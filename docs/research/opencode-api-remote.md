@@ -1,258 +1,128 @@
-# Recherche : API HTTP Opencode v2 pour clients distants
+# Remote Client API: OpenCode v2 HTTP Endpoints
 
-## Résumé
+## Summary
 
-Cette recherche documente les capacités de l'API HTTP d'OpenCode v2 pour le support de clients distants, l'exécution multi-clients simultanée, le flux temps réel, la création de conversations et les mécanismes de permissions.
+This research documents the HTTP API capabilities of OpenCode v2 for remote clients (phone/desktop behind Cloudflare Tunnel). Every endpoint cited is verified against the official OpenAPI spec (`/tmp/opencode/wf/spec.json`).
 
-**Source** : https://github.com/opencode-ai/opencode
+**Protocol**: All endpoints must appear in `spec['paths']`. Claims backed by spec entries or read-only live probes. Unverified items marked "to verify".
 
-**Conclusion principale** : L'API HTTP v2 d'OpenCode expose une surface d'API complète pour un client distant, avec un support explicite du PTY persistant (`persistentPty: true` dans `/api/info`) et la gestion de sessions multiples via les endpoints `/api/session` et `/api/session/active`. Le flux temps réel est implémenté via WebSockets (`wss://opencode.ai/v2/.../sessions/{sessionId}`).
+**Sources**:
+- OpenAPI Spec: https://opencode.ai/v2/openapi.json (downloaded to `/tmp/opencode/wf/spec.json`)
+- Official Docs: https://opencode.ai/v2/docs/
+- Live service: http://127.0.0.1:49374 (auth required)
 
----
-
-## 1. Endpoints de l'API HTTP v2
-
-### Endpoints principaux identifiés
-
-| Endpoint | Méthode | Description |
-|----------|---------|-------------|
-| `GET /api/info` | GET | Informations du serveur et capacités |
-| `POST /api/session` | POST | Créer une nouvelle session |
-| `GET /api/session/active` | GET | Liste des sessions actives |
-| `GET /api/session/{sessionId}` | GET | Détails d'une session spécifique |
-| `DELETE /api/session/{sessionId}` | DELETE | Terminer une session |
-| `POST /api/completions` | POST | Demande de complétion |
-| `POST /api/execute` | POST | Exécution de commandes |
-| `POST /api/terminal/input` | POST | Entrée terminale pour une session |
-| `wss://opencode.ai/v2/.../sessions/{sessionId}` | WebSocket | Connexion temps réel |
-
-### Endpoint `/api/info` (Capabilités)
-
-**Endpoint** : `GET /api/info`
-
-**Réponse typique** :
+**Server Info** (`GET /api/info`):
 ```json
-{
-  "capabilities": {
-    "persistentPty": true
-  }
-}
+{"version":"2.1.4","capabilities":{"persistentPty":true},"urls":["http://127.0.0.1:49374"]}
 ```
 
-**Signification** : Le paramètre `persistentPty: true` indique que l'API supporte l'allocation d'un pseudo-terminal persistant, essentiel pour les interfaces ligne de commande interactives dans un environnement distant.
+---
+
+## 1. Multiple Simultaneous Clients
+
+**Status**: ✅ **Supported**
+
+- **`GET /api/session/active`** returns list of active sessions
+  - Live probe returned 4 running sessions: `ses_e7c87fc15ffelt4TtMDqYQHUip`, `ses_e7c328737ffeRrUrvQHdv6wZZm`, `ses_e7c328736ffeeE4Xc9ShT9DhND`, `ses_e7c328732ffexjkNJkwkyI37lq`
+  - Each session has unique ID → multiple clients supported
+
+- **`POST /api/session`** creates new sessions
+- No explicit limits in spec (to verify: check `/api/experimental/usage/limits` if accessible)
 
 ---
 
-## 2. Gestion Multi-Session
+## 2. Event Stream (SSE): `/api/event`
 
-### Endpoint `/api/session/active`
+**Status**: ✅ **Specified**
 
-**Endpoint** : `GET /api/session/active`
+- **Endpoint**: `GET /api/event`
+- **Spec entry**: `paths['/api/event']['get']` exists
+- **Live probe**: Connection opened, stream active until timeout (no error returned)
 
-**Description** : Retourne la liste des sessions en cours d'exécution sur le serveur.
-
-**Réponse typique** :
-```json
-{
-  "sessions": [
-    {
-      "sessionId": "ses_xxxxx",
-      "status": "active",
-      "model": "qwen3.5-9b-gguf",
-      "startTime": "2026-10-28T10:30:00Z"
-    }
-  ]
-}
-```
-
-**Utilité pour clients distants** : Permet au client distant de :
-- Découvrir les sessions disponibles
-- Suivre l'état des sessions créées
-- Gérer le cycle de vie des sessions (nettoyage, sélection)
-
-### Endpoint `/api/session/{sessionId}`
-
-**Endpoint** : `GET /api/session/{sessionId}`
-
-**Description** : Récupère les détails d'une session spécifique.
-
-**Réponse typique** :
-```json
-{
-  "sessionId": "ses_xxxxx",
-  "status": "active",
-  "model": "qwen3.5-9b-gguf",
-  "startTime": "2026-10-28T10:30:00Z",
-  "lastActivity": "2026-10-28T11:45:00Z",
-  "modelId": "qwen3.5-9b-gguf",
-  "temperature": 0.7
-}
-```
-
-**Signification** : Chaque session est indépendante et gérée via son ID unique, permettant un véritable support multi-clients.
+**To verify**: Event types (messages, tools in flight, session state, permissions) and re-subscription behavior not documented in spec.
 
 ---
 
-## 3. Flux Temps Réel (Real-Time Streaming)
+## 3. PTY & Persistent PTY
 
-### WebSocket pour les sessions
+**Status**: ✅ **Supported**
 
-**Endpoint** : `wss://opencode.ai/v2/.../sessions/{sessionId}`
+Live terminal streaming for remote clients is implemented via dedicated PTY endpoints:
 
-**Description** : Connexion WebSocket pour un flux temps réel bidirectionnel avec une session spécifique.
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `GET /api/pty` | GET | List active PTY sessions |
+| `POST /api/pty` | POST | Create new PTY session |
+| `GET /api/pty/{ptyID}` | GET | Get PTY state |
+| `PUT /api/pty/{ptyID}` | PUT | Update PTY |
+| `DELETE /api/pty/{ptyID}` | DELETE | Terminate PTY |
+| `POST /api/pty/{ptyID}/connect-token` | POST | Generate connect token |
+| `GET /api/pty/{ptyID}/connect` | GET | WebSocket endpoint |
 
-**Caractéristiques identifiées** :
-- Connexion persistante WebSocket pour minimiser la latence
-- Flux de tokens en temps réel (streaming)
-- Support des entrées utilisateur asynchrones
+**Experimental Persistent PTY** (for long-lived connections):
 
-### Streaming de complétions
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `GET /api/experimental/persistent-pty/{ptyID}` | GET | Get persistent PTY state |
+| `PUT /api/experimental/persistent-pty/{ptyID}` | PUT | Update persistent PTY |
+| `DELETE /api/experimental/persistent-pty/{ptyID}` | DELETE | Terminate persistent PTY |
+| `GET /api/experimental/persistent-pty/{ptyID}/connect` | GET | WebSocket connect |
+| `POST /api/experimental/persistent-pty/{ptyID}/connect-token` | POST | Generate connect token |
+| `GET /api/experimental/persistent-pty/{ptyID}/snapshot` | GET | Get terminal snapshot |
+| `POST /api/experimental/persistent-pty/shutdown` | POST | Force shutdown |
+| `POST /api/experimental/persistent-pty/handoff` | POST | Handoff to user |
 
-**Endpoint** : `POST /api/completions`
-
-**Description** : Demande de complétion avec streaming des tokens générés.
-
-**Réponse en streaming** :
-```
-{ "token": "..." }
-{ "token": "..." }
-{ "token": "..." }
-```
-
-**Signification** : Le streaming permet une expérience utilisateur réactive avec affichage progressif du contenu généré.
-
----
-
-## 4. Exécution de Commandes et PTY
-
-### Endpoint `/api/execute`
-
-**Endpoint** : `POST /api/execute`
-
-**Description** : Exécution de commandes ou scripts via le serveur.
-
-**Champs principaux** :
-- `command` : La commande à exécuter
-- `workingDirectory` : Répertoire de travail
-- `sessionId` : Session associée (optionnel)
-
-**Signification** : L'exécution de commandes permet d'intégrer le terminal distant avec le système local.
-
-### PTY Persistant
-
-**Endpoint** : `POST /api/terminal/input`
-
-**Description** : Soumission de texte au pseudo-terminal d'une session.
-
-**Champs principaux** :
-- `sessionId` : ID de la session
-- `input` : Texte à soumettre au PTY
-
-**Support PTY** : Confirmé par `persistentPty: true` dans `/api/info`.
+**To verify**: Connection limits (one per PTY?), ticket expiry, rate limits.
 
 ---
 
-## 5. Authentification et Permissions
+## 4. Creating a New Conversation
 
-### Mécanismes d'authentification
+**Status**: ✅ **Supported**
 
-**Endpoints d'authentification identifiés** :
-- `POST /api/auth/login` : Connexion utilisateur
-- `POST /api/auth/logout` : Déconnexion
-- `GET /api/auth/me` : Informations utilisateur actuelle
+Sessions are created via:
 
-**Tokens d'authentification** :
-- JWT (JSON Web Token) pour l'authentification
-- Refresh tokens pour renouvellement
-- Session tokens pour les sessions WebSocket
+- **`POST /api/session`** - Create new session
+- **`POST /api/experimental/voice/session`** - Create voice session
+- **`POST /api/experimental/session/import`** - Import existing session
 
-### Permissions et autorisations
-
-**Niveaux d'accès** (déduits de la structure API) :
-- **Read** : Accès en lecture seule aux sessions
-- **Write** : Création et modification de sessions
-- **Execute** : Exécution de commandes
-- **Admin** : Gestion complète (crash, shutdown)
-
-**RBAC (Role-Based Access Control)** :
-- Rôles prédéfinis (user, admin, operator)
-- Permissions granulaires par endpoint
-- Audit logs pour tracer les actions
+Sessions can be attached to a project via:
+- **`POST /api/session/{sessionID}/move`** - Move session to project directory
+- **`POST /api/session/{sessionID}/prompt`** - Prompt session (creates conversation)
+- **`POST /api/session/{sessionID}/command`** - Send command to session
 
 ---
 
-## 6. Limites et Performances
+## 5. Permissions
 
-### Limites de débit
+**Status**: ✅ **Supported**
 
-**Endpoints de monitoring** :
-- `/api/session/active` pour suivre l'utilisation
-- `/api/limits` pour les quotas restants
+Endpoints for managing permissions:
 
-**Types de limites** :
-- Limites de connexion simultanées
-- Limites de tokens par minute
-- Limites de durée de session
-- Limites d'exécution de commandes
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `GET /api/permission/request` | GET | List pending permission requests |
+| `GET /api/permission/saved` | GET | List saved permission presets |
+| `PATCH /api/permission/saved/{id}` | PATCH | Update saved preset |
+| `DELETE /api/permission/saved/{id}` | DELETE | Delete saved preset |
+| `POST /api/session/{sessionID}/permission` | POST | Request permission |
+| `GET /api/session/{sessionID}/permission/{requestID}` | GET | Get specific request |
+| `POST /api/session/{sessionID}/permission/{requestID}/reply` | POST | Reply with once/always/reject |
 
-### Monitoring
-
-**Endpoints** :
-- `/api/session/active` : État des sessions
-- `/api/metrics` : Métriques de système
-- `/api/logs` : Journaux d'activité
-
-**Indicateurs** :
-- Nombre de sessions actives
-- Tokens générés
-- Temps d'exécution moyen
-- Charges CPU/mémoire
+**To verify**: Exact response format for reply (`once|always|reject`).
 
 ---
 
-## 7. Conclusions
+## To Verify
 
-### Capacités confirmées pour clients distants
-
-1. ✅ **Multi-clients simultanés** : Via la gestion de sessions multiples (`/api/session/active`, `/api/session/{id}`)
-2. ✅ **Flux temps réel** : Via WebSocket (`wss://.../sessions/{sessionId}`) avec streaming de tokens
-3. ✅ **PTY persistant** : Confirmé par `persistentPty: true` dans `/api/info`
-4. ✅ **Création de conversations** : Via `/api/session` avec paramètres de modèle et température
-5. ✅ **Permissions** : Authentification JWT et RBAC identifiés
-
-### Limitations potentielles
-
-- Nécessité de maintenir une connexion WebSocket active pour le streaming
-- Gestion manuelle du cycle de vie des sessions dans un environnement distant
-- Dépendance à la configuration réseau (firewall, ports ouverts)
-
-### Recommandations pour intégration
-
-1. Implémenter un gestionnaire de sessions pour découvrir et suivre les sessions disponibles
-2. Utiliser le WebSocket pour le flux temps réel et minimiser la latence
-3. Mettre en place un mécanisme de refresh des tokens JWT
-4. Gérer proprement les sessions inactives pour libérer les ressources
+- SSE event types and reconnection behavior on `/api/event`
+- PTY connection limits and expiry
+- Exact permission reply options
+- Session/project attachment flow details
+- Rate limits on concurrent PTY sessions
+- `/api/experimental/usage/limits` endpoint availability
 
 ---
 
-## 8. Sources et Références
-
-### Documentation officielle
-
-- **OpenAPI Specification** : https://opencode.ai/v2/openapi.json
-- **Documentation Client** : https://opencode.ai/v2/docs/build/client
-- **GitHub Repository** : https://github.com/opencode-ai/opencode
-
-### Tests effectués
-
-- **`GET /api/info`** : Retourne `{capabilities:{persistentPty:true}}`
-- **`GET /api/session/active`** : Liste les sessions actives en cours d'exécution
-- **Endpoint WebSocket** : `wss://opencode.ai/v2/.../sessions/{sessionId}` pour le flux temps réel
-
-### Date de recherche
-
-2026-10-28
-
----
-
-*Ce document a été généré dans le cadre du ticket #2 : "Recherche API HTTP opencode v2 pour client distant".*
+**Branch**: `research/opencode-api-remote`  
+**File**: `/tmp/opencode/wf/opencode-api-remote/docs/research/opencode-api-remote.md`
