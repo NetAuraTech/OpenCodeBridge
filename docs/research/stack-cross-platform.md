@@ -278,7 +278,7 @@ Evaluation criteria:
 
 **Sources:**
 - Flutter mobile support: https://docs.flutter.dev/reference/supported-platforms (2026-09-22)
-- Flutter push notifications: https://docs.flutter.dev/platforms/mobile/cdn (2026-10-13)
+- Flutter push notifications: https://pub.dev/packages/firebase_messaging (official Firebase SDK for Flutter — FCM + APNs)
 - Tauri 2 mobile support: https://v2.tauri.app (v2.5.0, v2.9.x release notes)
 - Tauri 2 benchmarks: https://johal.in/benchmark-electron-300-vs-tauri-20-vs-flutter-electron (2026-04-28)
 - Tauri 2 WebSocket: https://v2.tauri.app (plugin-websocket v2.4.3, 2026-09-26)
