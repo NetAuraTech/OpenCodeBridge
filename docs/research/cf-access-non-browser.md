@@ -1,141 +1,57 @@
-# Cloudflare Access Authentication for Non-Browser Clients
+# Cloudflare Access Authentication for a Non-Browser Client
 
-## Executive Summary
+**Date:** 2026-10-28 (revised — supersedes a first pass that cited non-existent pages and a second pass that invented an intermediary "auth bridge")
+**Ticket:** https://github.com/NetAuraTech/OpenCodeBridge/issues/4
+**Method:** every cited URL verified HTTP 200 at fetch time; claims are quoted from, or directly implied by, the fetched pages.
 
-For native mobile/desktop apps like OpenCodeBridge (CLI agents, coding assistants, SDKs), **Cloudflare Managed OAuth** is the documented and recommended authentication method. The alternative paths (Service Tokens, Linked App Tokens) are designed for machine-to-machine scenarios where the app itself is the API consumer, not a protected client requiring user authentication.
+## TL;DR
 
----
+Use **Managed OAuth** — Cloudflare's documented mechanism for non-browser clients. The native app **is** the OAuth client and talks to Access **directly**: no intermediary service, no custom auth bridge. Access issues an opaque access token; the app sends it on every request (plain HTTP, SSE, WebSocket). The origin (the bridge) receives the same `Cf-Access-Jwt-Assertion` / `X-Cloudflare-Access-*` headers it would for a browser login, and never sees or verifies the token.
 
-## 1. Recommended Auth Flow: Managed OAuth
+## 1. Recommended flow: Managed OAuth (the app is the OAuth client)
 
-**Primary source:** [Authenticate coding agents](https://developers.cloudflare.com/cloudflare-one/access-controls/authenticate-agents/index.md)
+Why this flow: by default, non-browser clients (CLIs, AI agents, SDKs, scripts) hitting an Access-protected app get a `302` redirect with no usable token or authorization endpoint. Enabling Managed OAuth turns the Access application into a standard OAuth 2.0 authorization server (discovery per RFC 8414/9728, dynamic client registration per RFC 8707), and the `302` becomes a `401` with a `WWW-Authenticate` header pointing at the discovery metadata.
 
-### When to use
-- Native apps (CLI, desktop, mobile)
-- AI agents and LLM tools
-- Development frameworks (OpenCode, Claude Code)
-- SDKs and automated scripts
+Setup (on the Cloudflare side):
+1. Create a **self-hosted Access application** on the tunnel (prerequisite for Managed OAuth).
+2. App **Advanced settings** → enable **Managed OAuth** (API: `PUT` the app with `oauth_configuration.enabled = true`).
+3. Recommended grants for a native app (from the doc's "Recommended configuration for CLI and agent use cases"):
+   - `dynamic_client_registration`: allow loopback/localhost redirect URIs (so the app can register itself as the OAuth client);
+   - `grant.access_token_lifetime`: **5–15 minutes** (default 15 min);
+   - `grant.session_duration`: **1–2 weeks** (how long the refresh token stays valid).
 
-### Auth flow diagram
-```
-┌──────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   App       │     │   Auth Bridge    │     │   Cloudflare    │
-│ (OpenCode)  │────▶│  (Self-hosted or │────▶│   Dashboard     │
-│             │     │   Cloudflare)    │     │                 │
-└──────────────┘     └──────────────────┘     └─────────────────┘
-                          │
-                          ▼
-                  ┌──────────────────┐
-                  │   Auth Provider  │
-                  │ (OAuth2 server)  │
-                  └──────────────────┘
-```
+Runtime flow (in the app):
+1. `GET https://<app-domain>/.well-known/oauth-authorization-server` → authorization/token endpoints.
+2. Register the client dynamically (RFC 8707) and open the authorization endpoint in the user's browser (system browser on mobile).
+3. User logs in to the IdP as usual; Access issues an **opaque** access token (`oauth:...`) plus a refresh token.
+4. App sends `Authorization: Bearer <opaque token>` on every request. Cloudflare resolves the token and forwards a signed assertion to the origin — from the origin's perspective the request looks exactly like a browser-authenticated one.
+5. On expiry the app refreshes silently (no user interaction) until the grant session ends; Access re-evaluates policies on each refresh. The user only re-authenticates when the grant session expires.
 
-### Step-by-step
+## 2. What the bridge (origin) must do
 
-1. **Create Auth Provider** on Cloudflare dashboard (Google, GitHub, GitLab, SSO)
-2. **Create Self-hosted App** on Cloudflare → Configure redirect URI (your bridge's `/oauth/callback`)
-3. **Deploy Auth Bridge** (optional, if not using Cloudflare-hosted):
-   - Hosts your redirect URI
-   - Exchanges OAuth tokens for Cloudflare access tokens
-   - Validates session for long-lived connections
-4. **Configure Policies**: Grant access to protected endpoints
-5. **Make SDK call**: Pass `Authorization: Bearer <access_token>` header
+- **Nothing special.** The origin receives the standard Access headers (`Cf-Access-Jwt-Assertion`, `X-Cloudflare-Access-*`) exactly as for browser logins. The opaque token is resolved by Cloudflare; the origin must NOT try to verify it.
+- If the bridge later needs to call *another* Access-protected service as the same user: the **Linked App Token** pattern (forward `Cf-Access-Jwt-Assertion` as `Cf-Access-Token`).
+- **Service tokens** are a different mechanism (machine identity, no user, no policy evaluation against a person) — not appropriate for a user-facing app.
 
-### Key requirements
+## 3. SSE / WebSocket through Access
 
-- **Bridge is required** if using OAuth flow (cannot go directly from app to Cloudflare)
-- Redirect URI must match your bridge implementation
-- App must handle OAuth flow initiation and callback
+- The docs describe **no special handling** for SSE/WebSocket: they are just authenticated requests. A connection opened with a valid token stays open; when the session/token expires the client re-authenticates (silent refresh via the refresh token) and reconnects.
+- Session model (session-management page): Access issues an **application token** (per app; default 24h, range immediate–1 month) and a **global token** (SSO across apps; default 24h, range 15 min–1 month). For a Managed OAuth client the operative knobs are `grant.access_token_lifetime` and `grant.session_duration` instead.
+- Failed authentication for non-browser traffic returns **401** (with `WWW-Authenticate` pointing at discovery metadata) rather than the useless `302` — the app should treat a 401 as "re-run the auth flow".
+- **To verify:** what happens to an already-established WebSocket exactly when its token expires (server closes it, or connection persists until server-side timeout) — not documented. Design the client to reconnect on 401/disconnect regardless.
 
----
+## 4. Minimal single-user setup
 
-## 2. Can the App Call Cloudflare Directly? (No Bridge)
+- 1 Cloudflare account (the user's domain) + 1 **named tunnel** (cloudflared) pointing at the bridge port.
+- 1 **self-hosted** Access application on the tunnel domain.
+- IdP: the simplest option is Cloudflare's built-in **email one-time passcode** (no external IdP to configure); a Google account/OIDC works too if preferred.
+- 1 policy: allow the user's email.
+- Managed OAuth enabled with short access token (5–15 min), long grant session (1–2 weeks), loopback redirect allowed.
 
-**Short answer: No** — for user-authenticated flows.
+## Sources (all verified HTTP 200)
 
-### Why?
-
-OAuth requires state management and callback handling that a browserless client cannot do:
-- No browser session storage
-- Cannot handle redirects (HTTP 302)
-- Cannot display OAuth consent UI
-
-### Alternatives (for different use cases)
-
-| Method | Use Case | Requires User Auth? |
-|--------|----------|---------------------|
-| Service Token | API-to-API, CI/CD | No |
-| Linked App Token | Machine auth for internal apps | No |
-| Managed OAuth | User-authenticated apps | **Yes** (requires bridge) |
-
----
-
-## 3. SSE and WebSocket Support
-
-**Yes, both are supported** for long-lived authenticated connections.
-
-### From [Session management](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/index.md):
-
-> "To enable persistent, long-lived access, you can use **long-lived refresh tokens** and **session persistence**. For connections that require continuous access, such as WebSocket and Server-Sent Events (SSE) connections, ensure that your app handles token refresh before expiration."
-
-### Implementation:
-
-1. **Initial request**: App makes HTTP request with OAuth token → receives access token
-2. **Store access token**: Save in app's secure storage
-3. **For WebSocket/SSE**:
-   - Include `Authorization: Bearer <access_token>` on connection open
-   - Handle token refresh before expiration (check expiry in token response)
-   - Reconnect or refresh token as needed
-
-### Token refresh strategy:
-
-- OAuth access tokens typically expire (e.g., 1 hour)
-- Refresh token (if granted) can be used to obtain new access token
-- Bridge should handle refresh token exchange and return new access token to app
-
----
-
-## 4. Single User Setup
-
-**Yes, a single-user self-hosted setup is supported and documented.**
-
-### From [Publish self-hosted app](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/index.md):
-
-> "Self-hosted apps are designed for scenarios where you control the hosting environment, including **personal deployments**, **development tools**, and **internal applications**."
-
-### For a personal CLI like OpenCodeBridge:
-
-1. **Create self-hosted app** (you control the serverless function or server)
-2. **Configure single user** (via policy or team membership)
-3. **No need for multi-user infrastructure**:
-   - Cloudflare doesn't require user databases for OAuth flow
-   - Each user's OAuth provider handles authentication
-   - Your app just exchanges tokens for access
-
-### Minimal personal setup:
-
-- 1 Cloudflare account
-- 1 self-hosted app (can be serverless function)
-- OAuth provider configured (e.g., GitHub for personal account)
-- Single-user policy (via Cloudflare team or group)
-
----
-
-## Summary Table
-
-| Question | Answer | Details |
-|----------|--------|---------|
-| **Auth flow?** | Managed OAuth | OAuth2 → bridge → Cloudflare access token |
-| **Can app call Cloudflare directly?** | No | Needs bridge for OAuth state handling |
-| **SSE/WebSocket support?** | Yes | Long-lived connections with token refresh |
-| **Single user setup?** | Yes | Personal deployment with OAuth provider |
-
----
-
-## References
-
-- [Authenticate coding agents](https://developers.cloudflare.com/cloudflare-one/access-controls/authenticate-agents/index.md)
-- [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/index.md)
-- [Session management](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/index.md)
-- [Publish self-hosted app](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/index.md)
+- Managed OAuth: https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/index.md
+- Session management: https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/index.md
+- Authenticate coding agents (covers OpenCode explicitly): https://developers.cloudflare.com/cloudflare-one/access-controls/authenticate-agents/index.md
+- Service tokens (machine-to-machine alternative): https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/index.md
+- Linked App Token: https://developers.cloudflare.com/cloudflare-one/access-controls/applications/linked-app-token/index.md
