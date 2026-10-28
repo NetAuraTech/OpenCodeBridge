@@ -18,6 +18,10 @@ _Avoid_: host mode, listen mode
 Desktop launch mode in which the app is a pure client connecting to a bridge.
 _Avoid_: remote mode, consumer mode
 
+**Tunnel**:
+The locally-managed named Cloudflare tunnel that server mode runs, exposing the bridge's localhost port through the user's domain behind Cloudflare Access.
+_Avoid_: cloudflared (the binary), reverse proxy
+
 ### Sessions
 
 **Session**:
