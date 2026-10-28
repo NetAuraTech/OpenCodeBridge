@@ -2,7 +2,7 @@
 
 ## Summary
 
-This research documents the HTTP API capabilities of OpenCode v2 for remote clients (phone/desktop behind Cloudflare Tunnel). Every endpoint cited is verified against the official OpenAPI spec (`/tmp/opencode/wf/spec.json`).
+This research documents the HTTP API capabilities of OpenCode v2 for remote clients (phone/desktop behind Cloudflare Tunnel). Every endpoint cited is verified against the official OpenAPI spec (fetched from https://opencode.ai/v2/openapi.json).
 
 **Protocol**: All endpoints must appear in `spec['paths']`. Claims backed by spec entries or read-only live probes. Unverified items marked "to verify".
 
@@ -20,14 +20,11 @@ This research documents the HTTP API capabilities of OpenCode v2 for remote clie
 
 ## 1. Multiple Simultaneous Clients
 
-**Status**: ✅ **Supported**
+**Status**: ⚠️ **To verify** (not provable from the spec alone)
 
-- **`GET /api/session/active`** returns list of active sessions
-  - Live probe returned 4 running sessions: `ses_e7c87fc15ffelt4TtMDqYQHUip`, `ses_e7c328737ffeRrUrvQHdv6wZZm`, `ses_e7c328736ffeeE4Xc9ShT9DhND`, `ses_e7c328732ffexjkNJkwkyI37lq`
-  - Each session has unique ID → multiple clients supported
-
-- **`POST /api/session`** creates new sessions
-- No explicit limits in spec (to verify: check `/api/experimental/usage/limits` if accessible)
+- The spec declares no client-count limit on the service or on `GET /api/event`.
+- A live probe of `GET /api/session/active` returned 4 sessions. Note: those were the *service's own live sessions* (the environment performing this probe runs on that service), so this is **not** evidence of concurrent client support.
+- What the bridge needs: two or more clients subscribed to `GET /api/event` at the same time (phone + desktop). Confirm with a read-only concurrency probe (two concurrent subscriptions) before relying on it.
 
 ---
 
