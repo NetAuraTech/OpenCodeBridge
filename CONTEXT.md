@@ -48,6 +48,16 @@ _Avoid_: request, exchange
 An approval request raised by the opencode agent during a turn; answered once, always, or rejected.
 _Avoid_: prompt, consent
 
+### Terminal window
+
+**Terminal window**:
+The physical window on the host opened by the bridge, hosting the attach client of one session's terminal.
+_Avoid_: shell, console
+
+**Attach client**:
+The process running inside the terminal window that displays and drives the session's terminal through the bridge.
+_Avoid_: terminal client, viewer
+
 ### Views
 
 **Terminal view**:
