@@ -33,7 +33,7 @@ Evaluation criteria:
 
 #### Universal Mobile + Desktop Support
 - Complete SDK supporting Android, iOS, Windows, macOS, Linux
-- **Terminal widget**: `flutter_xterm` or `flutter_console` packages for terminal emulation
+- **Terminal widget**: `xterm` (xterm.dart) for terminal emulation
 - Architecture "fat client": all native code compiled
 
 #### Real-Time Performance
@@ -203,7 +203,7 @@ Evaluation criteria:
 1. **Complete mobile support**: Android 24-37, iOS 15-27 verified (docs 2026-09-22)
 2. **Native push notifications**: FCM/APNs via plugins (docs 2026-10-13)
 3. **Real-time capabilities**: `web_socket_channel` and `sse` packages available
-4. **Terminal widget**: `flutter_xterm` package for native terminal emulation
+4. **Terminal widget**: `xterm` (xterm.dart) package for native terminal emulation
 5. **Desktop server mode**: Full support for embedded HTTP server in UI
 
 **Compromises:**
@@ -232,7 +232,7 @@ Evaluation criteria:
 ```
 ├── Frontend: Dart + Flutter UI
 ├── Build: Flutter CLI (cross-platform)
-├── Terminal: flutter_xterm package (native widget)
+├── Terminal: xterm (xterm.dart) package (native widget)
 ├── Real-time: web_socket_channel + sse packages
 ├── Notifications: firebase_messaging + flutter_local_notifications
 └── Desktop mode: Native Flutter UI with embedded HTTP server
@@ -267,7 +267,7 @@ Evaluation criteria:
 **Chosen for OpenCodeBridge:**
 - ✅ **Primary Android support**: Verified 2026 mobile support (Android 24-37, iOS 15-27)
 - ✅ **Real-time capabilities**: `web_socket_channel` + `sse` packages available
-- ✅ **Terminal emulator**: Native widget via `flutter_xterm`
+- ✅ **Terminal emulator**: Native widget via `xterm` (xterm.dart)
 - ✅ **Desktop server mode**: Full Flutter native support
 - ✅ **Push notifications**: Native FCM (Android) + APNs (iOS) via plugins
 
@@ -283,6 +283,7 @@ Evaluation criteria:
 - Tauri 2 benchmarks: https://johal.in/benchmark-electron-300-vs-tauri-20-vs-flutter-electron (2026-04-28)
 - Tauri 2 WebSocket: https://v2.tauri.app (plugin-websocket v2.4.3, 2026-09-26)
 - Capacitor v8: https://capacitorjs.com/docs/updating/8-0 (iOS 15+, Android API 24+)
+- Flutter terminal widget: https://pub.dev/packages/xterm (xterm.dart v4.0.0, Flutter >= 3.19)
 
 ### Trade-offs Summary
 
