@@ -5,7 +5,7 @@ import '../client/connection_monitor.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
 import 'docker_stub.dart';
-import 'sessions_stub.dart';
+import 'sessions_tab.dart';
 import 'settings_tab.dart';
 
 /// The 3-tab information architecture (spec: section 13):
@@ -38,6 +38,17 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _tab = 0;
 
+  /// Where the bridge's API lives for the client widgets: loopback in
+  /// server mode, the tunnel URL from Settings in client mode, or `null`
+  /// when the client mode has no tunnel URL yet.
+  Uri? get _apiBase {
+    if (widget.mode == AppMode.server) {
+      return widget.localBridgeUri?.replace(path: '/');
+    }
+    final tunnel = widget.settings.tunnelUrl.trim();
+    return tunnel.isEmpty ? null : Uri.parse(tunnel);
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
@@ -57,7 +68,7 @@ class _HomeShellState extends State<HomeShell> {
     body: IndexedStack(
       index: _tab,
       children: [
-        const SessionsStub(),
+        SessionsTab(apiBase: _apiBase),
         const DockerStub(),
         SettingsTab(
           settings: widget.settings,
