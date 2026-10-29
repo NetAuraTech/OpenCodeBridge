@@ -30,9 +30,10 @@ void main() {
       expect(find.text('Docker'), findsWidgets);
       expect(find.text('Settings'), findsWidgets);
 
-      // The Sessions stub is the default body.
+      // The Sessions tab is the default body; without a tunnel URL it
+      // points at Settings.
       expect(
-        find.text('The session list arrives in a later slice.'),
+        find.text('No bridge configured. Set the tunnel URL in Settings.'),
         findsOneWidget,
       );
 
