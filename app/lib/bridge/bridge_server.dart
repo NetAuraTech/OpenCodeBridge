@@ -6,6 +6,11 @@ import 'sessions/backend.dart';
 import 'sessions/opencode_http_service.dart';
 import 'sessions/opencode_service.dart';
 import 'sessions/session_store.dart';
+import 'terminal/opencode_http_terminal_service.dart';
+import 'terminal/terminal_attach_proxy.dart';
+import 'terminal/terminal_backend.dart';
+import 'terminal/terminal_frames.dart';
+import 'terminal/terminal_window_token.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
@@ -13,7 +18,7 @@ import 'sessions/session_store.dart';
 /// This slice exposes the health endpoint plus the sessions endpoints of
 /// spec section 5 (#1 `GET /api/sessions`, #4 `DELETE /api/sessions/{id}`).
 class BridgeServer {
-  BridgeServer._(this._server);
+  BridgeServer._(this._server, this._terminals);
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
   /// configuration (spec section 9) can point the ingress at it.
@@ -29,6 +34,10 @@ class BridgeServer {
 
   final HttpServer _server;
 
+  /// The terminal backend (endpoint 10); `null` when this machine has no
+  /// shared opencode service, in which case the terminal endpoint is 404.
+  final TerminalBackend? _terminals;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -39,6 +48,9 @@ class BridgeServer {
   /// the default builds a [SessionsBackend] over the shared opencode
   /// service and `~/.config/opencodebridge/sessions.json` and runs the
   /// startup orphan reconciliation (spec section 11) against it.
+  /// [terminals], when provided, serves the terminal attach endpoint (10,
+  /// tests); the default builds a [TerminalBackend] over the shared opencode
+  /// terminal service and a fresh window token.
   ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
@@ -47,17 +59,27 @@ class BridgeServer {
     int port = defaultPort,
     HealthReport Function()? health,
     SessionsBackend? sessions,
+    TerminalBackend? terminals,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
-    server.listen(
-      (request) => BridgeServer._handle(
+    final termBackend = terminals ?? await BridgeServer._defaultTerminals();
+    server.listen((request) async {
+      final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
+      if (termBackend != null &&
+          sessionId != null &&
+          request.method == 'GET' &&
+          BridgeServer._isWebSocket(request)) {
+        await BridgeServer._handleTerminal(request, sessionId, termBackend);
+        return;
+      }
+      await BridgeServer._handle(
         request,
         health ?? BridgeServer._scaffoldHealth,
         backend,
-      ),
-    );
-    return BridgeServer._(server);
+      );
+    });
+    return BridgeServer._(server, termBackend);
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -67,7 +89,10 @@ class BridgeServer {
   /// The health endpoint, e.g. `http://127.0.0.1:48201/api/health`.
   Uri get healthUri => baseUri.replace(path: healthPath);
 
-  Future<void> stop() => _server.close(force: true);
+  Future<void> stop() async {
+    await _server.close(force: true);
+    await _terminals?.close();
+  }
 
   /// The default sessions backend: the real shared opencode service plus the
   /// on-disk persistence, with the startup orphan reconciliation (spec §11).
@@ -86,6 +111,31 @@ class BridgeServer {
         // next bridge startup.
       }
       return backend;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The default terminal backend: the real shared opencode terminal service
+  /// plus a fresh window token (spec §10, §14) and a session->cwd resolver
+  /// over the service's session list. Returns `null` when this machine has no
+  /// shared opencode service (no descriptor), in which case endpoint 10 is
+  /// 404.
+  static Future<TerminalBackend?> _defaultTerminals() async {
+    try {
+      final terminalService = await OpencodeHttpTerminalService.fromHost();
+      final sessions = await OpencodeHttpService.fromHost();
+      return TerminalBackend(
+        service: terminalService,
+        token: TerminalWindowToken.generate(),
+        sessionCwd: (String id) async {
+          final rows = await sessions.listSessions();
+          for (final row in rows) {
+            if (row.id == id) return row.location;
+          }
+          throw const OpencodeServiceError(404, 'no such session');
+        },
+      );
     } catch (_) {
       return null;
     }
@@ -194,5 +244,98 @@ class BridgeServer {
     response.statusCode = HttpStatus.serviceUnavailable;
     response.write(jsonEncode({'error': 'opencode_unavailable'}));
     response.close();
+  }
+
+  /// The single session id in a terminal path, or `null` when [path] is not
+  /// `api/sessions/{id}/terminal` (exactly one segment, so it falls through to
+  /// the 404).
+  static String? _terminalSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/terminal';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// Whether [request] is a WebSocket upgrade request (the attach endpoint is
+  /// a WebSocket; a plain GET to it falls through to the 404).
+  static bool _isWebSocket(HttpRequest request) {
+    final upgrade = request.headers.value(HttpHeaders.upgradeHeader);
+    if (upgrade == null || !upgrade.toLowerCase().contains('websocket')) {
+      return false;
+    }
+    return request.headers.value('Sec-WebSocket-Key') != null;
+  }
+
+  /// Endpoint 10: the terminal attach WebSocket. Authenticates with the
+  /// window token (spec §10, §14), attaches a downstream to the session's
+  /// [TerminalAttachProxy], and pipes frames both ways.
+  static Future<void> _handleTerminal(
+    HttpRequest request,
+    String sessionId,
+    TerminalBackend terminals,
+  ) async {
+    final ws = await WebSocketTransformer.upgrade(request);
+    try {
+      final presented = request.uri.queryParameters['token'];
+      if (!terminals.verifyToken(presented)) {
+        await ws.close(1008, 'unauthorized');
+        return;
+      }
+      final cursor =
+          int.tryParse(request.uri.queryParameters['cursor'] ?? '') ?? 0;
+      TerminalAttacher attacher;
+      try {
+        attacher = await terminals.proxyFor(sessionId).attach(cursor: cursor);
+      } catch (_) {
+        // The PTY could not be resolved/attached (e.g. the service is down);
+        // the attach client auto-reconnects with backoff.
+        await ws.close(1011, 'attach failed');
+        return;
+      }
+      BridgeServer._pipeAttachment(ws, attacher);
+    } catch (_) {
+      // The client went away or the socket broke; closing is best-effort.
+      try {
+        await ws.close();
+      } catch (_) {}
+    }
+  }
+
+  /// The bidirectional frame pipe between one attach WebSocket and its
+  /// downstream [TerminalAttacher] (the proxy's ordered frame stream).
+  static void _pipeAttachment(WebSocket ws, TerminalAttacher attacher) {
+    attacher.frames.listen(
+      (frame) {
+        if (frame is TerminalOutput) {
+          ws.add(frame.bytes);
+        } else if (frame is TerminalReplayComplete) {
+          ws.add(encodeReplayComplete(frame.endOffset));
+        }
+      },
+      onDone: () {
+        ws.close();
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        ws.close(1011, 'terminal stream error');
+      },
+    );
+    ws.listen(
+      (event) {
+        if (event is List<int>) {
+          attacher.write(event);
+        } else if (event is String) {
+          final resize = parseResize(event);
+          if (resize != null) {
+            attacher.resize(resize.cols, resize.rows);
+          } else {
+            attacher.write(utf8.encode(event));
+          }
+        }
+      },
+      onDone: () => attacher.close(),
+      onError: (Object error, StackTrace stackTrace) => attacher.close(),
+    );
   }
 }
