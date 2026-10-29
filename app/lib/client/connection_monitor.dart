@@ -1,0 +1,95 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
+/// The state of the app's link to the bridge, as driven by the health
+/// endpoint. This is what the discreet connection indicator reflects.
+enum LinkState { connecting, connected, disconnected }
+
+/// Probes a bridge health URI and reports whether the bridge answers.
+/// Returns `true` when reachable.
+typedef HealthProbe = Future<bool> Function(Uri healthUri);
+
+/// Polls a bridge health endpoint and publishes the resulting [LinkState].
+///
+/// This is the single source of truth for the connection indicator: server
+/// mode points it at the embedded bridge on loopback, client mode at the
+/// tunnel URL from Settings.
+class ConnectionMonitor extends ChangeNotifier {
+  ConnectionMonitor({
+    this.interval = const Duration(seconds: 5),
+    HealthProbe? probe,
+  }) : _probe = probe ?? ConnectionMonitor._defaultProbe;
+
+  /// How often the health endpoint is polled.
+  final Duration interval;
+
+  final HealthProbe _probe;
+  Timer? _timer;
+  Uri? _target;
+  LinkState _state = LinkState.connecting;
+
+  /// The current link state.
+  LinkState get state => _state;
+
+  /// Begins polling [healthUri]. Replaces any previous target.
+  void connect(Uri healthUri) {
+    _target = healthUri;
+    _setState(LinkState.connecting);
+    _timer?.cancel();
+    _timer = Timer.periodic(interval, (_) => _tick());
+    _tick();
+  }
+
+  /// Stops polling and reports disconnected.
+  void disconnect() {
+    _timer?.cancel();
+    _timer = null;
+    _target = null;
+    _setState(LinkState.disconnected);
+  }
+
+  Future<void> _tick() async {
+    final target = _target;
+    if (target == null) return;
+    bool reachable = false;
+    try {
+      reachable = await _probe(target);
+    } catch (_) {
+      reachable = false;
+    }
+    // Ignore the result if the target changed or we disconnected meanwhile.
+    if (target == _target) {
+      _setState(reachable ? LinkState.connected : LinkState.disconnected);
+    }
+  }
+
+  void _setState(LinkState next) {
+    if (next == _state) return;
+    _state = next;
+    notifyListeners();
+  }
+
+  static Future<bool> _defaultProbe(Uri healthUri) async {
+    final client = HttpClient();
+    try {
+      final request = await client
+          .getUrl(healthUri)
+          .timeout(const Duration(seconds: 3));
+      final response = await request.close();
+      await response.drain<void>();
+      return response.statusCode == HttpStatus.ok;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+}
