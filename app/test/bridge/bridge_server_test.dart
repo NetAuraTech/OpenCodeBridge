@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
+import 'package:opencodebridge/bridge/events/bridge_event.dart';
+import 'package:opencodebridge/bridge/events/event_hub.dart';
+import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
 import 'package:opencodebridge/bridge/health.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
@@ -200,6 +204,131 @@ void main() {
       expect(status, 404);
     });
   });
+
+  group('BridgeServer events', () {
+    late BridgeServer server;
+    late Uri base;
+    late Directory dir;
+    late _FakeService service;
+    late SessionStore store;
+    late _FakeEventUpstream upstream;
+    late EventHub hub;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-events');
+      upstream = _FakeEventUpstream();
+      hub = EventHub(service: upstream);
+      service = _FakeService();
+      store = await SessionStore.load(dir: dir);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service, store: store),
+        events: hub,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('GET /api/events streams opencode events verbatim as SSE', () async {
+      final tap = await _SseTap.open(base);
+      try {
+        expect(tap.contentType, 'text/event-stream');
+        await _until(
+          () => tap.ready,
+          message: 'expected the initial `: connected` comment',
+        );
+        upstream.add(OpencodeEvent(raw: _payload(1), type: 'session.updated'));
+        await _until(
+          () => tap.dataPayloads.length == 1,
+          message: 'expected the verbatim data frame',
+        );
+        expect(tap.dataPayloads, [_payload(1)]);
+        expect(
+          tap.raw,
+          isNot(contains('event:')),
+          reason: 'the stream has data: frames only, no event: line',
+        );
+      } finally {
+        await tap.close();
+      }
+    });
+
+    test('a successful DELETE emits a bridge-native session.closed on the '
+        'stream', () async {
+      store.add('ses_one');
+      await store.save();
+      final tap = await _SseTap.open(base);
+      try {
+        await _until(() => tap.ready);
+        final (status, _) = await _delete(base, 'api/sessions/ses_one');
+        expect(status, 204);
+        await _until(
+          () => tap.dataPayloads.any((p) => p.contains('session.closed')),
+          message: 'expected the session.closed frame',
+        );
+        final frame = jsonDecode(
+          tap.dataPayloads.firstWhere((p) => p.contains('session.closed')),
+        ) as Map<String, Object?>;
+        expect(frame['type'], 'session.closed');
+        expect(frame['data'], {'sessionID': 'ses_one'});
+        expect(
+          frame.containsKey('durable'),
+          isFalse,
+          reason: 'bridge-native events carry no durable seq',
+        );
+      } finally {
+        await tap.close();
+      }
+    });
+
+    test('a failed DELETE does not emit session.closed', () async {
+      final tap = await _SseTap.open(base);
+      try {
+        await _until(() => tap.ready);
+        final (status, _) = await _delete(base, 'api/sessions/ses_missing');
+        expect(status, 404);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(tap.dataPayloads, isEmpty);
+      } finally {
+        await tap.close();
+      }
+    });
+
+    test('two concurrent SSE connections receive identical frames', () async {
+      final a = await _SseTap.open(base);
+      final b = await _SseTap.open(base);
+      try {
+        await _until(() => a.ready && b.ready);
+        upstream.add(OpencodeEvent(raw: _payload(1), type: 'session.updated'));
+        await _until(() => a.dataPayloads.length == 1);
+        hub.emit(
+          bridgeEvent(
+            type: BridgeEventType.sessionClosed,
+            data: {'sessionID': 'ses_one'},
+          ),
+        );
+        await _until(() => a.dataPayloads.length == 2);
+        upstream.add(OpencodeEvent(raw: _payload(2), type: 'session.updated'));
+        await _until(
+          () => a.dataPayloads.length == 3 && b.dataPayloads.length == 3,
+          message: 'expected both connections to receive all three frames',
+        );
+        expect(
+          a.dataPayloads,
+          b.dataPayloads,
+          reason: 'a raw SSE client and the app must see identical frames',
+        );
+        expect(a.frames, b.frames);
+      } finally {
+        await a.close();
+        await b.close();
+      }
+    });
+  });
 }
 
 /// A scripted service for the sessions-endpoint tests.
@@ -278,5 +407,87 @@ Future<(int, String)> _delete(Uri base, String path) async {
     return (response.statusCode, body);
   } finally {
     client.close(force: true);
+  }
+}
+
+/// A scripted upstream event service: one broadcast controller.
+class _FakeEventUpstream implements OpencodeEventService {
+  final StreamController<OpencodeEvent> controller =
+      StreamController<OpencodeEvent>.broadcast();
+
+  void add(OpencodeEvent event) => controller.add(event);
+
+  @override
+  Stream<OpencodeEvent> get events => controller.stream;
+
+  @override
+  Future<void> close() async {}
+}
+
+/// One raw SSE connection to `/api/events`, accumulating the raw bytes so a
+/// test can assert on the exact frames (the seam a curl/EventsClient sees).
+class _SseTap {
+  _SseTap._(this._client, this._response, this._sub, this._buffer);
+
+  static Future<_SseTap> open(Uri base) async {
+    final client = HttpClient();
+    final request = await client.getUrl(base.replace(path: 'api/events'));
+    request.headers.set('accept', 'text/event-stream');
+    final response = await request.close();
+    if (response.statusCode != HttpStatus.ok) {
+      throw StateError('events endpoint was not ok: ${response.statusCode}');
+    }
+    final buffer = StringBuffer();
+    final sub = response.transform(const Utf8Decoder()).listen(buffer.write);
+    return _SseTap._(client, response, sub, buffer);
+  }
+
+  final HttpClient _client;
+  final HttpClientResponse _response;
+  final StreamSubscription<String> _sub;
+  final StringBuffer _buffer;
+
+  String? get contentType => _response.headers.contentType?.toString();
+
+  /// Everything received so far, verbatim.
+  String get raw => _buffer.toString();
+
+  /// The received frames: the stream split on the blank-line separator.
+  List<String> get frames => _buffer
+      .toString()
+      .split('\n\n')
+      .where((frame) => frame.isNotEmpty)
+      .toList();
+
+  /// True once the initial `: connected` comment (the header flush) arrived.
+  bool get ready => frames.any((frame) => frame.startsWith(': connected'));
+
+  /// The payloads of every `data:` frame, in order.
+  List<String> get dataPayloads => frames
+      .where((frame) => frame.startsWith('data: '))
+      .map((frame) => frame.substring('data: '.length))
+      .toList();
+
+  Future<void> close() async {
+    await _sub.cancel();
+    _client.close(force: true);
+  }
+}
+
+String _payload(int seq) =>
+    '{"id":"evt_$seq","created":$seq,"type":"session.updated",'
+    '"data":{"n":$seq},"durable":{"aggregateID":"ses_x","seq":$seq,"version":1}}';
+
+Future<void> _until(
+  bool Function() condition, {
+  String message = 'condition',
+  Duration timeout = const Duration(seconds: 5),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('timed out waiting for $message');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
   }
 }
