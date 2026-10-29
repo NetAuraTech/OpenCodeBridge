@@ -104,6 +104,7 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         settings: settings,
         mode: mode,
         localBridgeUri: _bridge?.healthUri,
+        terminals: _bridge?.terminals,
         onTunnelUrlCommitted: () => _enter(settings, AppMode.client),
       ),
     );

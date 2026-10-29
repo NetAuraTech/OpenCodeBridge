@@ -113,6 +113,43 @@ void main() {
         throwsA(isA<TerminalEmulatorMissing>()),
       );
     });
+
+    test('kill closes the window: the attach client child dies', () async {
+      // A "binary" (the attach client) that runs long.
+      final app = File('${dir.path}/fake-app');
+      app.writeAsStringSync('#!/bin/sh\nsleep 300\n');
+      _chmod(app.path, '755');
+      // An emulator that runs the attach client (its argv after `--`) as a
+      // child and waits for it, like gnome-terminal --wait.
+      final script = File('${dir.path}/gnome-terminal');
+      script.writeAsStringSync(
+        '#!/bin/sh\n'
+        'echo "\$@" > ${_argsFile(dir).path}\n'
+        'while [ \$# -gt 0 ]; do\n'
+        '  if [ "\$1" = "--" ]; then shift; break; fi\n'
+        '  shift\n'
+        'done\n'
+        '"\$@" &\n'
+        'echo \$! > ${dir.path}/pid.txt\n'
+        'wait\n',
+      );
+      _chmod(script.path, '755');
+      final window = await TerminalWindowSpawner(
+        emulators: (String name) =>
+            name == 'gnome-terminal' ? script.path : null,
+      ).spawn(attachClientArgv: [app.path, '--attach-terminal']);
+      final pid = int.parse(
+        File('${dir.path}/pid.txt').readAsStringSync().trim(),
+      );
+      expect(Process.runSync('kill', ['-0', '$pid']).exitCode, 0);
+
+      await window.kill();
+
+      expect(await window.exited, isNot(0));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      // The attach client child is dead, not just the emulator process.
+      expect(Process.runSync('kill', ['-0', '$pid']).exitCode, isNot(0));
+    });
   });
 
   group('findHostEmulator', () {

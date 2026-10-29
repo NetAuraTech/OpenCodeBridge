@@ -110,6 +110,7 @@ class _FakeService implements OpencodeTerminalService {
     String ptyId, {
     required String ticket,
     int cursor = 0,
+    required TerminalSize size,
   }) async {
     connects++;
     return _FakeConnection();
@@ -143,6 +144,9 @@ class _FakeConnection implements TerminalConnection {
 
   @override
   Future<void> write(List<int> input) async {}
+
+  @override
+  Future<void> resize(int cols, int rows) async {}
 
   @override
   Future<void> close() async {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -24,6 +25,7 @@ void main() {
   late String? lastConnectQuery;
   late bool lastConnectTokenTicketHeader;
   final deletedPtyIds = <String>[];
+  final receivedWsFrames = <Object>[];
 
   setUp(() async {
     createdBody = {};
@@ -31,6 +33,7 @@ void main() {
     lastConnectQuery = null;
     lastConnectTokenTicketHeader = false;
     deletedPtyIds.clear();
+    receivedWsFrames.clear();
 
     server = await HttpServer.bind('127.0.0.1', 0);
     base = Uri.parse('http://127.0.0.1:${server.port}/');
@@ -51,11 +54,17 @@ void main() {
       if (req.method == 'GET' && path.endsWith('/connect')) {
         lastConnectQuery = req.uri.query;
         final ws = await WebSocketTransformer.upgrade(req);
-        ws.add('{"type":"attached","attachmentID":"a","inputProtocol":0}');
+        ws.add('{"type":"attached","attachmentID":"a","inputProtocol":1}');
         ws.add(utf8.encode('REPLAY-ANSI'));
         ws.add(encodeReplayCompleteValue(11));
-        // Keep the socket open (live) until the client closes it.
-        ws.listen((_) {}, onDone: () {}, onError: (e) {});
+        // Keep the socket open (live); record every client frame.
+        ws.listen(
+          (frame) {
+            receivedWsFrames.add(frame);
+          },
+          onDone: () {},
+          onError: (e) {},
+        );
         return;
       }
 
@@ -239,12 +248,13 @@ void main() {
           ptyId,
           ticket: ticket.ticket,
           cursor: 0,
+          size: const TerminalSize(cols: 80, rows: 24),
         );
         try {
-          // The connect carried the ticket and protocol 0.
+          // The connect carried the ticket and the framed input protocol.
           final query = Uri.parse('?$lastConnectQuery').queryParameters;
           expect(query['ticket'], 'tk_1');
-          expect(query['input_protocol'], '0');
+          expect(query['input_protocol'], '1');
           expect(query['cursor'], '0');
 
           // Only the raw ANSI replay is exposed (text frames are filtered).
@@ -252,6 +262,70 @@ void main() {
           expect(utf8.decode(bytes), 'REPLAY-ANSI');
 
           await conn.initialReplayDone;
+        } finally {
+          await conn.close();
+        }
+      },
+    );
+
+    test('resize sends a protocol-1 frame (flag 0) and no payload', () async {
+      final service = OpencodeHttpTerminalService(
+        baseUrl: base,
+        password: password,
+      );
+      final ticket = await service.connectToken(ptyId);
+      final conn = await service.connect(
+        ptyId,
+        ticket: ticket.ticket,
+        cursor: 0,
+        size: const TerminalSize(cols: 80, rows: 24),
+      );
+      try {
+        // Consume the initial replay so the socket settles before we drive it
+        // (the same handshake the connect test performs).
+        await conn.output.first;
+        await conn.resize(2, 3);
+        await until(() => receivedWsFrames.isNotEmpty);
+        // [flag 0, colsHi, colsLo, rowsHi, rowsLo], big-endian, no payload.
+        expect(receivedWsFrames.last, [0, 0, 2, 0, 3]);
+      } finally {
+        await conn.close();
+      }
+    });
+
+    test(
+      'write sends a protocol-1 input frame headed by the current PTY size',
+      () async {
+        final service = OpencodeHttpTerminalService(
+          baseUrl: base,
+          password: password,
+        );
+        final ticket = await service.connectToken(ptyId);
+        final conn = await service.connect(
+          ptyId,
+          ticket: ticket.ticket,
+          cursor: 0,
+          size: const TerminalSize(cols: 80, rows: 24),
+        );
+        try {
+          // Consume the initial replay so the socket settles before we drive it
+          // (the same handshake the connect test performs).
+          await conn.output.first;
+          receivedWsFrames.clear();
+          await conn.write(utf8.encode('hi'));
+          await until(() => receivedWsFrames.isNotEmpty);
+          // Flag 1, size 80x24 (big-endian), then the bytes 'hi' (104 105).
+          expect(receivedWsFrames.last, [1, 0, 80, 0, 24, 104, 105]);
+
+          // A resize updates the size the next input is framed with.
+          receivedWsFrames.clear();
+          await conn.resize(2, 3);
+          await until(() => receivedWsFrames.isNotEmpty);
+          receivedWsFrames.clear();
+          await conn.write(utf8.encode('x'));
+          await until(() => receivedWsFrames.isNotEmpty);
+          // Now framed with 2x3 and the byte 'x' (120).
+          expect(receivedWsFrames.last, [1, 0, 2, 0, 3, 120]);
         } finally {
           await conn.close();
         }
@@ -307,6 +381,21 @@ Future<Map<String, Object?>> _readBody(HttpRequest req) async {
     chunks.addAll(chunk);
   }
   return jsonDecode(utf8.decode(chunks)) as Map<String, Object?>;
+}
+
+/// Polls [condition] until true, so the tests can wait on an asynchronous
+/// WebSocket frame arriving at the fake server.
+Future<void> until(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 5),
+}) async {
+  final stopwatch = Stopwatch()..start();
+  while (!condition()) {
+    if (stopwatch.elapsed > timeout) {
+      throw TimeoutException('until condition not met');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
 }
 
 String encodeReplayCompleteValue(int endOffset) =>

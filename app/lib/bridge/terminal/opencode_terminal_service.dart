@@ -31,6 +31,11 @@ class OpencodeTerminalServiceError implements Exception {
 /// One live attach the bridge holds to a PTY. The bridge is the *only*
 /// upstream attach per PTY (the service enforces one), so this is the single
 /// handle the attach proxy reads the screen from and drives the TUI through.
+///
+/// The attach speaks the service's *framed* input protocol (protocol 1): the
+/// connection tracks the PTY size and rides it in every frame it sends, so a
+/// [write] never resizes the PTY to a stale size and a [resize] takes effect
+/// over the attach (with the attach open, the service rejects an HTTP resize).
 abstract class TerminalConnection {
   /// Raw ANSI output from the PTY (the initial replay, then live frames), as
   /// bytes. The service's text control frames (`attached`, `replay_complete`,
@@ -43,8 +48,12 @@ abstract class TerminalConnection {
   /// if the connection closes first.
   Future<void> get initialReplayDone;
 
-  /// Send raw input bytes to the TUI (protocol 0: the bytes are the input).
+  /// Send raw input bytes to the TUI, framed with the current PTY size.
   Future<void> write(List<int> input);
+
+  /// Resize the PTY to [cols] x [rows] over the attach and make that the size
+  /// subsequent [write]s frame with.
+  Future<void> resize(int cols, int rows);
 
   /// Close the upstream attach.
   Future<void> close();
@@ -75,11 +84,14 @@ abstract class OpencodeTerminalService {
   Future<TerminalTicket> connectToken(String ptyId);
 
   /// Open a live attach to [ptyId]. [ticket] is from [connectToken]; [cursor]
-  /// is the service's replay start offset (0 = from the start of its ring).
+  /// is the service's replay start offset (0 = from the start of its ring);
+  /// [size] is the PTY's current size — the attach frames every input with it
+  /// (protocol 1) and starts resizes from it.
   Future<TerminalConnection> connect(
     String ptyId, {
     required String ticket,
     int cursor = 0,
+    required TerminalSize size,
   });
 
   /// Resize the PTY to [size] (spec §16).

@@ -29,7 +29,6 @@ class _FakeService implements OpencodeTerminalService {
 
   int connects = 0;
   int tokenRequests = 0;
-  final resizes = <TerminalSize>[];
   final inputWrites = <List<int>>[];
 
   _FakeConnection? _connection;
@@ -60,6 +59,7 @@ class _FakeService implements OpencodeTerminalService {
     String ptyId, {
     required String ticket,
     int cursor = 0,
+    required TerminalSize size,
   }) async {
     connects++;
     final conn = _FakeConnection(this);
@@ -68,10 +68,7 @@ class _FakeService implements OpencodeTerminalService {
   }
 
   @override
-  Future<TerminalInfo> resize(String ptyId, TerminalSize size) async {
-    resizes.add(size);
-    return _info;
-  }
+  Future<TerminalInfo> resize(String ptyId, TerminalSize size) async => _info;
 
   @override
   Future<void> delete(String ptyId) async {}
@@ -96,6 +93,10 @@ class _FakeConnection implements TerminalConnection {
   final _replayDone = Completer<void>();
   bool closed = false;
 
+  /// The resizes the attacher requested, in order (the proxy forwards these
+  /// over the upstream attach, protocol 1).
+  final resizes = <TerminalSize>[];
+
   @override
   Stream<List<int>> get output => _controller.stream;
 
@@ -110,6 +111,11 @@ class _FakeConnection implements TerminalConnection {
   @override
   Future<void> write(List<int> input) async {
     _service.inputWrites.add(input);
+  }
+
+  @override
+  Future<void> resize(int cols, int rows) async {
+    resizes.add(TerminalSize(cols: cols, rows: rows));
   }
 
   @override
@@ -193,14 +199,16 @@ void main() {
     await proxy.close();
   });
 
-  test('a resize request is forwarded to the service', () async {
+  test('a resize request is forwarded over the upstream attach', () async {
     final service = _FakeService();
     final proxy = makeProxy(service);
 
     final a1 = await proxy.attach();
     await a1.resize(80, 24);
 
-    expect(service.resizes, [const TerminalSize(cols: 80, rows: 24)]);
+    expect(service.connection!.resizes, [
+      const TerminalSize(cols: 80, rows: 24),
+    ]);
 
     await proxy.close();
   });

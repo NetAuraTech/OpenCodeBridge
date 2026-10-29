@@ -62,7 +62,6 @@ class TerminalAttachProxy {
   late final int _ringCapacity;
 
   TerminalConnection? _upstream;
-  String? _ptyId;
   Future<void>? _ensureFuture;
   bool _closed = false;
 
@@ -125,12 +124,12 @@ class TerminalAttachProxy {
     try {
       if (_upstream != null) return;
       final terminal = await _pty();
-      _ptyId = terminal.id;
       final ticket = await _service.connectToken(terminal.id);
       final connection = await _service.connect(
         terminal.id,
         ticket: ticket.ticket,
         cursor: 0,
+        size: terminal.size,
       );
       _upstream = connection;
       connection.output.listen(
@@ -161,7 +160,6 @@ class TerminalAttachProxy {
   void _onUpstreamDone() {
     if (_upstream == null) return; // Already handled by a clean close.
     _upstream = null;
-    _ptyId = null;
     _ensureFuture = null;
     _ring.clear();
     _endOffset = 0;
@@ -178,15 +176,9 @@ class TerminalAttachProxy {
   }
 
   Future<void> _forwardResize(int cols, int rows) async {
-    final id = await _ptyIdOrEnsure();
-    await _service.resize(id, TerminalSize(cols: cols, rows: rows));
-  }
-
-  Future<String> _ptyIdOrEnsure() async {
-    final id = _ptyId;
-    if (id != null) return id;
-    await _ensureUpstream();
-    return _ptyId!;
+    final connection = _upstream;
+    if (connection == null) return; // PTY gone or not attached; resize dropped.
+    await connection.resize(cols, rows);
   }
 
   Future<void> _detach(_Attacher attacher) async {
@@ -198,7 +190,6 @@ class TerminalAttachProxy {
   Future<void> _closeUpstream() async {
     final connection = _upstream;
     _upstream = null;
-    _ptyId = null;
     _ensureFuture = null;
     _ring.clear();
     _endOffset = 0;

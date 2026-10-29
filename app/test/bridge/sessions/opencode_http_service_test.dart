@@ -61,7 +61,31 @@ void main() {
         return;
       }
       final path = req.uri.path;
-      if (path == '/api/session') {
+      if (path == '/api/session' && req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        final decoded = jsonDecode(body) as Map<String, Object?>;
+        final location = decoded['location'] as Map<String, Object?>?;
+        final directory = location?['directory'] as String?;
+        // Echo the created session, bound to the project of the directory.
+        final projectId = directory == '/proj/two'
+            ? 'p2'
+            : directory == '/proj/one'
+            ? 'p1'
+            : 'p1';
+        // The real service wraps the created session in a `data` envelope
+        // (like the list endpoint); echo that shape to pin the unwrap.
+        resp.write(
+          jsonEncode({
+            'data': {
+              'id': 'ses_new',
+              'title': 'new',
+              'projectID': projectId,
+              'time': {'created': 400},
+              'location': {'directory': directory ?? ''},
+            },
+          }),
+        );
+      } else if (path == '/api/session') {
         final cursor = req.uri.queryParameters['cursor'];
         final offset = cursor == null ? 0 : int.parse(cursor);
         final nextOffset = offset + pageSize;
@@ -109,6 +133,41 @@ void main() {
     test('projectNames derives names from canonical when absent', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       expect(await service.projectNames(), {'p1': 'one', 'p2': 'Two'});
+    });
+
+    test('projects returns id, display name, and canonical', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final list = await service.projects();
+      expect(list.map((p) => p.id).toList(), ['p1', 'p2']);
+      expect(list.map((p) => p.name).toList(), ['one', 'Two']);
+      expect(list.map((p) => p.canonical).toList(), ['/proj/one', '/proj/two']);
+    });
+
+    test(
+      'createSession posts the project canonical as the session location',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final session = await service.createSession('p2');
+        expect(session.id, 'ses_new');
+        expect(session.title, 'new');
+        expect(session.projectId, 'p2');
+        expect(session.created, 400);
+        expect(session.location, '/proj/two');
+      },
+    );
+
+    test('createSession of an unknown project is a 404', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await expectLater(
+        service.createSession('p_missing'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
     });
 
     test('activeSessionIds returns the active set', () async {
