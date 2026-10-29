@@ -39,14 +39,17 @@ class BridgeServer {
   /// the default builds a [SessionsBackend] over the shared opencode
   /// service and `~/.config/opencodebridge/sessions.json` and runs the
   /// startup orphan reconciliation (spec section 11) against it.
+  ///
+  /// The port is bound first so a port conflict (e.g. a second server-mode
+  /// instance) fails fast, before any opencode service or on-disk work.
   static Future<BridgeServer> start({
     String host = loopbackHost,
     int port = defaultPort,
     HealthReport Function()? health,
     SessionsBackend? sessions,
   }) async {
-    final backend = sessions ?? await BridgeServer._defaultSessions();
     final server = await HttpServer.bind(host, port);
+    final backend = sessions ?? await BridgeServer._defaultSessions();
     server.listen(
       (request) => BridgeServer._handle(
         request,
