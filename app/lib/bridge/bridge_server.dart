@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'events/bridge_event.dart';
+import 'events/event_hub.dart';
+import 'events/opencode_http_event_service.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
 import 'sessions/opencode_http_service.dart';
@@ -18,7 +21,7 @@ import 'terminal/terminal_window_token.dart';
 /// This slice exposes the health endpoint plus the sessions endpoints of
 /// spec section 5 (#1 `GET /api/sessions`, #4 `DELETE /api/sessions/{id}`).
 class BridgeServer {
-  BridgeServer._(this._server, this._terminals);
+  BridgeServer._(this._server, this._terminals, this._events);
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
   /// configuration (spec section 9) can point the ingress at it.
@@ -32,11 +35,19 @@ class BridgeServer {
   /// The home-list endpoint (spec section 5, endpoint 1).
   static const String sessionsPath = '/api/sessions';
 
+  /// The unified event stream (spec section 8, endpoint 14): SSE.
+  static const String eventsPath = '/api/events';
+
   final HttpServer _server;
 
   /// The terminal backend (endpoint 10); `null` when this machine has no
   /// shared opencode service, in which case the terminal endpoint is 404.
   final TerminalBackend? _terminals;
+
+  /// The unified event hub (endpoint 14); `null` when this machine has no
+  /// shared opencode service, in which case the events endpoint reports
+  /// `opencode_unavailable`.
+  final EventHub? _events;
 
   /// Starts the bridge on [host] and [port].
   ///
@@ -51,6 +62,9 @@ class BridgeServer {
   /// [terminals], when provided, serves the terminal attach endpoint (10,
   /// tests); the default builds a [TerminalBackend] over the shared opencode
   /// terminal service and a fresh window token.
+  /// [events], when provided, serves the unified event stream (14, tests);
+  /// the default builds an [EventHub] over the shared opencode event
+  /// service (the bridge's single upstream subscription).
   ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
@@ -60,10 +74,12 @@ class BridgeServer {
     HealthReport Function()? health,
     SessionsBackend? sessions,
     TerminalBackend? terminals,
+    EventHub? events,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
     final termBackend = terminals ?? await BridgeServer._defaultTerminals();
+    final eventHub = events ?? await BridgeServer._defaultEvents();
     server.listen((request) async {
       final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
       if (termBackend != null &&
@@ -77,9 +93,10 @@ class BridgeServer {
         request,
         health ?? BridgeServer._scaffoldHealth,
         backend,
+        eventHub,
       );
     });
-    return BridgeServer._(server, termBackend);
+    return BridgeServer._(server, termBackend, eventHub);
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -92,6 +109,7 @@ class BridgeServer {
   Future<void> stop() async {
     await _server.close(force: true);
     await _terminals?.close();
+    await _events?.close();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -141,6 +159,20 @@ class BridgeServer {
     }
   }
 
+  /// The default event hub (endpoint 14): the bridge's single upstream
+  /// `GET /api/event` subscription over the shared opencode service, fanned
+  /// out to the app SSE connections. Returns `null` when this machine has no
+  /// shared opencode service (no descriptor), in which case endpoint 14
+  /// reports `opencode_unavailable`.
+  static Future<EventHub?> _defaultEvents() async {
+    try {
+      final service = await OpencodeHttpEventService.fromHost();
+      return EventHub(service: service);
+    } catch (_) {
+      return null;
+    }
+  }
+
   static HealthReport _scaffoldHealth() => const HealthReport(
     bridge: ComponentStatus.ok,
     opencode: ComponentStatus.notConfigured,
@@ -151,10 +183,16 @@ class BridgeServer {
     HttpRequest request,
     HealthReport Function() report,
     SessionsBackend? sessions,
+    EventHub? events,
   ) async {
     final response = request.response;
     response.headers.contentType = ContentType.json;
     try {
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.eventsPath) {
+        await BridgeServer._handleEvents(request, events);
+        return;
+      }
       if (request.method == 'GET' &&
           request.uri.path == BridgeServer.healthPath) {
         response.statusCode = HttpStatus.ok;
@@ -170,7 +208,7 @@ class BridgeServer {
       if (request.method == 'DELETE') {
         final id = BridgeServer._sessionIdIn(request.uri.path);
         if (id != null) {
-          await BridgeServer._deleteSession(request, id, sessions);
+          await BridgeServer._deleteSession(request, id, sessions, events);
           return;
         }
       }
@@ -183,6 +221,26 @@ class BridgeServer {
         response.close();
       } catch (_) {}
     }
+  }
+
+  /// Endpoint 14: the unified event stream (SSE). Attaches the request as a
+  /// downstream connection on the event hub; the hub fans out every opencode
+  /// event (verbatim) and every bridge-native event to it.
+  static Future<void> _handleEvents(
+    HttpRequest request,
+    EventHub? events,
+  ) async {
+    final response = request.response;
+    if (events == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    response.headers.contentType = ContentType.parse('text/event-stream');
+    response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+    response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
+    response.bufferOutput = false;
+    response.statusCode = HttpStatus.ok;
+    events.add(HttpEventConnection(response));
   }
 
   /// The single session id in a `DELETE` path, or `null` when the path is
@@ -219,6 +277,7 @@ class BridgeServer {
     HttpRequest request,
     String id,
     SessionsBackend? sessions,
+    EventHub? events,
   ) async {
     final response = request.response;
     if (sessions == null) {
@@ -227,6 +286,14 @@ class BridgeServer {
     }
     try {
       await sessions.delete(id);
+      // Bridge-native `session.closed` (spec §8): every connected app drops the
+      // session from its list. Emitted after the delete succeeds.
+      events?.emit(
+        bridgeEvent(
+          type: BridgeEventType.sessionClosed,
+          data: {'sessionID': id},
+        ),
+      );
       response.statusCode = HttpStatus.noContent;
     } on OpencodeServiceError catch (e) {
       if (e.statusCode == HttpStatus.notFound) {
