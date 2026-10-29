@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app_mode.dart';
+import '../bridge/terminal/terminal_backend.dart';
 import '../client/connection_monitor.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
@@ -18,6 +19,7 @@ class HomeShell extends StatefulWidget {
     required this.settings,
     required this.mode,
     this.localBridgeUri,
+    this.terminals,
     this.onTunnelUrlCommitted,
   });
 
@@ -27,6 +29,10 @@ class HomeShell extends StatefulWidget {
 
   /// Present in server mode: where the embedded bridge listens.
   final Uri? localBridgeUri;
+
+  /// Present in server mode with a shared opencode service: the terminal
+  /// backend the Sessions tab attaches to in-process (spec §12).
+  final TerminalBackend? terminals;
 
   /// Re-points the connection at the tunnel URL after it is committed.
   final VoidCallback? onTunnelUrlCommitted;
@@ -68,7 +74,7 @@ class _HomeShellState extends State<HomeShell> {
     body: IndexedStack(
       index: _tab,
       children: [
-        SessionsTab(apiBase: _apiBase),
+        SessionsTab(apiBase: _apiBase, terminals: widget.terminals),
         const DockerStub(),
         SettingsTab(
           settings: widget.settings,

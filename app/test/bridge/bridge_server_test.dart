@@ -10,7 +10,10 @@ import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
 import 'package:opencodebridge/bridge/health.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/bridge/sessions/session_store.dart';
+import 'package:opencodebridge/bridge/terminal/terminal_window.dart';
+import 'package:opencodebridge/bridge/terminal/window_manager.dart';
 
 void main() {
   group('BridgeServer', () {
@@ -329,17 +332,375 @@ void main() {
       }
     });
   });
+
+  group('BridgeServer windows', () {
+    late BridgeServer server;
+    late Uri base;
+    late Directory dir;
+    late File app;
+    late File emulator;
+    late _FakeService service;
+    late SessionStore store;
+    late SessionsBackend backend;
+    late TerminalWindowManager windows;
+    late EventHub hub;
+    late List<String> windowEvents;
+    var launches = 0;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-windows');
+      launches = 0;
+      // A "binary" (the attach client) that runs long until killed.
+      app = File('${dir.path}/fake-app');
+      app.writeAsStringSync('#!/bin/sh\nsleep 300\n');
+      _chmod(app.path, '755');
+      // An emulator that runs the attach client (its argv after `--`) as a
+      // child and waits for it, like gnome-terminal --wait.
+      emulator = File('${dir.path}/gnome-terminal');
+      emulator.writeAsStringSync(
+        '#!/bin/sh\n'
+        'echo "\$@" > ${dir.path}/args.txt\n'
+        'while [ \$# -gt 0 ]; do\n'
+        '  if [ "\$1" = "--" ]; then shift; break; fi\n'
+        '  shift\n'
+        'done\n'
+        '"\$@" &\n'
+        'echo \$! > ${dir.path}/pid.txt\n'
+        'wait\n',
+      );
+      _chmod(emulator.path, '755');
+      service = _FakeService();
+      store = await SessionStore.load(dir: dir);
+      backend = SessionsBackend(service: service, store: store);
+      windowEvents = <String>[];
+      hub = EventHub(service: _FakeEventUpstream());
+      windows = TerminalWindowManager(
+        liveSessionIds: backend.liveSessionIds,
+        spawner: TerminalWindowSpawner(
+          emulators: (String name) =>
+              name == 'gnome-terminal' ? emulator.path : null,
+          launch: (List<String> argv) {
+            launches++;
+            return Process.start(argv.first, argv.sublist(1));
+          },
+        ),
+        terminalBinary: app.path,
+        windowToken: () => 'tok_1',
+        onEvent: windowEvents.add,
+      );
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        events: hub,
+        windows: windows,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('GET /api/projects returns the project list', () async {
+      final (status, body) = await _get(base, 'api/projects');
+      expect(status, 200);
+      expect(jsonDecode(body), [
+        {'id': 'p1', 'name': 'proj-one', 'canonical': '/proj/one'},
+        {'id': 'p2', 'name': 'proj-two', 'canonical': '/proj/two'},
+      ]);
+    });
+
+    test('GET /api/projects is 502 when the service is down', () async {
+      service.failProjects = true;
+      final (status, body) = await _get(base, 'api/projects');
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+    });
+
+    test('GET /api/projects is 503 without a sessions backend', () async {
+      if (_hostHasServiceDescriptor()) return;
+      final bare = await BridgeServer.start(port: 0);
+      try {
+        final (status, body) = await _get(bare.baseUri, 'api/projects');
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'opencode_unavailable'});
+      } finally {
+        await bare.stop();
+      }
+    });
+
+    test('POST /api/sessions creates the session, persists the id, opens the '
+        'window, and returns it live', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions',
+        jsonEncode({'project': 'p1'}),
+      );
+
+      expect(status, 201);
+      expect(jsonDecode(body), {
+        'id': 'ses_created',
+        'title': 'created',
+        'project': {'id': 'p1', 'name': 'proj-one'},
+        'created': 400,
+        'location': '/created',
+        'active': false,
+        'classification': 'app-launched-live',
+      });
+      expect(launches, 1);
+      expect(backend.liveSessionIds, contains('ses_created'));
+      // The persistence "add id" write happened at launch.
+      expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
+    });
+
+    test('POST /api/sessions with an invalid body is 400', () async {
+      for (final raw in <String>['', 'not json', '{}', '{"project": ""}']) {
+        final (status, body) = await _postRaw(base, 'api/sessions', raw);
+        expect(status, 400, reason: raw);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+      }
+      expect(launches, 0);
+      expect(store.ids(), isEmpty);
+    });
+
+    test('POST /api/sessions for an unknown project is 404', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions',
+        jsonEncode({'project': 'p_missing'}),
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      expect(launches, 0);
+      expect(store.ids(), isEmpty);
+    });
+
+    test('POST /api/sessions is 502 when the service is down', () async {
+      service.failCreate = true;
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions',
+        jsonEncode({'project': 'p1'}),
+      );
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      expect(launches, 0);
+      expect(store.ids(), isEmpty);
+    });
+
+    test('POST /api/sessions is 500 window_unavailable and leaves the session '
+        'persisted and closed', () async {
+      final spawnless = TerminalWindowManager(
+        liveSessionIds: backend.liveSessionIds,
+        spawner: TerminalWindowSpawner(emulators: (String name) => null),
+        terminalBinary: app.path,
+        windowToken: () => 'tok_1',
+      );
+      final other = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        windows: spawnless,
+      );
+      try {
+        final (status, body) = await _postRaw(
+          other.baseUri,
+          'api/sessions',
+          jsonEncode({'project': 'p1'}),
+        );
+        expect(status, 500);
+        expect(jsonDecode(body), {'error': 'window_unavailable'});
+      } finally {
+        await other.stop();
+      }
+      // The session still exists: persisted and closed — it can be reopened.
+      expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
+      expect(backend.liveSessionIds, isEmpty);
+    });
+
+    test('POST /api/sessions/{id}/window reopens a closed app-launched '
+        'session', () async {
+      store.add('ses_two');
+      await store.save();
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_two/window',
+        '',
+      );
+
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(launches, 1);
+      expect(backend.liveSessionIds, contains('ses_two'));
+      expect(windows.isLive('ses_two'), isTrue);
+    });
+
+    test('POST /api/sessions/{id}/window is 404 for a session that was not '
+        'app-launched', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/window',
+        '',
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      expect(launches, 0);
+    });
+
+    test('POST /api/sessions/{id}/window is 404 for a session gone from the '
+        'service', () async {
+      store.add('ses_two');
+      await store.save();
+      service.removedFromService.add('ses_two');
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_two/window',
+        '',
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      expect(launches, 0);
+    });
+
+    test(
+      'POST /api/sessions/{id}/window is 502 when the service is down',
+      () async {
+        store.add('ses_two');
+        await store.save();
+        service.failList = true;
+
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_two/window',
+          '',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+        expect(launches, 0);
+      },
+    );
+
+    test('POST /api/sessions/{id}/window is 500 window_unavailable when the '
+        'window cannot be spawned', () async {
+      store.add('ses_two');
+      await store.save();
+      final spawnless = TerminalWindowManager(
+        liveSessionIds: backend.liveSessionIds,
+        spawner: TerminalWindowSpawner(emulators: (String name) => null),
+        terminalBinary: app.path,
+        windowToken: () => 'tok_1',
+      );
+      final other = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        windows: spawnless,
+      );
+      try {
+        final (status, body) = await _postRaw(
+          other.baseUri,
+          'api/sessions/ses_two/window',
+          '',
+        );
+        expect(status, 500);
+        expect(jsonDecode(body), {'error': 'window_unavailable'});
+      } finally {
+        await other.stop();
+      }
+      expect(backend.liveSessionIds, isEmpty);
+    });
+
+    test('a window the user closes unflips live, emits terminal.closed, and '
+        'writes no persistence', () async {
+      // A window that closes on its own (the user closed it).
+      emulator.writeAsStringSync('#!/bin/sh\nexit 0\n');
+      store.add('ses_one');
+      await store.save();
+
+      await windows.openFor('ses_one');
+      await _until(
+        () =>
+            windowEvents.isNotEmpty &&
+            !backend.liveSessionIds.contains('ses_one'),
+      );
+
+      expect(windowEvents, hasLength(1));
+      final frame = jsonDecode(windowEvents.single) as Map<String, Object?>;
+      expect(frame['type'], 'terminal.closed');
+      expect(frame['data'], {'sessionID': 'ses_one'});
+      // Window close is an in-memory transition only: the record stays.
+      expect((await SessionStore.load(dir: dir)).has('ses_one'), isTrue);
+    });
+
+    test('DELETE on a live app-launched session closes the window first, '
+        'deletes, and emits session.closed', () async {
+      store.add('ses_one');
+      await store.save();
+      await windows.openFor('ses_one');
+      await _waitForFile('${dir.path}/pid.txt');
+      final pid = int.parse(
+        File('${dir.path}/pid.txt').readAsStringSync().trim(),
+      );
+      expect(Process.runSync('kill', ['-0', '$pid']).exitCode, 0);
+
+      final tap = await _SseTap.open(base);
+      try {
+        await _until(() => tap.ready);
+        final (status, body) = await _delete(base, 'api/sessions/ses_one');
+        expect(status, 204);
+        expect(body, isEmpty);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(
+          Process.runSync('kill', ['-0', '$pid']).exitCode,
+          isNot(0),
+          reason: 'the window must be closed before the delete answers',
+        );
+        expect(service.deleted, ['ses_one']);
+        expect(backend.liveSessionIds, isEmpty);
+        expect(windowEvents, isEmpty);
+        await _until(
+          () => tap.dataPayloads.any((p) => p.contains('session.closed')),
+          message: 'expected the session.closed frame',
+        );
+        final frame = jsonDecode(
+          tap.dataPayloads.firstWhere((p) => p.contains('session.closed')),
+        ) as Map<String, Object?>;
+        expect(frame['type'], 'session.closed');
+        expect(frame['data'], {'sessionID': 'ses_one'});
+      } finally {
+        await tap.close();
+      }
+    });
+  });
 }
 
 /// A scripted service for the sessions-endpoint tests.
 class _FakeService implements OpencodeService {
   final List<String> deleted = [];
+  final Set<String> removedFromService = {};
   var failList = false;
+  var failProjects = false;
+  var failCreate = false;
+
+  /// The session id [createSession] mints, by project id.
+  final Map<String, OpencodeSession> created = {
+    'p1': const OpencodeSession(
+      id: 'ses_created',
+      title: 'created',
+      projectId: 'p1',
+      created: 400,
+      location: '/created',
+    ),
+  };
 
   @override
   Future<List<OpencodeSession>> listSessions() async {
     if (failList) throw const OpencodeServiceError(0, 'service down');
-    return const [_one, _two, _three];
+    return [
+      for (final session in const [_one, _two, _three])
+        if (!removedFromService.contains(session.id)) session,
+    ];
   }
 
   @override
@@ -350,6 +711,25 @@ class _FakeService implements OpencodeService {
 
   @override
   Future<Set<String>> activeSessionIds() async => const {'ses_three'};
+
+  @override
+  Future<List<OpencodeProject>> projects() async {
+    if (failProjects) throw const OpencodeServiceError(0, 'service down');
+    return const [
+      OpencodeProject(id: 'p1', name: 'proj-one', canonical: '/proj/one'),
+      OpencodeProject(id: 'p2', name: 'proj-two', canonical: '/proj/two'),
+    ];
+  }
+
+  @override
+  Future<OpencodeSession> createSession(String projectId) async {
+    if (failCreate) throw const OpencodeServiceError(0, 'service down');
+    final session = created[projectId];
+    if (session == null) {
+      throw const OpencodeServiceError(404, 'no such project');
+    }
+    return session;
+  }
 
   @override
   Future<void> deleteSession(String id) async {
@@ -408,6 +788,48 @@ Future<(int, String)> _delete(Uri base, String path) async {
   } finally {
     client.close(force: true);
   }
+}
+
+Future<(int, String)> _postRaw(Uri base, String path, String body) async {
+  final client = HttpClient();
+  try {
+    final request = await client.postUrl(base.replace(path: path));
+    request.headers.contentType = ContentType.json;
+    if (body.isNotEmpty) {
+      request.write(body);
+    }
+    final response = await request.close();
+    final raw = await response.transform(const Utf8Decoder()).join();
+    return (response.statusCode, raw);
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// The emulator script writes [path] once the attach client child is up;
+/// the spawn that triggers it resolves before that, so poll for the file.
+Future<void> _waitForFile(String path) async {
+  await _until(() => File(path).existsSync());
+}
+
+void _chmod(String path, String mode) => Process.runSync('chmod', [mode, path]);
+
+/// On a host that publishes a shared opencode service descriptor the bridge
+/// default builds a real sessions backend, so the 503 path is not
+/// observable there.
+/// On a host that publishes a shared opencode service descriptor the bridge
+/// default builds a real sessions backend, so the 503 path is not
+/// observable there: the test marks itself skipped and returns true.
+bool _hostHasServiceDescriptor() {
+  if (File('${homeDirectory()}/.local/state/opencode/service.json')
+      .existsSync()) {
+    markTestSkipped(
+      'the host publishes a shared opencode service descriptor, so the '
+      'bridge default builds a real sessions backend',
+    );
+    return true;
+  }
+  return false;
 }
 
 /// A scripted upstream event service: one broadcast controller.

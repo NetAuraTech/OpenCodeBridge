@@ -12,13 +12,21 @@ class FakeOpencodeService implements OpencodeService {
     this.sessions = const [],
     this.names = const {},
     this.active = const {},
+    this.allProjects = const [],
+    this.createdSession,
   });
 
   final List<OpencodeSession> sessions;
   final Map<String, String> names;
   final Set<String> active;
+  final List<OpencodeProject> allProjects;
+
+  /// The session [createSession] returns (the fake does not consult [names]).
+  final OpencodeSession? createdSession;
 
   final List<String> deleted = [];
+
+  final List<String> created = [];
 
   @override
   Future<List<OpencodeSession>> listSessions() async => sessions;
@@ -28,6 +36,19 @@ class FakeOpencodeService implements OpencodeService {
 
   @override
   Future<Set<String>> activeSessionIds() async => active;
+
+  @override
+  Future<List<OpencodeProject>> projects() async => allProjects;
+
+  @override
+  Future<OpencodeSession> createSession(String projectId) async {
+    created.add(projectId);
+    final session = createdSession;
+    if (session == null) {
+      throw const OpencodeServiceError(500, 'no created session scripted');
+    }
+    return session;
+  }
 
   @override
   Future<void> deleteSession(String id) async {
@@ -177,6 +198,109 @@ void main() {
       await backend.reconcile();
 
       expect((await SessionStore.load(dir: dir)).ids(), {'ses_1'});
+    });
+  });
+
+  group('SessionsBackend.create', () {
+    test('creates on the service, persists the id at launch, and classifies '
+        'the row app-launched-closed until the window opens', () async {
+      final created = const OpencodeSession(
+        id: 'ses_new',
+        title: 'new',
+        projectId: 'p1',
+        created: 400,
+        location: '/new',
+      );
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService(
+        sessions: [created],
+        names: {'p1': 'proj-one'},
+        createdSession: created,
+      );
+      final backend = SessionsBackend(service: service, store: store);
+
+      final row = await backend.create('p1');
+
+      expect(service.created, ['p1']);
+      expect(store.has('ses_new'), isTrue);
+      // The persistence "add id" write was saved, not just in memory.
+      expect((await SessionStore.load(dir: dir)).has('ses_new'), isTrue);
+      expect(
+        row,
+        const Session(
+          id: 'ses_new',
+          title: 'new',
+          project: SessionProject(id: 'p1', name: 'proj-one'),
+          created: 400,
+          location: '/new',
+          active: false,
+          classification: SessionClassification.appLaunchedClosed,
+        ),
+      );
+    });
+
+    test('a live window flips the returned row to app-launched-live', () async {
+      final created = const OpencodeSession(
+        id: 'ses_new',
+        title: 'new',
+        projectId: 'p1',
+        created: 400,
+        location: '/new',
+      );
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService(
+        sessions: [created],
+        names: const {},
+        createdSession: created,
+      );
+      final backend = SessionsBackend(
+        service: service,
+        store: store,
+        liveSessionIds: <String>{},
+      );
+      backend.liveSessionIds.add('ses_new');
+
+      final row = await backend.create('p1');
+
+      expect(row.classification, SessionClassification.appLaunchedLive);
+    });
+  });
+
+  group('SessionsBackend.projects', () {
+    test('passes the service project list through', () async {
+      const projects = [
+        OpencodeProject(id: 'p1', name: 'proj-one', canonical: '/one'),
+        OpencodeProject(id: 'p2', name: 'proj-two', canonical: '/two'),
+      ];
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService(allProjects: projects);
+      final backend = SessionsBackend(service: service, store: store);
+
+      expect(await backend.projects(), projects);
+    });
+  });
+
+  group('SessionsBackend.isAppLaunched', () {
+    test('reflects the persistence records', () async {
+      final store = await SessionStore.load(dir: dir);
+      store.add('ses_1');
+      await store.save();
+      final service = FakeOpencodeService(sessions: [s1]);
+      final backend = SessionsBackend(service: service, store: store);
+
+      expect(backend.isAppLaunched('ses_1'), isTrue);
+      expect(backend.isAppLaunched('ses_3'), isFalse);
+    });
+  });
+
+  group('SessionsBackend.exists', () {
+    test('true while the service has the session, false once gone', () async {
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService(sessions: [s1]);
+      final backend = SessionsBackend(service: service, store: store);
+
+      expect(await backend.exists('ses_1'), isTrue);
+      expect(await backend.exists('ses_gone'), isFalse);
     });
   });
 }

@@ -8,11 +8,12 @@ import 'paths.dart';
 /// the service's Basic auth. The bridge holds these credentials and never
 /// exposes them (ADR-0001).
 ///
-/// Maps the service's endpoints to the four operations the sessions slice
+/// Maps the service's endpoints to the operations the sessions slice
 /// needs (spec §5, §6, §7):
 /// - `GET /api/session` (cursor-paginated) -> the session list;
-/// - `GET /api/project` -> project display names;
+/// - `GET /api/project` -> the project list (names + canonical dirs);
 /// - `GET /api/session/active` -> the TUI-attached / agent-working set;
+/// - `POST /api/session` -> create a session in a project;
 /// - `DELETE /api/session/{id}` -> deletion.
 class OpencodeHttpService implements OpencodeService {
   OpencodeHttpService({required Uri baseUrl, required String password})
@@ -69,20 +70,49 @@ class OpencodeHttpService implements OpencodeService {
 
   @override
   Future<Map<String, String>> projectNames() async {
+    final list = await projects();
+    return {for (final p in list) p.id: p.name};
+  }
+
+  @override
+  Future<List<OpencodeProject>> projects() async {
     final body = await _get(_base.replace(path: '/api/project'));
     final decoded = jsonDecode(body);
     final list = decoded is List ? decoded : const <Object?>[];
-    final names = <String, String>{};
-    for (final item in list) {
-      final map = item is Map<String, Object?> ? item : const {};
-      final id = map['id'] as String?;
-      if (id == null || id.isEmpty) continue;
-      final name = map['name'] is String && (map['name'] as String).isNotEmpty
-          ? map['name'] as String
-          : _basename(map['canonical'] as String? ?? id);
-      names[id] = name;
+    return [
+      for (final item in list)
+        if (item is Map<String, Object?>) _projectFrom(item),
+    ].where((p) => p.id.isNotEmpty).toList();
+  }
+
+  @override
+  Future<OpencodeSession> createSession(String projectId) async {
+    OpencodeProject? project;
+    for (final p in await projects()) {
+      if (p.id == projectId) {
+        project = p;
+        break;
+      }
     }
-    return names;
+    if (project == null) {
+      throw const OpencodeServiceError(404, 'no such project');
+    }
+    final body = await _post(
+      _base.replace(path: '/api/session'),
+      jsonEncode({
+        'location': {'directory': project.canonical},
+      }),
+    );
+    final decoded = jsonDecode(body);
+    final outer = decoded is Map<String, Object?>
+        ? decoded
+        : const <String, Object?>{};
+    // The service wraps single-object responses in `{ "data": … }` (the same
+    // envelope as the list endpoint); unwrap it. The top-level fallback keeps
+    // a shape change from degrading to a silently-empty id.
+    final data = outer['data'];
+    final map = data is Map<String, Object?> ? data : outer;
+    return _sessionFrom(map);
   }
 
   @override
@@ -144,21 +174,61 @@ class OpencodeHttpService implements OpencodeService {
     }
   }
 
+  /// A POST to [uri] with the service auth and a JSON [body], returning the raw
+  /// response body. Non-2xx -> [OpencodeServiceError]; a transport failure ->
+  /// status 0.
+  Future<String> _post(Uri uri, String body) async {
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(uri);
+      request.headers.set(HttpHeaders.authorizationHeader, _auth);
+      request.headers.contentType = ContentType.json;
+      request.write(body);
+      final response = await request.close();
+      final responseBody = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw OpencodeServiceError(response.statusCode, responseBody);
+      }
+      return responseBody;
+    } on OpencodeServiceError {
+      rethrow;
+    } catch (error) {
+      throw OpencodeServiceError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   static List<OpencodeSession> _sessionsFrom(Object? decoded) {
     final map = decoded is Map<String, Object?> ? decoded : const {};
     final data = map['data'];
     final list = data is List ? data : const <Object?>[];
     return [
       for (final item in list)
-        if (item is Map<String, Object?>)
-          OpencodeSession(
-            id: item['id'] as String? ?? '',
-            title: item['title'] as String? ?? '',
-            projectId: item['projectID'] as String? ?? '',
-            created: _nestedInt(item, 'time', 'created'),
-            location: _nestedString(item, 'location', 'directory'),
-          ),
+        if (item is Map<String, Object?>) _sessionFrom(item),
     ];
+  }
+
+  /// One session object (the service's `Session`), from a list item or the
+  /// create response.
+  static OpencodeSession _sessionFrom(Map<String, Object?> item) {
+    return OpencodeSession(
+      id: item['id'] as String? ?? '',
+      title: item['title'] as String? ?? '',
+      projectId: item['projectID'] as String? ?? '',
+      created: _nestedInt(item, 'time', 'created'),
+      location: _nestedString(item, 'location', 'directory'),
+    );
+  }
+
+  /// One project object (`GET /api/project` item).
+  static OpencodeProject _projectFrom(Map<String, Object?> item) {
+    final id = item['id'] as String? ?? '';
+    final canonical = item['canonical'] as String? ?? '';
+    final name = item['name'] is String && (item['name'] as String).isNotEmpty
+        ? item['name'] as String
+        : _basename(canonical.isEmpty ? id : canonical);
+    return OpencodeProject(id: id, name: name, canonical: canonical);
   }
 
   static String? _nextCursor(Object? decoded) {

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/session.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
 import 'events/opencode_http_event_service.dart';
@@ -13,15 +14,19 @@ import 'terminal/opencode_http_terminal_service.dart';
 import 'terminal/terminal_attach_proxy.dart';
 import 'terminal/terminal_backend.dart';
 import 'terminal/terminal_frames.dart';
+import 'terminal/terminal_window.dart';
 import 'terminal/terminal_window_token.dart';
+import 'terminal/window_manager.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
 ///
 /// This slice exposes the health endpoint plus the sessions endpoints of
-/// spec section 5 (#1 `GET /api/sessions`, #4 `DELETE /api/sessions/{id}`).
+/// spec section 5 (#1 `GET /api/sessions`, #2 `POST /api/sessions` + the
+/// `GET /api/projects` fill-in †, #3 `POST /api/sessions/{id}/window`,
+/// #4 `DELETE /api/sessions/{id}`).
 class BridgeServer {
-  BridgeServer._(this._server, this._terminals, this._events);
+  BridgeServer._(this._server, this._terminals, this._events, this._windows);
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
   /// configuration (spec section 9) can point the ingress at it.
@@ -34,6 +39,10 @@ class BridgeServer {
 
   /// The home-list endpoint (spec section 5, endpoint 1).
   static const String sessionsPath = '/api/sessions';
+
+  /// The project list endpoint (spec section 5, fill-in †): feeds the
+  /// new-session project picker.
+  static const String projectsPath = '/api/projects';
 
   /// The unified event stream (spec section 8, endpoint 14): SSE.
   static const String eventsPath = '/api/events';
@@ -48,6 +57,11 @@ class BridgeServer {
   /// shared opencode service, in which case the events endpoint reports
   /// `opencode_unavailable`.
   final EventHub? _events;
+
+  /// The terminal window manager (spec §7); `null` when this machine has no
+  /// shared opencode service, in which case the window endpoints report
+  /// `opencode_unavailable`.
+  final TerminalWindowManager? _windows;
 
   /// Starts the bridge on [host] and [port].
   ///
@@ -65,6 +79,9 @@ class BridgeServer {
   /// [events], when provided, serves the unified event stream (14, tests);
   /// the default builds an [EventHub] over the shared opencode event
   /// service (the bridge's single upstream subscription).
+  /// [windows], when provided, owns the terminal windows (spec §7, tests);
+  /// the default builds a [TerminalWindowManager] over the host window
+  /// spawner, the app binary, and the terminal backend's window token.
   ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
@@ -75,11 +92,19 @@ class BridgeServer {
     SessionsBackend? sessions,
     TerminalBackend? terminals,
     EventHub? events,
+    TerminalWindowManager? windows,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
     final termBackend = terminals ?? await BridgeServer._defaultTerminals();
     final eventHub = events ?? await BridgeServer._defaultEvents();
+    final windowManager =
+        windows ??
+        BridgeServer._defaultWindows(
+          backend: backend,
+          terminals: termBackend,
+          events: eventHub,
+        );
     server.listen((request) async {
       final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
       if (termBackend != null &&
@@ -94,9 +119,10 @@ class BridgeServer {
         health ?? BridgeServer._scaffoldHealth,
         backend,
         eventHub,
+        windowManager,
       );
     });
-    return BridgeServer._(server, termBackend, eventHub);
+    return BridgeServer._(server, termBackend, eventHub, windowManager);
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -106,10 +132,16 @@ class BridgeServer {
   /// The health endpoint, e.g. `http://127.0.0.1:48201/api/health`.
   Uri get healthUri => baseUri.replace(path: healthPath);
 
+  /// The terminal backend (endpoint 10), `null` when this machine has no
+  /// shared opencode service (the terminal endpoint reports 404 then). The
+  /// app uses it to attach to its sessions' terminals in-process (spec §12).
+  TerminalBackend? get terminals => _terminals;
+
   Future<void> stop() async {
     await _server.close(force: true);
     await _terminals?.close();
     await _events?.close();
+    await _windows?.close();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -173,6 +205,27 @@ class BridgeServer {
     }
   }
 
+  /// The default window manager (spec §7): the host window spawner (gnome
+  /// terminal / xterm), the app binary as the attach client, and the
+  /// terminal backend's per-startup window token. Returns `null` when this
+  /// machine has no sessions backend or terminal backend (no shared opencode
+  /// service), in which case the window endpoints report
+  /// `opencode_unavailable`.
+  static TerminalWindowManager? _defaultWindows({
+    required SessionsBackend? backend,
+    required TerminalBackend? terminals,
+    required EventHub? events,
+  }) {
+    if (backend == null || terminals == null) return null;
+    return TerminalWindowManager(
+      liveSessionIds: backend.liveSessionIds,
+      spawner: TerminalWindowSpawner.host(),
+      terminalBinary: Platform.resolvedExecutable,
+      windowToken: () => terminals.token.value,
+      onEvent: events?.emit,
+    );
+  }
+
   static HealthReport _scaffoldHealth() => const HealthReport(
     bridge: ComponentStatus.ok,
     opencode: ComponentStatus.notConfigured,
@@ -184,6 +237,7 @@ class BridgeServer {
     HealthReport Function() report,
     SessionsBackend? sessions,
     EventHub? events,
+    TerminalWindowManager? windows,
   ) async {
     final response = request.response;
     response.headers.contentType = ContentType.json;
@@ -205,10 +259,33 @@ class BridgeServer {
         await BridgeServer._listSessions(request, sessions);
         return;
       }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.projectsPath) {
+        await BridgeServer._listProjects(request, sessions);
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.sessionsPath) {
+        await BridgeServer._createSession(request, sessions, windows);
+        return;
+      }
+      if (request.method == 'POST') {
+        final id = BridgeServer._windowSessionIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._openWindow(request, id, sessions, windows);
+          return;
+        }
+      }
       if (request.method == 'DELETE') {
         final id = BridgeServer._sessionIdIn(request.uri.path);
         if (id != null) {
-          await BridgeServer._deleteSession(request, id, sessions, events);
+          await BridgeServer._deleteSession(
+            request,
+            id,
+            sessions,
+            events,
+            windows,
+          );
           return;
         }
       }
@@ -253,6 +330,18 @@ class BridgeServer {
     return Uri.decodeComponent(rest);
   }
 
+  /// The single session id in a window path, or `null` when [path] is not
+  /// `api/sessions/{id}/window` (exactly one segment, so it falls through to
+  /// the 404).
+  static String? _windowSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/window';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
   static Future<void> _listSessions(
     HttpRequest request,
     SessionsBackend? sessions,
@@ -273,11 +362,11 @@ class BridgeServer {
     await response.close();
   }
 
-  static Future<void> _deleteSession(
+  /// The project list (spec section 5, fill-in †): the picker's rows,
+  /// id + display name + canonical directory.
+  static Future<void> _listProjects(
     HttpRequest request,
-    String id,
     SessionsBackend? sessions,
-    EventHub? events,
   ) async {
     final response = request.response;
     if (sessions == null) {
@@ -285,6 +374,144 @@ class BridgeServer {
       return;
     }
     try {
+      final projects = await sessions.projects();
+      response.statusCode = HttpStatus.ok;
+      response.write(
+        jsonEncode([
+          for (final p in projects)
+            {'id': p.id, 'name': p.name, 'canonical': p.canonical},
+        ]),
+      );
+    } on OpencodeServiceError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// Endpoint 2 (spec section 5, fill-in †): create a session in the
+  /// picked project, record the launch (persistence write #1), open its
+  /// terminal window, and return the session (classified
+  /// `app-launched-live`). A body that is not `{"project": "<id>"}` is a
+  /// 400; a project the service does not have is a 404; a service failure
+  /// is a 502; a window that cannot be spawned is a 500 (the session
+  /// still exists, persisted and closed — it can be reopened).
+  static Future<void> _createSession(
+    HttpRequest request,
+    SessionsBackend? sessions,
+    TerminalWindowManager? windows,
+  ) async {
+    final response = request.response;
+    if (sessions == null || windows == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    String? project;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      project = decoded is Map<String, Object?>
+          ? decoded['project'] as String?
+          : null;
+    } catch (_) {
+      project = null; // A non-JSON body is an invalid body.
+    }
+    if (project == null || project.trim().isEmpty) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      final row = await sessions.create(project);
+      await windows.openFor(row.id);
+      response.statusCode = HttpStatus.created;
+      response.write(
+        jsonEncode(
+          windows.isLive(row.id)
+              ? row.withClassification(SessionClassification.appLaunchedLive)
+              : row,
+        ),
+      );
+    } on OpencodeServiceError catch (e) {
+      if (e.statusCode == HttpStatus.notFound) {
+        response.statusCode = HttpStatus.notFound;
+        response.write(jsonEncode({'error': 'not_found'}));
+      } else {
+        response.statusCode = HttpStatus.badGateway;
+        response.write(jsonEncode({'error': 'opencode_unreachable'}));
+      }
+    } catch (_) {
+      // The window could not be spawned (no emulator, launch failure).
+      response.statusCode = HttpStatus.internalServerError;
+      response.write(jsonEncode({'error': 'window_unavailable'}));
+    }
+    await response.close();
+  }
+
+  /// Endpoint 3 (spec section 5): reopen the terminal window of a closed
+  /// app-launched session — a new window running the attach client for
+  /// `opencode --session <id>`. Unknown or not-app-launched sessions are a
+  /// 404; a session gone from the service is a 404; a service failure is a
+  /// 502; a window that cannot be spawned is a 500.
+  static Future<void> _openWindow(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+    TerminalWindowManager? windows,
+  ) async {
+    final response = request.response;
+    if (sessions == null || windows == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    if (!sessions.isAppLaunched(id)) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+      await response.close();
+      return;
+    }
+    bool exists;
+    try {
+      exists = await sessions.exists(id);
+    } on OpencodeServiceError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'opencode_unreachable'}));
+      await response.close();
+      return;
+    }
+    if (!exists) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+      await response.close();
+      return;
+    }
+    try {
+      await windows.openFor(id);
+      response.statusCode = HttpStatus.noContent;
+    } catch (_) {
+      response.statusCode = HttpStatus.internalServerError;
+      response.write(jsonEncode({'error': 'window_unavailable'}));
+    }
+    await response.close();
+  }
+
+  static Future<void> _deleteSession(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+    EventHub? events,
+    TerminalWindowManager? windows,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      // Delete on a live app-launched session (spec section 5, endpoint 4):
+      // close its window first, then delete — the same action.
+      await windows?.closeFor(id);
       await sessions.delete(id);
       // Bridge-native `session.closed` (spec §8): every connected app drops the
       // session from its list. Emitted after the delete succeeds.

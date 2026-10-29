@@ -84,6 +84,19 @@ class Session {
   final bool active;
   final SessionClassification classification;
 
+  /// This row with [newClassification] replaced (the window flow flips
+  /// live/closed without changing the other row facts).
+  Session withClassification(SessionClassification newClassification) =>
+      Session(
+        id: id,
+        title: title,
+        project: project,
+        created: created,
+        location: location,
+        active: active,
+        classification: newClassification,
+      );
+
   Map<String, Object?> toJson() => {
     'id': id,
     'title': title,

@@ -15,8 +15,9 @@ import '../sessions/paths.dart';
 /// - `POST   /api/experimental/session/{id}/terminal` -> create the PTY;
 /// - `GET    /api/experimental/session/{id}/terminal` -> the session's PTYs;
 /// - `POST   /api/experimental/persistent-pty/{id}/connect-token` -> ticket;
-/// - `GET    /api/experimental/persistent-pty/{id}/connect` (WebSocket);
-/// - `PUT    /api/experimental/persistent-pty/{id}` -> resize;
+/// - `GET    /api/experimental/persistent-pty/{id}/connect` (WebSocket, the
+///   attach: input and resize ride on it as protocol-1 frames);
+/// - `PUT    /api/experimental/persistent-pty/{id}` -> resize (no attach);
 /// - `DELETE /api/experimental/persistent-pty/{id}` -> delete.
 class OpencodeHttpTerminalService implements OpencodeTerminalService {
   OpencodeHttpTerminalService({required Uri baseUrl, required String password})
@@ -136,6 +137,7 @@ class OpencodeHttpTerminalService implements OpencodeTerminalService {
     String ptyId, {
     required String ticket,
     int cursor = 0,
+    required TerminalSize size,
   }) async {
     final url = _wsBase.replace(
       path:
@@ -143,14 +145,18 @@ class OpencodeHttpTerminalService implements OpencodeTerminalService {
       queryParameters: {
         'ticket': ticket,
         'cursor': '$cursor',
-        'input_protocol': '0',
+        // Protocol 1: framed input. With the attach open, the service rejects
+        // an HTTP resize (503, "requires the active controller attachment") —
+        // only protocol 0 cannot carry a resize at all, so input and resize
+        // both ride on the socket as framed binary.
+        'input_protocol': '1',
       },
     );
     final socket = await WebSocket.connect(
       url.toString(),
       headers: {HttpHeaders.authorizationHeader: _auth},
     );
-    return _WebSocketTerminalConnection(socket);
+    return _WebSocketTerminalConnection(socket, size.cols, size.rows);
   }
 
   @override
@@ -234,10 +240,19 @@ class OpencodeHttpTerminalService implements OpencodeTerminalService {
 }
 
 /// The [TerminalConnection] over a service attach WebSocket: it filters the
-/// service's stream down to raw ANSI bytes and reports when the initial replay
-/// is done.
+/// service's stream down to raw ANSI bytes, reports when the initial replay is
+/// done, and drives the PTY with protocol-1 frames.
+///
+/// Protocol 1 frames every client frame as a 5-byte header
+/// `[flag, colsHi, colsLo, rowsHi, rowsLo]` followed by an optional payload:
+/// flag 0 is a pure resize (no payload), flag 1 is input (the payload is the
+/// raw bytes). The header always carries the PTY size and the service applies
+/// that size to the PTY — so this connection tracks the current size
+/// ([_cols]/[_rows]) so an input frame never resizes the PTY to a stale size.
 class _WebSocketTerminalConnection implements TerminalConnection {
-  _WebSocketTerminalConnection(this._socket) {
+  _WebSocketTerminalConnection(this._socket, int cols, int rows)
+    : _cols = cols,
+      _rows = rows {
     _socket.listen(
       (event) {
         if (event is List<int>) {
@@ -262,6 +277,10 @@ class _WebSocketTerminalConnection implements TerminalConnection {
   final StreamController<List<int>> _output = StreamController();
   final Completer<void> _replayDone = Completer<void>();
 
+  /// The PTY size the connection last set; every frame it sends is headed by it.
+  int _cols;
+  int _rows;
+
   @override
   Stream<List<int>> get output => _output.stream;
 
@@ -272,9 +291,28 @@ class _WebSocketTerminalConnection implements TerminalConnection {
     if (!_replayDone.isCompleted) _replayDone.complete();
   }
 
+  /// Build a protocol-1 frame: `[flag, colsHi, colsLo, rowsHi, rowsLo, ...]`.
+  List<int> _frame(int flag, int cols, int rows, List<int> payload) => [
+    flag,
+    (cols >> 8) & 0xff,
+    cols & 0xff,
+    (rows >> 8) & 0xff,
+    rows & 0xff,
+    ...payload,
+  ];
+
   @override
   Future<void> write(List<int> input) async {
-    _socket.add(input);
+    // Flag 1: the payload is the input, headed by the current PTY size.
+    _socket.add(_frame(1, _cols, _rows, input));
+  }
+
+  @override
+  Future<void> resize(int cols, int rows) async {
+    _cols = cols;
+    _rows = rows;
+    // Flag 0: a pure resize, no payload.
+    _socket.add(_frame(0, _cols, _rows, const []));
   }
 
   @override

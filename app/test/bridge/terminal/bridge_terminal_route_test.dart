@@ -254,6 +254,7 @@ class _FakeTerminalService implements OpencodeTerminalService {
     String ptyId, {
     required String ticket,
     int cursor = 0,
+    required TerminalSize size,
   }) async {
     connects++;
     final conn = _FakeConnection(this);
@@ -305,6 +306,11 @@ class _FakeConnection implements TerminalConnection {
   }
 
   @override
+  Future<void> resize(int cols, int rows) async {
+    _service.resizes.add(TerminalSize(cols: cols, rows: rows));
+  }
+
+  @override
   Future<void> close() async {
     if (closed) return;
     closed = true;
@@ -320,6 +326,11 @@ class _NoopSessions implements OpencodeService {
   Future<Map<String, String>> projectNames() async => const {};
   @override
   Future<Set<String>> activeSessionIds() async => const {};
+  @override
+  Future<List<OpencodeProject>> projects() async => const [];
+  @override
+  Future<OpencodeSession> createSession(String projectId) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
   @override
   Future<void> deleteSession(String id) async {}
 }
