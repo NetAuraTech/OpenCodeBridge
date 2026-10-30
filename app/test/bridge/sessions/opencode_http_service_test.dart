@@ -84,7 +84,10 @@ void main() {
           'id': 't1',
           'name': 'bash',
           'time': {'created': 3},
-          'state': {'status': 'running', 'input': {'command': 'ls'}},
+          'state': {
+            'status': 'running',
+            'input': {'command': 'ls'},
+          },
         },
         {'type': 'reasoning', 'text': 'hmm'},
         {
@@ -100,12 +103,22 @@ void main() {
         },
       ],
     },
-    {'type': 'system', 'id': 'm3', 'time': {'created': 5}, 'text': 'boot'},
+    {
+      'type': 'system',
+      'id': 'm3',
+      'time': {'created': 5},
+      'text': 'boot',
+    },
   ];
 
   // The service's pending `Permission.Request` list for `ses_1`.
   final pendingPerms = [
-    {'id': 'per_1', 'sessionID': 'ses_1', 'action': 'shell', 'resources': ['ls']},
+    {
+      'id': 'per_1',
+      'sessionID': 'ses_1',
+      'action': 'shell',
+      'resources': ['ls'],
+    },
   ];
 
   final promptBodies = <Map<String, Object?>>[];
@@ -173,7 +186,8 @@ void main() {
         resp.write(jsonEncode({'data': active}));
       } else if (path == '/api/session/ses_1/context' && req.method == 'GET') {
         resp.write(jsonEncode({'data': contextMessages}));
-      } else if (path == '/api/session/ses_1/permission' && req.method == 'GET') {
+      } else if (path == '/api/session/ses_1/permission' &&
+          req.method == 'GET') {
         resp.write(jsonEncode({'data': pendingPerms}));
       } else if (path == '/api/session/ses_1/prompt' && req.method == 'POST') {
         final body = await utf8.decodeStream(req);
@@ -271,26 +285,28 @@ void main() {
       await service.deleteSession('ses_1'); // no throw on 204
     });
 
-    test('getDetail flattens the service Session.Info into the contract',
-        () async {
-          final service = OpencodeHttpService(baseUrl: base, password: password);
-          final detail = await service.getDetail('ses_1');
-          expect(detail.id, 'ses_1');
-          expect(detail.title, 'one');
-          expect(detail.location, '/one');
-          expect(detail.cost, 1.5);
-          expect(detail.outcome, 'succeeded');
-          expect(
-            detail.tokens,
-            const TokenUsage(
-              input: 100,
-              output: 50,
-              reasoning: 5,
-              cacheRead: 10,
-              cacheWrite: 2,
-            ),
-          );
-        });
+    test(
+      'getDetail flattens the service Session.Info into the contract',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final detail = await service.getDetail('ses_1');
+        expect(detail.id, 'ses_1');
+        expect(detail.title, 'one');
+        expect(detail.location, '/one');
+        expect(detail.cost, 1.5);
+        expect(detail.outcome, 'succeeded');
+        expect(
+          detail.tokens,
+          const TokenUsage(
+            input: 100,
+            output: 50,
+            reasoning: 5,
+            cacheRead: 10,
+            cacheWrite: 2,
+          ),
+        );
+      },
+    );
 
     test('getDetail of an unknown session is a 404', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
@@ -306,28 +322,30 @@ void main() {
       );
     });
 
-    test('getMessages maps user and assistant turns, skipping system',
-        () async {
-          final service = OpencodeHttpService(baseUrl: base, password: password);
-          final messages = await service.getMessages('ses_1');
-          expect(messages, hasLength(2));
-          expect(
-            messages[0],
-            const SessionMessage(role: 'user', text: 'do the thing'),
-          );
-          final assistant = messages[1];
-          expect(assistant.role, 'assistant');
-          expect(assistant.text, 'working\nhmm');
-          expect(assistant.tools, hasLength(2));
-          // The tool input is a map, so compare fields (deep) not by ==.
-          expect(assistant.tools[0].name, 'bash');
-          expect(assistant.tools[0].status, 'running');
-          expect(assistant.tools[0].input, {'command': 'ls'});
-          expect(assistant.tools[0].error, isNull);
-          expect(assistant.tools[1].name, 'write');
-          expect(assistant.tools[1].status, 'error');
-          expect(assistant.tools[1].error, 'denied');
-        });
+    test(
+      'getMessages maps user and assistant turns, skipping system',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final messages = await service.getMessages('ses_1');
+        expect(messages, hasLength(2));
+        expect(
+          messages[0],
+          const SessionMessage(role: 'user', text: 'do the thing'),
+        );
+        final assistant = messages[1];
+        expect(assistant.role, 'assistant');
+        expect(assistant.text, 'working\nhmm');
+        expect(assistant.tools, hasLength(2));
+        // The tool input is a map, so compare fields (deep) not by ==.
+        expect(assistant.tools[0].name, 'bash');
+        expect(assistant.tools[0].status, 'running');
+        expect(assistant.tools[0].input, {'command': 'ls'});
+        expect(assistant.tools[0].error, isNull);
+        expect(assistant.tools[1].name, 'write');
+        expect(assistant.tools[1].status, 'error');
+        expect(assistant.tools[1].error, 'denied');
+      },
+    );
 
     test('prompt posts the text with delivery steer', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
@@ -340,16 +358,13 @@ void main() {
     test('pendingPermissions maps the service requests', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       final perms = await service.pendingPermissions('ses_1');
-      expect(
-        perms,
-        [
-          const PermissionRequest(
-            id: 'per_1',
-            action: 'shell',
-            resources: ['ls'],
-          ),
-        ],
-      );
+      expect(perms, [
+        const PermissionRequest(
+          id: 'per_1',
+          action: 'shell',
+          resources: ['ls'],
+        ),
+      ]);
     });
 
     test('replyPermission posts the decision and accepts 204', () async {

@@ -218,7 +218,9 @@ class SessionsClient {
     final client = HttpClient();
     try {
       final request = await client.getUrl(
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/permissions'),
+        _base.replace(
+          path: 'api/sessions/${Uri.encodeComponent(id)}/permissions',
+        ),
       );
       final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
@@ -247,7 +249,8 @@ class SessionsClient {
     try {
       final request = await client.postUrl(
         _base.replace(
-          path: 'api/sessions/${Uri.encodeComponent(id)}/permissions/'
+          path:
+              'api/sessions/${Uri.encodeComponent(id)}/permissions/'
               '${Uri.encodeComponent(requestID)}/reply',
         ),
       );

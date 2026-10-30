@@ -90,7 +90,8 @@ class _TerminalScreenState extends State<TerminalScreen> {
     final stream = widget.events;
     if (stream != null) {
       _events = stream.listen((event) {
-        final forSession = event.durable?.aggregateID == session ||
+        final forSession =
+            event.durable?.aggregateID == session ||
             event.data['sessionID'] == session;
         if (!forSession) return;
         if (event.type == 'permission.asked' ||

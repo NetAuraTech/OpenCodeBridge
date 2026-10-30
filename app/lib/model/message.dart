@@ -62,11 +62,7 @@ class ToolCall {
 
 /// One message of a session's history (spec section 5, endpoint 6).
 class SessionMessage {
-  const SessionMessage({
-    required this.role,
-    this.text,
-    this.tools = const [],
-  });
+  const SessionMessage({required this.role, this.text, this.tools = const []});
 
   /// `user` or `assistant`.
   final String role;
@@ -104,8 +100,7 @@ class SessionMessage {
       _toolsEqual(other.tools, tools);
 
   @override
-  int get hashCode =>
-      Object.hash(role, text, Object.hashAll(tools));
+  int get hashCode => Object.hash(role, text, Object.hashAll(tools));
 
   @override
   String toString() =>

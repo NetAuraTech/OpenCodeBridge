@@ -186,7 +186,9 @@ class OpencodeHttpService implements OpencodeService {
       _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/context'),
     );
     final outer = jsonDecode(body);
-    final map = outer is Map<String, Object?> ? outer : const <String, Object?>{};
+    final map = outer is Map<String, Object?>
+        ? outer
+        : const <String, Object?>{};
     final data = map['data'];
     final list = data is List ? data : const <Object?>[];
     final messages = <SessionMessage>[];
@@ -218,7 +220,9 @@ class OpencodeHttpService implements OpencodeService {
       _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/permission'),
     );
     final outer = jsonDecode(body);
-    final map = outer is Map<String, Object?> ? outer : const <String, Object?>{};
+    final map = outer is Map<String, Object?>
+        ? outer
+        : const <String, Object?>{};
     final data = map['data'];
     final list = data is List ? data : const <Object?>[];
     return [
@@ -322,7 +326,10 @@ class OpencodeHttpService implements OpencodeService {
 
   static List<String> _stringList(Object? json) {
     final list = json is List ? json : const <Object?>[];
-    return [for (final item in list) if (item is String) item];
+    return [
+      for (final item in list)
+        if (item is String) item,
+    ];
   }
 
   /// A GET to [uri] with the service auth, returning the raw body. Non-200 ->

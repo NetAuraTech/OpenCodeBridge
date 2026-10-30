@@ -242,8 +242,16 @@ void main() {
           response.statusCode = HttpStatus.ok;
           response.write(
             jsonEncode([
-              {'id': 'req_1', 'action': 'shell', 'resources': ['ls -la']},
-              {'id': 'req_2', 'action': 'edit', 'resources': ['lib/x.dart']},
+              {
+                'id': 'req_1',
+                'action': 'shell',
+                'resources': ['ls -la'],
+              },
+              {
+                'id': 'req_2',
+                'action': 'edit',
+                'resources': ['lib/x.dart'],
+              },
             ]),
           );
         }
@@ -253,7 +261,8 @@ void main() {
         final raw = await utf8.decodeStream(request);
         final requestID = request.uri.path
             .substring(
-              request.uri.path.indexOf('/permissions/') + '/permissions/'.length,
+              request.uri.path.indexOf('/permissions/') +
+                  '/permissions/'.length,
             )
             .split('/')
             .first;
@@ -447,21 +456,26 @@ void main() {
     }
   });
 
-  test('getDetail maps a non-200 to SessionsClientError with the status',
-      () async {
-    failDetail = true;
-    try {
-      await client.getDetail('ses_1');
-      fail('expected SessionsClientError');
-    } on SessionsClientError catch (e) {
-      expect(e.statusCode, HttpStatus.badGateway);
-    }
-  });
+  test(
+    'getDetail maps a non-200 to SessionsClientError with the status',
+    () async {
+      failDetail = true;
+      try {
+        await client.getDetail('ses_1');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.badGateway);
+      }
+    },
+  );
 
   test('getMessages parses the history with the tools in flight', () async {
     final messages = await client.getMessages('ses_1');
     expect(messages.length, 3);
-    expect(messages.first, const SessionMessage(role: 'user', text: 'do the thing'));
+    expect(
+      messages.first,
+      const SessionMessage(role: 'user', text: 'do the thing'),
+    );
     expect(messages[1].role, 'assistant');
     expect(messages[1].text, isNull);
     expect(messages[1].tools.length, 2);
@@ -473,7 +487,10 @@ void main() {
     expect(messages[1].tools.last.status, 'error');
     expect(messages[1].tools.last.input, {'path': '/x'});
     expect(messages[1].tools.last.error, 'nope');
-    expect(messages.last, const SessionMessage(role: 'assistant', text: 'done'));
+    expect(
+      messages.last,
+      const SessionMessage(role: 'assistant', text: 'done'),
+    );
   });
 
   test('getMessages maps the bridge 404 to SessionsClientError(404)', () async {
@@ -487,7 +504,9 @@ void main() {
 
   test('prompt posts only the text and accepts 202', () async {
     await client.prompt('ses_1', 'keep going');
-    expect(promptBodies, [jsonEncode({'text': 'keep going'})]);
+    expect(promptBodies, [
+      jsonEncode({'text': 'keep going'}),
+    ]);
   });
 
   test('prompt maps the bridge 404 to SessionsClientError(404)', () async {
@@ -500,46 +519,48 @@ void main() {
   });
 
   test('getPermissions parses the pending requests', () async {
-    expect(
-      await client.getPermissions('ses_1'),
-      const [
-        PermissionRequest(id: 'req_1', action: 'shell', resources: ['ls -la']),
-        PermissionRequest(id: 'req_2', action: 'edit', resources: ['lib/x.dart']),
-      ],
-    );
+    expect(await client.getPermissions('ses_1'), const [
+      PermissionRequest(id: 'req_1', action: 'shell', resources: ['ls -la']),
+      PermissionRequest(id: 'req_2', action: 'edit', resources: ['lib/x.dart']),
+    ]);
   });
 
-  test('getPermissions maps the bridge 404 to SessionsClientError(404)',
-      () async {
-    try {
-      await client.getPermissions('ses_missing');
-      fail('expected SessionsClientError');
-    } on SessionsClientError catch (e) {
-      expect(e.statusCode, HttpStatus.notFound);
-    }
-  });
+  test(
+    'getPermissions maps the bridge 404 to SessionsClientError(404)',
+    () async {
+      try {
+        await client.getPermissions('ses_missing');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    },
+  );
 
   test('replyPermission posts the wire value and accepts 204', () async {
     await client.replyPermission('ses_1', 'req_1', PermissionReply.once);
     await client.replyPermission('ses_1', 'req_1', PermissionReply.always);
     await client.replyPermission('ses_1', 'req_1', PermissionReply.reject);
-    expect(
-      replyBodies,
-      [
-        jsonEncode({'reply': 'once'}),
-        jsonEncode({'reply': 'always'}),
-        jsonEncode({'reply': 'reject'}),
-      ],
-    );
+    expect(replyBodies, [
+      jsonEncode({'reply': 'once'}),
+      jsonEncode({'reply': 'always'}),
+      jsonEncode({'reply': 'reject'}),
+    ]);
   });
 
-  test('replyPermission maps an unknown request to SessionsClientError(404)',
-      () async {
-    try {
-      await client.replyPermission('ses_1', 'req_missing', PermissionReply.once);
-      fail('expected SessionsClientError');
-    } on SessionsClientError catch (e) {
-      expect(e.statusCode, HttpStatus.notFound);
-    }
-  });
+  test(
+    'replyPermission maps an unknown request to SessionsClientError(404)',
+    () async {
+      try {
+        await client.replyPermission(
+          'ses_1',
+          'req_missing',
+          PermissionReply.once,
+        );
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    },
+  );
 }

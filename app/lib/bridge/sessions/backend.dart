@@ -113,8 +113,7 @@ class SessionsBackend {
     String id,
     String requestID,
     PermissionReply reply,
-  ) =>
-      service.replyPermission(id, requestID, reply);
+  ) => service.replyPermission(id, requestID, reply);
 
   /// One home-list row, from the service's session plus the persistence and
   /// live facts (spec §6 classification).

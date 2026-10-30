@@ -157,8 +157,7 @@ class _FakeSessionsClient extends SessionsClient {
   }
 
   @override
-  Future<List<PermissionRequest>> getPermissions(String id) async =>
-      const [];
+  Future<List<PermissionRequest>> getPermissions(String id) async => const [];
 
   @override
   Future<void> replyPermission(

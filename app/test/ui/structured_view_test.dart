@@ -78,8 +78,9 @@ class _FakeClient extends SessionsClient {
   @override
   Future<SessionDetail> getDetail(String id) async {
     detailCalls++;
-    final index =
-        detailCalls - 1 < details.length ? detailCalls - 1 : details.length - 1;
+    final index = detailCalls - 1 < details.length
+        ? detailCalls - 1
+        : details.length - 1;
     return details[index];
   }
 
@@ -87,10 +88,9 @@ class _FakeClient extends SessionsClient {
   Future<List<SessionMessage>> getMessages(String id) async {
     messageCalls++;
     if (messageLists.isEmpty) return messages;
-    final index =
-        messageCalls - 1 < messageLists.length
-            ? messageCalls - 1
-            : messageLists.length - 1;
+    final index = messageCalls - 1 < messageLists.length
+        ? messageCalls - 1
+        : messageLists.length - 1;
     return messageLists[index];
   }
 
@@ -105,10 +105,9 @@ class _FakeClient extends SessionsClient {
   Future<List<PermissionRequest>> getPermissions(String id) async {
     permissionCalls++;
     if (permissionLists.isEmpty) return const [];
-    final index =
-        permissionCalls - 1 < permissionLists.length
-            ? permissionCalls - 1
-            : permissionLists.length - 1;
+    final index = permissionCalls - 1 < permissionLists.length
+        ? permissionCalls - 1
+        : permissionLists.length - 1;
     return permissionLists[index];
   }
 
@@ -148,50 +147,49 @@ BridgeEvent _event(
   String type, {
   String? aggregateID,
   Map<String, Object?>? data,
-}) =>
-    BridgeEvent(
-      id: 'evt_$type',
-      created: 1,
-      type: type,
-      data: data ?? const {},
-      durable: aggregateID == null
-          ? null
-          : Durable(aggregateID: aggregateID, seq: 1),
-    );
+}) => BridgeEvent(
+  id: 'evt_$type',
+  created: 1,
+  type: type,
+  data: data ?? const {},
+  durable: aggregateID == null
+      ? null
+      : Durable(aggregateID: aggregateID, seq: 1),
+);
 
 void main() {
   group('StructuredSessionScreen', () {
-    testWidgets(
-      'renders the history, the tools in flight, and the cost bar',
-      (tester) async {
-        final client = _FakeClient(
-          details: const [_detail0],
-          messages: const [
-            SessionMessage(role: 'user', text: 'fix the tests'),
-            SessionMessage(
-              role: 'assistant',
-              tools: [
-                ToolCall(
-                  name: 'shell',
-                  status: 'running',
-                  input: {'command': 'ls'},
-                ),
-              ],
-            ),
-          ],
-        );
-        await _pump(tester, client: client);
+    testWidgets('renders the history, the tools in flight, and the cost bar', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'user', text: 'fix the tests'),
+          SessionMessage(
+            role: 'assistant',
+            tools: [
+              ToolCall(
+                name: 'shell',
+                status: 'running',
+                input: {'command': 'ls'},
+              ),
+            ],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
 
-        expect(find.text('You'), findsOneWidget);
-        expect(find.text('fix the tests'), findsOneWidget);
-        expect(find.text('Assistant'), findsOneWidget);
-        expect(find.text('shell · running'), findsOneWidget);
-        expect(find.text('Cost \$0.0000'), findsOneWidget);
-      },
-    );
+      expect(find.text('You'), findsOneWidget);
+      expect(find.text('fix the tests'), findsOneWidget);
+      expect(find.text('Assistant'), findsOneWidget);
+      expect(find.text('shell · running'), findsOneWidget);
+      expect(find.text('Cost \$0.0000'), findsOneWidget);
+    });
 
-    testWidgets('sends the prompt, posts only the text, and clears the input',
-        (tester) async {
+    testWidgets('sends the prompt, posts only the text, and clears the input', (
+      tester,
+    ) async {
       final client = _FakeClient(details: const [_detail0]);
       await _pump(tester, client: client);
 
@@ -214,10 +212,7 @@ void main() {
     ) async {
       final client = _FakeClient(
         details: const [_detail0],
-        promptError: const SessionsClientError(
-          502,
-          'opencode_unreachable',
-        ),
+        promptError: const SessionsClientError(502, 'opencode_unreachable'),
       );
       await _pump(tester, client: client);
 
@@ -234,7 +229,10 @@ void main() {
         find.byKey(const ValueKey('structured-prompt-input')),
       );
       expect(field.controller?.text, 'keep going');
-      expect(find.text('Could not send the message (status 502).'), findsOneWidget);
+      expect(
+        find.text('Could not send the message (status 502).'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the input stays enabled mid-turn (tools in flight)', (
@@ -289,13 +287,13 @@ void main() {
         expect(find.text('Permission requested: shell'), findsOneWidget);
         expect(find.text('rm -rf node_modules'), findsOneWidget);
 
-        await tester.tap(
-          find.byKey(const ValueKey('permission-once-per_1')),
-        );
+        await tester.tap(find.byKey(const ValueKey('permission-once-per_1')));
         await tester.pump();
         await tester.pump();
 
-        expect(client.replies, const [('ses_1', 'per_1', PermissionReply.once)]);
+        expect(client.replies, const [
+          ('ses_1', 'per_1', PermissionReply.once),
+        ]);
         expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
       },
     );
@@ -313,29 +311,26 @@ void main() {
       expect(find.text('Cost \$0.0123'), findsOneWidget);
     });
 
-    testWidgets(
-      'session.execution.succeeded refreshes the history',
-      (tester) async {
-        final client = _FakeClient(
-          details: const [_detail0],
-          messageLists: const [
-            <SessionMessage>[],
-            <SessionMessage>[
-              SessionMessage(role: 'assistant', text: 'done'),
-            ],
-          ],
-        );
-        final events = await _pump(tester, client: client);
+    testWidgets('session.execution.succeeded refreshes the history', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messageLists: const [
+          <SessionMessage>[],
+          <SessionMessage>[SessionMessage(role: 'assistant', text: 'done')],
+        ],
+      );
+      final events = await _pump(tester, client: client);
 
-        expect(find.text('No messages yet.'), findsOneWidget);
+      expect(find.text('No messages yet.'), findsOneWidget);
 
-        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
-        await tester.pump();
-        await tester.pump();
+      events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+      await tester.pump();
+      await tester.pump();
 
-        expect(find.text('done'), findsOneWidget);
-      },
-    );
+      expect(find.text('done'), findsOneWidget);
+    });
 
     testWidgets('events of another session are ignored', (tester) async {
       final client = _FakeClient(details: const [_detail0, _detail1]);
@@ -358,10 +353,7 @@ void main() {
         final events = await _pump(tester, client: client);
 
         events.add(
-          _event(
-            'session.usage.updated',
-            data: const {'sessionID': 'ses_1'},
-          ),
+          _event('session.usage.updated', data: const {'sessionID': 'ses_1'}),
         );
         await tester.pump();
         await tester.pump();

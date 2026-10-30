@@ -62,7 +62,8 @@ class TokenUsage {
       Object.hash(input, output, reasoning, cacheRead, cacheWrite);
 
   @override
-  String toString() => 'TokenUsage(input: $input, output: $output, '
+  String toString() =>
+      'TokenUsage(input: $input, output: $output, '
       'reasoning: $reasoning, cacheRead: $cacheRead, '
       'cacheWrite: $cacheWrite)';
 }
@@ -140,8 +141,7 @@ class SessionDetail {
       other.outcome == outcome;
 
   @override
-  int get hashCode =>
-      Object.hash(id, title, location, cost, tokens, outcome);
+  int get hashCode => Object.hash(id, title, location, cost, tokens, outcome);
 
   @override
   String toString() =>

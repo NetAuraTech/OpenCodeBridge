@@ -372,8 +372,7 @@ void main() {
       PermissionRequest(id: 'req_1', action: 'shell', resources: ['ls']),
     ];
 
-    test('detail, messages, permissions pass through to the service',
-        () async {
+    test('detail, messages, permissions pass through to the service', () async {
       final store = await SessionStore.load(dir: dir);
       final service = FakeOpencodeService(
         detail: detail,
@@ -398,38 +397,25 @@ void main() {
       );
     });
 
-    test('prompt and reply record the id, text/request id, and decision',
-        () async {
-      final store = await SessionStore.load(dir: dir);
-      final service = FakeOpencodeService();
-      final backend = SessionsBackend(service: service, store: store);
+    test(
+      'prompt and reply record the id, text/request id, and decision',
+      () async {
+        final store = await SessionStore.load(dir: dir);
+        final service = FakeOpencodeService();
+        final backend = SessionsBackend(service: service, store: store);
 
-      await backend.prompt('ses_1', 'keep going');
-      await backend.replyPermission(
-        'ses_1',
-        'req_1',
-        PermissionReply.once,
-      );
-      await backend.replyPermission(
-        'ses_1',
-        'req_1',
-        PermissionReply.always,
-      );
-      await backend.replyPermission(
-        'ses_1',
-        'req_2',
-        PermissionReply.reject,
-      );
+        await backend.prompt('ses_1', 'keep going');
+        await backend.replyPermission('ses_1', 'req_1', PermissionReply.once);
+        await backend.replyPermission('ses_1', 'req_1', PermissionReply.always);
+        await backend.replyPermission('ses_1', 'req_2', PermissionReply.reject);
 
-      expect(service.prompts, const [('ses_1', 'keep going')]);
-      expect(
-        service.replies,
-        const [
+        expect(service.prompts, const [('ses_1', 'keep going')]);
+        expect(service.replies, const [
           ('ses_1', 'req_1', PermissionReply.once),
           ('ses_1', 'req_1', PermissionReply.always),
           ('ses_1', 'req_2', PermissionReply.reject),
-        ],
-      );
-    });
+        ]);
+      },
+    );
   });
 }

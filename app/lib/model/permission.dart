@@ -31,7 +31,11 @@ enum PermissionReply {
     'once' => PermissionReply.once,
     'always' => PermissionReply.always,
     'reject' => PermissionReply.reject,
-    _ => throw ArgumentError.value(value, 'reply', 'must be once, always, or reject'),
+    _ => throw ArgumentError.value(
+      value,
+      'reply',
+      'must be once, always, or reject',
+    ),
   };
 }
 
@@ -66,7 +70,10 @@ class PermissionRequest {
       id: map['id'] as String? ?? '',
       action: map['action'] as String? ?? '',
       resources: resources is List
-          ? [for (final r in resources) if (r is String) r]
+          ? [
+              for (final r in resources)
+                if (r is String) r,
+            ]
           : const [],
     );
   }
@@ -79,8 +86,7 @@ class PermissionRequest {
       _resourcesEqual(other.resources, resources);
 
   @override
-  int get hashCode =>
-      Object.hash(id, action, Object.hashAll(resources));
+  int get hashCode => Object.hash(id, action, Object.hashAll(resources));
 
   @override
   String toString() =>

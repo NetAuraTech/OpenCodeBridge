@@ -45,8 +45,9 @@ void main() {
       expect(find.textContaining('Permission requested'), findsNothing);
     });
 
-    testWidgets('renders one row per pending request with action and target',
-        (tester) async {
+    testWidgets('renders one row per pending request with action and target', (
+      tester,
+    ) async {
       await _pumpBanner(tester, pending: const [_one, _two]);
 
       expect(find.text('Permission requested: shell'), findsOneWidget);
@@ -55,8 +56,9 @@ void main() {
       expect(find.text('lib/main.dart'), findsOneWidget);
     });
 
-    testWidgets('Once / Always / Reject apply their decision to the request',
-        (tester) async {
+    testWidgets('Once / Always / Reject apply their decision to the request', (
+      tester,
+    ) async {
       final replies = <(PermissionRequest, PermissionReply)>[];
       await _pumpBanner(tester, pending: const [_one], replies: replies);
 
@@ -67,32 +69,28 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('permission-reject-per_1')));
       await tester.pump();
 
-      expect(
-        replies,
-        const [
-          (_one, PermissionReply.once),
-          (_one, PermissionReply.always),
-          (_one, PermissionReply.reject),
-        ],
-      );
+      expect(replies, const [
+        (_one, PermissionReply.once),
+        (_one, PermissionReply.always),
+        (_one, PermissionReply.reject),
+      ]);
     });
 
     testWidgets('the request with the in-flight reply shows progress', (
       tester,
     ) async {
-      await _pumpBanner(
-        tester,
-        pending: const [_one],
-        replyBusyId: 'per_1',
-      );
+      await _pumpBanner(tester, pending: const [_one], replyBusyId: 'per_1');
 
       expect(find.byKey(const ValueKey('permission-once-per_1')), findsNothing);
-      expect(find.byKey(const ValueKey('permission-always-per_1')), findsNothing);
-      expect(find.byKey(const ValueKey('permission-reject-per_1')), findsNothing);
       expect(
-        find.byType(CircularProgressIndicator),
-        findsOneWidget,
+        find.byKey(const ValueKey('permission-always-per_1')),
+        findsNothing,
       );
+      expect(
+        find.byKey(const ValueKey('permission-reject-per_1')),
+        findsNothing,
+      );
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
     });
   });
 }

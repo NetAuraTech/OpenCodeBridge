@@ -22,10 +22,8 @@ class PermissionBanner extends StatelessWidget {
   final List<PermissionRequest> pending;
 
   /// Applies the decision to a request (endpoint 9).
-  final Future<void> Function(
-    PermissionRequest request,
-    PermissionReply reply,
-  ) onReply;
+  final Future<void> Function(PermissionRequest request, PermissionReply reply)
+  onReply;
 
   /// The request with the reply in flight: its row shows progress instead of
   /// the decision buttons.
@@ -82,11 +80,7 @@ class _PermissionRow extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(
-                Icons.lock_outline,
-                size: 18,
-                color: scheme.error,
-              ),
+              Icon(Icons.lock_outline, size: 18, color: scheme.error),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -135,7 +129,8 @@ class _PermissionRow extends StatelessWidget {
                           onPressed: () => onReply(reply),
                           child: Text(label),
                         ),
-                        if (reply != PermissionReply.reject) const SizedBox(width: 4),
+                        if (reply != PermissionReply.reject)
+                          const SizedBox(width: 4),
                       ],
                     ],
                   ),

@@ -44,7 +44,8 @@ class StructuredSessionScreen extends StatefulWidget {
   final Stream<BridgeEvent>? events;
 
   @override
-  State<StructuredSessionScreen> createState() => _StructuredSessionScreenState();
+  State<StructuredSessionScreen> createState() =>
+      _StructuredSessionScreenState();
 }
 
 class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
@@ -109,7 +110,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _loadError = e.statusCode == 0
             ? 'Cannot reach the bridge.'
             : 'The bridge could not load the session '
-              '(status ${e.statusCode}).';
+                  '(status ${e.statusCode}).';
         _loading = false;
       });
     } catch (_) {
@@ -201,7 +202,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       if (mounted) {
         _snackBar(
           'Could not send the message '
-              '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+          '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
         );
       }
     } catch (_) {
@@ -217,17 +218,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     if (_replyBusyId != null) return;
     setState(() => _replyBusyId = request.id);
     try {
-      await widget.client.replyPermission(
-        widget.sessionId,
-        request.id,
-        reply,
-      );
+      await widget.client.replyPermission(widget.sessionId, request.id, reply);
       await _refreshPermissions();
     } on SessionsClientError catch (e) {
       if (mounted) {
         _snackBar(
           'Could not reply to the permission request '
-              '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+          '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
         );
       }
     } catch (_) {
@@ -250,43 +247,39 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      _loadError!,
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    PermissionBanner(
-                      pending: _pending,
-                      onReply: _reply,
-                      replyBusyId: _replyBusyId,
-                    ),
-                    _CostBar(detail: _detail),
-                    Expanded(
-                      child: ListView(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                        children: [
-                          if (_messages.isEmpty) const _CenteredMessage(
-                            text: 'No messages yet.',
-                          ),
-                          for (final message in _messages)
-                            _MessagePane(message: message),
-                        ],
-                      ),
-                    ),
-                    _PromptBar(
-                      controller: _prompt,
-                      busy: _promptBusy,
-                      onSend: _sendPrompt,
-                    ),
-                  ],
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(_loadError!, textAlign: TextAlign.center),
+              ),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                PermissionBanner(
+                  pending: _pending,
+                  onReply: _reply,
+                  replyBusyId: _replyBusyId,
                 ),
+                _CostBar(detail: _detail),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                    children: [
+                      if (_messages.isEmpty)
+                        const _CenteredMessage(text: 'No messages yet.'),
+                      for (final message in _messages)
+                        _MessagePane(message: message),
+                    ],
+                  ),
+                ),
+                _PromptBar(
+                  controller: _prompt,
+                  busy: _promptBusy,
+                  onSend: _sendPrompt,
+                ),
+              ],
+            ),
     );
   }
 }
@@ -308,7 +301,9 @@ class _CostBar extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
       decoration: BoxDecoration(
         border: Border(
-          bottom: BorderSide(color: Theme.of(context).colorScheme.outlineVariant),
+          bottom: BorderSide(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
         ),
       ),
       child: Row(
@@ -321,8 +316,8 @@ class _CostBar extends StatelessWidget {
           ),
           Text(
             '${tokens.input} in · ${tokens.output} out · '
-                '${tokens.reasoning} reasoning · '
-                '${tokens.cacheRead} cache read · ${tokens.cacheWrite} cache write',
+            '${tokens.reasoning} reasoning · '
+            '${tokens.cacheRead} cache read · ${tokens.cacheWrite} cache write',
             style: TextStyle(
               fontSize: 12,
               color: Theme.of(context).colorScheme.outline,
@@ -406,10 +401,7 @@ class _ToolCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final (icon, iconColor) = switch (tool.status) {
-      'streaming' || 'running' => (
-          Icons.pending,
-          Colors.orange,
-        ),
+      'streaming' || 'running' => (Icons.pending, Colors.orange),
       'completed' => (Icons.check_circle, Colors.green),
       'error' => (Icons.error, scheme.error),
       _ => (Icons.build_outlined, scheme.outline),
@@ -461,10 +453,7 @@ class _ToolCard extends StatelessWidget {
                 tool.error!,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: scheme.error,
-                ),
+                style: TextStyle(fontSize: 12, color: scheme.error),
               ),
             ),
         ],

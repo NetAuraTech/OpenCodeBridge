@@ -286,108 +286,117 @@ void main() {
     });
 
     test('GET /api/sessions/{id}/messages returns the history', () async {
-      final (status, body) = await _get(
-        base,
-        'api/sessions/ses_one/messages',
-      );
+      final (status, body) = await _get(base, 'api/sessions/ses_one/messages');
       expect(status, 200);
-      expect(jsonDecode(body), [
-        for (final m in messages) m.toJson(),
-      ]);
+      expect(jsonDecode(body), [for (final m in messages) m.toJson()]);
     });
 
-    test('GET /api/sessions/{id}/messages is 404 for an unknown session',
-        () async {
-          final (status, body) = await _get(
-            base,
-            'api/sessions/ses_missing/messages',
-          );
-          expect(status, 404);
-          expect(jsonDecode(body), {'error': 'not_found'});
-        });
+    test(
+      'GET /api/sessions/{id}/messages is 404 for an unknown session',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_missing/messages',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      },
+    );
 
-    test('GET /api/sessions/{id}/messages is 502 when the service is down',
-        () async {
-          service.failMessages = true;
-          final (status, body) = await _get(
-            base,
-            'api/sessions/ses_one/messages',
-          );
-          expect(status, 502);
-          expect(jsonDecode(body), {'error': 'opencode_unreachable'});
-        });
+    test(
+      'GET /api/sessions/{id}/messages is 502 when the service is down',
+      () async {
+        service.failMessages = true;
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/messages',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
 
-    test('POST /api/sessions/{id}/messages sends the prompt and is 202',
-        () async {
+    test(
+      'POST /api/sessions/{id}/messages sends the prompt and is 202',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/messages',
+          jsonEncode({'text': 'hello there'}),
+        );
+        expect(status, 202);
+        expect(body, isEmpty);
+        expect(service.prompts, [('ses_one', 'hello there')]);
+      },
+    );
+
+    test(
+      'POST /api/sessions/{id}/messages with an invalid body is 400',
+      () async {
+        for (final raw in <String>['', 'not json', '{}', '{"text": ""}']) {
           final (status, body) = await _postRaw(
             base,
             'api/sessions/ses_one/messages',
-            jsonEncode({'text': 'hello there'}),
+            raw,
           );
-          expect(status, 202);
-          expect(body, isEmpty);
-          expect(service.prompts, [('ses_one', 'hello there')]);
-        });
+          expect(status, 400, reason: raw);
+          expect(jsonDecode(body), {'error': 'invalid_body'});
+        }
+        expect(service.prompts, isEmpty);
+      },
+    );
 
-    test('POST /api/sessions/{id}/messages with an invalid body is 400',
-        () async {
-          for (final raw in <String>['', 'not json', '{}', '{"text": ""}']) {
-            final (status, body) = await _postRaw(
-              base,
-              'api/sessions/ses_one/messages',
-              raw,
-            );
-            expect(status, 400, reason: raw);
-            expect(jsonDecode(body), {'error': 'invalid_body'});
-          }
-          expect(service.prompts, isEmpty);
-        });
+    test(
+      'POST /api/sessions/{id}/messages is 404 for an unknown session',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_missing/messages',
+          jsonEncode({'text': 'hello'}),
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+        expect(service.prompts, isEmpty);
+      },
+    );
 
-    test('POST /api/sessions/{id}/messages is 404 for an unknown session',
-        () async {
-          final (status, body) = await _postRaw(
-            base,
-            'api/sessions/ses_missing/messages',
-            jsonEncode({'text': 'hello'}),
-          );
-          expect(status, 404);
-          expect(jsonDecode(body), {'error': 'not_found'});
-          expect(service.prompts, isEmpty);
-        });
+    test(
+      'POST /api/sessions/{id}/messages is 502 when the service is down',
+      () async {
+        service.failPrompt = true;
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/messages',
+          jsonEncode({'text': 'hello'}),
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
 
-    test('POST /api/sessions/{id}/messages is 502 when the service is down',
-        () async {
-          service.failPrompt = true;
-          final (status, body) = await _postRaw(
-            base,
-            'api/sessions/ses_one/messages',
-            jsonEncode({'text': 'hello'}),
-          );
-          expect(status, 502);
-          expect(jsonDecode(body), {'error': 'opencode_unreachable'});
-        });
+    test(
+      'GET /api/sessions/{id}/permissions returns the pending requests',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/permissions',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), [for (final p in permissions) p.toJson()]);
+      },
+    );
 
-    test('GET /api/sessions/{id}/permissions returns the pending requests',
-        () async {
-          final (status, body) = await _get(
-            base,
-            'api/sessions/ses_one/permissions',
-          );
-          expect(status, 200);
-          expect(jsonDecode(body), [
-            for (final p in permissions) p.toJson(),
-          ]);
-        });
-
-    test('GET /api/sessions/{id}/permissions is 404 for an unknown session',
-        () async {
-          final (status, body) = await _get(
-            base,
-            'api/sessions/ses_missing/permissions',
-          );
-          expect(status, 404);
-          expect(jsonDecode(body), {'error': 'not_found'});
-        });
+    test(
+      'GET /api/sessions/{id}/permissions is 404 for an unknown session',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_missing/permissions',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      },
+    );
 
     test(
       'GET /api/sessions/{id}/permissions is 502 when the service is down',
@@ -402,19 +411,16 @@ void main() {
       },
     );
 
-    test(
-      'POST .../permissions/{requestID}/reply replies and is 204',
-      () async {
-        final (status, body) = await _postRaw(
-          base,
-          'api/sessions/ses_one/permissions/per_1/reply',
-          jsonEncode({'reply': 'always'}),
-        );
-        expect(status, 204);
-        expect(body, isEmpty);
-        expect(service.replies, [('ses_one', 'per_1', PermissionReply.always)]);
-      },
-    );
+    test('POST .../permissions/{requestID}/reply replies and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/permissions/per_1/reply',
+        jsonEncode({'reply': 'always'}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.replies, [('ses_one', 'per_1', PermissionReply.always)]);
+    });
 
     test(
       'POST .../permissions/{requestID}/reply with an invalid decision is 400',

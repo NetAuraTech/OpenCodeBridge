@@ -146,7 +146,7 @@ void main() {
 
   group('TerminalScreen permission banner', () {
     Future<({_FakeClient client, StreamController<BridgeEvent> events})>
-        pumpWithBanner(WidgetTester tester, _FakeClient client) async {
+    pumpWithBanner(WidgetTester tester, _FakeClient client) async {
       final events = StreamController<BridgeEvent>.broadcast();
       await tester.pumpWidget(
         MaterialApp(
@@ -195,10 +195,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(
-        client.replies,
-        const [('ses_1', 'per_1', PermissionReply.once)],
-      );
+      expect(client.replies, const [('ses_1', 'per_1', PermissionReply.once)]);
       // The re-fetch after the reply found no pending request.
       expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
     });

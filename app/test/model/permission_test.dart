@@ -29,7 +29,11 @@ void main() {
         resources: ['rm -rf /'],
       );
       final json = req.toJson();
-      expect(json, {'id': 'perm_1', 'action': 'bash', 'resources': ['rm -rf /']});
+      expect(json, {
+        'id': 'perm_1',
+        'action': 'bash',
+        'resources': ['rm -rf /'],
+      });
       final back = PermissionRequest.fromJson(json);
       expect(back.id, 'perm_1');
       expect(back.action, 'bash');

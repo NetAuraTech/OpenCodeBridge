@@ -455,9 +455,10 @@ class SessionsTabState extends State<SessionsTab> {
     if (client == null) return null;
     return switch (session.classification) {
       SessionClassification.external => () => _openStructured(session),
-      SessionClassification.appLaunchedLive => widget.terminals == null
-          ? null
-          : () => _openTerminal(session, widget.terminals!),
+      SessionClassification.appLaunchedLive =>
+        widget.terminals == null
+            ? null
+            : () => _openTerminal(session, widget.terminals!),
       SessionClassification.appLaunchedClosed => null,
     };
   }

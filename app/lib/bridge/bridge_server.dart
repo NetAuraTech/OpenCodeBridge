@@ -536,7 +536,9 @@ class BridgeServer {
     try {
       final raw = await utf8.decodeStream(request);
       final decoded = jsonDecode(raw);
-      text = decoded is Map<String, Object?> ? decoded['text'] as String? : null;
+      text = decoded is Map<String, Object?>
+          ? decoded['text'] as String?
+          : null;
     } catch (_) {
       text = null; // A non-JSON body is an invalid body.
     }
@@ -570,9 +572,7 @@ class BridgeServer {
     try {
       final requests = await sessions.pendingPermissions(id);
       response.statusCode = HttpStatus.ok;
-      response.write(
-        jsonEncode([for (final r in requests) r.toJson()]),
-      );
+      response.write(jsonEncode([for (final r in requests) r.toJson()]));
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
     }
@@ -597,8 +597,9 @@ class BridgeServer {
     try {
       final raw = await utf8.decodeStream(request);
       final decoded = jsonDecode(raw);
-      final decision =
-          decoded is Map<String, Object?> ? decoded['reply'] : null;
+      final decision = decoded is Map<String, Object?>
+          ? decoded['reply']
+          : null;
       reply = PermissionReply.fromWire(decision); // throws on an unknown value
     } catch (_) {
       reply = null; // A non-JSON body or unknown decision is invalid.
