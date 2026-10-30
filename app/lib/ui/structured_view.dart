@@ -9,6 +9,7 @@ import '../client/sessions_client.dart';
 import '../model/message.dart';
 import '../model/permission.dart';
 import '../model/session_detail.dart';
+import 'diff_view.dart';
 import 'permission_banner.dart';
 
 /// The structured view of one session (spec §6: *External* → structured
@@ -1255,6 +1256,16 @@ class _ToolCard extends StatelessWidget {
     }
   }
 
+  /// The file the edit changed (the tool's `input.path`), `null` when the
+  /// input carries none.
+  String? get _path {
+    final input = tool.input;
+    if (input is Map<String, Object?> && input['path'] is String) {
+      return input['path'] as String;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -1290,7 +1301,26 @@ class _ToolCard extends StatelessWidget {
               ),
             ],
           ),
-          if (_inputText.isNotEmpty)
+          if (tool.patch != null) ...[
+            if (_path != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4, left: 24),
+                child: Text(
+                  _path!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                    color: scheme.outline,
+                  ),
+                ),
+              ),
+            // The file diff, like the terminal: the removed lines, the added
+            // lines, and the context, in the TUI's diff colors.
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 24),
+              child: DiffView(patch: tool.patch!),
+            ),
+          ] else if (_inputText.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: Text(

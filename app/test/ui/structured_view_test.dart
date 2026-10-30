@@ -243,6 +243,51 @@ void main() {
       expect(find.text('done'), findsOneWidget);
     });
 
+    testWidgets('an edit tool renders its file patch like the terminal', (
+      tester,
+    ) async {
+      const patch =
+          'Index: my/file.dart\n'
+          '===================================================================\n'
+          '--- my/file.dart\n'
+          '+++ my/file.dart\n'
+          '@@ -1,2 +1,2 @@\n'
+          ' keep\n'
+          '-old line\n'
+          '+new line\n';
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(
+            id: 'm1',
+            role: 'assistant',
+            tools: [
+              ToolCall(
+                id: 't1',
+                name: 'edit',
+                status: 'completed',
+                input: {
+                  'path': 'my/file.dart',
+                  'oldString': 'old line',
+                  'newString': 'new line',
+                },
+                patch: patch,
+              ),
+            ],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(find.text('my/file.dart'), findsOneWidget);
+      // The context line, the removed line, and the added line.
+      expect(find.text('keep'), findsOneWidget);
+      final removed = tester.widget<Text>(find.text('old line'));
+      expect(removed.style?.color, const Color(0xFFC53B53));
+      final added = tester.widget<Text>(find.text('new line'));
+      expect(added.style?.color, const Color(0xFF1E725C));
+    });
+
     testWidgets('sends the prompt, posts only the text, and clears the input', (
       tester,
     ) async {

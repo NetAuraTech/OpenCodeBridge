@@ -137,6 +137,27 @@ void main() {
             'error': {'type': 'fail', 'message': 'denied'},
           },
         },
+        {
+          'type': 'tool',
+          'id': 't3',
+          'name': 'edit',
+          'time': {'created': 5},
+          'state': {
+            'status': 'completed',
+            'input': {'path': '/a.dart', 'oldString': 'a', 'newString': 'b'},
+            'metadata': {
+              'files': [
+                {
+                  'file': 'a.dart',
+                  'patch': '--- a.dart\n+++ a.dart\n@@ -1 +1 @@\n-a\n+b\n',
+                  'status': 'modified',
+                  'additions': 1,
+                  'deletions': 1,
+                },
+              ],
+            },
+          },
+        },
       ],
     },
     {
@@ -432,17 +453,28 @@ void main() {
         expect(assistant.role, 'assistant');
         expect(assistant.text, 'working');
         expect(assistant.reasoning, 'hmm');
-        expect(assistant.tools, hasLength(2));
+        expect(assistant.tools, hasLength(3));
         // The tool input is a map, so compare fields (deep) not by ==.
         expect(assistant.tools[0].id, 't1');
         expect(assistant.tools[0].name, 'bash');
         expect(assistant.tools[0].status, 'running');
         expect(assistant.tools[0].input, {'command': 'ls'});
         expect(assistant.tools[0].error, isNull);
+        expect(assistant.tools[0].patch, isNull);
         expect(assistant.tools[1].id, 't2');
         expect(assistant.tools[1].name, 'write');
         expect(assistant.tools[1].status, 'error');
         expect(assistant.tools[1].error, 'denied');
+        expect(assistant.tools[1].patch, isNull);
+        // The edit's file patch (the service's metadata.files unified diff)
+        // is carried for the structured view's diff render.
+        expect(assistant.tools[2].id, 't3');
+        expect(assistant.tools[2].name, 'edit');
+        expect(assistant.tools[2].status, 'completed');
+        expect(
+          assistant.tools[2].patch,
+          '--- a.dart\n+++ a.dart\n@@ -1 +1 @@\n-a\n+b\n',
+        );
         // The context gauge: the model call's total input (100 + 5000 + 10).
         expect(assistant.contextTokens, 5110);
         // The compaction marker keeps the summary the compaction wrote.

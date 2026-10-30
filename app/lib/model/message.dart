@@ -12,6 +12,7 @@ class ToolCall {
     required this.status,
     this.input,
     this.error,
+    this.patch,
   });
 
   /// The tool call id (the service's tool part `id`). The structured view
@@ -33,12 +34,19 @@ class ToolCall {
   /// The tool's error message, when [status] is `error`.
   final String? error;
 
+  /// The service-computed unified diff of the file the edit changed (the
+  /// tool state's `metadata.files` patch, with the hunk headers and the
+  /// context lines): `@@`/`-`/`+` lines, as the terminal renders it.
+  /// `null` for tools that carry no patch (or before the edit runs).
+  final String? patch;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
     'status': status,
     'input': input,
     'error': error,
+    'patch': patch,
   };
 
   factory ToolCall.fromJson(Object? json) {
@@ -49,6 +57,7 @@ class ToolCall {
       status: map['status'] as String? ?? '',
       input: map['input'],
       error: map['error'] is String ? map['error'] as String : null,
+      patch: map['patch'] is String ? map['patch'] as String : null,
     );
   }
 
@@ -59,15 +68,16 @@ class ToolCall {
       other.name == name &&
       other.status == status &&
       other.input == input &&
-      other.error == error;
+      other.error == error &&
+      other.patch == patch;
 
   @override
-  int get hashCode => Object.hash(id, name, status, input, error);
+  int get hashCode => Object.hash(id, name, status, input, error, patch);
 
   @override
   String toString() =>
       'ToolCall(id: $id, name: $name, status: $status, '
-      'input: $input, error: $error)';
+      'input: $input, error: $error, patch: $patch)';
 }
 
 /// One message of a session's history (spec section 5, endpoint 6).

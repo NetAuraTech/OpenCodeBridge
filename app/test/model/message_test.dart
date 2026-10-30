@@ -16,6 +16,7 @@ void main() {
         'status': 'running',
         'input': {'command': 'ls -la'},
         'error': null,
+        'patch': null,
       });
       final back = ToolCall.fromJson(tc.toJson());
       expect(back.id, 'call_1');
@@ -25,7 +26,7 @@ void main() {
       expect(back.error, isNull);
     });
 
-    test('input and error are optional on the wire', () {
+    test('input, error, and patch are optional on the wire', () {
       const tc = ToolCall(name: 'read', status: 'completed');
       expect(tc.toJson(), {
         'id': null,
@@ -33,10 +34,20 @@ void main() {
         'status': 'completed',
         'input': null,
         'error': null,
+        'patch': null,
       });
       final back = ToolCall.fromJson(tc.toJson());
       expect(back.input, isNull);
       expect(back.error, isNull);
+      expect(back.patch, isNull);
+    });
+
+    test('the file patch round-trips', () {
+      const patch = '--- a\n+++ a\n@@ -1 +1 @@\n-a\n+b\n';
+      const tc = ToolCall(name: 'edit', status: 'completed', patch: patch);
+      final back = ToolCall.fromJson(tc.toJson());
+      expect(back.patch, patch);
+      expect(back, tc);
     });
 
     test('error surfaces when present', () {
@@ -73,6 +84,7 @@ void main() {
             'status': 'running',
             'input': {'command': 'ls'},
             'error': null,
+            'patch': null,
           },
         ],
       });
