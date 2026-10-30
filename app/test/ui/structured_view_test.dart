@@ -470,12 +470,7 @@ void main() {
       await tester.pump();
 
       expect(find.text('Cost \$0.0123'), findsOneWidget);
-      expect(
-        find.text(
-          '10 in · 20 out · 0 reasoning · 0 cache read · 0 cache write',
-        ),
-        findsOneWidget,
-      );
+      expect(find.text('10 in · 20 out'), findsOneWidget);
       expect(client.detailCalls, 1);
     });
 

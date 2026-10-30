@@ -930,6 +930,7 @@ class _CostBar extends StatelessWidget {
     final detail = this.detail;
     if (detail == null) return const SizedBox.shrink();
     final tokens = detail.tokens;
+    final tokenText = _tokenText(tokens);
     final limit = detail.contextLimit;
     final used = contextUsed;
     final fraction = used != null && limit != null && limit > 0
@@ -958,20 +959,18 @@ class _CostBar extends StatelessWidget {
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
               ),
-              Flexible(
-                child: Text(
-                  '${tokens.input} in · ${tokens.output} out · '
-                  '${tokens.reasoning} reasoning · '
-                  '${tokens.cacheRead} cache read · '
-                  '${tokens.cacheWrite} cache write',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.outline,
+              if (tokenText != null)
+                Flexible(
+                  child: Text(
+                    tokenText,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.outline,
+                    ),
                   ),
                 ),
-              ),
               if (used != null) ...[
                 const SizedBox(width: 8),
                 Container(
@@ -1049,6 +1048,20 @@ class _CostBar extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// The header's token counts, one field per non-zero value. Zeros are
+  /// omitted: local providers (llama.cpp) report no reasoning and no
+  /// cache-write tokens, and the trailing zeros would only add noise. `null`
+  /// when every field is zero.
+  static String? _tokenText(TokenUsage tokens) {
+    final parts = <String>[];
+    if (tokens.input != 0) parts.add('${tokens.input} in');
+    if (tokens.output != 0) parts.add('${tokens.output} out');
+    if (tokens.reasoning != 0) parts.add('${tokens.reasoning} reasoning');
+    if (tokens.cacheRead != 0) parts.add('${tokens.cacheRead} cache read');
+    if (tokens.cacheWrite != 0) parts.add('${tokens.cacheWrite} cache write');
+    return parts.isEmpty ? null : parts.join(' · ');
   }
 
   /// The header's speed chip text, or `null` while idle: the live prefill or
@@ -1265,11 +1278,7 @@ class _Markdown extends StatelessWidget {
         h6: style(fontWeight: FontWeight.w600, color: palette.heading),
         em: style(fontStyle: FontStyle.italic, color: palette.em),
         strong: style(fontWeight: FontWeight.bold, color: palette.strong),
-        code: style(
-          fontFamily: 'monospace',
-          fontSize: size * 0.85,
-          color: palette.code,
-        ),
+        code: style(fontFamily: 'monospace', color: palette.code),
         a: style(
           color: palette.link,
         ).copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
