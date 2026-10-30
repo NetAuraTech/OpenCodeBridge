@@ -201,10 +201,10 @@ void main() {
       await _pump(tester, client: client);
 
       expect(find.text('Compacted context'), findsOneWidget);
-      expect(
-        find.text('## Objective\n- the compressed context'),
-        findsOneWidget,
-      );
+      // The summary is rendered as markdown: the heading and the list item
+      // are separate text nodes.
+      expect(find.text('Objective'), findsOneWidget);
+      expect(find.text('the compressed context'), findsOneWidget);
     });
 
     testWidgets('session.compaction.delta streams the summary live, and '
@@ -223,7 +223,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 60));
 
       expect(find.text('Compacting…'), findsOneWidget);
-      expect(find.text('## Objective'), findsOneWidget);
+      expect(find.text('Objective'), findsOneWidget);
 
       events.add(
         _event(
@@ -235,7 +235,8 @@ void main() {
       await tester.pump();
 
       expect(find.text('Compacted context'), findsOneWidget);
-      expect(find.text('## Objective\n- done'), findsOneWidget);
+      expect(find.text('Objective'), findsOneWidget);
+      expect(find.text('done'), findsOneWidget);
     });
 
     testWidgets('sends the prompt, posts only the text, and clears the input', (
@@ -499,9 +500,9 @@ void main() {
       );
 
       // The reasoning block is styled (gray) and indented to the left;
-      // the text block is not.
+      // the text block is not. The markdown span carries the gray.
       final reasoningText = tester.widget<Text>(find.text('think'));
-      expect(reasoningText.style?.color, isNotNull);
+      expect(reasoningText.textSpan?.style?.color, isNotNull);
       final paddings = tester.widgetList<Padding>(
         find.ancestor(of: find.text('think'), matching: find.byType(Padding)),
       );

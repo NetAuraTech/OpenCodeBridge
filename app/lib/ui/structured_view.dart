@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../client/events_client.dart';
 import '../client/sessions_client.dart';
@@ -1024,18 +1025,58 @@ class _MessagePane extends StatelessWidget {
           if (message.reasoning != null)
             Padding(
               padding: const EdgeInsets.only(top: 2, left: 16),
-              child: Text(
-                message.reasoning!,
-                style: TextStyle(color: scheme.outline),
+              child: _Markdown(
+                data: message.reasoning!,
+                base: TextStyle(color: scheme.outline),
               ),
             ),
           if (message.text != null)
             Padding(
               padding: const EdgeInsets.only(top: 2),
-              child: Text(message.text!),
+              child: _Markdown(data: message.text!),
             ),
           for (final tool in message.tools) _ToolCard(tool: tool),
         ],
+      ),
+    );
+  }
+}
+
+/// Markdown text: the message bodies and the compaction summary are markdown
+/// (headings, bold, lists, code) — the service stores them as written, the
+/// TUI renders them as such, and so does this view. With no [base] the
+/// theme's own text styles apply (regular message text); with a [base]
+/// every style derives from it (the gray panes: the thinking text and the
+/// compaction summary).
+class _Markdown extends StatelessWidget {
+  const _Markdown({required this.data, this.base});
+
+  final String data;
+
+  /// The base style every markdown style derives from, or `null` to use the
+  /// theme's styles as-is.
+  final TextStyle? base;
+
+  @override
+  Widget build(BuildContext context) {
+    final b = base;
+    if (b == null) return MarkdownBody(data: data);
+    final size = b.fontSize ?? 14;
+    return MarkdownBody(
+      data: data,
+      styleSheet: MarkdownStyleSheet(
+        p: b,
+        h1: b.copyWith(fontSize: size * 1.3, fontWeight: FontWeight.w700),
+        h2: b.copyWith(fontSize: size * 1.15, fontWeight: FontWeight.w700),
+        h3: b.copyWith(fontWeight: FontWeight.w600),
+        h4: b.copyWith(fontWeight: FontWeight.w600),
+        h5: b.copyWith(fontWeight: FontWeight.w600),
+        h6: b.copyWith(fontWeight: FontWeight.w600),
+        em: b.copyWith(fontStyle: FontStyle.italic),
+        strong: b.copyWith(fontWeight: FontWeight.bold),
+        code: b.copyWith(fontFamily: 'monospace'),
+        blockquote: b,
+        listBullet: b,
       ),
     );
   }
@@ -1095,9 +1136,9 @@ class _CompactionPane extends StatelessWidget {
           if (message.text != null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                message.text!,
-                style: TextStyle(fontSize: 12, color: scheme.outline),
+              child: _Markdown(
+                data: message.text!,
+                base: TextStyle(fontSize: 12, color: scheme.outline),
               ),
             ),
         ],
