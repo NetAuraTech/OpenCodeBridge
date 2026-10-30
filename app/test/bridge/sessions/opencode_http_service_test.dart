@@ -158,6 +158,17 @@ void main() {
             },
           },
         },
+        {
+          'type': 'tool',
+          'id': 't4',
+          'name': 'write',
+          'time': {'created': 6},
+          'state': {
+            'status': 'completed',
+            'input': {'path': '/w.txt', 'content': 'hello\nworld\n'},
+            'metadata': {'truncated': false},
+          },
+        },
       ],
     },
     {
@@ -435,61 +446,73 @@ void main() {
       );
     });
 
-    test(
-      'getMessages walks the paginated history and maps the turns',
-      () async {
-        final service = OpencodeHttpService(baseUrl: base, password: password);
-        final messages = await service.getMessages('ses_1');
-        // The 200 synthetic fillers are skipped, leaving the two turns and
-        // the compaction marker, back in chronological order despite the
-        // newest-first pages.
-        expect(messages, hasLength(3));
-        expect(
-          messages[0],
-          const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
-        );
-        final assistant = messages[1];
-        expect(assistant.id, 'm2');
-        expect(assistant.role, 'assistant');
-        expect(assistant.text, 'working');
-        expect(assistant.reasoning, 'hmm');
-        expect(assistant.tools, hasLength(3));
-        // The tool input is a map, so compare fields (deep) not by ==.
-        expect(assistant.tools[0].id, 't1');
-        expect(assistant.tools[0].name, 'bash');
-        expect(assistant.tools[0].status, 'running');
-        expect(assistant.tools[0].input, {'command': 'ls'});
-        expect(assistant.tools[0].error, isNull);
-        expect(assistant.tools[0].patch, isNull);
-        expect(assistant.tools[1].id, 't2');
-        expect(assistant.tools[1].name, 'write');
-        expect(assistant.tools[1].status, 'error');
-        expect(assistant.tools[1].error, 'denied');
-        expect(assistant.tools[1].patch, isNull);
-        // The edit's file patch (the service's metadata.files unified diff)
-        // is carried for the structured view's diff render.
-        expect(assistant.tools[2].id, 't3');
-        expect(assistant.tools[2].name, 'edit');
-        expect(assistant.tools[2].status, 'completed');
-        expect(
-          assistant.tools[2].patch,
-          '--- a.dart\n+++ a.dart\n@@ -1 +1 @@\n-a\n+b\n',
-        );
-        // The context gauge: the model call's total input (100 + 5000 + 10).
-        expect(assistant.contextTokens, 5110);
-        // The compaction marker keeps the summary the compaction wrote.
-        expect(
-          messages[2],
-          const SessionMessage(
-            id: 'm4',
-            role: 'compaction',
-            text: 'the compressed context',
-          ),
-        );
-        // The client walked the pages: a full first page, then the rest.
-        expect(messageOffsets, [0, 200]);
-      },
-    );
+    test('getMessages walks the paginated history and maps the turns', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final messages = await service.getMessages('ses_1');
+      // The 200 synthetic fillers are skipped, leaving the two turns and
+      // the compaction marker, back in chronological order despite the
+      // newest-first pages.
+      expect(messages, hasLength(3));
+      expect(
+        messages[0],
+        const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
+      );
+      final assistant = messages[1];
+      expect(assistant.id, 'm2');
+      expect(assistant.role, 'assistant');
+      expect(assistant.text, 'working');
+      expect(assistant.reasoning, 'hmm');
+      expect(assistant.tools, hasLength(4));
+      // The tool input is a map, so compare fields (deep) not by ==.
+      expect(assistant.tools[0].id, 't1');
+      expect(assistant.tools[0].name, 'bash');
+      expect(assistant.tools[0].status, 'running');
+      expect(assistant.tools[0].input, {'command': 'ls'});
+      expect(assistant.tools[0].error, isNull);
+      expect(assistant.tools[0].patch, isNull);
+      expect(assistant.tools[1].id, 't2');
+      expect(assistant.tools[1].name, 'write');
+      expect(assistant.tools[1].status, 'error');
+      expect(assistant.tools[1].error, 'denied');
+      expect(assistant.tools[1].patch, isNull);
+      // The edit's file patch (the service's metadata.files unified diff)
+      // is carried for the structured view's diff render.
+      expect(assistant.tools[2].id, 't3');
+      expect(assistant.tools[2].name, 'edit');
+      expect(assistant.tools[2].status, 'completed');
+      expect(
+        assistant.tools[2].patch,
+        '--- a.dart\n+++ a.dart\n@@ -1 +1 @@\n-a\n+b\n',
+      );
+      // A write carries no service patch; the bridge synthesizes the "new
+      // file" diff from the content for the same diff render.
+      expect(assistant.tools[3].id, 't4');
+      expect(assistant.tools[3].name, 'write');
+      expect(assistant.tools[3].status, 'completed');
+      expect(
+        assistant.tools[3].patch,
+        'Index: /w.txt\n'
+        '===================================================================\n'
+        '--- /dev/null\n'
+        '+++ /w.txt\n'
+        '@@ -0,0 +1,2 @@\n'
+        '+hello\n'
+        '+world\n',
+      );
+      // The context gauge: the model call's total input (100 + 5000 + 10).
+      expect(assistant.contextTokens, 5110);
+      // The compaction marker keeps the summary the compaction wrote.
+      expect(
+        messages[2],
+        const SessionMessage(
+          id: 'm4',
+          role: 'compaction',
+          text: 'the compressed context',
+        ),
+      );
+      // The client walked the pages: a full first page, then the rest.
+      expect(messageOffsets, [0, 200]);
+    });
 
     test('prompt posts the text with delivery steer', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);

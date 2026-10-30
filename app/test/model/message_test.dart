@@ -60,6 +60,60 @@ void main() {
     });
   });
 
+  group('ToolCall.writePatch', () {
+    const header =
+        'Index: /x/a.txt\n'
+        '===================================================================\n'
+        '--- /dev/null\n'
+        '+++ /x/a.txt\n';
+
+    test('synthesizes a new-file diff from the write content', () {
+      expect(
+        ToolCall.writePatch({'path': '/x/a.txt', 'content': 'a\nb\n'}),
+        '$header@@ -0,0 +1,2 @@\n+a\n+b\n',
+      );
+    });
+
+    test('handles content without a trailing newline', () {
+      expect(
+        ToolCall.writePatch({'path': '/x/a.txt', 'content': 'a\nb'}),
+        '$header@@ -0,0 +1,2 @@\n+a\n+b\n',
+      );
+    });
+
+    test('keeps the content lines own leading signs', () {
+      expect(
+        ToolCall.writePatch({'path': 'p', 'content': '-x\n+ y\n z\n'}),
+        'Index: p\n'
+        '===================================================================\n'
+        '--- /dev/null\n'
+        '+++ p\n'
+        '@@ -0,0 +1,3 @@\n'
+        '+-x\n'
+        '++ y\n'
+        '+ z\n',
+      );
+    });
+
+    test('empty content yields a header-only patch', () {
+      expect(
+        ToolCall.writePatch({'path': 'p', 'content': ''}),
+        'Index: p\n'
+        '===================================================================\n'
+        '--- /dev/null\n'
+        '+++ p\n'
+        '@@ -0,0 +1,0 @@\n',
+      );
+    });
+
+    test('null when the input carries no content', () {
+      expect(ToolCall.writePatch({'path': 'p', 'command': 'ls'}), isNull);
+      expect(ToolCall.writePatch({'path': 'p', 'content': 42}), isNull);
+      expect(ToolCall.writePatch(null), isNull);
+      expect(ToolCall.writePatch('not a map'), isNull);
+    });
+  });
+
   group('SessionMessage round-trip', () {
     test('assistant message with tools serializes and deserializes', () {
       const msg = SessionMessage(

@@ -61,6 +61,39 @@ class ToolCall {
     );
   }
 
+  /// The "new file" unified diff of a [write] tool's content (every line
+  /// added): the same shape the service's edit patches take, so the diff view
+  /// renders the written file the way it renders an edit. The service doesn't
+  /// compute a patch for a write — it returns only the file's content — so
+  /// this synthesizes one.
+  ///
+  /// [input] is the tool's input (`{path, content}`). The patch is `null` when
+  /// the input carries no content (a tool that isn't a write, or a write
+  /// before its content streams in).
+  static String? writePatch(Object? input) {
+    final map = input is Map<String, Object?> ? input : null;
+    final content = map?['content'];
+    if (content is! String) return null;
+    final path = map!['path'] is String ? map['path'] as String : '';
+    final lines = content.split('\n');
+    // The trailing newline of the content is not a line: `a\nb\n` is two.
+    if (lines.isNotEmpty && lines.last.isEmpty) {
+      lines.removeLast();
+    }
+    final buffer = StringBuffer()
+      ..writeln('Index: $path')
+      ..writeln(
+        '===================================================================',
+      )
+      ..writeln('--- /dev/null')
+      ..writeln('+++ $path')
+      ..writeln('@@ -0,0 +1,${lines.length} @@');
+    for (final line in lines) {
+      buffer.writeln('+$line');
+    }
+    return buffer.toString();
+  }
+
   @override
   bool operator ==(Object other) =>
       other is ToolCall &&

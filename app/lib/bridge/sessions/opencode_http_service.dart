@@ -459,20 +459,26 @@ class OpencodeHttpService implements OpencodeService {
         error = e['message'] as String;
       }
     }
+    final name = part['name'] as String? ?? '';
     return ToolCall(
       id: part['id'] is String ? part['id'] as String : null,
-      name: part['name'] as String? ?? '',
+      name: name,
       status: status,
       input: state['input'],
       error: error,
-      patch: _patchFrom(state),
+      patch: _patchFrom(state, name: name),
     );
   }
 
-  /// The tool's file patch (the service's tool state
-  /// `metadata.files` unified diff, the one the terminal renders for the
-  /// edits), or `null` when the tool carries none.
-  static String? _patchFrom(Map<String, Object?> state) {
+  /// The file patch the structured view renders for the tool: the service's
+  /// tool-state `metadata.files` unified diff (the one the terminal renders
+  /// for the edits), or — for a `write`, which the service returns only as
+  /// the file's full content — the "new file" diff synthesized from it.
+  /// `null` when the tool carries no patch and no synthesizable content.
+  static String? _patchFrom(
+    Map<String, Object?> state, {
+    required String name,
+  }) {
     final metadata = state['metadata'];
     final files = metadata is Map<String, Object?> ? metadata['files'] : null;
     if (files is List && files.isNotEmpty) {
@@ -481,7 +487,7 @@ class OpencodeHttpService implements OpencodeService {
         return first['patch'] as String;
       }
     }
-    return null;
+    return name == 'write' ? ToolCall.writePatch(state['input']) : null;
   }
 
   static List<String> _stringList(Object? json) {
