@@ -77,6 +77,7 @@ class SessionMessage {
     required this.role,
     this.text,
     this.reasoning,
+    this.contextTokens,
     this.tools = const [],
   });
 
@@ -97,6 +98,14 @@ class SessionMessage {
   /// can render it distinctly.
   final String? reasoning;
 
+  /// The context the model call that produced this assistant message sent
+  /// to the model: its `tokens` input plus the prompt-cache reads and
+  /// writes. The structured view seeds its context gauge from the last
+  /// message that carries one, so an opened session shows the context the
+  /// session really is in. `null` for user messages and messages composed
+  /// without the service's tokens.
+  final int? contextTokens;
+
   /// The assistant message's tool calls (in flight or finished); empty for
   /// user messages.
   final List<ToolCall> tools;
@@ -106,6 +115,7 @@ class SessionMessage {
     'role': role,
     'text': text,
     'reasoning': reasoning,
+    'contextTokens': contextTokens,
     'tools': [for (final tool in tools) tool.toJson()],
   };
 
@@ -117,6 +127,9 @@ class SessionMessage {
       role: map['role'] as String? ?? '',
       text: map['text'] is String ? map['text'] as String : null,
       reasoning: map['reasoning'] is String ? map['reasoning'] as String : null,
+      contextTokens: map['contextTokens'] is num
+          ? (map['contextTokens'] as num).toInt()
+          : null,
       tools: tools is List
           ? [for (final item in tools) ToolCall.fromJson(item)]
           : const [],
@@ -130,16 +143,24 @@ class SessionMessage {
       other.role == role &&
       other.text == text &&
       other.reasoning == reasoning &&
+      other.contextTokens == contextTokens &&
       _toolsEqual(other.tools, tools);
 
   @override
-  int get hashCode =>
-      Object.hash(id, role, text, reasoning, Object.hashAll(tools));
+  int get hashCode => Object.hash(
+    id,
+    role,
+    text,
+    reasoning,
+    contextTokens,
+    Object.hashAll(tools),
+  );
 
   @override
   String toString() =>
       'SessionMessage(id: $id, role: $role, '
-      'text: $text, reasoning: $reasoning, tools: $tools)';
+      'text: $text, reasoning: $reasoning, '
+      'contextTokens: $contextTokens, tools: $tools)';
 }
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {

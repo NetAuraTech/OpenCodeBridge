@@ -65,6 +65,7 @@ void main() {
         'role': 'assistant',
         'text': 'Listing files.',
         'reasoning': 'which files?',
+        'contextTokens': null,
         'tools': [
           {
             'id': null,
@@ -92,6 +93,7 @@ void main() {
         'role': 'user',
         'text': 'Hello',
         'reasoning': null,
+        'contextTokens': null,
         'tools': <Object?>[],
       });
     });
@@ -125,7 +127,7 @@ void main() {
     expect(
       SessionMessage(role: 'user').toString(),
       'SessionMessage(id: null, role: user, text: null, '
-      'reasoning: null, tools: [])',
+      'reasoning: null, contextTokens: null, tools: [])',
     );
   });
 }

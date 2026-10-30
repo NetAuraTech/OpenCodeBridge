@@ -89,9 +89,12 @@ void main() {
     },
   ];
 
-  // The service's `Session.Message.Info` context for `ses_1`. The `system`
-  // item must be skipped by the client.
-  final contextMessages = [
+  // The service's `Session.Message.Info` history for `ses_1` (endpoint 6).
+  // The fake serves it newest-first in pages of at most 200 (the service's
+  // pagination), and the 200 `synthetic` filler items push the history past
+  // one full page so the client's loop is exercised. The `system` item must
+  // be skipped by the client.
+  final historyMessages = <Map<String, Object?>>[
     {
       'type': 'user',
       'id': 'm1',
@@ -104,6 +107,12 @@ void main() {
       'time': {'created': 2},
       'agent': 'a',
       'model': 'm',
+      'tokens': {
+        'input': 100,
+        'output': 50,
+        'reasoning': 0,
+        'cache': {'read': 5000, 'write': 10},
+      },
       'content': [
         {'type': 'text', 'text': 'working'},
         {
@@ -136,6 +145,13 @@ void main() {
       'time': {'created': 5},
       'text': 'boot',
     },
+    for (var i = 0; i < 200; i++)
+      {
+        'type': 'synthetic',
+        'id': 'f$i',
+        'time': {'created': 100 + i},
+        'text': 'filler $i',
+      },
   ];
 
   // The service's pending `Permission.Request` list for `ses_1`.
@@ -151,6 +167,7 @@ void main() {
   final promptBodies = <Map<String, Object?>>[];
   final replyBodies = <Map<String, Object?>>[];
   final repliedRequestIDs = <String>[];
+  final messageOffsets = <int>[];
 
   late HttpServer server;
   late Uri base;
@@ -211,8 +228,17 @@ void main() {
         resp.write(jsonEncode(projects));
       } else if (path == '/api/session/active') {
         resp.write(jsonEncode({'data': active}));
-      } else if (path == '/api/session/ses_1/context' && req.method == 'GET') {
-        resp.write(jsonEncode({'data': contextMessages}));
+      } else if (path == '/api/session/ses_1/message' && req.method == 'GET') {
+        final params = req.uri.queryParameters;
+        final limit = int.parse(params['limit'] ?? '50');
+        final offset = int.parse(params['offset'] ?? '0');
+        messageOffsets.add(offset);
+        // The real service serves the history newest-first, addressing
+        // pages by skipping `offset` of the newest items.
+        final newestFirst = historyMessages.reversed.toList();
+        resp.write(
+          jsonEncode({'data': newestFirst.skip(offset).take(limit).toList()}),
+        );
       } else if (path == '/api/session/ses_1/permission' &&
           req.method == 'GET') {
         resp.write(jsonEncode({'data': pendingPerms}));
@@ -371,10 +397,12 @@ void main() {
     });
 
     test(
-      'getMessages maps user and assistant turns, skipping system',
+      'getMessages walks the paginated history and maps the turns',
       () async {
         final service = OpencodeHttpService(baseUrl: base, password: password);
         final messages = await service.getMessages('ses_1');
+        // The 200 synthetic fillers are skipped, leaving the two turns,
+        // back in chronological order despite the newest-first pages.
         expect(messages, hasLength(2));
         expect(
           messages[0],
@@ -396,6 +424,10 @@ void main() {
         expect(assistant.tools[1].name, 'write');
         expect(assistant.tools[1].status, 'error');
         expect(assistant.tools[1].error, 'denied');
+        // The context gauge: the model call's total input (100 + 5000 + 10).
+        expect(assistant.contextTokens, 5110);
+        // The client walked the pages: a full first page, then the rest.
+        expect(messageOffsets, [0, 200]);
       },
     );
 

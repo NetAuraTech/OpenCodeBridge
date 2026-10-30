@@ -603,17 +603,36 @@ void main() {
             aggregateID: 'ses_1',
             data: const {
               'assistantMessageID': 'msg_1',
-              'tokens': {'input': 30},
+              'tokens': {
+                'input': 30,
+                'cache': {'read': 40, 'write': 30},
+              },
             },
           ),
         );
         await tester.pump();
         await tester.pump();
 
-        expect(find.text('context 30 / 100 · 30%'), findsOneWidget);
+        // The context is the total input: input + cache reads and writes.
+        expect(find.text('context 100 / 100 · 100%'), findsOneWidget);
         expect(find.byType(LinearProgressIndicator), findsOneWidget);
       },
     );
+
+    testWidgets('opening a session seeds the context from its history', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detailCtx],
+        messages: const [
+          SessionMessage(role: 'assistant', text: 'earlier', contextTokens: 55),
+          SessionMessage(role: 'user', text: 'next'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(find.text('context 55 / 100 · 55%'), findsOneWidget);
+    });
 
     testWidgets('events of another session are ignored', (tester) async {
       final client = _FakeClient(details: const [_detail0]);

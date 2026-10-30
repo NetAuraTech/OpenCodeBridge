@@ -243,28 +243,67 @@ class OpencodeHttpService implements OpencodeService {
     return _contextLimits[id];
   }
 
-  /// Endpoint 6 (spec §5): the session's history as structured-view messages.
+  /// Endpoint 6 (spec §5): the session's full history as structured-view
+  /// messages, oldest first. The history (not the context: after a
+  /// compaction the service's `/context` view drops the compacted
+  /// messages, which used to wipe the whole screen) — the service
+  /// paginates it newest-first (`limit`/`offset`, at most 200 per page),
+  /// so the client walks every page and sorts back to chronological.
   /// Only `user` and `assistant` turns are conversational; the other
-  /// message kinds (system, synthetic, shell, …) carry no display content.
+  /// message kinds (compaction, system, synthetic, shell, …) carry no
+  /// display content.
   @override
   Future<List<SessionMessage>> getMessages(String id) async {
-    final body = await _get(
-      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/context'),
-    );
-    final outer = jsonDecode(body);
-    final map = outer is Map<String, Object?>
-        ? outer
-        : const <String, Object?>{};
-    final data = map['data'];
-    final list = data is List ? data : const <Object?>[];
+    const page = 200;
+    final items = <Object?>[];
+    for (var offset = 0; offset < page * _maxPages; offset += page) {
+      final body = await _get(
+        _base.replace(
+          path: '/api/session/${Uri.encodeComponent(id)}/message',
+          queryParameters: {'limit': '$page', 'offset': '$offset'},
+        ),
+      );
+      final outer = jsonDecode(body);
+      final map = outer is Map<String, Object?>
+          ? outer
+          : const <String, Object?>{};
+      final data = map['data'];
+      final list = data is List ? data : const <Object?>[];
+      items.addAll(list);
+      if (list.length < page) break;
+    }
+    items.sort((a, b) => _messageOrder(a, b));
     final messages = <SessionMessage>[];
-    for (final item in list) {
+    for (final item in items) {
       if (item is Map<String, Object?>) {
         final message = _messageFrom(item);
         if (message != null) messages.add(message);
       }
     }
     return messages;
+  }
+
+  /// Chronological order for the history items: the service's
+  /// `time.created`, the id (a time-stamped id) breaking ties.
+  static int _messageOrder(Object? a, Object? b) {
+    final ta = _messageCreated(a);
+    final tb = _messageCreated(b);
+    if (ta != null && tb != null && ta != tb) return ta.compareTo(tb);
+    final sa = a is Map<String, Object?> && a['id'] is String
+        ? a['id'] as String
+        : '';
+    final sb = b is Map<String, Object?> && b['id'] is String
+        ? b['id'] as String
+        : '';
+    return sa.compareTo(sb);
+  }
+
+  static int? _messageCreated(Object? item) {
+    final map = item is Map<String, Object?> ? item : null;
+    final time = map?['time'];
+    return time is Map<String, Object?>
+        ? (time['created'] as num?)?.toInt()
+        : null;
   }
 
   /// Endpoint 7 (spec §5): send a prompt. `delivery: steer` is the verified
@@ -369,8 +408,26 @@ class OpencodeHttpService implements OpencodeService {
       role: 'assistant',
       text: texts.isEmpty ? null : texts.join('\n'),
       reasoning: reasonings.isEmpty ? null : reasonings.join('\n'),
+      contextTokens: _contextTokensFrom(item['tokens']),
       tools: tools,
     );
+  }
+
+  /// The context an assistant message's model call sent to the model: its
+  /// `tokens` input plus the prompt-cache reads and writes (the `input`
+  /// alone is only the uncached slice). `null` when the service carried no
+  /// tokens.
+  static int? _contextTokensFrom(Object? json) {
+    final map = json is Map<String, Object?> ? json : null;
+    if (map == null) return null;
+    final input = (map['input'] as num?)?.toInt();
+    if (input == null) return null;
+    final cache = map['cache'] is Map<String, Object?>
+        ? map['cache'] as Map<String, Object?>
+        : const <String, Object?>{};
+    return input +
+        ((cache['read'] as num?)?.toInt() ?? 0) +
+        ((cache['write'] as num?)?.toInt() ?? 0);
   }
 
   /// One assistant tool part (the service's `Session.Message.Assistant.Tool`)

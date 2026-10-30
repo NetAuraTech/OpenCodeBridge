@@ -205,6 +205,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _pending = results[2] as List<PermissionRequest>;
         _loading = false;
         _seedLiveMessages();
+        _seedContextUsed();
       });
       _stick = true;
       _followBottomNextFrame();
@@ -533,13 +534,38 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     setState(() => _detail = detail.withUsage(cost: cost, tokens: tokens));
   }
 
-  /// The context the model call used: the call's input tokens.
+  /// The context the model call used: the call's total input — the fresh
+  /// input plus the prompt-cache reads and writes (the `input` alone is
+  /// only the uncached slice, which read the context as nearly empty).
   void _applyStepEnded(Map<String, Object?> data) {
     final tokens = data['tokens'];
     if (tokens is! Map<String, Object?>) return;
     final input = (tokens['input'] as num?)?.toInt();
     if (input == null || !mounted) return;
-    setState(() => _contextUsed = input);
+    final cache = tokens['cache'] is Map<String, Object?>
+        ? tokens['cache'] as Map<String, Object?>
+        : const <String, Object?>{};
+    final used =
+        input +
+        ((cache['read'] as num?)?.toInt() ?? 0) +
+        ((cache['write'] as num?)?.toInt() ?? 0);
+    setState(() => _contextUsed = used);
+  }
+
+  /// Seeds the context gauge from the history: the last assistant message
+  /// that carries its tokens is the session's last model call, so an
+  /// opened session shows the context the session really is in — not only
+  /// the steps streamed since the open. A live `session.step.ended` is
+  /// always newer, so it is never overridden.
+  void _seedContextUsed() {
+    if (_contextUsed != null) return;
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      final used = _messages[i].contextTokens;
+      if (used != null) {
+        _contextUsed = used;
+        return;
+      }
+    }
   }
 
   /// A [TokenUsage] from the service's wire shape (the events' `tokens`
@@ -624,6 +650,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _messages = results[1] as List<SessionMessage>;
         _pending = results[2] as List<PermissionRequest>;
         _seedLiveMessages();
+        _seedContextUsed();
       });
       _followBottomNextFrame();
     } on SessionsClientError {
@@ -762,8 +789,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
 /// The live header: the session's cost in USD and its token usage (endpoint
 /// 5, moved by `session.usage.updated`), plus the model's context window —
-/// the context the last model call used (`session.step.ended`) against the
-/// session's model limit, with the percent used.
+/// the context the session's last model call used (seeded from the
+/// history's last assistant message, moved live by
+/// `session.step.ended`) against the session's model limit, with the
+/// percent used.
 class _CostBar extends StatelessWidget {
   const _CostBar({required this.detail, required this.contextUsed});
 
