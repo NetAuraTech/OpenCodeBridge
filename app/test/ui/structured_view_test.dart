@@ -121,6 +121,7 @@ class _FakeClient extends SessionsClient {
 Future<StreamController<BridgeEvent>> _pump(
   WidgetTester tester, {
   required _FakeClient client,
+  Stream<SessionGap>? gaps,
 }) async {
   final events = StreamController<BridgeEvent>.broadcast();
   await tester.pumpWidget(
@@ -130,6 +131,7 @@ Future<StreamController<BridgeEvent>> _pump(
         title: 'external session',
         client: client,
         events: events.stream,
+        gaps: gaps,
       ),
     ),
   );
@@ -380,7 +382,7 @@ void main() {
           );
         }
         await tester.pump();
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 60));
 
         expect(find.text('Assistant · working…'), findsOneWidget);
         expect(find.text('Hello'), findsOneWidget);
@@ -432,7 +434,7 @@ void main() {
         ),
       );
       await tester.pump();
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 60));
 
       expect(find.text('think\ndone'), findsOneWidget);
     });
@@ -460,13 +462,64 @@ void main() {
           ),
         );
         await tester.pump();
-        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 60));
 
         expect(find.text('Hello'), findsOneWidget);
         expect(find.text('Assistant'), findsOneWidget);
         expect(client.messageCalls, 1);
       },
     );
+
+    testWidgets(
+      'deltas coalesce: buffered until the flush, one rebuild for a burst',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        final events = await _pump(tester, client: client);
+
+        for (final delta in ['Hel', 'lo']) {
+          events.add(
+            _event(
+              'session.text.delta',
+              aggregateID: 'ses_1',
+              data: {
+                'assistantMessageID': 'msg_1',
+                'ordinal': 0,
+                'delta': delta,
+              },
+            ),
+          );
+        }
+        // No flush has run: the burst sits in the buffer, unrendered.
+        await tester.pump();
+        expect(find.text('Hello'), findsNothing);
+        // The flush period elapses: one rebuild applies the whole burst.
+        await tester.pump(const Duration(milliseconds: 60));
+        expect(find.text('Hello'), findsOneWidget);
+      },
+    );
+
+    testWidgets('a durable-seq gap for this session re-fetches the state', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final gaps = StreamController<SessionGap>.broadcast();
+      await _pump(tester, client: client, gaps: gaps.stream);
+      expect(client.messageCalls, 1);
+
+      gaps.add(
+        const SessionGap(aggregateID: 'ses_other', lastSeen: 1, received: 3),
+      );
+      await tester.pump();
+      expect(client.messageCalls, 1); // Another session: ignored.
+
+      gaps.add(
+        const SessionGap(aggregateID: 'ses_1', lastSeen: 1, received: 4),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(client.messageCalls, 2);
+      await gaps.close();
+    });
 
     testWidgets('tool events update the in-flight tool card live', (
       tester,

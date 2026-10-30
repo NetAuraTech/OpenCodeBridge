@@ -79,6 +79,10 @@ abstract class EventSource {
   /// Every event off the stream, decoded, in order.
   Stream<BridgeEvent> get events;
 
+  /// Gaps detected in a session's durable seq (events missed, typically
+  /// across a reconnect), so a listener can catch up on its session.
+  Stream<SessionGap> get gaps;
+
   /// Open the stream and start receiving events. Idempotent.
   Future<void> connect();
 
@@ -128,6 +132,7 @@ class EventsClient implements EventSource {
   Stream<BridgeEvent> get events => _events.stream;
 
   /// Gaps detected in a session's durable seq.
+  @override
   Stream<SessionGap> get gaps => _gaps.stream;
 
   /// Open the SSE stream and start receiving events. Idempotent.

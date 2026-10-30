@@ -172,15 +172,22 @@ class _FakeSessionsClient extends SessionsClient {
 /// A scripted [EventSource] for the tab tests (no real SSE connection).
 class _FakeEventsSource implements EventSource {
   final _controller = StreamController<BridgeEvent>.broadcast();
+  final _gaps = StreamController<SessionGap>.broadcast();
 
   @override
   Stream<BridgeEvent> get events => _controller.stream;
 
   @override
+  Stream<SessionGap> get gaps => _gaps.stream;
+
+  @override
   Future<void> connect() async {}
 
   @override
-  Future<void> disconnect() => _controller.close();
+  Future<void> disconnect() async {
+    await _controller.close();
+    await _gaps.close();
+  }
 }
 
 /// A [TerminalBackend] over a fake terminal service with one running PTY,

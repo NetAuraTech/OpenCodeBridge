@@ -30,6 +30,7 @@ class StructuredSessionScreen extends StatefulWidget {
     required this.title,
     required this.client,
     this.events,
+    this.gaps,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -45,6 +46,11 @@ class StructuredSessionScreen extends StatefulWidget {
   /// initial-state-only rendering (the initial state comes from endpoints
   /// 5, 6, and 8; the live refreshes are then skipped).
   final Stream<BridgeEvent>? events;
+
+  /// Durable-seq gaps for this session's source, when it reports them: a
+  /// gap means events were missed (typically across a reconnect), so the
+  /// view re-fetches its state and the final content is always complete.
+  final Stream<SessionGap>? gaps;
 
   @override
   State<StructuredSessionScreen> createState() =>
@@ -107,6 +113,23 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
   StreamSubscription<BridgeEvent>? _events;
 
+  StreamSubscription<SessionGap>? _gapsSub;
+
+  /// Streamed text deltas waiting for the next coalesced flush, by message
+  /// id (arrival order preserved; the part-boundary newline is folded in).
+  final Map<String, StringBuffer> _pendingDeltas = {};
+
+  /// The pending-delta flush in flight, or `null` between flushes.
+  Timer? _flush;
+
+  /// How long streamed tokens buffer before one coalesced rebuild. A
+  /// per-token rebuild of the whole history starved the event loop during a
+  /// burst — and with it the bridge's relay of the very tokens being shown.
+  static const Duration _flushPeriod = Duration(milliseconds: 48);
+
+  /// True while a turn-boundary re-fetch (normalize) is in flight.
+  bool _normalizing = false;
+
   final TextEditingController _prompt = TextEditingController();
 
   @override
@@ -118,11 +141,17 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     if (stream != null) {
       _events = stream.listen(_onEvent);
     }
+    final gaps = widget.gaps;
+    if (gaps != null) {
+      _gapsSub = gaps.listen(_onGap);
+    }
   }
 
   @override
   void dispose() {
     _events?.cancel();
+    _gapsSub?.cancel();
+    _flush?.cancel();
     _prompt.dispose();
     _scroll.dispose();
     super.dispose();
@@ -159,6 +188,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         widget.client.getPermissions(widget.sessionId),
       ]);
       if (!mounted) return;
+      // The fetched history is authoritative: drop the streamed leftovers.
+      _flush?.cancel();
+      _flush = null;
+      _pendingDeltas.clear();
       setState(() {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
@@ -275,6 +308,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     return event.data['sessionID'] == widget.sessionId;
   }
 
+  /// A durable-seq gap for this session (events were missed, typically
+  /// across a reconnect): re-fetch the service's authoritative state, so a
+  /// missed stretch of the stream never leaves partial content on screen.
+  void _onGap(SessionGap gap) {
+    if (gap.aggregateID == widget.sessionId) _normalize();
+  }
+
   /// The in-flight assistant message id from a `session.*` payload.
   String? _messageId(Map<String, Object?> data) =>
       data['assistantMessageID'] is String
@@ -306,14 +346,18 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
   /// A part (`reasoning:0`, `text:1`, …) starts: from the next delta on, the
   /// streamed content is a new part, so it joins the history with the part
-  /// newline whenever the message already carries content.
+  /// newline whenever the message already carries content (including deltas
+  /// still buffered for the next flush).
   void _applyPartStarted(Map<String, Object?> data) {
     final id = _messageId(data);
     if (id == null || !mounted) return;
     setState(() {
       _ensureLiveMessage(id);
       final text = _messages[_liveMessages[id]!].text;
-      _needsSep[id] = text != null && text.isNotEmpty;
+      final pending = _pendingDeltas[id];
+      _needsSep[id] =
+          (text != null && text.isNotEmpty) ||
+          (pending != null && pending.isNotEmpty);
     });
   }
 
@@ -324,22 +368,52 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _messages = list;
   }
 
-  /// A streamed token: appended to the in-flight message's text, part
-  /// boundary and all (the history flattens reasoning and text parts into
-  /// the same stream, in order).
+  /// A streamed token: buffered with the part-boundary newline, applied to
+  /// the in-flight message at the next coalesced flush (the history
+  /// flattens reasoning and text parts into the same stream, in order).
+  /// Buffering — instead of a per-token rebuild of the whole history — is
+  /// what keeps the event loop free to keep the bridge relay alive while a
+  /// burst arrives.
   void _applyPartDelta(Map<String, Object?> data) {
     final id = _messageId(data);
     final delta = data['delta'] is String ? data['delta'] as String : null;
     if (id == null || delta == null || !mounted) return;
+    _ensureLiveMessage(id);
+    final pending = _pendingDeltas[id] ??= StringBuffer();
+    if (_needsSep.remove(id) == true) pending.write('\n');
+    pending.write(delta);
+    _scheduleFlush();
+  }
+
+  /// Starts the pending-delta flush, if none is already running: the buffer
+  /// collects at most [_flushPeriod] of tokens before one rebuild.
+  void _scheduleFlush() {
+    if (_flush != null) return;
+    _flush = Timer(_flushPeriod, _flushPending);
+  }
+
+  /// Applies every buffered token to its in-flight message in one rebuild.
+  void _flushPending() {
+    _flush = null;
+    if (_pendingDeltas.isEmpty) return;
+    if (!mounted) {
+      _pendingDeltas.clear();
+      return;
+    }
     setState(() {
-      final index = _ensureLiveMessage(id);
-      final message = _messages[index];
-      final text = message.text ?? '';
-      final separator = _needsSep.remove(id) == true ? '\n' : '';
-      _setMessageAt(
-        index,
-        _rebuildMessage(message, text: text + separator + delta),
-      );
+      for (final entry in _pendingDeltas.entries) {
+        final index = _liveMessages[entry.key];
+        if (index == null) continue;
+        final message = _messages[index];
+        _setMessageAt(
+          index,
+          _rebuildMessage(
+            message,
+            text: (message.text ?? '') + entry.value.toString(),
+          ),
+        );
+      }
+      _pendingDeltas.clear();
     });
     _followBottomNextFrame();
   }
@@ -498,6 +572,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// content is replaced by the history, and the detail's context window
   /// follows the session's model. A transient failure keeps the screen.
   Future<void> _normalize() async {
+    if (_normalizing) return; // One re-fetch at a time; it takes the latest.
+    _normalizing = true;
     try {
       final results = await Future.wait<Object?>([
         widget.client.getDetail(widget.sessionId),
@@ -505,6 +581,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         widget.client.getPermissions(widget.sessionId),
       ]);
       if (!mounted) return;
+      // The fetched history is authoritative: drop the streamed leftovers.
+      _flush?.cancel();
+      _flush = null;
+      _pendingDeltas.clear();
       setState(() {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
@@ -517,6 +597,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       // re-fetches.
     } catch (_) {
       // Same: a normalize failure never breaks the view.
+    } finally {
+      _normalizing = false;
     }
   }
 
@@ -612,21 +694,25 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                 ),
                 _CostBar(detail: _detail, contextUsed: _contextUsed),
                 Expanded(
-                  child: ListView(
+                  // Lazy: only the visible messages build and lay out. A
+                  // non-lazy list re-laid out the whole history on every
+                  // streamed flush — the slow frame that starved the event
+                  // loop (and, with it, the relay) during a long session.
+                  child: ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                    children: [
-                      if (_messages.isEmpty)
-                        const _CenteredMessage(text: 'No messages yet.'),
-                      for (final message in _messages)
-                        _MessagePane(
-                          message: message,
-                          inFlight:
-                              _turnActive &&
-                              message.id != null &&
-                              _liveMessages.containsKey(message.id),
-                        ),
-                    ],
+                    itemCount: _messages.isEmpty ? 1 : _messages.length,
+                    itemBuilder: (context, index) {
+                      if (_messages.isEmpty) {
+                        return const _CenteredMessage(text: 'No messages yet.');
+                      }
+                      final message = _messages[index];
+                      final inFlight =
+                          _turnActive &&
+                          message.id != null &&
+                          _liveMessages.containsKey(message.id);
+                      return _MessagePane(message: message, inFlight: inFlight);
+                    },
                   ),
                 ),
                 _PromptBar(

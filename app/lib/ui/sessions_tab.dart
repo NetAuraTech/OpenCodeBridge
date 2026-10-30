@@ -260,6 +260,7 @@ class SessionsTabState extends State<SessionsTab> {
           title: session.title.isNotEmpty ? session.title : session.location,
           client: client,
           events: _events?.events,
+          gaps: _events?.gaps,
         ),
       ),
     );
