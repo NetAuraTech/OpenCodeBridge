@@ -184,6 +184,38 @@ void main() {
       expect(find.text('Cost \$0.0000'), findsOneWidget);
     });
 
+    testWidgets('the header shows the llama.cpp prefill and decode speed '
+        'from llama.speed, and clears it when idle', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final events = await _pump(tester, client: client);
+
+      expect(find.byKey(const ValueKey('structured-speed')), findsNothing);
+
+      events.add(
+        _event('llama.speed', data: const {'prefill': 1200.0, 'decode': null}),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('prefill 1200 tok/s'), findsOneWidget);
+
+      events.add(
+        _event('llama.speed', data: const {'prefill': null, 'decode': 45.5}),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('decode 45.5 tok/s'), findsOneWidget);
+
+      events.add(
+        _event('llama.speed', data: const {'prefill': null, 'decode': null}),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('structured-speed')), findsNothing);
+    });
+
     testWidgets('renders the compaction marker with the summary it wrote', (
       tester,
     ) async {

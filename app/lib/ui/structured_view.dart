@@ -94,6 +94,14 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// prompt).
   int? _contextUsed;
 
+  /// The local llama.cpp server's live prefill throughput (tok/s), from the
+  /// last `llama.speed` bridge event; `null` while idle or decoding.
+  double? _prefill;
+
+  /// The live decode throughput (tok/s); `null` while idle or prefilling. At
+  /// most one of [_prefill] / [_decode] is set at a time.
+  double? _decode;
+
   /// Assistant message id -> its index in [_messages]. Seeded with the loaded
   /// history, so a turn already running when the view opens streams into the
   /// in-flight message the service's context includes (not a duplicate);
@@ -278,6 +286,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// turn boundary (`session.execution.*`) re-fetches the service's
   /// authoritative state.
   void _onEvent(BridgeEvent event) {
+    // Bridge-native, not per-session: the local llama.cpp server's
+    // prefill/decode throughput, shown in the header for whichever session is
+    // open.
+    if (event.type == 'llama.speed') {
+      _applySpeed(event.data);
+      return;
+    }
     if (!_forSession(event)) return;
     switch (event.type) {
       case 'session.execution.started':
@@ -343,6 +358,19 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       return durable.aggregateID == widget.sessionId;
     }
     return event.data['sessionID'] == widget.sessionId;
+  }
+
+  /// A `llama.speed` payload moves the header's prefill/decode throughput.
+  void _applySpeed(Map<String, Object?> data) {
+    final prefill = (data['prefill'] as num?)?.toDouble();
+    final decode = (data['decode'] as num?)?.toDouble();
+    if (prefill == _prefill && decode == _decode) return;
+    if (mounted) {
+      setState(() {
+        _prefill = prefill;
+        _decode = decode;
+      });
+    }
   }
 
   /// A durable-seq gap for this session (events were missed, typically
@@ -828,7 +856,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   onReply: _reply,
                   replyBusyId: _replyBusyId,
                 ),
-                _CostBar(detail: _detail, contextUsed: _contextUsed),
+                _CostBar(
+                  detail: _detail,
+                  contextUsed: _contextUsed,
+                  prefill: _prefill,
+                  decode: _decode,
+                ),
                 Expanded(
                   // Lazy: only the visible messages build and lay out. A
                   // non-lazy list re-laid out the whole history on every
@@ -875,11 +908,22 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 /// `session.step.ended`) against the session's model limit, with the
 /// percent used.
 class _CostBar extends StatelessWidget {
-  const _CostBar({required this.detail, required this.contextUsed});
+  const _CostBar({
+    required this.detail,
+    required this.contextUsed,
+    this.prefill,
+    this.decode,
+  });
 
   final SessionDetail? detail;
 
   final int? contextUsed;
+
+  /// The local llama.cpp server's live prefill/decode throughput (tok/s), or
+  /// `null` while idle. At most one is set at a time.
+  final double? prefill;
+
+  final double? decode;
 
   @override
   Widget build(BuildContext context) {
@@ -891,6 +935,7 @@ class _CostBar extends StatelessWidget {
     final fraction = used != null && limit != null && limit > 0
         ? used / limit
         : null;
+    final speed = _speedText(prefill, decode);
     return Container(
       key: const ValueKey('structured-cost'),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -966,6 +1011,23 @@ class _CostBar extends StatelessWidget {
                   ),
                 ),
               ],
+              if (speed != null) ...[
+                const SizedBox(width: 8),
+                Container(
+                  key: const ValueKey('structured-speed'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(4),
+                    color: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerHighest,
+                  ),
+                  child: Text(speed, style: const TextStyle(fontSize: 12)),
+                ),
+              ],
             ],
           ),
           if (fraction != null)
@@ -982,6 +1044,19 @@ class _CostBar extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// The header's speed chip text, or `null` while idle: the live prefill or
+  /// decode throughput (at most one is set at a time).
+  static String? _speedText(double? prefill, double? decode) {
+    final parts = <String>[];
+    if (prefill != null) {
+      parts.add('prefill ${prefill.toStringAsFixed(0)} tok/s');
+    }
+    if (decode != null) {
+      parts.add('decode ${decode.toStringAsFixed(1)} tok/s');
+    }
+    return parts.isEmpty ? null : parts.join(' · ');
   }
 
   static String _percent(int used, int limit) {

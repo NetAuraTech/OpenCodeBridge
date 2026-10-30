@@ -5,6 +5,7 @@ import '../model/permission.dart';
 import '../model/session.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
+import 'events/llama_speed_feed.dart';
 import 'events/opencode_http_event_service.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
@@ -27,7 +28,13 @@ import 'terminal/window_manager.dart';
 /// `GET /api/projects` fill-in †, #3 `POST /api/sessions/{id}/window`,
 /// #4 `DELETE /api/sessions/{id}`).
 class BridgeServer {
-  BridgeServer._(this._server, this._terminals, this._events, this._windows);
+  BridgeServer._(
+    this._server,
+    this._terminals,
+    this._events,
+    this._windows,
+    this._speed,
+  );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
   /// configuration (spec section 9) can point the ingress at it.
@@ -64,6 +71,11 @@ class BridgeServer {
   /// `opencode_unavailable`.
   final TerminalWindowManager? _windows;
 
+  /// The local llama.cpp speed feed (the app header's prefill/decode tok/s);
+  /// `null` when this machine has no shared opencode service, in which case
+  /// the speed header stays empty.
+  final LlamaSpeedFeed? _speed;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -94,6 +106,7 @@ class BridgeServer {
     TerminalBackend? terminals,
     EventHub? events,
     TerminalWindowManager? windows,
+    LlamaSpeedFeed? speedFeed,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
@@ -106,6 +119,9 @@ class BridgeServer {
           terminals: termBackend,
           events: eventHub,
         );
+    final speed =
+        speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
+    speed?.start();
     server.listen((request) async {
       final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
       if (termBackend != null &&
@@ -123,7 +139,7 @@ class BridgeServer {
         windowManager,
       );
     });
-    return BridgeServer._(server, termBackend, eventHub, windowManager);
+    return BridgeServer._(server, termBackend, eventHub, windowManager, speed);
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -143,6 +159,7 @@ class BridgeServer {
     await _terminals?.close();
     await _events?.close();
     await _windows?.close();
+    await _speed?.close();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -201,6 +218,22 @@ class BridgeServer {
     try {
       final service = await OpencodeHttpEventService.fromHost();
       return EventHub(service: service);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The default llama.cpp speed feed: the local llama.cpp server's
+  /// prefill/decode throughput, re-emitted as `llama.speed` bridge events on
+  /// the unified stream. `null` when this machine has no shared opencode
+  /// service (no [emit] / no descriptor), in which case the app's speed
+  /// header stays empty.
+  static Future<LlamaSpeedFeed?> _defaultSpeedFeed(
+    void Function(String)? emit,
+  ) async {
+    if (emit == null) return null;
+    try {
+      return await LlamaSpeedFeed.fromHost(emit: emit);
     } catch (_) {
       return null;
     }
