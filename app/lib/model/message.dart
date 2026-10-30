@@ -7,11 +7,17 @@
 /// One tool call of an assistant message (spec section 5, endpoint 6).
 class ToolCall {
   const ToolCall({
+    this.id,
     required this.name,
     required this.status,
     this.input,
     this.error,
   });
+
+  /// The tool call id (the service's tool part `id`). The structured view
+  /// tracks the in-flight tool cards off the `session.tool.*` events by this
+  /// id. `null` when the call was composed without one.
+  final String? id;
 
   /// The tool name (the service's tool `name`).
   final String name;
@@ -28,6 +34,7 @@ class ToolCall {
   final String? error;
 
   Map<String, Object?> toJson() => {
+    'id': id,
     'name': name,
     'status': status,
     'input': input,
@@ -37,6 +44,7 @@ class ToolCall {
   factory ToolCall.fromJson(Object? json) {
     final map = json is Map<String, Object?> ? json : const {};
     return ToolCall(
+      id: map['id'] is String ? map['id'] as String : null,
       name: map['name'] as String? ?? '',
       status: map['status'] as String? ?? '',
       input: map['input'],
@@ -47,22 +55,35 @@ class ToolCall {
   @override
   bool operator ==(Object other) =>
       other is ToolCall &&
+      other.id == id &&
       other.name == name &&
       other.status == status &&
       other.input == input &&
       other.error == error;
 
   @override
-  int get hashCode => Object.hash(name, status, input, error);
+  int get hashCode => Object.hash(id, name, status, input, error);
 
   @override
   String toString() =>
-      'ToolCall(name: $name, status: $status, input: $input, error: $error)';
+      'ToolCall(id: $id, name: $name, status: $status, '
+      'input: $input, error: $error)';
 }
 
 /// One message of a session's history (spec section 5, endpoint 6).
 class SessionMessage {
-  const SessionMessage({required this.role, this.text, this.tools = const []});
+  const SessionMessage({
+    this.id,
+    required this.role,
+    this.text,
+    this.tools = const [],
+  });
+
+  /// The service's message id (its `Session.Message` id). The bridge sets it
+  /// from the context; the structured view tracks the in-flight message off
+  /// the `session.*` events by this id. `null` when the message was composed
+  /// without one (a locally-appended user prompt).
+  final String? id;
 
   /// `user` or `assistant`.
   final String role;
@@ -75,6 +96,7 @@ class SessionMessage {
   final List<ToolCall> tools;
 
   Map<String, Object?> toJson() => {
+    'id': id,
     'role': role,
     'text': text,
     'tools': [for (final tool in tools) tool.toJson()],
@@ -84,6 +106,7 @@ class SessionMessage {
     final map = json is Map<String, Object?> ? json : const {};
     final tools = map['tools'];
     return SessionMessage(
+      id: map['id'] is String ? map['id'] as String : null,
       role: map['role'] as String? ?? '',
       text: map['text'] is String ? map['text'] as String : null,
       tools: tools is List
@@ -95,16 +118,17 @@ class SessionMessage {
   @override
   bool operator ==(Object other) =>
       other is SessionMessage &&
+      other.id == id &&
       other.role == role &&
       other.text == text &&
       _toolsEqual(other.tools, tools);
 
   @override
-  int get hashCode => Object.hash(role, text, Object.hashAll(tools));
+  int get hashCode => Object.hash(id, role, text, Object.hashAll(tools));
 
   @override
   String toString() =>
-      'SessionMessage(role: $role, text: $text, tools: $tools)';
+      'SessionMessage(id: $id, role: $role, text: $text, tools: $tools)';
 }
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {

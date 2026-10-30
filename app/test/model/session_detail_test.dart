@@ -67,6 +67,7 @@ void main() {
           cacheWrite: 0,
         ),
         outcome: 'succeeded',
+        contextLimit: 200000,
       );
       expect(detail.toJson(), {
         'id': 'ses_1',
@@ -81,6 +82,7 @@ void main() {
           'cacheWrite': 0,
         },
         'outcome': 'succeeded',
+        'contextLimit': 200000,
       });
     });
 

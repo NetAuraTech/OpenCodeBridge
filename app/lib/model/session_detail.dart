@@ -79,6 +79,7 @@ class SessionDetail {
     required this.cost,
     required this.tokens,
     this.outcome,
+    this.contextLimit,
   });
 
   final String id;
@@ -97,6 +98,11 @@ class SessionDetail {
   /// `interrupted`), or `null` when the service reports none yet.
   final String? outcome;
 
+  /// The session's model's context window, in tokens (the model registry's
+  /// `limit.context`), or `null` when the registry knows no limit for the
+  /// model. Drives the structured view's context bar.
+  final int? contextLimit;
+
   /// This detail with [cost] and [tokens] replaced (the live
   /// `session.usage.updated` refresh keeps the other facts).
   SessionDetail withUsage({required double cost, required TokenUsage tokens}) =>
@@ -107,6 +113,7 @@ class SessionDetail {
         cost: cost,
         tokens: tokens,
         outcome: outcome,
+        contextLimit: contextLimit,
       );
 
   Map<String, Object?> toJson() => {
@@ -116,6 +123,7 @@ class SessionDetail {
     'cost': cost,
     'tokens': tokens.toJson(),
     'outcome': outcome,
+    'contextLimit': contextLimit,
   };
 
   factory SessionDetail.fromJson(Object? json) {
@@ -127,6 +135,7 @@ class SessionDetail {
       cost: (map['cost'] as num?)?.toDouble() ?? 0,
       tokens: TokenUsage.fromJson(map['tokens']),
       outcome: map['outcome'] is String ? map['outcome'] as String : null,
+      contextLimit: (map['contextLimit'] as num?)?.toInt(),
     );
   }
 
@@ -138,13 +147,16 @@ class SessionDetail {
       other.location == location &&
       other.cost == cost &&
       other.tokens == tokens &&
-      other.outcome == outcome;
+      other.outcome == outcome &&
+      other.contextLimit == contextLimit;
 
   @override
-  int get hashCode => Object.hash(id, title, location, cost, tokens, outcome);
+  int get hashCode =>
+      Object.hash(id, title, location, cost, tokens, outcome, contextLimit);
 
   @override
   String toString() =>
       'SessionDetail(id: $id, title: $title, location: $location, '
-      'cost: $cost, tokens: $tokens, outcome: $outcome)';
+      'cost: $cost, tokens: $tokens, outcome: $outcome, '
+      'contextLimit: $contextLimit)';
 }

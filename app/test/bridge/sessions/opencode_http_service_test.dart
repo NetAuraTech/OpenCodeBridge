@@ -60,7 +60,34 @@ void main() {
     'outcome': 'succeeded',
     'location': {'directory': '/one'},
     'time': {'created': 100, 'updated': 200},
+    'model': {'id': 'mod1', 'providerID': 'prov1'},
   };
+
+  // The detail of `ses_2`: the model is unknown to the registry, so the
+  // context limit must fall back to `null`.
+  final detailInfo2 = {
+    'id': 'ses_2',
+    'title': 'two',
+    'cost': 0,
+    'tokens': {
+      'input': 0,
+      'output': 0,
+      'reasoning': 0,
+      'cache': {'read': 0, 'write': 0},
+    },
+    'location': {'directory': '/two'},
+    'model': {'id': 'unknown-model', 'providerID': 'prov2'},
+  };
+
+  // The service's model registry (the `limit.context` context windows).
+  final modelRegistry = [
+    {
+      'id': 'mod1',
+      'modelID': 'mod1',
+      'providerID': 'prov1',
+      'limit': {'context': 123456},
+    },
+  ];
 
   // The service's `Session.Message.Info` context for `ses_1`. The `system`
   // item must be skipped by the client.
@@ -207,6 +234,10 @@ void main() {
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1' && req.method == 'GET') {
         resp.write(jsonEncode({'data': detailInfo}));
+      } else if (path == '/api/session/ses_2' && req.method == 'GET') {
+        resp.write(jsonEncode({'data': detailInfo2}));
+      } else if (path == '/api/model') {
+        resp.write(jsonEncode({'data': modelRegistry}));
       } else if (path.startsWith('/api/session/') && req.method == 'DELETE') {
         resp.statusCode = HttpStatus.noContent;
       } else {
@@ -308,6 +339,23 @@ void main() {
       },
     );
 
+    test(
+      'getDetail resolves the context limit from the model registry',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final detail = await service.getDetail('ses_1');
+        expect(detail.contextLimit, 123456);
+      },
+    );
+
+    test('getDetail carries no context limit for a model the registry does '
+        'not know', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final detail = await service.getDetail('ses_2');
+      expect(detail.id, 'ses_2');
+      expect(detail.contextLimit, isNull);
+    });
+
     test('getDetail of an unknown session is a 404', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       await expectLater(
@@ -330,17 +378,20 @@ void main() {
         expect(messages, hasLength(2));
         expect(
           messages[0],
-          const SessionMessage(role: 'user', text: 'do the thing'),
+          const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
         );
         final assistant = messages[1];
+        expect(assistant.id, 'm2');
         expect(assistant.role, 'assistant');
         expect(assistant.text, 'working\nhmm');
         expect(assistant.tools, hasLength(2));
         // The tool input is a map, so compare fields (deep) not by ==.
+        expect(assistant.tools[0].id, 't1');
         expect(assistant.tools[0].name, 'bash');
         expect(assistant.tools[0].status, 'running');
         expect(assistant.tools[0].input, {'command': 'ls'});
         expect(assistant.tools[0].error, isNull);
+        expect(assistant.tools[1].id, 't2');
         expect(assistant.tools[1].name, 'write');
         expect(assistant.tools[1].status, 'error');
         expect(assistant.tools[1].error, 'denied');

@@ -167,6 +167,9 @@ class OpencodeHttpService implements OpencodeService {
     final map = data is Map<String, Object?> ? data : const <String, Object?>{};
     final title = map['title'] is String ? map['title'] as String : null;
     final outcome = map['outcome'] is String ? map['outcome'] as String : null;
+    final model = map['model'] is Map<String, Object?>
+        ? map['model'] as Map<String, Object?>
+        : null;
     return SessionDetail(
       id: map['id'] as String? ?? '',
       title: title ?? '',
@@ -174,7 +177,70 @@ class OpencodeHttpService implements OpencodeService {
       cost: (map['cost'] as num?)?.toDouble() ?? 0,
       tokens: _tokensFrom(map['tokens']),
       outcome: outcome,
+      contextLimit: await _contextLimitFor(model),
     );
+  }
+
+  /// The model registry's context limits, keyed by model id (and by
+  /// `providerID/modelID` when the registry carries a provider), cached for
+  /// the life of this service: the registry is static for a running service,
+  /// and the detail is the only consumer.
+  final Map<String, int> _contextLimits = {};
+
+  /// True once the registry fetch has run (a failed fetch leaves it false so
+  /// the next detail retries; the registry is optional, never fatal).
+  var _limitsLoaded = false;
+
+  Future<void> _ensureModelLimits() async {
+    if (_limitsLoaded) return;
+    try {
+      final body = await _get(_base.replace(path: '/api/model'));
+      final decoded = jsonDecode(body);
+      final data = decoded is Map<String, Object?> ? decoded['data'] : null;
+      final list = data is List
+          ? data
+          : decoded is List
+          ? decoded
+          : const <Object?>[];
+      for (final item in list) {
+        if (item is! Map<String, Object?>) continue;
+        final limit = _nestedInt(item, 'limit', 'context');
+        if (limit <= 0) continue;
+        final id = item['modelID'] is String
+            ? item['modelID'] as String
+            : item['id'] is String
+            ? item['id'] as String
+            : null;
+        if (id == null) continue;
+        _contextLimits.putIfAbsent(id, () => limit);
+        final provider = item['providerID'] is String
+            ? item['providerID'] as String
+            : null;
+        if (provider != null) {
+          _contextLimits.putIfAbsent('$provider/$id', () => limit);
+        }
+      }
+      _limitsLoaded = true;
+    } catch (_) {
+      // The registry is optional: the detail just carries no limit.
+    }
+  }
+
+  /// The session's model's context window in tokens (the registry's
+  /// `limit.context` for its `model.id`, preferring the `model.providerID`
+  ///-keyed entry when the registry carries providers), or `null`.
+  Future<int?> _contextLimitFor(Map<String, Object?>? model) async {
+    final id = model?['id'] is String ? model!['id'] as String : null;
+    final provider = model?['providerID'] is String
+        ? model!['providerID'] as String
+        : null;
+    if (id == null) return null;
+    await _ensureModelLimits();
+    if (provider != null) {
+      final keyed = _contextLimits['$provider/$id'];
+      if (keyed != null) return keyed;
+    }
+    return _contextLimits[id];
   }
 
   /// Endpoint 6 (spec §5): the session's history as structured-view messages.
@@ -274,9 +340,10 @@ class OpencodeHttpService implements OpencodeService {
   /// structured view does not render.
   static SessionMessage? _messageFrom(Map<String, Object?> item) {
     final type = item['type'] as String?;
+    final id = item['id'] is String ? item['id'] as String : null;
     if (type == 'user') {
       final text = item['text'] is String ? item['text'] as String : null;
-      return SessionMessage(role: 'user', text: text);
+      return SessionMessage(id: id, role: 'user', text: text);
     }
     if (type != 'assistant') return null;
     final content = item['content'];
@@ -295,6 +362,7 @@ class OpencodeHttpService implements OpencodeService {
       }
     }
     return SessionMessage(
+      id: id,
       role: 'assistant',
       text: texts.isEmpty ? null : texts.join('\n'),
       tools: tools,
@@ -317,6 +385,7 @@ class OpencodeHttpService implements OpencodeService {
       }
     }
     return ToolCall(
+      id: part['id'] is String ? part['id'] as String : null,
       name: part['name'] as String? ?? '',
       status: status,
       input: state['input'],

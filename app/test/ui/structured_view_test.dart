@@ -24,19 +24,14 @@ const _detail0 = SessionDetail(
   tokens: _zero,
   outcome: null,
 );
-const _detail1 = SessionDetail(
+const _detailCtx = SessionDetail(
   id: 'ses_1',
   title: 'external',
   location: '/x',
-  cost: 0.0123,
-  tokens: TokenUsage(
-    input: 10,
-    output: 20,
-    reasoning: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-  ),
+  cost: 0,
+  tokens: _zero,
   outcome: null,
+  contextLimit: 100,
 );
 
 /// A scripted [SessionsClient] for the structured view tests.
@@ -205,6 +200,8 @@ void main() {
         find.byKey(const ValueKey('structured-prompt-input')),
       );
       expect(field.controller?.text, isEmpty);
+      expect(find.text('You'), findsOneWidget);
+      expect(find.text('keep going'), findsOneWidget);
     });
 
     testWidgets('a prompt failure keeps the text and reports it', (
@@ -298,17 +295,40 @@ void main() {
       },
     );
 
-    testWidgets('session.usage.updated refreshes the cost bar', (tester) async {
-      final client = _FakeClient(details: const [_detail0, _detail1]);
+    testWidgets('session.usage.updated moves the cost bar from the payload, '
+        'without a re-fetch', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
       final events = await _pump(tester, client: client);
 
       expect(find.text('Cost \$0.0000'), findsOneWidget);
 
-      events.add(_event('session.usage.updated', aggregateID: 'ses_1'));
+      events.add(
+        _event(
+          'session.usage.updated',
+          aggregateID: 'ses_1',
+          data: const {
+            'sessionID': 'ses_1',
+            'cost': 0.0123,
+            'tokens': {
+              'input': 10,
+              'output': 20,
+              'reasoning': 0,
+              'cache': {'read': 0, 'write': 0},
+            },
+          },
+        ),
+      );
       await tester.pump();
       await tester.pump();
 
       expect(find.text('Cost \$0.0123'), findsOneWidget);
+      expect(
+        find.text(
+          '10 in · 20 out · 0 reasoning · 0 cache read · 0 cache write',
+        ),
+        findsOneWidget,
+      );
+      expect(client.detailCalls, 1);
     });
 
     testWidgets('session.execution.succeeded refreshes the history', (
@@ -332,8 +352,198 @@ void main() {
       expect(find.text('done'), findsOneWidget);
     });
 
+    testWidgets(
+      'text deltas grow the in-flight message live, without a re-fetch',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        final events = await _pump(tester, client: client);
+
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        events.add(
+          _event(
+            'session.text.started',
+            aggregateID: 'ses_1',
+            data: const {'assistantMessageID': 'msg_1'},
+          ),
+        );
+        for (final delta in ['Hel', 'lo']) {
+          events.add(
+            _event(
+              'session.text.delta',
+              aggregateID: 'ses_1',
+              data: {
+                'assistantMessageID': 'msg_1',
+                'ordinal': 0,
+                'delta': delta,
+              },
+            ),
+          );
+        }
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('Assistant · working…'), findsOneWidget);
+        expect(find.text('Hello'), findsOneWidget);
+        expect(client.messageCalls, 1);
+        expect(client.detailCalls, 1);
+      },
+    );
+
+    testWidgets('reasoning and text parts join with the history newline', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final events = await _pump(tester, client: client);
+
+      events.add(
+        _event(
+          'session.reasoning.started',
+          aggregateID: 'ses_1',
+          data: const {'assistantMessageID': 'msg_1'},
+        ),
+      );
+      events.add(
+        _event(
+          'session.reasoning.delta',
+          aggregateID: 'ses_1',
+          data: const {
+            'assistantMessageID': 'msg_1',
+            'ordinal': 0,
+            'delta': 'think',
+          },
+        ),
+      );
+      events.add(
+        _event(
+          'session.text.started',
+          aggregateID: 'ses_1',
+          data: const {'assistantMessageID': 'msg_1'},
+        ),
+      );
+      events.add(
+        _event(
+          'session.text.delta',
+          aggregateID: 'ses_1',
+          data: const {
+            'assistantMessageID': 'msg_1',
+            'ordinal': 0,
+            'delta': 'done',
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('think\ndone'), findsOneWidget);
+    });
+
+    testWidgets(
+      'a turn running when the view opens streams into the loaded message',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(id: 'msg_1', role: 'assistant', text: 'Hel'),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        events.add(
+          _event(
+            'session.text.delta',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'ordinal': 0,
+              'delta': 'lo',
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('Hello'), findsOneWidget);
+        expect(find.text('Assistant'), findsOneWidget);
+        expect(client.messageCalls, 1);
+      },
+    );
+
+    testWidgets('tool events update the in-flight tool card live', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final events = await _pump(tester, client: client);
+
+      events.add(
+        _event(
+          'session.tool.input.started',
+          aggregateID: 'ses_1',
+          data: const {
+            'assistantMessageID': 'msg_1',
+            'id': 't1',
+            'name': 'shell',
+          },
+        ),
+      );
+      events.add(
+        _event(
+          'session.tool.input.ended',
+          aggregateID: 'ses_1',
+          data: const {
+            'assistantMessageID': 'msg_1',
+            'id': 't1',
+            'text': '{"command":"ls"}',
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('shell · running'), findsOneWidget);
+      expect(find.text('{"command":"ls"}'), findsOneWidget);
+
+      events.add(
+        _event(
+          'session.tool.success',
+          aggregateID: 'ses_1',
+          data: const {'assistantMessageID': 'msg_1', 'id': 't1'},
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('shell · completed'), findsOneWidget);
+      expect(client.messageCalls, 1);
+    });
+
+    testWidgets(
+      'step.ended records the context used against the detail limit',
+      (tester) async {
+        final client = _FakeClient(details: const [_detailCtx]);
+        final events = await _pump(tester, client: client);
+
+        expect(find.byKey(const ValueKey('structured-context')), findsNothing);
+
+        events.add(
+          _event(
+            'session.step.ended',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'tokens': {'input': 30},
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('context 30 / 100 · 30%'), findsOneWidget);
+        expect(find.byType(LinearProgressIndicator), findsOneWidget);
+      },
+    );
+
     testWidgets('events of another session are ignored', (tester) async {
-      final client = _FakeClient(details: const [_detail0, _detail1]);
+      final client = _FakeClient(details: const [_detail0]);
       final events = await _pump(tester, client: client);
 
       events.add(_event('session.usage.updated', aggregateID: 'ses_other'));
@@ -349,16 +559,16 @@ void main() {
     testWidgets(
       'an event without a durable is matched by the payload sessionID',
       (tester) async {
-        final client = _FakeClient(details: const [_detail0, _detail1]);
+        final client = _FakeClient(details: const [_detail0]);
         final events = await _pump(tester, client: client);
 
         events.add(
-          _event('session.usage.updated', data: const {'sessionID': 'ses_1'}),
+          _event('permission.asked', data: const {'sessionID': 'ses_1'}),
         );
         await tester.pump();
         await tester.pump();
 
-        expect(client.detailCalls, 2);
+        expect(client.permissionCalls, 2);
       },
     );
   });

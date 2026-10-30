@@ -5,17 +5,20 @@ void main() {
   group('ToolCall round-trip', () {
     test('serializes all fields and deserializes back', () {
       const tc = ToolCall(
+        id: 'call_1',
         name: 'bash',
         status: 'running',
         input: {'command': 'ls -la'},
       );
       expect(tc.toJson(), {
+        'id': 'call_1',
         'name': 'bash',
         'status': 'running',
         'input': {'command': 'ls -la'},
         'error': null,
       });
       final back = ToolCall.fromJson(tc.toJson());
+      expect(back.id, 'call_1');
       expect(back.name, 'bash');
       expect(back.status, 'running');
       expect(back.input, {'command': 'ls -la'});
@@ -25,6 +28,7 @@ void main() {
     test('input and error are optional on the wire', () {
       const tc = ToolCall(name: 'read', status: 'completed');
       expect(tc.toJson(), {
+        'id': null,
         'name': 'read',
         'status': 'completed',
         'input': null,
@@ -48,6 +52,7 @@ void main() {
   group('SessionMessage round-trip', () {
     test('assistant message with tools serializes and deserializes', () {
       const msg = SessionMessage(
+        id: 'msg_1',
         role: 'assistant',
         text: 'Listing files.',
         tools: [
@@ -55,10 +60,12 @@ void main() {
         ],
       );
       expect(msg.toJson(), {
+        'id': 'msg_1',
         'role': 'assistant',
         'text': 'Listing files.',
         'tools': [
           {
+            'id': null,
             'name': 'bash',
             'status': 'running',
             'input': {'command': 'ls'},
@@ -67,6 +74,7 @@ void main() {
         ],
       });
       final back = SessionMessage.fromJson(msg.toJson());
+      expect(back.id, 'msg_1');
       expect(back.role, 'assistant');
       expect(back.text, 'Listing files.');
       expect(back.tools, hasLength(1));
@@ -77,6 +85,7 @@ void main() {
     test('a user message without tools serializes an empty tools list', () {
       const msg = SessionMessage(role: 'user', text: 'Hello');
       expect(msg.toJson(), {
+        'id': null,
         'role': 'user',
         'text': 'Hello',
         'tools': <Object?>[],
@@ -110,7 +119,7 @@ void main() {
   test('toString identifies the model', () {
     expect(
       SessionMessage(role: 'user').toString(),
-      'SessionMessage(role: user, text: null, tools: [])',
+      'SessionMessage(id: null, role: user, text: null, tools: [])',
     );
   });
 }
