@@ -55,6 +55,7 @@ void main() {
         id: 'msg_1',
         role: 'assistant',
         text: 'Listing files.',
+        reasoning: 'which files?',
         tools: [
           ToolCall(name: 'bash', status: 'running', input: {'command': 'ls'}),
         ],
@@ -63,6 +64,7 @@ void main() {
         'id': 'msg_1',
         'role': 'assistant',
         'text': 'Listing files.',
+        'reasoning': 'which files?',
         'tools': [
           {
             'id': null,
@@ -77,6 +79,7 @@ void main() {
       expect(back.id, 'msg_1');
       expect(back.role, 'assistant');
       expect(back.text, 'Listing files.');
+      expect(back.reasoning, 'which files?');
       expect(back.tools, hasLength(1));
       expect(back.tools.single.name, 'bash');
       expect(back.tools.single.status, 'running');
@@ -88,6 +91,7 @@ void main() {
         'id': null,
         'role': 'user',
         'text': 'Hello',
+        'reasoning': null,
         'tools': <Object?>[],
       });
     });
@@ -112,6 +116,7 @@ void main() {
     test('missing optional message fields fall back to null/empty', () {
       final msg = SessionMessage.fromJson({'role': 'user'});
       expect(msg.text, isNull);
+      expect(msg.reasoning, isNull);
       expect(msg.tools, isEmpty);
     });
   });
@@ -119,7 +124,8 @@ void main() {
   test('toString identifies the model', () {
     expect(
       SessionMessage(role: 'user').toString(),
-      'SessionMessage(id: null, role: user, text: null, tools: [])',
+      'SessionMessage(id: null, role: user, text: null, '
+      'reasoning: null, tools: [])',
     );
   });
 }

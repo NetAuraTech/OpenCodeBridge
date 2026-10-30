@@ -383,7 +383,8 @@ void main() {
         final assistant = messages[1];
         expect(assistant.id, 'm2');
         expect(assistant.role, 'assistant');
-        expect(assistant.text, 'working\nhmm');
+        expect(assistant.text, 'working');
+        expect(assistant.reasoning, 'hmm');
         expect(assistant.tools, hasLength(2));
         // The tool input is a map, so compare fields (deep) not by ==.
         expect(assistant.tools[0].id, 't1');

@@ -391,7 +391,7 @@ void main() {
       },
     );
 
-    testWidgets('reasoning and text parts join with the history newline', (
+    testWidgets('reasoning and text parts stream into separate fields', (
       tester,
     ) async {
       final client = _FakeClient(details: const [_detail0]);
@@ -436,7 +436,27 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 60));
 
-      expect(find.text('think\ndone'), findsOneWidget);
+      expect(find.text('think'), findsOneWidget);
+      expect(find.text('done'), findsOneWidget);
+      expect(
+        find.text('think\ndone'),
+        findsNothing,
+        reason: 'reasoning and text never join into one block',
+      );
+
+      // The reasoning block is styled (gray) and indented to the left;
+      // the text block is not.
+      final reasoningText = tester.widget<Text>(find.text('think'));
+      expect(reasoningText.style?.color, isNotNull);
+      final paddings = tester.widgetList<Padding>(
+        find.ancestor(of: find.text('think'), matching: find.byType(Padding)),
+      );
+      expect(
+        paddings.map((p) => p.padding),
+        contains(const EdgeInsets.only(top: 2, left: 16)),
+      );
+      final textBlock = tester.widget<Text>(find.text('done'));
+      expect(textBlock.style, isNull);
     });
 
     testWidgets(

@@ -76,6 +76,7 @@ class SessionMessage {
     this.id,
     required this.role,
     this.text,
+    this.reasoning,
     this.tools = const [],
   });
 
@@ -91,6 +92,11 @@ class SessionMessage {
   /// The message's text; `null` when the message carries only tools.
   final String? text;
 
+  /// The assistant message's reasoning (thinking) text, when the model
+  /// emits one; `null` otherwise. Kept out of [text] so the structured view
+  /// can render it distinctly.
+  final String? reasoning;
+
   /// The assistant message's tool calls (in flight or finished); empty for
   /// user messages.
   final List<ToolCall> tools;
@@ -99,6 +105,7 @@ class SessionMessage {
     'id': id,
     'role': role,
     'text': text,
+    'reasoning': reasoning,
     'tools': [for (final tool in tools) tool.toJson()],
   };
 
@@ -109,6 +116,7 @@ class SessionMessage {
       id: map['id'] is String ? map['id'] as String : null,
       role: map['role'] as String? ?? '',
       text: map['text'] is String ? map['text'] as String : null,
+      reasoning: map['reasoning'] is String ? map['reasoning'] as String : null,
       tools: tools is List
           ? [for (final item in tools) ToolCall.fromJson(item)]
           : const [],
@@ -121,14 +129,17 @@ class SessionMessage {
       other.id == id &&
       other.role == role &&
       other.text == text &&
+      other.reasoning == reasoning &&
       _toolsEqual(other.tools, tools);
 
   @override
-  int get hashCode => Object.hash(id, role, text, Object.hashAll(tools));
+  int get hashCode =>
+      Object.hash(id, role, text, reasoning, Object.hashAll(tools));
 
   @override
   String toString() =>
-      'SessionMessage(id: $id, role: $role, text: $text, tools: $tools)';
+      'SessionMessage(id: $id, role: $role, '
+      'text: $text, reasoning: $reasoning, tools: $tools)';
 }
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {

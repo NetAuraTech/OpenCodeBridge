@@ -348,14 +348,17 @@ class OpencodeHttpService implements OpencodeService {
     if (type != 'assistant') return null;
     final content = item['content'];
     final texts = <String>[];
+    final reasonings = <String>[];
     final tools = <ToolCall>[];
     if (content is List) {
       for (final part in content) {
         if (part is! Map<String, Object?>) continue;
         final partType = part['type'] as String?;
-        if (partType == 'text' || partType == 'reasoning') {
-          final t = part['text'] is String ? part['text'] as String : '';
+        final t = part['text'] is String ? part['text'] as String : '';
+        if (partType == 'text') {
           if (t.isNotEmpty) texts.add(t);
+        } else if (partType == 'reasoning') {
+          if (t.isNotEmpty) reasonings.add(t);
         } else if (partType == 'tool') {
           tools.add(_toolCallFrom(part));
         }
@@ -365,6 +368,7 @@ class OpencodeHttpService implements OpencodeService {
       id: id,
       role: 'assistant',
       text: texts.isEmpty ? null : texts.join('\n'),
+      reasoning: reasonings.isEmpty ? null : reasonings.join('\n'),
       tools: tools,
     );
   }

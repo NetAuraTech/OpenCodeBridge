@@ -100,10 +100,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// In-flight tool call id -> the id of the message its card lives in.
   final Map<String, String> _liveToolsOf = {};
 
-  /// In-flight message id -> whether the next streamed part must be joined
-  /// with the newline that separates the parts of the history (the same
-  /// join the service's context history uses between its parts).
+  /// In-flight message id -> whether the next streamed text part must be
+  /// joined with the newline that separates the parts of the history (the
+  /// same join the service's context history uses between its parts).
   final Map<String, bool> _needsSep = {};
+
+  /// The same, for streamed reasoning parts.
+  final Map<String, bool> _needsSepReasoning = {};
 
   /// Follow the streaming content to the bottom, until the user scrolls up
   /// (re-engage by scrolling back to the bottom).
@@ -118,6 +121,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// Streamed text deltas waiting for the next coalesced flush, by message
   /// id (arrival order preserved; the part-boundary newline is folded in).
   final Map<String, StringBuffer> _pendingDeltas = {};
+
+  /// The same, for streamed reasoning deltas.
+  final Map<String, StringBuffer> _pendingReasoning = {};
 
   /// The pending-delta flush in flight, or `null` between flushes.
   Timer? _flush;
@@ -192,6 +198,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _flush?.cancel();
       _flush = null;
       _pendingDeltas.clear();
+      _pendingReasoning.clear();
       setState(() {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
@@ -227,6 +234,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _liveTools.clear();
     _liveToolsOf.clear();
     _needsSep.clear();
+    _needsSepReasoning.clear();
     for (var i = 0; i < _messages.length; i++) {
       final message = _messages[i];
       final id = message.id;
@@ -269,12 +277,16 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _applyStepEnded(event.data);
         break;
       case 'session.text.started':
+        _applyPartStarted(event.data, reasoning: false);
+        break;
       case 'session.reasoning.started':
-        _applyPartStarted(event.data);
+        _applyPartStarted(event.data, reasoning: true);
         break;
       case 'session.text.delta':
+        _applyPartDelta(event.data, reasoning: false);
+        break;
       case 'session.reasoning.delta':
-        _applyPartDelta(event.data);
+        _applyPartDelta(event.data, reasoning: true);
         break;
       case 'session.tool.input.started':
         _applyToolInputStarted(event.data);
@@ -336,27 +348,31 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   SessionMessage _rebuildMessage(
     SessionMessage message, {
     String? text,
+    String? reasoning,
     List<ToolCall>? tools,
   }) => SessionMessage(
     id: message.id,
     role: message.role,
     text: text ?? message.text,
+    reasoning: reasoning ?? message.reasoning,
     tools: tools ?? message.tools,
   );
 
   /// A part (`reasoning:0`, `text:1`, …) starts: from the next delta on, the
   /// streamed content is a new part, so it joins the history with the part
-  /// newline whenever the message already carries content (including deltas
-  /// still buffered for the next flush).
-  void _applyPartStarted(Map<String, Object?> data) {
+  /// newline whenever the message already carries content of the same kind
+  /// (including deltas still buffered for the next flush). Reasoning and
+  /// text are separate fields, so they never join each other.
+  void _applyPartStarted(Map<String, Object?> data, {required bool reasoning}) {
     final id = _messageId(data);
     if (id == null || !mounted) return;
     setState(() {
       _ensureLiveMessage(id);
-      final text = _messages[_liveMessages[id]!].text;
-      final pending = _pendingDeltas[id];
-      _needsSep[id] =
-          (text != null && text.isNotEmpty) ||
+      final message = _messages[_liveMessages[id]!];
+      final stored = reasoning ? message.reasoning : message.text;
+      final pending = (reasoning ? _pendingReasoning : _pendingDeltas)[id];
+      (reasoning ? _needsSepReasoning : _needsSep)[id] =
+          (stored != null && stored.isNotEmpty) ||
           (pending != null && pending.isNotEmpty);
     });
   }
@@ -369,18 +385,21 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   }
 
   /// A streamed token: buffered with the part-boundary newline, applied to
-  /// the in-flight message at the next coalesced flush (the history
-  /// flattens reasoning and text parts into the same stream, in order).
-  /// Buffering — instead of a per-token rebuild of the whole history — is
-  /// what keeps the event loop free to keep the bridge relay alive while a
-  /// burst arrives.
-  void _applyPartDelta(Map<String, Object?> data) {
+  /// the in-flight message at the next coalesced flush (reasoning deltas
+  /// buffer toward [SessionMessage.reasoning], text deltas toward
+  /// [SessionMessage.text]). Buffering — instead of a per-token rebuild of
+  /// the whole history — is what keeps the event loop free to keep the
+  /// bridge relay alive while a burst arrives.
+  void _applyPartDelta(Map<String, Object?> data, {required bool reasoning}) {
     final id = _messageId(data);
     final delta = data['delta'] is String ? data['delta'] as String : null;
     if (id == null || delta == null || !mounted) return;
     _ensureLiveMessage(id);
-    final pending = _pendingDeltas[id] ??= StringBuffer();
-    if (_needsSep.remove(id) == true) pending.write('\n');
+    final pending = (reasoning ? _pendingReasoning : _pendingDeltas)[id] ??=
+        StringBuffer();
+    if ((reasoning ? _needsSepReasoning : _needsSep).remove(id) == true) {
+      pending.write('\n');
+    }
     pending.write(delta);
     _scheduleFlush();
   }
@@ -395,9 +414,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// Applies every buffered token to its in-flight message in one rebuild.
   void _flushPending() {
     _flush = null;
-    if (_pendingDeltas.isEmpty) return;
+    if (_pendingDeltas.isEmpty && _pendingReasoning.isEmpty) return;
     if (!mounted) {
       _pendingDeltas.clear();
+      _pendingReasoning.clear();
       return;
     }
     setState(() {
@@ -413,7 +433,20 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           ),
         );
       }
+      for (final entry in _pendingReasoning.entries) {
+        final index = _liveMessages[entry.key];
+        if (index == null) continue;
+        final message = _messages[index];
+        _setMessageAt(
+          index,
+          _rebuildMessage(
+            message,
+            reasoning: (message.reasoning ?? '') + entry.value.toString(),
+          ),
+        );
+      }
       _pendingDeltas.clear();
+      _pendingReasoning.clear();
     });
     _followBottomNextFrame();
   }
@@ -585,6 +618,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _flush?.cancel();
       _flush = null;
       _pendingDeltas.clear();
+      _pendingReasoning.clear();
       setState(() {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
@@ -847,8 +881,8 @@ class _CostBar extends StatelessWidget {
   }
 }
 
-/// One message of the history (endpoint 6): the text, then the assistant's
-/// tool calls (in flight or finished).
+/// One message of the history (endpoint 6): the reasoning (thinking) text,
+/// then the text, then the assistant's tool calls (in flight or finished).
 class _MessagePane extends StatelessWidget {
   const _MessagePane({required this.message, required this.inFlight});
 
@@ -879,6 +913,14 @@ class _MessagePane extends StatelessWidget {
               color: isUser ? scheme.primary : scheme.outline,
             ),
           ),
+          if (message.reasoning != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, left: 16),
+              child: Text(
+                message.reasoning!,
+                style: TextStyle(color: scheme.outline),
+              ),
+            ),
           if (message.text != null)
             Padding(
               padding: const EdgeInsets.only(top: 2),
