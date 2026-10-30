@@ -205,6 +205,10 @@ void main() {
       // are separate text nodes.
       expect(find.text('Objective'), findsOneWidget);
       expect(find.text('the compressed context'), findsOneWidget);
+      // The heading carries the TUI's heading color (light palette), like
+      // the terminal.
+      final heading = tester.widget<Text>(find.text('Objective'));
+      expect(heading.textSpan?.style?.color, const Color(0xFFD68C27));
     });
 
     testWidgets('session.compaction.delta streams the summary live, and '

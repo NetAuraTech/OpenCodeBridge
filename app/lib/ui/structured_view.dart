@@ -1028,6 +1028,7 @@ class _MessagePane extends StatelessWidget {
               child: _Markdown(
                 data: message.reasoning!,
                 base: TextStyle(color: scheme.outline),
+                dim: true,
               ),
             ),
           if (message.text != null)
@@ -1042,41 +1043,130 @@ class _MessagePane extends StatelessWidget {
   }
 }
 
+/// The markdown colors of the opencode TUI theme (the `markdown` section of
+/// its `opencode` theme document, resolved against its light and dark hue
+/// palettes): this view renders the same colors as the terminal.
+class _TuiMarkdownColors {
+  const _TuiMarkdownColors({
+    required this.heading,
+    required this.strong,
+    required this.em,
+    required this.code,
+    required this.link,
+    required this.listBullet,
+    required this.blockQuote,
+  });
+
+  static const _light = _TuiMarkdownColors(
+    heading: Color(0xFFD68C27),
+    strong: Color(0xFFD68C27),
+    em: Color(0xFFB0851F),
+    code: Color(0xFF3D9A57),
+    link: Color(0xFF3B7DD8),
+    listBullet: Color(0xFF3B7DD8),
+    blockQuote: Color(0xFFB0851F),
+  );
+
+  static const _dark = _TuiMarkdownColors(
+    heading: Color(0xFF9D7CD8),
+    strong: Color(0xFFF5A742),
+    em: Color(0xFFE5C07B),
+    code: Color(0xFF7FD88F),
+    link: Color(0xFFFAB283),
+    listBullet: Color(0xFFFAB283),
+    blockQuote: Color(0xFFE5C07B),
+  );
+
+  final Color heading;
+  final Color strong;
+  final Color em;
+  final Color code;
+  final Color link;
+  final Color listBullet;
+  final Color blockQuote;
+
+  static _TuiMarkdownColors resolve(Brightness brightness) =>
+      brightness == Brightness.dark ? _dark : _light;
+}
+
 /// Markdown text: the message bodies and the compaction summary are markdown
 /// (headings, bold, lists, code) — the service stores them as written, the
-/// TUI renders them as such, and so does this view. With no [base] the
-/// theme's own text styles apply (regular message text); with a [base]
-/// every style derives from it (the gray panes: the thinking text and the
-/// compaction summary).
+/// TUI renders them as such, and so does this view, in the TUI's own colors
+/// ([_TuiMarkdownColors]). With no [base] the theme's text styles apply
+/// (regular message text); a [base] carries the size of the small panes or
+/// the flat gray of the dimmed one (the thinking text, like the terminal's).
 class _Markdown extends StatelessWidget {
-  const _Markdown({required this.data, this.base});
+  const _Markdown({required this.data, this.base, this.dim = false});
 
   final String data;
 
-  /// The base style every markdown style derives from, or `null` to use the
-  /// theme's styles as-is.
+  /// The base style every markdown style derives from: the font size of the
+  /// small panes, the gray of the dimmed pane.
   final TextStyle? base;
+
+  /// True for the thinking text: flat gray, no palette (the terminal shows
+  /// the thinking in its muted style too).
+  final bool dim;
 
   @override
   Widget build(BuildContext context) {
-    final b = base;
-    if (b == null) return MarkdownBody(data: data);
+    final palette = _TuiMarkdownColors.resolve(Theme.of(context).brightness);
+    final b = base ?? const TextStyle();
     final size = b.fontSize ?? 14;
+    TextStyle style({
+      Color? color,
+      double? fontSize,
+      FontWeight? fontWeight,
+      FontStyle? fontStyle,
+      String? fontFamily,
+    }) {
+      final style = b.copyWith(
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+        fontStyle: fontStyle,
+        fontFamily: fontFamily,
+      );
+      return color == null
+          ? style
+          : style.copyWith(color: dim ? b.color : color);
+    }
+
     return MarkdownBody(
       data: data,
       styleSheet: MarkdownStyleSheet(
         p: b,
-        h1: b.copyWith(fontSize: size * 1.3, fontWeight: FontWeight.w700),
-        h2: b.copyWith(fontSize: size * 1.15, fontWeight: FontWeight.w700),
-        h3: b.copyWith(fontWeight: FontWeight.w600),
-        h4: b.copyWith(fontWeight: FontWeight.w600),
-        h5: b.copyWith(fontWeight: FontWeight.w600),
-        h6: b.copyWith(fontWeight: FontWeight.w600),
-        em: b.copyWith(fontStyle: FontStyle.italic),
-        strong: b.copyWith(fontWeight: FontWeight.bold),
-        code: b.copyWith(fontFamily: 'monospace'),
-        blockquote: b,
-        listBullet: b,
+        h1: style(
+          fontSize: size * 1.3,
+          fontWeight: FontWeight.w700,
+          color: palette.heading,
+        ),
+        h2: style(
+          fontSize: size * 1.15,
+          fontWeight: FontWeight.w700,
+          color: palette.heading,
+        ),
+        h3: style(fontWeight: FontWeight.w600, color: palette.heading),
+        h4: style(fontWeight: FontWeight.w600, color: palette.heading),
+        h5: style(fontWeight: FontWeight.w600, color: palette.heading),
+        h6: style(fontWeight: FontWeight.w600, color: palette.heading),
+        em: style(fontStyle: FontStyle.italic, color: palette.em),
+        strong: style(fontWeight: FontWeight.bold, color: palette.strong),
+        code: style(
+          fontFamily: 'monospace',
+          fontSize: size * 0.85,
+          color: palette.code,
+        ),
+        a: style(
+          color: palette.link,
+        ).copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
+        listBullet: style(color: palette.listBullet),
+        blockquote: style(color: palette.blockQuote),
+        codeblockDecoration: BoxDecoration(
+          color: dim
+              ? null
+              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(4),
+        ),
       ),
     );
   }
@@ -1138,7 +1228,7 @@ class _CompactionPane extends StatelessWidget {
               padding: const EdgeInsets.only(top: 8),
               child: _Markdown(
                 data: message.text!,
-                base: TextStyle(fontSize: 12, color: scheme.outline),
+                base: const TextStyle(fontSize: 12),
               ),
             ),
         ],
