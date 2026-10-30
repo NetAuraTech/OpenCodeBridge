@@ -19,6 +19,11 @@ abstract class BridgeEventType {
 
   /// A container exited abnormally (non-zero exit). (Wired as Docker lands.)
   static const String dockerContainerCrashed = 'docker.container.crashed';
+
+  /// The local llama.cpp server's live throughput, from its `/stream` SSE
+  /// (the bridge's [LlamaSpeedFeed]). `data` carries `prefill` and `decode`
+  /// (each a tok/s number or `null`); at most one is set at a time.
+  static const String llamaSpeed = 'llama.speed';
 }
 
 /// Build the wire payload for a bridge-native event: the same `data:` envelope

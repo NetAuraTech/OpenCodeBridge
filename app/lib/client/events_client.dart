@@ -71,6 +71,25 @@ class EventsClientError implements Exception {
   String toString() => 'EventsClientError($statusCode: $message)';
 }
 
+/// A live source of the bridge's unified event stream (spec §8,
+/// endpoint 14). The owner drives [connect] and [disconnect]; the UI listens
+/// to [events]. [EventsClient] is the production implementation; tests
+/// implement it with a scripted stream.
+abstract class EventSource {
+  /// Every event off the stream, decoded, in order.
+  Stream<BridgeEvent> get events;
+
+  /// Gaps detected in a session's durable seq (events missed, typically
+  /// across a reconnect), so a listener can catch up on its session.
+  Stream<SessionGap> get gaps;
+
+  /// Open the stream and start receiving events. Idempotent.
+  Future<void> connect();
+
+  /// Stop receiving and release the connection.
+  Future<void> disconnect();
+}
+
 /// The app-side client of the bridge's unified event stream (spec §8,
 /// endpoint 14). The app talks only to the bridge (ADR-0001): in server mode
 /// that is loopback, in client mode the same API behind the tunnel.
@@ -81,7 +100,7 @@ class EventsClientError implements Exception {
 /// it emits a [SessionGap] so the app can catch up. It auto-reconnects on
 /// disconnect, preserving the seq map across reconnects so a gap spanning the
 /// drop is still detected.
-class EventsClient {
+class EventsClient implements EventSource {
   EventsClient(
     this._base, {
     this.reconnectDelay = const Duration(milliseconds: 500),
@@ -109,12 +128,15 @@ class EventsClient {
 
   /// Every event off the stream, decoded, in order. Listen before (or right
   /// after) [connect] to avoid missing the early frames.
+  @override
   Stream<BridgeEvent> get events => _events.stream;
 
   /// Gaps detected in a session's durable seq.
+  @override
   Stream<SessionGap> get gaps => _gaps.stream;
 
   /// Open the SSE stream and start receiving events. Idempotent.
+  @override
   Future<void> connect() {
     if (_running) return Future<void>.value();
     _running = true;
@@ -125,6 +147,7 @@ class EventsClient {
   }
 
   /// Stop receiving and release the connection.
+  @override
   Future<void> disconnect() async {
     _stopped = true;
     _running = false;

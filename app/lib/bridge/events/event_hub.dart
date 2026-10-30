@@ -101,6 +101,11 @@ class HttpEventConnection implements EventConnection {
     Duration keepAliveInterval = const Duration(seconds: 20),
   }) {
     _response.bufferOutput = false;
+    // The response encodes its `write`s with the content-type's charset
+    // (the bridge sets `text/event-stream; charset=utf-8`). The old default
+    // was Latin-1, whose encoder threw on any character above U+00FF — one
+    // such token in a streamed delta used to abort the write and drop the
+    // whole connection from the fan-out.
     // An initial comment flushes the response headers on connect (the client
     // is blocked on them) and marks the stream live.
     _response.write(': connected\n\n');

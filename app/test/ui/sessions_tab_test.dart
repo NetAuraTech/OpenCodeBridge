@@ -7,10 +7,15 @@ import 'package:opencodebridge/bridge/terminal/opencode_terminal_service.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_backend.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_models.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window_token.dart';
+import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
+import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
 import 'package:opencodebridge/model/session.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
+import 'package:opencodebridge/ui/structured_view.dart';
 import 'package:xterm/xterm.dart';
 
 const _one = Session(
@@ -71,6 +76,8 @@ class _FakeSessionsClient extends SessionsClient {
   final List<String> deleted = [];
   final List<String> created = [];
   final List<String> windowsOpened = [];
+  final List<(String, String)> prompts = [];
+  final List<(String, String, PermissionReply)> replies = [];
   var listCalls = 0;
   var projectsCalls = 0;
 
@@ -122,6 +129,65 @@ class _FakeSessionsClient extends SessionsClient {
     deleted.add(id);
     rows.removeWhere((s) => s.id == id);
   }
+
+  @override
+  Future<SessionDetail> getDetail(String id) async => SessionDetail(
+    id: id,
+    title: 'detail',
+    location: '/detail',
+    cost: 0.01,
+    tokens: TokenUsage(
+      input: 1,
+      output: 2,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    ),
+    outcome: null,
+  );
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async => const [
+    SessionMessage(role: 'user', text: 'hello'),
+  ];
+
+  @override
+  Future<void> prompt(String id, String text) async {
+    prompts.add((id, text));
+  }
+
+  @override
+  Future<List<PermissionRequest>> getPermissions(String id) async => const [];
+
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {
+    replies.add((id, requestID, reply));
+  }
+}
+
+/// A scripted [EventSource] for the tab tests (no real SSE connection).
+class _FakeEventsSource implements EventSource {
+  final _controller = StreamController<BridgeEvent>.broadcast();
+  final _gaps = StreamController<SessionGap>.broadcast();
+
+  @override
+  Stream<BridgeEvent> get events => _controller.stream;
+
+  @override
+  Stream<SessionGap> get gaps => _gaps.stream;
+
+  @override
+  Future<void> connect() async {}
+
+  @override
+  Future<void> disconnect() async {
+    await _controller.close();
+    await _gaps.close();
+  }
 }
 
 /// A [TerminalBackend] over a fake terminal service with one running PTY,
@@ -149,6 +215,7 @@ Future<_FakeSessionsClient> _pumpTab(
           apiBase: Uri.parse('http://bridge.test/'),
           client: client,
           terminals: terminals,
+          events: _FakeEventsSource(),
         ),
       ),
     ),
@@ -347,6 +414,34 @@ void main() {
         await tester.pumpAndSettle();
       });
 
+      testWidgets('tapping an external row opens the structured view', (
+        tester,
+      ) async {
+        await _pumpTab(tester, rows: [_one, _three]);
+
+        await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+        await tester.pumpAndSettle();
+
+        // The structured view shows the history, the cost bar, and the
+        // always-enabled prompt input.
+        expect(find.byType(StructuredSessionScreen), findsOneWidget);
+        expect(find.text('You'), findsOneWidget);
+        expect(find.text('hello'), findsOneWidget);
+        expect(find.text('Cost \$0.0100'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('structured-prompt-input')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('structured-prompt-send')),
+          findsOneWidget,
+        );
+
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        expect(find.byType(StructuredSessionScreen), findsNothing);
+      });
+
       testWidgets('server mode: tapping a closed row reopens and follows', (
         tester,
       ) async {
@@ -514,6 +609,7 @@ void main() {
               body: SessionsTab(
                 apiBase: Uri.parse('http://bridge.test/'),
                 client: client,
+                events: _FakeEventsSource(),
               ),
             ),
           ),

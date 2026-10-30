@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/permission.dart';
 import '../model/session.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
+import 'events/llama_speed_feed.dart';
 import 'events/opencode_http_event_service.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
@@ -26,7 +28,13 @@ import 'terminal/window_manager.dart';
 /// `GET /api/projects` fill-in †, #3 `POST /api/sessions/{id}/window`,
 /// #4 `DELETE /api/sessions/{id}`).
 class BridgeServer {
-  BridgeServer._(this._server, this._terminals, this._events, this._windows);
+  BridgeServer._(
+    this._server,
+    this._terminals,
+    this._events,
+    this._windows,
+    this._speed,
+  );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
   /// configuration (spec section 9) can point the ingress at it.
@@ -63,6 +71,11 @@ class BridgeServer {
   /// `opencode_unavailable`.
   final TerminalWindowManager? _windows;
 
+  /// The local llama.cpp speed feed (the app header's prefill/decode tok/s);
+  /// `null` when this machine has no shared opencode service, in which case
+  /// the speed header stays empty.
+  final LlamaSpeedFeed? _speed;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -93,6 +106,7 @@ class BridgeServer {
     TerminalBackend? terminals,
     EventHub? events,
     TerminalWindowManager? windows,
+    LlamaSpeedFeed? speedFeed,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
@@ -105,6 +119,9 @@ class BridgeServer {
           terminals: termBackend,
           events: eventHub,
         );
+    final speed =
+        speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
+    speed?.start();
     server.listen((request) async {
       final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
       if (termBackend != null &&
@@ -122,7 +139,7 @@ class BridgeServer {
         windowManager,
       );
     });
-    return BridgeServer._(server, termBackend, eventHub, windowManager);
+    return BridgeServer._(server, termBackend, eventHub, windowManager, speed);
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -142,6 +159,7 @@ class BridgeServer {
     await _terminals?.close();
     await _events?.close();
     await _windows?.close();
+    await _speed?.close();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -200,6 +218,22 @@ class BridgeServer {
     try {
       final service = await OpencodeHttpEventService.fromHost();
       return EventHub(service: service);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The default llama.cpp speed feed: the local llama.cpp server's
+  /// prefill/decode throughput, re-emitted as `llama.speed` bridge events on
+  /// the unified stream. `null` when this machine has no shared opencode
+  /// service (no [emit] / no descriptor), in which case the app's speed
+  /// header stays empty.
+  static Future<LlamaSpeedFeed?> _defaultSpeedFeed(
+    void Function(String)? emit,
+  ) async {
+    if (emit == null) return null;
+    try {
+      return await LlamaSpeedFeed.fromHost(emit: emit);
     } catch (_) {
       return null;
     }
@@ -269,6 +303,45 @@ class BridgeServer {
         await BridgeServer._createSession(request, sessions, windows);
         return;
       }
+      // The structured-view reads (spec section 5, endpoints 5–8).
+      if (request.method == 'GET') {
+        final id = BridgeServer._sessionIdIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._detail(request, id, sessions);
+          return;
+        }
+      }
+      if (request.method == 'GET' || request.method == 'POST') {
+        final id = BridgeServer._messagesSessionIn(request.uri.path);
+        if (id != null) {
+          if (request.method == 'GET') {
+            await BridgeServer._messages(request, id, sessions);
+          } else {
+            await BridgeServer._prompt(request, id, sessions);
+          }
+          return;
+        }
+      }
+      if (request.method == 'GET') {
+        final id = BridgeServer._permissionsSessionIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._permissions(request, id, sessions);
+          return;
+        }
+      }
+      // Endpoint 9: the permission reply.
+      if (request.method == 'POST') {
+        final reply = BridgeServer._permissionReplyIn(request.uri.path);
+        if (reply != null) {
+          await BridgeServer._permissionReply(
+            request,
+            reply.$1,
+            reply.$2,
+            sessions,
+          );
+          return;
+        }
+      }
       if (request.method == 'POST') {
         final id = BridgeServer._windowSessionIn(request.uri.path);
         if (id != null) {
@@ -312,7 +385,13 @@ class BridgeServer {
       BridgeServer._unavailable(response);
       return;
     }
-    response.headers.contentType = ContentType.parse('text/event-stream');
+    // The charset matters: HttpResponse encodes its `write`s with the
+    // content-type's charset (default Latin-1, which throws on any character
+    // above U+00FF and used to drop the whole SSE connection on one such
+    // token). The stream is UTF-8, matching the client's Utf8Decoder.
+    response.headers.contentType = ContentType.parse(
+      'text/event-stream; charset=utf-8',
+    );
     response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
     response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
     response.bufferOutput = false;
@@ -340,6 +419,50 @@ class BridgeServer {
     final id = path.substring(prefix.length, path.length - suffix.length);
     if (id.isEmpty || id.contains('/')) return null;
     return Uri.decodeComponent(id);
+  }
+
+  /// The single session id in a messages path, or `null` when [path] is not
+  /// `api/sessions/{id}/messages` (endpoint 6 read, endpoint 7 write).
+  static String? _messagesSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/messages';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The single session id in a permissions path, or `null` when [path] is not
+  /// `api/sessions/{id}/permissions` (endpoint 8).
+  static String? _permissionsSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/permissions';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The (session id, request id) in a permission-reply path, or `null` when
+  /// [path] is not `api/sessions/{id}/permissions/{requestID}/reply`
+  /// (endpoint 9).
+  static (String, String)? _permissionReplyIn(String path) {
+    const prefix = '/api/sessions/';
+    const mid = '/permissions/';
+    const suffix = '/reply';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final rest = path.substring(prefix.length, path.length - suffix.length);
+    final i = rest.indexOf(mid);
+    if (i < 0) return null;
+    final id = rest.substring(0, i);
+    final requestID = rest.substring(i + mid.length);
+    if (id.isEmpty ||
+        id.contains('/') ||
+        requestID.isEmpty ||
+        requestID.contains('/')) {
+      return null;
+    }
+    return (Uri.decodeComponent(id), Uri.decodeComponent(requestID));
   }
 
   static Future<void> _listSessions(
@@ -385,6 +508,152 @@ class BridgeServer {
     } on OpencodeServiceError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// Endpoint 5 (spec section 5): the session's detail — state plus costs and
+  /// token usage. Unknown session is a 404; a service failure is a 502.
+  static Future<void> _detail(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final detail = await sessions.getDetail(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode(detail.toJson()));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 6 (spec section 5): the session's history as structured-view
+  /// messages (with the tools in flight). Unknown session is a 404; a service
+  /// failure is a 502.
+  static Future<void> _messages(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final messages = await sessions.getMessages(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final m in messages) m.toJson()]));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 7 (spec section 5): send a prompt. The body is `{"text": "…"}`;
+  /// anything else is a 400. The prompt is enabled at any time — the service
+  /// queues a mid-turn prompt (`delivery: steer`). Unknown session is a 404;
+  /// a service failure is a 502.
+  static Future<void> _prompt(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    String? text;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      text = decoded is Map<String, Object?>
+          ? decoded['text'] as String?
+          : null;
+    } catch (_) {
+      text = null; // A non-JSON body is an invalid body.
+    }
+    if (text == null || text.trim().isEmpty) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      await sessions.prompt(id, text);
+      response.statusCode = HttpStatus.accepted;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 8 (spec section 5): the session's pending permission requests.
+  /// Unknown session is a 404; a service failure is a 502.
+  static Future<void> _permissions(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final requests = await sessions.pendingPermissions(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final r in requests) r.toJson()]));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 9 (spec section 5): reply to a pending permission request. The
+  /// body is `{"reply": "once"|"always"|"reject"}`; anything else is a 400.
+  /// An unknown session or request is a 404; a service failure is a 502.
+  static Future<void> _permissionReply(
+    HttpRequest request,
+    String id,
+    String requestID,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    PermissionReply? reply;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      final decision = decoded is Map<String, Object?>
+          ? decoded['reply']
+          : null;
+      reply = PermissionReply.fromWire(decision); // throws on an unknown value
+    } catch (_) {
+      reply = null; // A non-JSON body or unknown decision is invalid.
+    }
+    if (reply == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      await sessions.replyPermission(id, requestID, reply);
+      response.statusCode = HttpStatus.noContent;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
     }
     await response.close();
   }
@@ -538,6 +807,18 @@ class BridgeServer {
     response.statusCode = HttpStatus.serviceUnavailable;
     response.write(jsonEncode({'error': 'opencode_unavailable'}));
     response.close();
+  }
+
+  /// Maps a service failure to the bridge contract: a 404 from the service is
+  /// a 404; anything else is a 502.
+  static void _serviceError(HttpResponse response, OpencodeServiceError e) {
+    if (e.statusCode == HttpStatus.notFound) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } else {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
   }
 
   /// The single session id in a terminal path, or `null` when [path] is not

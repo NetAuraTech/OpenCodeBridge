@@ -4,6 +4,9 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_http_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 
 /// A stand-in for the shared opencode service: it serves the four endpoints
 /// the bridge needs, checks Basic auth, and paginates `GET /api/session` in
@@ -42,6 +45,169 @@ void main() {
     'ses_2': {'type': 'running'},
   };
   const pageSize = 2;
+
+  // The service's `Session.Info` for `ses_1` (the detail endpoint).
+  final detailInfo = {
+    'id': 'ses_1',
+    'title': 'one',
+    'cost': 1.5,
+    'tokens': {
+      'input': 100,
+      'output': 50,
+      'reasoning': 5,
+      'cache': {'read': 10, 'write': 2},
+    },
+    'outcome': 'succeeded',
+    'location': {'directory': '/one'},
+    'time': {'created': 100, 'updated': 200},
+    'model': {'id': 'mod1', 'providerID': 'prov1'},
+  };
+
+  // The detail of `ses_2`: the model is unknown to the registry, so the
+  // context limit must fall back to `null`.
+  final detailInfo2 = {
+    'id': 'ses_2',
+    'title': 'two',
+    'cost': 0,
+    'tokens': {
+      'input': 0,
+      'output': 0,
+      'reasoning': 0,
+      'cache': {'read': 0, 'write': 0},
+    },
+    'location': {'directory': '/two'},
+    'model': {'id': 'unknown-model', 'providerID': 'prov2'},
+  };
+
+  // The service's model registry (the `limit.context` context windows).
+  final modelRegistry = [
+    {
+      'id': 'mod1',
+      'modelID': 'mod1',
+      'providerID': 'prov1',
+      'limit': {'context': 123456},
+    },
+  ];
+
+  // The service's `Session.Message.Info` history for `ses_1` (endpoint 6).
+  // The fake serves it newest-first in pages of at most 200 (the service's
+  // pagination), and the 200 `synthetic` filler items push the history past
+  // one full page so the client's loop is exercised. The `system` item must
+  // be skipped by the client.
+  final historyMessages = <Map<String, Object?>>[
+    {
+      'type': 'user',
+      'id': 'm1',
+      'time': {'created': 1},
+      'text': 'do the thing',
+    },
+    {
+      'type': 'assistant',
+      'id': 'm2',
+      'time': {'created': 2},
+      'agent': 'a',
+      'model': 'm',
+      'tokens': {
+        'input': 100,
+        'output': 50,
+        'reasoning': 0,
+        'cache': {'read': 5000, 'write': 10},
+      },
+      'content': [
+        {'type': 'text', 'text': 'working'},
+        {
+          'type': 'tool',
+          'id': 't1',
+          'name': 'bash',
+          'time': {'created': 3},
+          'state': {
+            'status': 'running',
+            'input': {'command': 'ls'},
+          },
+        },
+        {'type': 'reasoning', 'text': 'hmm'},
+        {
+          'type': 'tool',
+          'id': 't2',
+          'name': 'write',
+          'time': {'created': 4},
+          'state': {
+            'status': 'error',
+            'input': {'path': '/x'},
+            'error': {'type': 'fail', 'message': 'denied'},
+          },
+        },
+        {
+          'type': 'tool',
+          'id': 't3',
+          'name': 'edit',
+          'time': {'created': 5},
+          'state': {
+            'status': 'completed',
+            'input': {'path': '/a.dart', 'oldString': 'a', 'newString': 'b'},
+            'metadata': {
+              'files': [
+                {
+                  'file': 'a.dart',
+                  'patch': '--- a.dart\n+++ a.dart\n@@ -1 +1 @@\n-a\n+b\n',
+                  'status': 'modified',
+                  'additions': 1,
+                  'deletions': 1,
+                },
+              ],
+            },
+          },
+        },
+        {
+          'type': 'tool',
+          'id': 't4',
+          'name': 'write',
+          'time': {'created': 6},
+          'state': {
+            'status': 'completed',
+            'input': {'path': '/w.txt', 'content': 'hello\nworld\n'},
+            'metadata': {'truncated': false},
+          },
+        },
+      ],
+    },
+    {
+      'type': 'compaction',
+      'id': 'm4',
+      'time': {'created': 3},
+      'status': 'completed',
+      'reason': 'manual',
+      'summary': 'the compressed context',
+    },
+    {
+      'type': 'system',
+      'id': 'm3',
+      'time': {'created': 5},
+      'text': 'boot',
+    },
+    for (var i = 0; i < 200; i++)
+      {
+        'type': 'synthetic',
+        'id': 'f$i',
+        'time': {'created': 100 + i},
+        'text': 'filler $i',
+      },
+  ];
+
+  // The service's pending `Permission.Request` list for `ses_1`.
+  final pendingPerms = [
+    {
+      'id': 'per_1',
+      'sessionID': 'ses_1',
+      'action': 'shell',
+      'resources': ['ls'],
+    },
+  ];
+
+  final promptBodies = <Map<String, Object?>>[];
+  final replyBodies = <Map<String, Object?>>[];
+  final repliedRequestIDs = <String>[];
+  final messageOffsets = <int>[];
 
   late HttpServer server;
   late Uri base;
@@ -102,6 +268,52 @@ void main() {
         resp.write(jsonEncode(projects));
       } else if (path == '/api/session/active') {
         resp.write(jsonEncode({'data': active}));
+      } else if (path == '/api/session/ses_1/message' && req.method == 'GET') {
+        final cursor = req.uri.queryParameters['cursor'];
+        final limit = int.parse(req.uri.queryParameters['limit'] ?? '50');
+        // The real service serves the history newest-first by cursor, the
+        // cursor skipping `offset` of the newest items (opaque here: an
+        // integer, like the session list fake).
+        final offset = cursor == null ? 0 : int.parse(cursor);
+        messageOffsets.add(offset);
+        final newestFirst = historyMessages.reversed.toList();
+        final page = newestFirst.skip(offset).take(limit).toList();
+        resp.write(
+          jsonEncode({
+            'data': page,
+            'cursor': {
+              'next': offset + limit < historyMessages.length
+                  ? '${offset + limit}'
+                  : null,
+              'previous': null,
+            },
+          }),
+        );
+      } else if (path == '/api/session/ses_1/permission' &&
+          req.method == 'GET') {
+        resp.write(jsonEncode({'data': pendingPerms}));
+      } else if (path == '/api/session/ses_1/prompt' && req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        promptBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.write(jsonEncode({'data': {}}));
+      } else if (path.startsWith('/api/session/ses_1/permission/') &&
+          path.endsWith('/reply') &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        replyBodies.add(jsonDecode(body) as Map<String, Object?>);
+        repliedRequestIDs.add(
+          path.substring(
+            '/api/session/ses_1/permission/'.length,
+            path.length - '/reply'.length,
+          ),
+        );
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1' && req.method == 'GET') {
+        resp.write(jsonEncode({'data': detailInfo}));
+      } else if (path == '/api/session/ses_2' && req.method == 'GET') {
+        resp.write(jsonEncode({'data': detailInfo2}));
+      } else if (path == '/api/model') {
+        resp.write(jsonEncode({'data': modelRegistry}));
       } else if (path.startsWith('/api/session/') && req.method == 'DELETE') {
         resp.statusCode = HttpStatus.noContent;
       } else {
@@ -178,6 +390,157 @@ void main() {
     test('deleteSession issues a DELETE and accepts 204', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       await service.deleteSession('ses_1'); // no throw on 204
+    });
+
+    test(
+      'getDetail flattens the service Session.Info into the contract',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final detail = await service.getDetail('ses_1');
+        expect(detail.id, 'ses_1');
+        expect(detail.title, 'one');
+        expect(detail.location, '/one');
+        expect(detail.cost, 1.5);
+        expect(detail.outcome, 'succeeded');
+        expect(
+          detail.tokens,
+          const TokenUsage(
+            input: 100,
+            output: 50,
+            reasoning: 5,
+            cacheRead: 10,
+            cacheWrite: 2,
+          ),
+        );
+      },
+    );
+
+    test(
+      'getDetail resolves the context limit from the model registry',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final detail = await service.getDetail('ses_1');
+        expect(detail.contextLimit, 123456);
+      },
+    );
+
+    test('getDetail carries no context limit for a model the registry does '
+        'not know', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final detail = await service.getDetail('ses_2');
+      expect(detail.id, 'ses_2');
+      expect(detail.contextLimit, isNull);
+    });
+
+    test('getDetail of an unknown session is a 404', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await expectLater(
+        service.getDetail('ses_missing'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
+    });
+
+    test('getMessages walks the paginated history and maps the turns', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final messages = await service.getMessages('ses_1');
+      // The 200 synthetic fillers are skipped, leaving the two turns and
+      // the compaction marker, back in chronological order despite the
+      // newest-first pages.
+      expect(messages, hasLength(3));
+      expect(
+        messages[0],
+        const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
+      );
+      final assistant = messages[1];
+      expect(assistant.id, 'm2');
+      expect(assistant.role, 'assistant');
+      expect(assistant.text, 'working');
+      expect(assistant.reasoning, 'hmm');
+      expect(assistant.tools, hasLength(4));
+      // The tool input is a map, so compare fields (deep) not by ==.
+      expect(assistant.tools[0].id, 't1');
+      expect(assistant.tools[0].name, 'bash');
+      expect(assistant.tools[0].status, 'running');
+      expect(assistant.tools[0].input, {'command': 'ls'});
+      expect(assistant.tools[0].error, isNull);
+      expect(assistant.tools[0].patch, isNull);
+      expect(assistant.tools[1].id, 't2');
+      expect(assistant.tools[1].name, 'write');
+      expect(assistant.tools[1].status, 'error');
+      expect(assistant.tools[1].error, 'denied');
+      expect(assistant.tools[1].patch, isNull);
+      // The edit's file patch (the service's metadata.files unified diff)
+      // is carried for the structured view's diff render.
+      expect(assistant.tools[2].id, 't3');
+      expect(assistant.tools[2].name, 'edit');
+      expect(assistant.tools[2].status, 'completed');
+      expect(
+        assistant.tools[2].patch,
+        '--- a.dart\n+++ a.dart\n@@ -1 +1 @@\n-a\n+b\n',
+      );
+      // A write carries no service patch; the bridge synthesizes the "new
+      // file" diff from the content for the same diff render.
+      expect(assistant.tools[3].id, 't4');
+      expect(assistant.tools[3].name, 'write');
+      expect(assistant.tools[3].status, 'completed');
+      expect(
+        assistant.tools[3].patch,
+        'Index: /w.txt\n'
+        '===================================================================\n'
+        '--- /dev/null\n'
+        '+++ /w.txt\n'
+        '@@ -0,0 +1,2 @@\n'
+        '+hello\n'
+        '+world\n',
+      );
+      // The context gauge: the model call's total input (100 + 5000 + 10).
+      expect(assistant.contextTokens, 5110);
+      // The compaction marker keeps the summary the compaction wrote.
+      expect(
+        messages[2],
+        const SessionMessage(
+          id: 'm4',
+          role: 'compaction',
+          text: 'the compressed context',
+        ),
+      );
+      // The client walked the pages: a full first page, then the rest.
+      expect(messageOffsets, [0, 200]);
+    });
+
+    test('prompt posts the text with delivery steer', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await service.prompt('ses_1', 'hello');
+      expect(promptBodies, [
+        {'text': 'hello', 'delivery': 'steer'},
+      ]);
+    });
+
+    test('pendingPermissions maps the service requests', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final perms = await service.pendingPermissions('ses_1');
+      expect(perms, [
+        const PermissionRequest(
+          id: 'per_1',
+          action: 'shell',
+          resources: ['ls'],
+        ),
+      ]);
+    });
+
+    test('replyPermission posts the decision and accepts 204', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await service.replyPermission('ses_1', 'per_1', PermissionReply.always);
+      expect(replyBodies, [
+        {'decision': 'always'},
+      ]);
+      expect(repliedRequestIDs, ['per_1']);
     });
 
     test('a bad password surfaces a 401 OpencodeServiceError', () async {
