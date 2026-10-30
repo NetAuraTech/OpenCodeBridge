@@ -730,6 +730,56 @@ void main() {
       expect(client.messageCalls, 1);
     });
 
+    testWidgets('a live write renders its content as a diff', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final events = await _pump(tester, client: client);
+
+      events.add(
+        _event(
+          'session.tool.input.started',
+          aggregateID: 'ses_1',
+          data: const {
+            'assistantMessageID': 'msg_1',
+            'id': 'w1',
+            'name': 'write',
+          },
+        ),
+      );
+      events.add(
+        _event(
+          'session.tool.called',
+          aggregateID: 'ses_1',
+          data: {
+            'assistantMessageID': 'msg_1',
+            'id': 'w1',
+            // The called event carries the input object (the write's path and
+            // full content), the same shape the service returns.
+            'input': <String, Object?>{
+              'path': '/w.txt',
+              'content': 'alpha\nbeta\n',
+            },
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      events.add(
+        _event(
+          'session.tool.success',
+          aggregateID: 'ses_1',
+          data: const {'assistantMessageID': 'msg_1', 'id': 'w1'},
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('write · completed'), findsOneWidget);
+      // The content renders as an added-line diff, not the raw input JSON.
+      expect(find.text('alpha'), findsOneWidget);
+      expect(find.text('beta'), findsOneWidget);
+    });
+
     testWidgets(
       'step.ended records the context used against the detail limit',
       (tester) async {
@@ -804,5 +854,69 @@ void main() {
         expect(client.permissionCalls, 2);
       },
     );
+
+    testWidgets('inline code renders in the body font size', (tester) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'assistant', text: 'see `cached_tokens` here'),
+        ],
+      );
+      final events = await _pump(tester, client: client);
+      await events.close();
+
+      final text = tester.widget<Text>(find.text('see cached_tokens here'));
+      TextStyle merged = const TextStyle();
+      double? bodySize;
+      double? codeSize;
+      void walk(InlineSpan span) {
+        if (span is! TextSpan) return;
+        merged = merged.merge(span.style);
+        final leaf = span.children == null || span.children!.isEmpty;
+        if (leaf) {
+          if (span.text == 'cached_tokens') {
+            codeSize = merged.fontSize;
+          } else {
+            bodySize ??= merged.fontSize;
+          }
+        }
+        for (final child in span.children ?? const <InlineSpan>[]) {
+          walk(child);
+        }
+      }
+
+      walk(text.textSpan!);
+      expect(codeSize, isNotNull);
+      expect(codeSize, bodySize);
+    });
+
+    testWidgets('the user prompt is set off from the assistant text', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [SessionMessage(role: 'user', text: 'fix the tests')],
+      );
+      final events = await _pump(tester, client: client);
+      await events.close();
+
+      BoxDecoration? decoration;
+      for (final element
+          in find
+              .ancestor(
+                of: find.text('fix the tests'),
+                matching: find.byType(Container),
+              )
+              .evaluate()) {
+        final widget = element.widget as Container;
+        if (widget.decoration is BoxDecoration) {
+          decoration = widget.decoration as BoxDecoration;
+          break;
+        }
+      }
+      expect(decoration, isNotNull);
+      final border = decoration!.border as Border;
+      expect(border.left, isA<BorderSide>());
+    });
   });
 }

@@ -597,16 +597,42 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     });
   }
 
-  /// The tool finished.
+  /// The tool finished: the success payload carries the file patch (the
+  /// history's tool-state shape, `metadata.files[0].patch`), so the live card
+  /// shows the same diff the reopened history does. A `write` carries no
+  /// service patch, so its diff is synthesized from the content the
+  /// `session.tool.called` event stored on the card.
   void _applyToolSuccess(Map<String, Object?> data) {
     final toolId = data['id'] is String ? data['id'] as String : null;
     if (toolId == null || !mounted) return;
+    final servicePatch = _patchFromState(data);
     setState(
       () => _updateToolCard(
         toolId,
-        (tool) => _rebuildTool(tool, status: 'completed'),
+        (tool) => _rebuildTool(
+          tool,
+          status: 'completed',
+          patch:
+              servicePatch ??
+              (tool.name == 'write' ? ToolCall.writePatch(tool.input) : null),
+        ),
       ),
     );
+  }
+
+  /// The tool's file patch from a tool-state payload — the success event's
+  /// `data`, and the history's tool `state`, both carry
+  /// `metadata.files[0].patch` (the unified diff the terminal renders).
+  static String? _patchFromState(Map<String, Object?> state) {
+    final metadata = state['metadata'];
+    final files = metadata is Map<String, Object?> ? metadata['files'] : null;
+    if (files is List && files.isNotEmpty) {
+      final first = files.first;
+      if (first is Map<String, Object?> && first['patch'] is String) {
+        return first['patch'] as String;
+      }
+    }
+    return null;
   }
 
   /// The tool failed.
@@ -713,19 +739,22 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _setMessageAt(index, _rebuildMessage(message, tools: tools));
   }
 
-  /// A [ToolCall] copy with [name], [status], [input], [error] replaced.
+  /// A [ToolCall] copy with [name], [status], [input], [error], and [patch]
+  /// replaced.
   ToolCall _rebuildTool(
     ToolCall tool, {
     String? name,
     String? status,
     Object? input,
     String? error,
+    String? patch,
   }) => ToolCall(
     id: tool.id,
     name: name ?? tool.name,
     status: status ?? tool.status,
     input: input ?? tool.input,
     error: error ?? tool.error,
+    patch: patch ?? tool.patch,
   );
 
   /// The turn boundary just ended (or started): re-fetch the service's
@@ -1126,10 +1155,25 @@ class _MessagePane extends StatelessWidget {
               ),
             ),
           if (message.text != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: _Markdown(data: message.text!),
-            ),
+            isUser
+                ? Container(
+                    margin: const EdgeInsets.only(top: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: scheme.primary.withValues(alpha: 0.08),
+                      border: Border(
+                        left: BorderSide(color: scheme.primary, width: 3),
+                      ),
+                    ),
+                    child: _Markdown(data: message.text!),
+                  )
+                : Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: _Markdown(data: message.text!),
+                  ),
           for (final tool in message.tools) _ToolCard(tool: tool),
         ],
       ),
@@ -1239,7 +1283,12 @@ class _Markdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = _TuiMarkdownColors.resolve(Theme.of(context).brightness);
     final b = base ?? const TextStyle();
-    final size = b.fontSize ?? 14;
+    // The body size the paragraph text actually renders in: the base when the
+    // pane sets one, else the theme's body size (the markdown fallback
+    // stylesheet merges under ours, so the code size must be set explicitly
+    // to win over its shrunken default).
+    final size =
+        b.fontSize ?? Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14;
     TextStyle style({
       Color? color,
       double? fontSize,
@@ -1278,7 +1327,11 @@ class _Markdown extends StatelessWidget {
         h6: style(fontWeight: FontWeight.w600, color: palette.heading),
         em: style(fontStyle: FontStyle.italic, color: palette.em),
         strong: style(fontWeight: FontWeight.bold, color: palette.strong),
-        code: style(fontFamily: 'monospace', color: palette.code),
+        code: style(
+          fontFamily: 'monospace',
+          fontSize: size,
+          color: palette.code,
+        ),
         a: style(
           color: palette.link,
         ).copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
