@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
+import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
 import 'package:opencodebridge/bridge/events/event_hub.dart';
 import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
@@ -989,6 +990,516 @@ void main() {
       }
     });
   });
+
+  group('BridgeServer docker', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeDockerBridge fake;
+
+    setUp(() async {
+      fake = _FakeDockerBridge();
+      server = await BridgeServer.start(
+        port: 0,
+        docker: fake.backend,
+        // The log keep-alive is what surfaces a client disconnect (and kills
+        // the CLI child); shorten it so that is observable in a test.
+        dockerLogKeepAlive: const Duration(milliseconds: 100),
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('GET /api/docker/containers returns the container rows', () async {
+      fake.runResult = const DockerCliResult(
+        exitCode: 0,
+        stdout:
+            '{"Names": "web", "Image": "nginx:latest", "State": "running", '
+            '"RunningFor": "2 hours ago"}\n'
+            '{"Names": "db", "Image": "postgres:16", "State": "exited", '
+            '"RunningFor": ""}\n',
+        stderr: '',
+      );
+
+      final (status, body) = await _get(base, 'api/docker/containers');
+      expect(status, 200);
+      expect(jsonDecode(body), [
+        {
+          'name': 'web',
+          'image': 'nginx:latest',
+          'state': 'running',
+          'uptime': '2 hours ago',
+        },
+        {
+          'name': 'db',
+          'image': 'postgres:16',
+          'state': 'exited',
+          'uptime': null,
+        },
+      ]);
+    });
+
+    test(
+      'GET /api/docker/containers is 502 when the docker CLI fails',
+      () async {
+        fake.runResult = const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'Cannot connect to the Docker daemon',
+        );
+
+        final (status, body) = await _get(base, 'api/docker/containers');
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'docker_unreachable'});
+      },
+    );
+
+    test(
+      'GET /api/docker/containers is 503 without a docker CLI on the host',
+      () async {
+        if (_hostHasDockerCli()) return;
+        final bare = await BridgeServer.start(port: 0);
+        try {
+          final (status, body) = await _get(
+            bare.baseUri,
+            'api/docker/containers',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'docker_unavailable'});
+        } finally {
+          await bare.stop();
+        }
+      },
+    );
+
+    test('POST .../action takes the action by name and answers 200', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/docker/containers/web/action',
+        '{"action": "start"}',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), {'name': 'web'});
+      expect(fake.runArgs, [
+        const ['start', 'web'],
+      ]);
+
+      final (status2, _) = await _postRaw(
+        base,
+        'api/docker/containers/web/action',
+        '{"action": "stop"}',
+      );
+      expect(status2, 200);
+      expect(fake.runArgs, [
+        const ['start', 'web'],
+        const ['stop', 'web'],
+      ]);
+    });
+
+    test('POST .../action of an unknown container is 404', () async {
+      fake.runResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'Error response from daemon: No such container: web',
+      );
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/docker/containers/web/action',
+        '{"action": "stop"}',
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test('POST .../action with a daemon failure is 502', () async {
+      fake.runResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'Cannot connect to the Docker daemon',
+      );
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/docker/containers/web/action',
+        '{"action": "stop"}',
+      );
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_unreachable'});
+    });
+
+    test('POST .../action with an invalid body is 400', () async {
+      final (statusA, bodyA) = await _postRaw(
+        base,
+        'api/docker/containers/web/action',
+        'not json',
+      );
+      expect(statusA, 400);
+      expect(jsonDecode(bodyA), {'error': 'invalid_body'});
+
+      final (statusB, bodyB) = await _postRaw(
+        base,
+        'api/docker/containers/web/action',
+        '{"action": "explode"}',
+      );
+      expect(statusB, 400);
+      expect(jsonDecode(bodyB), {'error': 'invalid_body'});
+      expect(fake.runArgs, isEmpty);
+    });
+
+    test('GET .../logs streams the container lines as SSE', () async {
+      final tap = await _LogsTap.open(base, 'web');
+      try {
+        expect(tap.status, HttpStatus.ok);
+        expect(tap.contentType, 'text/event-stream; charset=utf-8');
+        await _until(() => fake.spawnArgs.isNotEmpty);
+        expect(fake.spawnArgs.single, ['logs', '--follow', 'web']);
+
+        fake.logsLines.add('alpha');
+        fake.logsLines.add('beta');
+        await _until(() => tap.dataPayloads.length >= 2);
+        expect(tap.dataPayloads, ['alpha', 'beta']);
+      } finally {
+        await tap.close();
+      }
+      // The CLI child lives for the connection: the disconnect kills it.
+      await _until(() => fake.children.last.killed);
+    });
+
+    test('GET .../logs without follow ends after the existing log', () async {
+      final pending = _get(base, 'api/docker/containers/web/logs');
+      await _until(() => fake.spawnArgs.isNotEmpty);
+      expect(fake.spawnArgs.single, ['logs', 'web']);
+      fake.logsLines.add('old line');
+      await fake.logsLines.close();
+
+      final (status, body) = await pending;
+      expect(status, HttpStatus.ok);
+      expect(body, ': connected\n\ndata: old line\n\n');
+    });
+
+    test('GET .../logs of an unknown container is 404', () async {
+      fake.runResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'Error: No such container: web',
+      );
+
+      final (status, body) = await _get(base, 'api/docker/containers/web/logs');
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      expect(fake.spawnArgs, isEmpty);
+    });
+
+    test('GET .../logs with a daemon failure is 502', () async {
+      fake.runResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'Cannot connect to the Docker daemon',
+      );
+
+      final (status, body) = await _get(base, 'api/docker/containers/web/logs');
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_unreachable'});
+    });
+
+    test('the docker paths do not swallow other routes', () async {
+      final (statusA, _) = await _get(base, 'api/docker/containers/web/action');
+      expect(statusA, 404); // GET is not the action route
+
+      final (statusB, _) = await _postRaw(
+        base,
+        'api/docker/containers/action',
+        '{"action": "start"}',
+      );
+      expect(statusB, 404); // the name is required
+
+      final (statusC, _) = await _get(
+        base,
+        'api/docker/containers/web/logs/extra',
+      );
+      expect(statusC, 404);
+    });
+
+    test('a container exit is re-emitted on GET /api/events', () async {
+      final hub = EventHub(service: _FakeEventUpstream());
+      final docker = _FakeDockerBridge(emit: hub.emit);
+      final server = await BridgeServer.start(
+        port: 0,
+        events: hub,
+        docker: docker.backend,
+      );
+      try {
+        final tap = await _SseTap.open(server.baseUri);
+        try {
+          await _until(() => tap.ready);
+          docker.eventsLines.add(
+            jsonEncode({
+              'Action': 'die',
+              'Actor': {
+                'Attributes': {'exitCode': '0', 'name': 'web'},
+              },
+            }),
+          );
+          await _until(
+            () => tap.dataPayloads.any(
+              (p) => p.contains('docker.container.stopped'),
+            ),
+            message: 'expected the docker.container.stopped frame',
+          );
+          final payload = tap.dataPayloads.firstWhere(
+            (p) => p.contains('docker.container.stopped'),
+          );
+          final frame = jsonDecode(payload) as Map<String, Object?>;
+          expect(frame['type'], 'docker.container.stopped');
+          expect(frame['data'], {'name': 'web'});
+        } finally {
+          await tap.close();
+        }
+      } finally {
+        await server.stop();
+      }
+    });
+  });
+
+  group('BridgeServer compose', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeDockerBridge fake;
+    late SessionStore store;
+    late Directory temp;
+    late Directory repo;
+    late Directory bare;
+
+    setUp(() async {
+      temp = await Directory.systemTemp.createTemp('oc-compose-route');
+      // A fixed repo name so the derived compose project name is stable.
+      repo = Directory('${temp.path}/composeproj');
+      await repo.create();
+      await File('${repo.path}/docker-compose.yml')
+          .writeAsString('services: {}\n');
+      // A project directory without a compose file (must be skipped).
+      bare = Directory('${temp.path}/bare');
+      await bare.create();
+      fake = _FakeDockerBridge();
+      store = await SessionStore.load(dir: temp);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: _FakeService(
+            overrideProjects: [
+              OpencodeProject(id: 'p1', name: 'proj-one', canonical: repo.path),
+              OpencodeProject(id: 'p2', name: 'proj-two', canonical: bare.path),
+            ],
+          ),
+          store: store,
+        ),
+        docker: fake.backend,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await temp.delete(recursive: true);
+    });
+
+    test('GET /api/docker/compose lists the compose projects', () async {
+      fake.runResults
+        ..add(
+          const DockerCliResult(exitCode: 0, stdout: 'web\ndb\n', stderr: ''),
+        )
+        ..add(
+          const DockerCliResult(
+            exitCode: 0,
+            stdout: '{"Service": "db", "Name": "composeproj-db-1", "Image": "postgres:16", "State": "exited"}\n',
+            stderr: '',
+          ),
+        );
+
+      final (status, body) = await _get(base, 'api/docker/compose');
+      expect(status, 200);
+      final projects = (jsonDecode(body) as List).cast<Map<String, Object?>>();
+      expect(projects, [
+        {
+          'id': Uri.encodeComponent(repo.path),
+          'project': 'composeproj',
+          'path': repo.path,
+          'composeFile': '${repo.path}/docker-compose.yml',
+          'services': [
+            {'name': 'web', 'state': null, 'image': null, 'container': null},
+            {
+              'name': 'db',
+              'state': 'exited',
+              'image': 'postgres:16',
+              'container': 'composeproj-db-1',
+            },
+          ],
+        },
+      ]);
+      expect(fake.runArgs, [
+        const ['compose', 'config', '--services'],
+        const ['compose', 'ps', '--all', '--format', 'json'],
+      ]);
+      expect(fake.runWorkingDirs, [repo.path, repo.path]);
+    });
+
+    test(
+      'GET /api/docker/compose skips projects without a compose file',
+      () async {
+        fake.runResults
+          ..add(const DockerCliResult(exitCode: 0, stdout: 'web\n', stderr: ''))
+          ..add(const DockerCliResult(exitCode: 0, stdout: '', stderr: ''));
+
+        final (status, body) = await _get(base, 'api/docker/compose');
+        expect(status, 200);
+        final projects = (jsonDecode(body) as List)
+            .cast<Map<String, Object?>>();
+        expect(projects, hasLength(1));
+        expect(projects.single['path'], repo.path);
+        // Only the directory with a compose file ran docker.
+        expect(fake.runWorkingDirs, [repo.path, repo.path]);
+      },
+    );
+
+    test('GET /api/docker/compose with a compose failure is 502', () async {
+      fake.runResults.add(
+        const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'cannot connect to the daemon',
+        ),
+      );
+
+      final (status, body) = await _get(base, 'api/docker/compose');
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_unreachable'});
+    });
+
+    test(
+      'GET /api/docker/compose is 503 without a docker CLI on the host',
+      () async {
+        if (_hostHasDockerCli()) return;
+        final noDocker = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(overrideProjects: const []),
+            store: store,
+          ),
+        );
+        try {
+          final (status, body) = await _get(
+            noDocker.baseUri,
+            'api/docker/compose',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'docker_unavailable'});
+        } finally {
+          await noDocker.stop();
+        }
+      },
+    );
+
+    test(
+      'GET /api/docker/compose without opencode projects is empty',
+      () async {
+        final empty = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(overrideProjects: const []),
+            store: store,
+          ),
+          docker: fake.backend,
+        );
+        try {
+          final (status, body) = await _get(
+            empty.baseUri,
+            'api/docker/compose',
+          );
+          expect(status, 200);
+          expect(jsonDecode(body), []);
+        } finally {
+          await empty.stop();
+        }
+      },
+    );
+
+    String actionPath() =>
+        'api/docker/compose/${Uri.encodeComponent(repo.path)}/action';
+
+    test('POST .../compose/{id}/action up starts the whole project', () async {
+      final (status, body) = await _postRaw(
+        base,
+        actionPath(),
+        '{"action": "up"}',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), {'path': repo.path});
+      expect(fake.runArgs, [
+        const ['compose', 'up', '-d'],
+      ]);
+      expect(fake.runWorkingDirs, [repo.path]);
+    });
+
+    test('POST .../compose/{id}/action stop stops one service', () async {
+      final (status, body) = await _postRaw(
+        base,
+        actionPath(),
+        '{"action": "stop", "service": "db"}',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), {'path': repo.path, 'service': 'db'});
+      expect(fake.runArgs, [
+        const ['compose', 'stop', 'db'],
+      ]);
+      expect(fake.runWorkingDirs, [repo.path]);
+    });
+
+    test('POST .../compose/{id}/action of an unknown action is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        actionPath(),
+        '{"action": "restart"}',
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(fake.runArgs, isEmpty);
+    });
+
+    test(
+      'POST .../compose/{id}/action without a compose file is 404',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/docker/compose/${Uri.encodeComponent(bare.path)}/action',
+          '{"action": "up"}',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      },
+    );
+
+    test(
+      'POST .../compose/{id}/action with a compose failure is 502',
+      () async {
+        fake.runResult = const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'no such service',
+        );
+
+        final (status, body) = await _postRaw(
+          base,
+          actionPath(),
+          '{"action": "stop"}',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'docker_unreachable'});
+      },
+    );
+  });
 }
 
 /// A scripted service for the sessions-endpoint tests.
@@ -997,7 +1508,12 @@ class _FakeService implements OpencodeService {
     this.detail,
     this.messages = const [],
     this.permissions = const [],
+    this.overrideProjects,
   });
+
+  /// When set, [projects] returns these (the compose tests point one at a
+  /// temp directory that actually holds a compose file).
+  final List<OpencodeProject>? overrideProjects;
 
   final List<String> deleted = [];
   final Set<String> removedFromService = {};
@@ -1050,6 +1566,8 @@ class _FakeService implements OpencodeService {
   @override
   Future<List<OpencodeProject>> projects() async {
     if (failProjects) throw const OpencodeServiceError(0, 'service down');
+    final override = overrideProjects;
+    if (override != null) return override;
     return const [
       OpencodeProject(id: 'p1', name: 'proj-one', canonical: '/proj/one'),
       OpencodeProject(id: 'p2', name: 'proj-two', canonical: '/proj/two'),
@@ -1228,6 +1746,137 @@ class _FakeEventUpstream implements OpencodeEventService {
 
   @override
   Future<void> close() async {}
+}
+
+/// A scripted docker backend for the route tests: the run seam is scripted,
+/// and the spawn seam hands out a controllable child per command (`events`
+/// gets the event-watch child, `logs` gets the log-stream child).
+class _FakeDockerBridge {
+  _FakeDockerBridge({void Function(String)? emit}) {
+    _backend = DockerBackend(run: _run, spawn: _spawn, emit: emit);
+  }
+
+  final List<List<String>> runArgs = [];
+  final List<String?> runWorkingDirs = [];
+  final List<List<String>> spawnArgs = [];
+  final List<_FakeDockerChild> children = [];
+  DockerCliResult runResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+  );
+  final List<DockerCliResult> runResults = [];
+  final StreamController<String> eventsLines = StreamController<String>();
+  final StreamController<String> logsLines = StreamController<String>();
+  late final DockerBackend _backend;
+
+  DockerBackend get backend => _backend;
+
+  Future<DockerCliResult> _run(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
+    runArgs.add(List.of(argv));
+    runWorkingDirs.add(workingDirectory);
+    return runResults.isNotEmpty ? runResults.removeAt(0) : runResult;
+  }
+
+  Future<DockerProcess> _spawn(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
+    spawnArgs.add(List.of(argv));
+    final lines = argv.first == 'events' ? eventsLines : logsLines;
+    final child = _FakeDockerChild(lines);
+    children.add(child);
+    return child.toProcess();
+  }
+}
+
+/// One docker CLI child: its stdout is the given line controller, and
+/// killing it closes the controller (like the CLI child exiting).
+class _FakeDockerChild {
+  _FakeDockerChild(this._lines);
+
+  final StreamController<String> _lines;
+  bool killed = false;
+
+  DockerProcess toProcess() => DockerProcess(
+    stdout: _lines.stream,
+    stderr: const Stream.empty(),
+    exitCode: Completer<int>().future,
+    kill: kill,
+  );
+
+  Future<void> kill() async {
+    if (killed) return;
+    killed = true;
+    await _lines.close();
+  }
+}
+
+/// One raw connection to a container's log SSE stream, accumulating the
+/// received frames (the seam a curl/DockerClient sees).
+class _LogsTap {
+  _LogsTap._(
+    this._client,
+    this.status,
+    this._contentType,
+    this._sub,
+    this._buffer,
+  );
+
+  static Future<_LogsTap> open(Uri base, String name) async {
+    final client = HttpClient();
+    final request = await client.getUrl(
+      base.replace(path: 'api/docker/containers/$name/logs', query: 'follow=1'),
+    );
+    final response = await request.close();
+    final buffer = StringBuffer();
+    final sub = response.transform(const Utf8Decoder()).listen(buffer.write);
+    return _LogsTap._(
+      client,
+      response.statusCode,
+      response.headers.contentType?.toString(),
+      sub,
+      buffer,
+    );
+  }
+
+  final HttpClient _client;
+  final int status;
+  final String? _contentType;
+  final StreamSubscription<String> _sub;
+  final StringBuffer _buffer;
+
+  String? get contentType => _contentType;
+
+  /// The payloads of every `data:` frame, in order.
+  List<String> get dataPayloads => _buffer
+      .toString()
+      .split('\n\n')
+      .where((frame) => frame.startsWith('data: '))
+      .map((frame) => frame.substring('data: '.length))
+      .toList();
+
+  Future<void> close() async {
+    await _sub.cancel();
+    _client.close(force: true);
+  }
+}
+
+/// On a host with the docker CLI on PATH the bridge default builds a real
+/// docker backend, so the 503 path is not observable there: the test marks
+/// itself skipped and returns true.
+bool _hostHasDockerCli() {
+  if (findHostDocker() != null) {
+    markTestSkipped(
+      'the host has a docker CLI on PATH, so the bridge default builds a '
+      'real docker backend',
+    );
+    return true;
+  }
+  return false;
 }
 
 /// One raw SSE connection to `/api/events`, accumulating the raw bytes so a

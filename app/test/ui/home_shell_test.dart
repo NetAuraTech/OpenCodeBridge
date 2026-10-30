@@ -37,11 +37,12 @@ void main() {
         findsOneWidget,
       );
 
-      // Switch to the Docker tab.
+      // Switch to the Docker tab; without a tunnel URL it points at
+      // Settings like the Sessions tab does.
       await tester.tap(find.text('Docker').last);
       await tester.pump();
       expect(
-        find.text('Container monitoring arrives in a later slice.'),
+        find.text('No bridge configured. Set the tunnel URL in Settings.'),
         findsOneWidget,
       );
 

@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/compose_project.dart';
+import '../model/container.dart';
 import '../model/permission.dart';
 import '../model/session.dart';
+import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
 import 'events/llama_speed_feed.dart';
@@ -34,6 +38,7 @@ class BridgeServer {
     this._events,
     this._windows,
     this._speed,
+    this._docker,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -54,6 +59,15 @@ class BridgeServer {
 
   /// The unified event stream (spec section 8, endpoint 14): SSE.
   static const String eventsPath = '/api/events';
+
+  /// The container list (issue #21); the per-container action and logs
+  /// endpoints hang off it by name.
+  static const String dockerContainersPath = '/api/docker/containers';
+
+  /// The compose project list (issue #21 follow-on): the docker-compose files
+  /// found in the repos opencode lists, with their creatable services. The
+  /// per-project action hangs off it by the project's address.
+  static const String dockerComposePath = '/api/docker/compose';
 
   final HttpServer _server;
 
@@ -76,6 +90,10 @@ class BridgeServer {
   /// the speed header stays empty.
   final LlamaSpeedFeed? _speed;
 
+  /// The Docker backend (issue #21); `null` when this machine has no docker
+  /// CLI, in which case the docker endpoints report `docker_unavailable`.
+  final DockerBackend? _docker;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -95,6 +113,12 @@ class BridgeServer {
   /// [windows], when provided, owns the terminal windows (spec §7, tests);
   /// the default builds a [TerminalWindowManager] over the host window
   /// spawner, the app binary, and the terminal backend's window token.
+  /// [docker], when provided, serves the docker endpoints (issue #21,
+  /// tests); the default builds a [DockerBackend] over the host docker CLI,
+  /// its container exits re-emitted onto the event stream.
+  /// [dockerLogKeepAlive] paces the keep-alive comment on a followed
+  /// container's log stream (20s, as on the events stream); the keep-alive
+  /// write is what surfaces a client disconnect, so tests shorten it.
   ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
@@ -107,6 +131,8 @@ class BridgeServer {
     EventHub? events,
     TerminalWindowManager? windows,
     LlamaSpeedFeed? speedFeed,
+    DockerBackend? docker,
+    Duration dockerLogKeepAlive = const Duration(seconds: 20),
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
@@ -121,6 +147,8 @@ class BridgeServer {
         );
     final speed =
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
+    final dockerBackend =
+        docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
     speed?.start();
     server.listen((request) async {
       final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
@@ -137,9 +165,18 @@ class BridgeServer {
         backend,
         eventHub,
         windowManager,
+        dockerBackend,
+        dockerLogKeepAlive,
       );
     });
-    return BridgeServer._(server, termBackend, eventHub, windowManager, speed);
+    return BridgeServer._(
+      server,
+      termBackend,
+      eventHub,
+      windowManager,
+      speed,
+      dockerBackend,
+    );
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -160,6 +197,7 @@ class BridgeServer {
     await _events?.close();
     await _windows?.close();
     await _speed?.close();
+    await _docker?.close();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -239,6 +277,20 @@ class BridgeServer {
     }
   }
 
+  /// The default Docker backend (issue #21): the host docker CLI, its
+  /// container exits re-emitted onto the unified stream through the event
+  /// hub when there is one. Returns `null` when this machine has no docker
+  /// CLI, in which case the docker endpoints report `docker_unavailable`.
+  static Future<DockerBackend?> _defaultDocker(
+    void Function(String)? emit,
+  ) async {
+    try {
+      return await DockerBackend.host(emit: emit);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// The default window manager (spec §7): the host window spawner (gnome
   /// terminal / xterm), the app binary as the attach client, and the
   /// terminal backend's per-startup window token. Returns `null` when this
@@ -272,6 +324,8 @@ class BridgeServer {
     SessionsBackend? sessions,
     EventHub? events,
     TerminalWindowManager? windows,
+    DockerBackend? docker,
+    Duration dockerLogKeepAlive,
   ) async {
     final response = request.response;
     response.headers.contentType = ContentType.json;
@@ -297,6 +351,45 @@ class BridgeServer {
           request.uri.path == BridgeServer.projectsPath) {
         await BridgeServer._listProjects(request, sessions);
         return;
+      }
+      // The docker endpoints (issue #21), checked before the session matchers
+      // (a bare list path would otherwise read as a session id to them).
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.dockerContainersPath) {
+        await BridgeServer._listDockerContainers(request, docker);
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.dockerComposePath) {
+        await BridgeServer._listComposeProjects(request, sessions, docker);
+        return;
+      }
+      if (request.method == 'GET') {
+        final logs = BridgeServer._dockerLogsIn(request.uri);
+        if (logs != null) {
+          await BridgeServer._handleDockerLogs(
+            request,
+            logs.$1,
+            logs.$2,
+            docker,
+            dockerLogKeepAlive,
+          );
+          return;
+        }
+      }
+      if (request.method == 'POST') {
+        final name = BridgeServer._dockerActionIn(request.uri.path);
+        if (name != null) {
+          await BridgeServer._handleDockerAction(request, name, docker);
+          return;
+        }
+      }
+      if (request.method == 'POST') {
+        final dir = BridgeServer._composeActionIn(request.uri.path);
+        if (dir != null) {
+          await BridgeServer._handleComposeAction(request, dir, docker);
+          return;
+        }
       }
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.sessionsPath) {
@@ -803,9 +896,317 @@ class BridgeServer {
     await response.close();
   }
 
+  /// The container list (issue #21): name, image, state, uptime per
+  /// container.
+  static Future<void> _listDockerContainers(
+    HttpRequest request,
+    DockerBackend? docker,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      final rows = await docker.list();
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final c in rows) c.toJson()]));
+    } on DockerNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The container action (issue #21): the body is
+  /// `{"action": "start"|"stop"|"restart"}`; anything else is a 400. An
+  /// unknown container is a 404; a daemon failure is a 502.
+  static Future<void> _handleDockerAction(
+    HttpRequest request,
+    String name,
+    DockerBackend? docker,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    DockerAction? action;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      final value = decoded is Map<String, Object?> ? decoded['action'] : null;
+      action = DockerAction.fromWire(value); // throws on an unknown value
+    } catch (_) {
+      action = null; // A non-JSON body or unknown action is invalid.
+    }
+    if (action == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      switch (action) {
+        case DockerAction.start:
+          await docker.start(name);
+        case DockerAction.stop:
+          await docker.stop(name);
+        case DockerAction.restart:
+          await docker.restart(name);
+      }
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode({'name': name}));
+    } on DockerNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The compose project list (issue #21 follow-on): the docker-compose files
+  /// found in the repos opencode lists (the project list's canonical
+  /// directories), each with its creatable services and their live state.
+  /// Without docker the endpoint reports `docker_unavailable`; without an
+  /// opencode service (no projects to scan) it is an empty list. A compose
+  /// file that cannot be read is a 502.
+  static Future<void> _listComposeProjects(
+    HttpRequest request,
+    SessionsBackend? sessions,
+    DockerBackend? docker,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      var projects = const <ComposeProject>[];
+      if (sessions != null) {
+        final projectList = await sessions.projects();
+        final dirs = [for (final p in projectList) p.canonical];
+        projects = await docker.composeProjects(dirs);
+      }
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final p in projects) p.toJson()]));
+    } on ComposeNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OpencodeServiceError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The compose project action (issue #21 follow-on): the body is
+  /// `{"action": "up"|"stop", "service": "<name>"?}`; a `service` targets one
+  /// service, its absence the whole project. Anything but up/stop is a 400;
+  /// a directory with no compose file is a 404; a docker failure is a 502.
+  static Future<void> _handleComposeAction(
+    HttpRequest request,
+    String dir,
+    DockerBackend? docker,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    ComposeAction? action;
+    String? service;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      final map = decoded is Map<String, Object?>
+          ? decoded
+          : const <String, Object?>{};
+      action = ComposeAction.fromWire(
+        map['action'],
+      ); // throws on an unknown value
+      final serviceValue = map['service'];
+      service = serviceValue is String && serviceValue.isNotEmpty
+          ? serviceValue
+          : null;
+    } catch (_) {
+      action = null; // A non-JSON body or unknown action is invalid.
+    }
+    if (action == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    final services = service == null ? null : [service];
+    try {
+      switch (action) {
+        case ComposeAction.up:
+          await docker.composeUp(dir, services: services);
+        case ComposeAction.stop:
+          await docker.composeStop(dir, services: services);
+      }
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode({'path': dir, 'service': ?service}));
+    } on ComposeNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The project directory behind a compose action path, or `null` when
+  /// [path] is not a compose action path. The client percent-encodes the
+  /// directory so it rides the path as a single segment; `Uri.path` keeps
+  /// percent-escapes, so the extracted id is decoded back to the directory.
+  static String? _composeActionIn(String path) {
+    const prefix = '/api/docker/compose/';
+    const suffix = '/action';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    // An empty id (`.../compose/action`) is not a compose action path.
+    if (path.length < prefix.length + suffix.length) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    // A raw `/` would mean the id is not the percent-encoded directory.
+    if (id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The container's log stream (issue #21): the `docker logs` output as an
+  /// SSE stream, one log line per `data:` frame; `?follow=1` keeps the
+  /// stream open on the container's new output. The keyword filtering is the
+  /// app's (the bridge never filters). An unknown container is a 404; a
+  /// daemon failure is a 502.
+  static Future<void> _handleDockerLogs(
+    HttpRequest request,
+    String name,
+    bool follow,
+    DockerBackend? docker,
+    Duration keepAlive,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    DockerLogStream stream;
+    try {
+      stream = await docker.logs(name, follow: follow);
+    } on DockerNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+      await response.close();
+      return;
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+      await response.close();
+      return;
+    }
+    // The charset matters exactly as on the events stream: the response
+    // encodes its `write`s with the content-type's charset, and log output
+    // is UTF-8.
+    response.headers.contentType = ContentType.parse(
+      'text/event-stream; charset=utf-8',
+    );
+    response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+    response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
+    response.bufferOutput = false;
+    response.statusCode = HttpStatus.ok;
+    // The initial comment flushes the response headers on connect (the
+    // client is blocked on them) and marks the stream live, like the events
+    // endpoint: a container with no output yet would otherwise hold the
+    // response open without a single byte.
+    response.write(': connected\n\n');
+    // A keep-alive comment, exactly as on the events stream: an idle tunnel
+    // connection must not be reaped, and the keep-alive write is what
+    // completes [response.done] when the client disconnects (a silent
+    // container would otherwise hold the CLI child with no write left to
+    // fail).
+    final keepAliveTimer = Timer.periodic(keepAlive, (_) {
+      try {
+        response.write(': keep-alive\n\n');
+      } catch (_) {
+        // The client went away; [response.done] kills the CLI child.
+      }
+    });
+    final subscription = stream.lines.listen(
+      (line) {
+        try {
+          response.write('data: $line\n\n');
+        } catch (_) {
+          // The client went away; [response.done] kills the CLI child.
+        }
+      },
+      onDone: () {
+        keepAliveTimer.cancel();
+        response.close();
+      },
+      onError: (Object error) {
+        keepAliveTimer.cancel();
+        response.close();
+      },
+    );
+    // The CLI child lives for this connection: it is killed when the client
+    // disconnects or the log ends.
+    unawaited(
+      response.done.then((_) {
+        keepAliveTimer.cancel();
+        unawaited(subscription.cancel());
+        unawaited(stream.close());
+      }),
+    );
+  }
+
+  /// The single container name in an action path, or `null` when [path] is
+  /// not `api/docker/containers/{name}/action` (exactly one segment, so it
+  /// falls through to the 404).
+  static String? _dockerActionIn(String path) {
+    const prefix = '/api/docker/containers/';
+    const suffix = '/action';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    // An empty name (`.../containers/action`) is not a container path.
+    if (path.length < prefix.length + suffix.length) return null;
+    final name = path.substring(prefix.length, path.length - suffix.length);
+    if (name.contains('/')) return null;
+    return Uri.decodeComponent(name);
+  }
+
+  /// The (container name, follow) of a logs path, or `null` when [uri] is
+  /// not `api/docker/containers/{name}/logs` (exactly one segment, so it
+  /// falls through to the 404).
+  static (String, bool)? _dockerLogsIn(Uri uri) {
+    final path = uri.path;
+    const prefix = '/api/docker/containers/';
+    const suffix = '/logs';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    // An empty name (`.../containers/logs`) is not a container path.
+    if (path.length < prefix.length + suffix.length) return null;
+    final name = path.substring(prefix.length, path.length - suffix.length);
+    if (name.contains('/')) return null;
+    return (Uri.decodeComponent(name), uri.queryParameters['follow'] == '1');
+  }
+
   static void _unavailable(HttpResponse response) {
     response.statusCode = HttpStatus.serviceUnavailable;
     response.write(jsonEncode({'error': 'opencode_unavailable'}));
+    response.close();
+  }
+
+  /// No docker CLI on this host (issue #21).
+  static void _dockerUnavailable(HttpResponse response) {
+    response.statusCode = HttpStatus.serviceUnavailable;
+    response.write(jsonEncode({'error': 'docker_unavailable'}));
     response.close();
   }
 
