@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/client/docker_client.dart';
+import 'package:opencodebridge/model/compose_project.dart';
 import 'package:opencodebridge/model/container.dart';
 
 void main() {
@@ -12,11 +13,13 @@ void main() {
   late List<String?> followQueries;
   late List<(String, String)> actions;
   late List<String> logNames;
+  late List<(String, String, String?)> composeActions;
 
   setUp(() async {
     followQueries = [];
     actions = [];
     logNames = [];
+    composeActions = [];
     server = await HttpServer.bind('127.0.0.1', 0);
     base = Uri.parse('http://127.0.0.1:${server.port}');
     client = DockerClient(base);
@@ -99,6 +102,60 @@ void main() {
         response.statusCode = HttpStatus.ok;
         response.write('data: alpha\n\n');
         response.write('data: beta\n\n');
+        await response.close();
+        return;
+      }
+      if (request.method == 'GET' && path == '/api/docker/compose') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.ok;
+        response.write(
+          jsonEncode([
+            {
+              'id': Uri.encodeComponent('/repos/proj'),
+              'project': 'proj',
+              'path': '/repos/proj',
+              'composeFile': '/repos/proj/docker-compose.yml',
+              'services': [
+                {
+                  'name': 'web',
+                  'state': 'running',
+                  'image': 'nginx:latest',
+                  'container': 'proj-web-1',
+                },
+                {'name': 'db', 'state': null, 'image': null, 'container': null},
+              ],
+            },
+          ]),
+        );
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' &&
+          path.startsWith('/api/docker/compose/') &&
+          path.endsWith('/action')) {
+        final id = path.substring(
+          '/api/docker/compose/'.length,
+          path.length - '/action'.length,
+        );
+        final raw = await utf8.decodeStream(request);
+        String? action;
+        String? service;
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map<String, Object?>) {
+            action = decoded['action'] as String?;
+            service = decoded['service'] as String?;
+          }
+        } catch (_) {}
+        response.headers.contentType = ContentType.json;
+        if (action == null || !{'up', 'stop'}.contains(action)) {
+          response.statusCode = HttpStatus.badRequest;
+          response.write(jsonEncode({'error': 'invalid_body'}));
+        } else {
+          composeActions.add((Uri.decodeComponent(id), action, service));
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode({'path': Uri.decodeComponent(id)}));
+        }
         await response.close();
         return;
       }
@@ -208,5 +265,98 @@ void main() {
         ),
       );
     });
+  });
+
+  group('DockerClient compose', () {
+    test('compose decodes the project rows', () async {
+      final projects = await client.compose();
+      expect(projects, [
+        ComposeProject(
+          id: Uri.encodeComponent('/repos/proj'),
+          project: 'proj',
+          path: '/repos/proj',
+          composeFile: '/repos/proj/docker-compose.yml',
+          services: [
+            const ComposeService(
+              name: 'web',
+              state: DockerState.running,
+              image: 'nginx:latest',
+              container: 'proj-web-1',
+            ),
+            const ComposeService(name: 'db', state: null),
+          ],
+        ),
+      ]);
+    });
+
+    test('composeAction posts the wire action for the whole project', () async {
+      await client.composeAction(
+        Uri.encodeComponent('/repos/proj'),
+        ComposeAction.up,
+      );
+      expect(composeActions, [('/repos/proj', 'up', null)]);
+    });
+
+    test('composeAction posts the service when one is given', () async {
+      await client.composeAction(
+        Uri.encodeComponent('/repos/proj'),
+        ComposeAction.stop,
+        service: 'db',
+      );
+      expect(composeActions, [('/repos/proj', 'stop', 'db')]);
+    });
+
+    test('compose throws DockerClientError with the bridge status', () async {
+      final failing = await HttpServer.bind('127.0.0.1', 0);
+      try {
+        failing.listen((request) async {
+          request.response.statusCode = HttpStatus.serviceUnavailable;
+          request.response.write(jsonEncode({'error': 'docker_unavailable'}));
+          await request.response.close();
+        });
+        await expectLater(
+          DockerClient(Uri.parse('http://127.0.0.1:${failing.port}')).compose(),
+          throwsA(
+            isA<DockerClientError>().having(
+              (e) => e.statusCode,
+              'statusCode',
+              HttpStatus.serviceUnavailable,
+            ),
+          ),
+        );
+      } finally {
+        await failing.close(force: true);
+      }
+    });
+
+    test(
+      'composeAction throws DockerClientError with the bridge status',
+      () async {
+        final failing = await HttpServer.bind('127.0.0.1', 0);
+        try {
+          failing.listen((request) async {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write(jsonEncode({'error': 'not_found'}));
+            await request.response.close();
+          });
+          await expectLater(
+            DockerClient(Uri.parse('http://127.0.0.1:${failing.port}'))
+                .composeAction(
+                  Uri.encodeComponent('/repos/proj'),
+                  ComposeAction.up,
+                ),
+            throwsA(
+              isA<DockerClientError>().having(
+                (e) => e.statusCode,
+                'statusCode',
+                HttpStatus.notFound,
+              ),
+            ),
+          );
+        } finally {
+          await failing.close(force: true);
+        }
+      },
+    );
   });
 }
