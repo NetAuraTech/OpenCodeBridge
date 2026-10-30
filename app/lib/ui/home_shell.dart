@@ -5,7 +5,7 @@ import '../bridge/terminal/terminal_backend.dart';
 import '../client/connection_monitor.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
-import 'docker_stub.dart';
+import 'docker_tab.dart';
 import 'sessions_tab.dart';
 import 'settings_tab.dart';
 
@@ -75,7 +75,7 @@ class _HomeShellState extends State<HomeShell> {
       index: _tab,
       children: [
         SessionsTab(apiBase: _apiBase, terminals: widget.terminals),
-        const DockerStub(),
+        DockerTab(apiBase: _apiBase),
         SettingsTab(
           settings: widget.settings,
           mode: widget.mode,
