@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../client/docker_client.dart';
 import '../client/events_client.dart';
+import '../model/compose_project.dart';
 import '../model/container.dart';
 
 /// The Docker tab (issue #21): the host's container list, each row opening
@@ -53,6 +54,16 @@ class _DockerTabState extends State<DockerTab> {
   /// True while a load is in flight.
   bool _loading = true;
 
+  /// The fetched compose projects (issue #21 follow-on), `null` until the
+  /// first successful compose load.
+  List<ComposeProject>? _composeProjects;
+
+  /// The last compose load failure, if any.
+  String? _composeError;
+
+  /// True while a compose load is in flight.
+  bool _composeLoading = true;
+
   @override
   void initState() {
     super.initState();
@@ -61,8 +72,10 @@ class _DockerTabState extends State<DockerTab> {
       _client = widget.client ?? DockerClient(base);
       _setupEvents(base);
       _load();
+      _loadCompose();
     } else {
       _loading = false;
+      _composeLoading = false;
     }
   }
 
@@ -73,6 +86,7 @@ class _DockerTabState extends State<DockerTab> {
       _client = widget.client ?? DockerClient(widget.apiBase!);
       _setupEvents(widget.apiBase!);
       _load();
+      _loadCompose();
     }
   }
 
@@ -151,6 +165,47 @@ class _DockerTabState extends State<DockerTab> {
     }
   }
 
+  /// Loads the compose projects (issue #21 follow-on) among the repos
+  /// opencode lists. Independent of the container load: a compose failure
+  /// degrades only the compose section, never the container list.
+  Future<void> _loadCompose() async {
+    final client = _client;
+    if (client == null) return;
+    setState(() {
+      _composeError = null;
+      _composeLoading = true;
+    });
+    try {
+      final projects = await client.compose();
+      if (!mounted) return;
+      setState(() {
+        _composeProjects = projects;
+        _composeLoading = false;
+      });
+    } on DockerClientError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _composeError = e.statusCode == 0
+            ? 'Cannot reach the bridge.'
+            : 'The bridge could not list compose projects '
+                  '(status ${e.statusCode}).';
+        _composeLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _composeError = 'Could not load the compose projects.';
+        _composeLoading = false;
+      });
+    }
+  }
+
+  /// Pull-to-refresh: the container list and the compose projects.
+  Future<void> _refreshAll() async {
+    await _load();
+    await _loadCompose();
+  }
+
   /// Opens the detail for [row]: state, the start/stop/restart actions, and
   /// the live log stream. When the detail closes, the list re-loads.
   Future<void> _openDetail(DockerContainer row) async {
@@ -185,7 +240,7 @@ class _DockerTabState extends State<DockerTab> {
     }
     final rows = _rows!;
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: _refreshAll,
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.only(top: 8),
@@ -193,6 +248,14 @@ class _DockerTabState extends State<DockerTab> {
           if (rows.isEmpty) const _CenteredMessage(text: 'No containers.'),
           for (final row in rows)
             _ContainerRow(container: row, onTap: () => _openDetail(row)),
+          const SizedBox(height: 12),
+          _ComposeSection(
+            client: _client!,
+            projects: _composeProjects,
+            loading: _composeLoading,
+            error: _composeError,
+            reload: _loadCompose,
+          ),
         ],
       ),
     );
@@ -692,4 +755,313 @@ class _ErrorState extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// One compose up/stop decision (the project's, or one service's).
+typedef _ComposeOnAction = void Function(
+  ComposeAction action, {
+  String? service,
+});
+
+/// The compose section of the Docker tab (issue #21 follow-on): the
+/// docker-compose projects detected in the repos opencode lists, each a group
+/// of its creatable services. The state of each service and project, and the
+/// up/stop actions, are the bridge's `docker compose` endpoints. Refreshes via
+/// [reload] after its own actions and on pull.
+class _ComposeSection extends StatefulWidget {
+  const _ComposeSection({
+    required this.client,
+    required this.projects,
+    required this.loading,
+    required this.error,
+    required this.reload,
+  });
+
+  final DockerClient client;
+
+  /// The loaded projects; `null` until the first successful load.
+  final List<ComposeProject>? projects;
+
+  /// True while a compose load is in flight.
+  final bool loading;
+
+  /// The last compose load failure, if any.
+  final String? error;
+
+  /// Re-fetches the compose projects (the parent's loader).
+  final Future<void> Function() reload;
+
+  @override
+  State<_ComposeSection> createState() => _ComposeSectionState();
+}
+
+class _ComposeSectionState extends State<_ComposeSection> {
+  /// The key of the in-flight action (so its button shows progress); `null`
+  /// when no action is in flight. While set, all compose buttons are disabled
+  /// (one compose action at a time, so they cannot race on a project).
+  String? _busy;
+
+  Future<void> _act(
+    ComposeProject project,
+    ComposeAction action, {
+    String? service,
+  }) async {
+    if (_busy != null) return;
+    final key = _actionKey(project.id, action, service);
+    setState(() => _busy = key);
+    try {
+      await widget.client.composeAction(project.id, action, service: service);
+      if (!mounted) return;
+      await widget.reload();
+    } on DockerClientError catch (e) {
+      if (!mounted) return;
+      _snackBar(
+        'Could not ${action.wire}${service == null ? '' : ' $service'} '
+        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'})',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _snackBar(
+        'Could not ${action.wire}${service == null ? '' : ' $service'}.',
+      );
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
+
+  void _snackBar(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final projects = widget.projects;
+    if (widget.loading && projects == null) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Center(child: Text('Loading compose projects…')),
+      );
+    }
+    if (projects == null) {
+      final error = widget.error;
+      return error == null
+          ? const SizedBox.shrink()
+          : Padding(padding: const EdgeInsets.all(16), child: Text(error));
+    }
+    if (projects.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Center(child: Text('No compose projects detected.')),
+      );
+    }
+    return Column(
+      children: [
+        for (final project in projects)
+          _ComposeProjectCard(
+            project: project,
+            busy: _busy,
+            onAction: (action, {service}) =>
+                _act(project, action, service: service),
+          ),
+      ],
+    );
+  }
+}
+
+/// The single-segment key of one compose action, for the busy-button lookup.
+String _actionKey(String projectId, ComposeAction action, String? service) =>
+    service == null
+    ? 'proj|$projectId|${action.wire}'
+    : 'svc|$projectId|$service|${action.wire}';
+
+/// One compose project: its directory, a per-project start-all / stop-all,
+/// and one row per creatable service.
+class _ComposeProjectCard extends StatelessWidget {
+  const _ComposeProjectCard({
+    required this.project,
+    required this.busy,
+    required this.onAction,
+  });
+
+  final ComposeProject project;
+  final String? busy;
+  final _ComposeOnAction onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final running = project.services.where((s) => s.isRunning).length;
+    final total = project.services.length;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        project.project,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        project.path,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11, color: scheme.outline),
+                      ),
+                    ],
+                  ),
+                ),
+                Text(
+                  '$running/$total up',
+                  style: TextStyle(fontSize: 12, color: scheme.outline),
+                ),
+                const SizedBox(width: 8),
+                _ComposeButton(
+                  actionKey: _actionKey(project.id, ComposeAction.up, null),
+                  busy: busy,
+                  label: 'Start all',
+                  enabled: project.anyNotRunning,
+                  onPressed: () => onAction(ComposeAction.up),
+                ),
+                _ComposeButton(
+                  actionKey: _actionKey(project.id, ComposeAction.stop, null),
+                  busy: busy,
+                  label: 'Stop all',
+                  enabled: project.anyRunning,
+                  onPressed: () => onAction(ComposeAction.stop),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            for (final service in project.services)
+              _ComposeServiceRow(
+                project: project,
+                service: service,
+                busy: busy,
+                onAction: onAction,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One creatable service of a compose project: the state dot, the name, the
+/// image (when known), and its own start / stop.
+class _ComposeServiceRow extends StatelessWidget {
+  const _ComposeServiceRow({
+    required this.project,
+    required this.service,
+    required this.busy,
+    required this.onAction,
+  });
+
+  final ComposeProject project;
+  final ComposeService service;
+  final String? busy;
+  final _ComposeOnAction onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(left: 4, top: 2, bottom: 2),
+      child: Row(
+        children: [
+          _StateDot(state: service.state ?? DockerState.created),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  service.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (service.image != null)
+                  Text(
+                    service.image!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: scheme.outline),
+                  ),
+              ],
+            ),
+          ),
+          _ComposeButton(
+            actionKey: _actionKey(project.id, ComposeAction.up, service.name),
+            busy: busy,
+            label: 'Start',
+            enabled: !service.isRunning,
+            onPressed: () => onAction(ComposeAction.up, service: service.name),
+          ),
+          _ComposeButton(
+            actionKey: _actionKey(project.id, ComposeAction.stop, service.name),
+            busy: busy,
+            label: 'Stop',
+            enabled: service.isRunning,
+            onPressed: () =>
+                onAction(ComposeAction.stop, service: service.name),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One compose start/stop button. Disabled while its action is inadmissible
+/// or while any compose action is in flight; shows progress while it is the
+/// in-flight action.
+class _ComposeButton extends StatelessWidget {
+  const _ComposeButton({
+    required this.actionKey,
+    required this.busy,
+    required this.label,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  final String actionKey;
+  final String? busy;
+  final String label;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final inFlight = actionKey == busy;
+    final active = enabled && busy == null;
+    return Padding(
+      padding: const EdgeInsets.only(left: 6),
+      child: OutlinedButton(
+        key: ValueKey('compose-btn-$actionKey'),
+        onPressed: active ? onPressed : null,
+        child: inFlight
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Text(label, style: const TextStyle(fontSize: 12)),
+      ),
+    );
+  }
 }

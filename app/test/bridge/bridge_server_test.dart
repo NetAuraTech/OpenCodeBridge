@@ -1263,6 +1263,243 @@ void main() {
       }
     });
   });
+
+  group('BridgeServer compose', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeDockerBridge fake;
+    late SessionStore store;
+    late Directory temp;
+    late Directory repo;
+    late Directory bare;
+
+    setUp(() async {
+      temp = await Directory.systemTemp.createTemp('oc-compose-route');
+      // A fixed repo name so the derived compose project name is stable.
+      repo = Directory('${temp.path}/composeproj');
+      await repo.create();
+      await File('${repo.path}/docker-compose.yml')
+          .writeAsString('services: {}\n');
+      // A project directory without a compose file (must be skipped).
+      bare = Directory('${temp.path}/bare');
+      await bare.create();
+      fake = _FakeDockerBridge();
+      store = await SessionStore.load(dir: temp);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: _FakeService(
+            overrideProjects: [
+              OpencodeProject(id: 'p1', name: 'proj-one', canonical: repo.path),
+              OpencodeProject(id: 'p2', name: 'proj-two', canonical: bare.path),
+            ],
+          ),
+          store: store,
+        ),
+        docker: fake.backend,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await temp.delete(recursive: true);
+    });
+
+    test('GET /api/docker/compose lists the compose projects', () async {
+      fake.runResults
+        ..add(
+          const DockerCliResult(exitCode: 0, stdout: 'web\ndb\n', stderr: ''),
+        )
+        ..add(
+          const DockerCliResult(
+            exitCode: 0,
+            stdout: '{"Service": "db", "Name": "composeproj-db-1", "Image": "postgres:16", "State": "exited"}\n',
+            stderr: '',
+          ),
+        );
+
+      final (status, body) = await _get(base, 'api/docker/compose');
+      expect(status, 200);
+      final projects = (jsonDecode(body) as List).cast<Map<String, Object?>>();
+      expect(projects, [
+        {
+          'id': Uri.encodeComponent(repo.path),
+          'project': 'composeproj',
+          'path': repo.path,
+          'composeFile': '${repo.path}/docker-compose.yml',
+          'services': [
+            {'name': 'web', 'state': null, 'image': null, 'container': null},
+            {
+              'name': 'db',
+              'state': 'exited',
+              'image': 'postgres:16',
+              'container': 'composeproj-db-1',
+            },
+          ],
+        },
+      ]);
+      expect(fake.runArgs, [
+        const ['compose', 'config', '--services'],
+        const ['compose', 'ps', '--all', '--format', 'json'],
+      ]);
+      expect(fake.runWorkingDirs, [repo.path, repo.path]);
+    });
+
+    test(
+      'GET /api/docker/compose skips projects without a compose file',
+      () async {
+        fake.runResults
+          ..add(const DockerCliResult(exitCode: 0, stdout: 'web\n', stderr: ''))
+          ..add(const DockerCliResult(exitCode: 0, stdout: '', stderr: ''));
+
+        final (status, body) = await _get(base, 'api/docker/compose');
+        expect(status, 200);
+        final projects = (jsonDecode(body) as List)
+            .cast<Map<String, Object?>>();
+        expect(projects, hasLength(1));
+        expect(projects.single['path'], repo.path);
+        // Only the directory with a compose file ran docker.
+        expect(fake.runWorkingDirs, [repo.path, repo.path]);
+      },
+    );
+
+    test('GET /api/docker/compose with a compose failure is 502', () async {
+      fake.runResults.add(
+        const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'cannot connect to the daemon',
+        ),
+      );
+
+      final (status, body) = await _get(base, 'api/docker/compose');
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_unreachable'});
+    });
+
+    test(
+      'GET /api/docker/compose is 503 without a docker CLI on the host',
+      () async {
+        if (_hostHasDockerCli()) return;
+        final noDocker = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(overrideProjects: const []),
+            store: store,
+          ),
+        );
+        try {
+          final (status, body) = await _get(
+            noDocker.baseUri,
+            'api/docker/compose',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'docker_unavailable'});
+        } finally {
+          await noDocker.stop();
+        }
+      },
+    );
+
+    test(
+      'GET /api/docker/compose without opencode projects is empty',
+      () async {
+        final empty = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(overrideProjects: const []),
+            store: store,
+          ),
+          docker: fake.backend,
+        );
+        try {
+          final (status, body) = await _get(
+            empty.baseUri,
+            'api/docker/compose',
+          );
+          expect(status, 200);
+          expect(jsonDecode(body), []);
+        } finally {
+          await empty.stop();
+        }
+      },
+    );
+
+    String actionPath() =>
+        'api/docker/compose/${Uri.encodeComponent(repo.path)}/action';
+
+    test('POST .../compose/{id}/action up starts the whole project', () async {
+      final (status, body) = await _postRaw(
+        base,
+        actionPath(),
+        '{"action": "up"}',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), {'path': repo.path});
+      expect(fake.runArgs, [
+        const ['compose', 'up', '-d'],
+      ]);
+      expect(fake.runWorkingDirs, [repo.path]);
+    });
+
+    test('POST .../compose/{id}/action stop stops one service', () async {
+      final (status, body) = await _postRaw(
+        base,
+        actionPath(),
+        '{"action": "stop", "service": "db"}',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), {'path': repo.path, 'service': 'db'});
+      expect(fake.runArgs, [
+        const ['compose', 'stop', 'db'],
+      ]);
+      expect(fake.runWorkingDirs, [repo.path]);
+    });
+
+    test('POST .../compose/{id}/action of an unknown action is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        actionPath(),
+        '{"action": "restart"}',
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(fake.runArgs, isEmpty);
+    });
+
+    test(
+      'POST .../compose/{id}/action without a compose file is 404',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/docker/compose/${Uri.encodeComponent(bare.path)}/action',
+          '{"action": "up"}',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      },
+    );
+
+    test(
+      'POST .../compose/{id}/action with a compose failure is 502',
+      () async {
+        fake.runResult = const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'no such service',
+        );
+
+        final (status, body) = await _postRaw(
+          base,
+          actionPath(),
+          '{"action": "stop"}',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'docker_unreachable'});
+      },
+    );
+  });
 }
 
 /// A scripted service for the sessions-endpoint tests.
@@ -1271,7 +1508,12 @@ class _FakeService implements OpencodeService {
     this.detail,
     this.messages = const [],
     this.permissions = const [],
+    this.overrideProjects,
   });
+
+  /// When set, [projects] returns these (the compose tests point one at a
+  /// temp directory that actually holds a compose file).
+  final List<OpencodeProject>? overrideProjects;
 
   final List<String> deleted = [];
   final Set<String> removedFromService = {};
@@ -1324,6 +1566,8 @@ class _FakeService implements OpencodeService {
   @override
   Future<List<OpencodeProject>> projects() async {
     if (failProjects) throw const OpencodeServiceError(0, 'service down');
+    final override = overrideProjects;
+    if (override != null) return override;
     return const [
       OpencodeProject(id: 'p1', name: 'proj-one', canonical: '/proj/one'),
       OpencodeProject(id: 'p2', name: 'proj-two', canonical: '/proj/two'),
@@ -1513,6 +1757,7 @@ class _FakeDockerBridge {
   }
 
   final List<List<String>> runArgs = [];
+  final List<String?> runWorkingDirs = [];
   final List<List<String>> spawnArgs = [];
   final List<_FakeDockerChild> children = [];
   DockerCliResult runResult = const DockerCliResult(
@@ -1520,18 +1765,26 @@ class _FakeDockerBridge {
     stdout: '',
     stderr: '',
   );
+  final List<DockerCliResult> runResults = [];
   final StreamController<String> eventsLines = StreamController<String>();
   final StreamController<String> logsLines = StreamController<String>();
   late final DockerBackend _backend;
 
   DockerBackend get backend => _backend;
 
-  Future<DockerCliResult> _run(List<String> argv) async {
+  Future<DockerCliResult> _run(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
     runArgs.add(List.of(argv));
-    return runResult;
+    runWorkingDirs.add(workingDirectory);
+    return runResults.isNotEmpty ? runResults.removeAt(0) : runResult;
   }
 
-  Future<DockerProcess> _spawn(List<String> argv) async {
+  Future<DockerProcess> _spawn(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
     spawnArgs.add(List.of(argv));
     final lines = argv.first == 'events' ? eventsLines : logsLines;
     final child = _FakeDockerChild(lines);

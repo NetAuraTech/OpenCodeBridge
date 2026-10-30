@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/compose_project.dart';
 import '../model/container.dart';
 import '../model/permission.dart';
 import '../model/session.dart';
@@ -62,6 +63,11 @@ class BridgeServer {
   /// The container list (issue #21); the per-container action and logs
   /// endpoints hang off it by name.
   static const String dockerContainersPath = '/api/docker/containers';
+
+  /// The compose project list (issue #21 follow-on): the docker-compose files
+  /// found in the repos opencode lists, with their creatable services. The
+  /// per-project action hangs off it by the project's address.
+  static const String dockerComposePath = '/api/docker/compose';
 
   final HttpServer _server;
 
@@ -353,6 +359,11 @@ class BridgeServer {
         await BridgeServer._listDockerContainers(request, docker);
         return;
       }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.dockerComposePath) {
+        await BridgeServer._listComposeProjects(request, sessions, docker);
+        return;
+      }
       if (request.method == 'GET') {
         final logs = BridgeServer._dockerLogsIn(request.uri);
         if (logs != null) {
@@ -370,6 +381,13 @@ class BridgeServer {
         final name = BridgeServer._dockerActionIn(request.uri.path);
         if (name != null) {
           await BridgeServer._handleDockerAction(request, name, docker);
+          return;
+        }
+      }
+      if (request.method == 'POST') {
+        final dir = BridgeServer._composeActionIn(request.uri.path);
+        if (dir != null) {
+          await BridgeServer._handleComposeAction(request, dir, docker);
           return;
         }
       }
@@ -950,6 +968,118 @@ class BridgeServer {
       response.write(jsonEncode({'error': 'docker_unreachable'}));
     }
     await response.close();
+  }
+
+  /// The compose project list (issue #21 follow-on): the docker-compose files
+  /// found in the repos opencode lists (the project list's canonical
+  /// directories), each with its creatable services and their live state.
+  /// Without docker the endpoint reports `docker_unavailable`; without an
+  /// opencode service (no projects to scan) it is an empty list. A compose
+  /// file that cannot be read is a 502.
+  static Future<void> _listComposeProjects(
+    HttpRequest request,
+    SessionsBackend? sessions,
+    DockerBackend? docker,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      var projects = const <ComposeProject>[];
+      if (sessions != null) {
+        final projectList = await sessions.projects();
+        final dirs = [for (final p in projectList) p.canonical];
+        projects = await docker.composeProjects(dirs);
+      }
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final p in projects) p.toJson()]));
+    } on ComposeNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OpencodeServiceError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The compose project action (issue #21 follow-on): the body is
+  /// `{"action": "up"|"stop", "service": "<name>"?}`; a `service` targets one
+  /// service, its absence the whole project. Anything but up/stop is a 400;
+  /// a directory with no compose file is a 404; a docker failure is a 502.
+  static Future<void> _handleComposeAction(
+    HttpRequest request,
+    String dir,
+    DockerBackend? docker,
+  ) async {
+    final response = request.response;
+    if (docker == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    ComposeAction? action;
+    String? service;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      final map = decoded is Map<String, Object?>
+          ? decoded
+          : const <String, Object?>{};
+      action = ComposeAction.fromWire(
+        map['action'],
+      ); // throws on an unknown value
+      final serviceValue = map['service'];
+      service = serviceValue is String && serviceValue.isNotEmpty
+          ? serviceValue
+          : null;
+    } catch (_) {
+      action = null; // A non-JSON body or unknown action is invalid.
+    }
+    if (action == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    final services = service == null ? null : [service];
+    try {
+      switch (action) {
+        case ComposeAction.up:
+          await docker.composeUp(dir, services: services);
+        case ComposeAction.stop:
+          await docker.composeStop(dir, services: services);
+      }
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode({'path': dir, 'service': ?service}));
+    } on ComposeNotFoundError {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The project directory behind a compose action path, or `null` when
+  /// [path] is not a compose action path. The client percent-encodes the
+  /// directory so it rides the path as a single segment; `Uri.path` keeps
+  /// percent-escapes, so the extracted id is decoded back to the directory.
+  static String? _composeActionIn(String path) {
+    const prefix = '/api/docker/compose/';
+    const suffix = '/action';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    // An empty id (`.../compose/action`) is not a compose action path.
+    if (path.length < prefix.length + suffix.length) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    // A raw `/` would mean the id is not the percent-encoded directory.
+    if (id.contains('/')) return null;
+    return Uri.decodeComponent(id);
   }
 
   /// The container's log stream (issue #21): the `docker logs` output as an

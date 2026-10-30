@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
+import 'package:opencodebridge/model/compose_project.dart';
 import 'package:opencodebridge/model/container.dart';
 
 /// A scripted docker CLI child for the spawner seam.
@@ -34,6 +35,7 @@ class _FakeProcess {
 /// The DockerRunner/DockerSpawner seam, scripted.
 class _FakeDocker {
   final List<List<String>> runArgs = [];
+  final List<String?> runWorkingDirs = [];
   final List<List<String>> spawnArgs = [];
   final List<_FakeProcess> spawned = [];
   final List<String> emitted = [];
@@ -42,6 +44,11 @@ class _FakeDocker {
     stdout: '',
     stderr: '',
   );
+
+  /// Results queued for the next [run] calls, in order; consumed before
+  /// [runResult] (which is the fallback for any un-queued call). Lets one
+  /// backend return distinct output for `config --services` and `ps --all`.
+  final List<DockerCliResult> runResults = [];
 
   /// The next children the spawner returns, in order.
   final List<_FakeProcess> processes = [];
@@ -56,12 +63,19 @@ class _FakeDocker {
     reconnectDelay: reconnectDelay,
   );
 
-  Future<DockerCliResult> _run(List<String> argv) async {
+  Future<DockerCliResult> _run(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
     runArgs.add(List.of(argv));
-    return runResult;
+    runWorkingDirs.add(workingDirectory);
+    return runResults.isNotEmpty ? runResults.removeAt(0) : runResult;
   }
 
-  Future<DockerProcess> _spawn(List<String> argv) async {
+  Future<DockerProcess> _spawn(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
     spawnArgs.add(List.of(argv));
     if (processes.isNotEmpty) {
       final process = processes.removeAt(0);
@@ -502,6 +516,244 @@ void main() {
       expect(findHostDocker(path: '/definitely/not/a/path-$_pid'), isNull);
     });
   });
+
+  group('findComposeFile', () {
+    test('finds the compose file in the directory', () async {
+      final dir = await Directory.systemTemp.createTemp('oc-compose-file');
+      try {
+        final file = File('${dir.path}/docker-compose.yml');
+        await file.writeAsString('services: {}\n');
+        expect(DockerBackend.findComposeFile(dir.path), file.path);
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test('returns null when no compose file is present', () async {
+      final dir = await Directory.systemTemp.createTemp('oc-compose-none');
+      try {
+        expect(DockerBackend.findComposeFile(dir.path), isNull);
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    });
+  });
+
+  group('parseComposeServices', () {
+    test('merges the creatable names with their live state', () {
+      const psOutput = '''
+{"Service": "web", "Name": "proj-web-1", "Image": "nginx:latest", "State": "running"}
+{"Service": "db", "Name": "proj-db-1", "Image": "postgres:16", "State": "exited"}
+''';
+      final services = parseComposeServices(
+        configServices: ['web', 'db', 'cache'],
+        psOutput: psOutput,
+      );
+      expect(services, [
+        const ComposeService(
+          name: 'web',
+          state: DockerState.running,
+          image: 'nginx:latest',
+          container: 'proj-web-1',
+        ),
+        const ComposeService(
+          name: 'db',
+          state: DockerState.exited,
+          image: 'postgres:16',
+          container: 'proj-db-1',
+        ),
+        // `cache` is creatable but never created: no live row.
+        const ComposeService(name: 'cache', state: null),
+      ]);
+    });
+  });
+
+  group('DockerBackend.composeProjects', () {
+    Future<Directory> repo() async {
+      final dir = await Directory.systemTemp.createTemp('oc-compose-repo');
+      await File('${dir.path}/docker-compose.yml')
+          .writeAsString('services: {}\n');
+      return dir;
+    }
+
+    test('skips directories without a compose file', () async {
+      final withCompose = await repo();
+      final without = await Directory.systemTemp.createTemp('oc-compose-skip');
+      final fake = _FakeDocker();
+      fake.runResults
+        ..add(const DockerCliResult(exitCode: 0, stdout: 'web\n', stderr: ''))
+        ..add(const DockerCliResult(exitCode: 0, stdout: '', stderr: ''));
+      final backend = fake.bind();
+      try {
+        final projects = await backend.composeProjects([
+          without.path,
+          withCompose.path,
+        ]);
+        expect(projects, hasLength(1));
+        expect(projects.single.path, withCompose.path);
+        // Only the directory with a compose file ran docker.
+        expect(fake.runWorkingDirs, [withCompose.path, withCompose.path]);
+      } finally {
+        await backend.close();
+        await withCompose.delete(recursive: true);
+        await without.delete(recursive: true);
+      }
+    });
+
+    test('reports the project with its services and live state', () async {
+      final dir = await repo();
+      final fake = _FakeDocker();
+      fake.runResults
+        ..add(
+          const DockerCliResult(exitCode: 0, stdout: 'web\ndb\n', stderr: ''),
+        )
+        ..add(
+          const DockerCliResult(
+            exitCode: 0,
+            stdout: '{"Service": "db", "Name": "x-db-1", "Image": "alpine", "State": "exited"}\n',
+            stderr: '',
+          ),
+        );
+      final backend = fake.bind();
+      try {
+        final projects = await backend.composeProjects([dir.path]);
+        final project = projects.single;
+        expect(project.path, dir.path);
+        expect(project.project, _basename(dir.path));
+        expect(project.id, ComposeProject.encodeId(dir.path));
+        expect(project.services, [
+          const ComposeService(name: 'web', state: null),
+          const ComposeService(
+            name: 'db',
+            state: DockerState.exited,
+            image: 'alpine',
+            container: 'x-db-1',
+          ),
+        ]);
+      } finally {
+        await backend.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test('a config failure is DockerUnavailableError', () async {
+      final dir = await repo();
+      final fake = _FakeDocker();
+      fake.runResults.add(
+        const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'cannot connect to the daemon',
+        ),
+      );
+      final backend = fake.bind();
+      try {
+        await expectLater(
+          backend.composeProjects([dir.path]),
+          throwsA(isA<DockerUnavailableError>()),
+        );
+      } finally {
+        await backend.close();
+        await dir.delete(recursive: true);
+      }
+    });
+  });
+
+  group('DockerBackend compose actions', () {
+    Future<Directory> repo() async {
+      final dir = await Directory.systemTemp.createTemp('oc-compose-act');
+      await File('${dir.path}/docker-compose.yml')
+          .writeAsString('services: {}\n');
+      return dir;
+    }
+
+    test('up the whole project', () async {
+      final dir = await repo();
+      final fake = _FakeDocker();
+      final backend = fake.bind();
+      try {
+        await backend.composeUp(dir.path);
+        expect(fake.runArgs.single, const ['compose', 'up', '-d']);
+        expect(fake.runWorkingDirs.single, dir.path);
+      } finally {
+        await backend.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test('up one service', () async {
+      final dir = await repo();
+      final fake = _FakeDocker();
+      final backend = fake.bind();
+      try {
+        await backend.composeUp(dir.path, services: ['web']);
+        expect(fake.runArgs.single, const ['compose', 'up', '-d', 'web']);
+      } finally {
+        await backend.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test('stop the services', () async {
+      final dir = await repo();
+      final fake = _FakeDocker();
+      final backend = fake.bind();
+      try {
+        await backend.composeStop(dir.path, services: ['db', 'web']);
+        expect(fake.runArgs.single, const ['compose', 'stop', 'db', 'web']);
+      } finally {
+        await backend.close();
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test(
+      'a directory without a compose file is ComposeNotFoundError',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('oc-compose-none');
+        final fake = _FakeDocker();
+        final backend = fake.bind();
+        try {
+          await expectLater(
+            backend.composeUp(dir.path),
+            throwsA(isA<ComposeNotFoundError>()),
+          );
+        } finally {
+          await backend.close();
+          await dir.delete(recursive: true);
+        }
+      },
+    );
+
+    test('a compose failure is DockerUnavailableError', () async {
+      final dir = await repo();
+      final fake = _FakeDocker();
+      fake.runResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'no such service',
+      );
+      final backend = fake.bind();
+      try {
+        await expectLater(
+          backend.composeStop(dir.path),
+          throwsA(isA<DockerUnavailableError>()),
+        );
+      } finally {
+        await backend.close();
+        await dir.delete(recursive: true);
+      }
+    });
+  });
+}
+
+/// The directory's basename as the backend derives the compose project name
+/// (lower-cased; the temp names are all `[a-z0-9]`, so this is exact).
+String _basename(String path) {
+  final trimmed = path.endsWith('/')
+      ? path.substring(0, path.length - 1)
+      : path;
+  return trimmed.split('/').last.toLowerCase();
 }
 
 final int _pid = Random().nextInt(1 << 30);

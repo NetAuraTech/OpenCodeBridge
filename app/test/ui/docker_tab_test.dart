@@ -4,20 +4,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/client/docker_client.dart';
 import 'package:opencodebridge/client/events_client.dart';
+import 'package:opencodebridge/model/compose_project.dart';
 import 'package:opencodebridge/model/container.dart';
 import 'package:opencodebridge/ui/docker_tab.dart';
 
 /// A scripted [DockerClient] for the tab tests.
 class _FakeDockerClient extends DockerClient {
-  _FakeDockerClient({this.rows = const []})
+  _FakeDockerClient({this.rows = const [], this.composeProjects = const []})
     : super(Uri.parse('http://bridge.test/'));
 
   /// The rows the client returns; actions mutate them, like a re-fetch
   /// would see.
   final List<DockerContainer> rows;
 
+  /// The compose projects [compose] returns (issue #21 follow-on).
+  final List<ComposeProject> composeProjects;
+
   final List<(String, DockerAction)> actions = [];
   final List<String> logNames = [];
+
+  /// The compose actions taken, as (project id, action, service).
+  final List<(String, ComposeAction, String?)> composeActions = [];
 
   /// The log lines the log stream yields.
   final StreamController<String> logLines =
@@ -25,6 +32,8 @@ class _FakeDockerClient extends DockerClient {
 
   Object? listError;
   Object? actionError;
+  Object? composeError;
+  Object? composeActionError;
   var listCalls = 0;
 
   @override
@@ -59,6 +68,24 @@ class _FakeDockerClient extends DockerClient {
     logNames.add(name);
     return logLines.stream;
   }
+
+  @override
+  Future<List<ComposeProject>> compose() async {
+    final error = composeError;
+    if (error is Object) throw error;
+    return composeProjects;
+  }
+
+  @override
+  Future<void> composeAction(
+    String id,
+    ComposeAction action, {
+    String? service,
+  }) async {
+    final error = composeActionError;
+    if (error is Object) throw error;
+    composeActions.add((id, action, service));
+  }
 }
 
 /// A scripted [EventSource] for the tab tests (no real SSE connection).
@@ -90,8 +117,12 @@ BridgeEvent _dockerEvent(String type, Map<String, Object?> data) =>
 Future<(_FakeDockerClient, _FakeEventsSource)> _pumpTab(
   WidgetTester tester, {
   List<DockerContainer> rows = const [],
+  List<ComposeProject> composeProjects = const [],
 }) async {
-  final client = _FakeDockerClient(rows: List.of(rows));
+  final client = _FakeDockerClient(
+    rows: List.of(rows),
+    composeProjects: List.of(composeProjects),
+  );
   final events = _FakeEventsSource();
   await tester.pumpWidget(
     MaterialApp(
@@ -413,6 +444,93 @@ void main() {
 
         // Only the list behind the detail re-fetches.
         expect(client.listCalls, before + 1);
+      });
+    });
+
+    group('compose projects (issue #21 follow-on)', () {
+      final demo = ComposeProject(
+        id: Uri.encodeComponent('/repo'),
+        project: 'demo',
+        path: '/repo',
+        composeFile: '/repo/docker-compose.yml',
+        services: [
+          const ComposeService(
+            name: 'web',
+            state: DockerState.running,
+            image: 'nginx:latest',
+            container: 'demo-web-1',
+          ),
+          const ComposeService(name: 'db', state: null),
+        ],
+      );
+
+      testWidgets('shows each project with its services and state', (
+        tester,
+      ) async {
+        await _pumpTab(tester, composeProjects: [demo]);
+
+        expect(find.text('demo'), findsOneWidget);
+        expect(find.text('/repo'), findsOneWidget);
+        expect(find.text('1/2 up'), findsOneWidget);
+        // The created service shows its image…
+        expect(find.text('nginx:latest'), findsOneWidget);
+        // …the never-created one shows only its name.
+        expect(find.text('db'), findsOneWidget);
+        expect(find.text('Start all'), findsOneWidget);
+        expect(find.text('Stop all'), findsOneWidget);
+      });
+
+      testWidgets('no compose file in any repo says so', (tester) async {
+        await _pumpTab(tester);
+        expect(find.text('No compose projects detected.'), findsOneWidget);
+      });
+
+      testWidgets('starting a service takes the up action on it', (
+        tester,
+      ) async {
+        final (client, _) = await _pumpTab(tester, composeProjects: [demo]);
+
+        await tester.tap(
+          find.byKey(ValueKey('compose-btn-svc|${demo.id}|db|up')),
+        );
+        await tester.pump();
+
+        expect(client.composeActions, [(demo.id, ComposeAction.up, 'db')]);
+      });
+
+      testWidgets('Start all takes the up action on the whole project', (
+        tester,
+      ) async {
+        final (client, _) = await _pumpTab(tester, composeProjects: [demo]);
+
+        await tester.tap(
+          find.byKey(ValueKey('compose-btn-proj|${demo.id}|up')),
+        );
+        await tester.pump();
+
+        expect(client.composeActions, [(demo.id, ComposeAction.up, null)]);
+      });
+
+      testWidgets('a compose load failure shows the error', (tester) async {
+        final client = _FakeDockerClient();
+        client.composeError = const DockerClientError(502, 'oops');
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: DockerTab(
+                apiBase: Uri.parse('http://bridge.test/'),
+                client: client,
+                events: _FakeEventsSource(),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.text('The bridge could not list compose projects (status 502).'),
+          findsOneWidget,
+        );
       });
     });
   });

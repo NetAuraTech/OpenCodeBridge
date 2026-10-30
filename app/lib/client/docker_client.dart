@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:opencodebridge/model/compose_project.dart';
 import 'package:opencodebridge/model/container.dart';
 import 'package:opencodebridge/sse/sse.dart';
 
@@ -28,6 +29,62 @@ class DockerClient {
       final decoded = jsonDecode(body);
       final list = decoded is List ? decoded : const <Object?>[];
       return [for (final item in list) DockerContainer.fromJson(item)];
+    } on DockerClientError {
+      rethrow;
+    } catch (error) {
+      throw DockerClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// The compose projects among the repos opencode lists (issue #21 follow-
+  /// on): the docker-compose files found, each with its creatable services and
+  /// their live state.
+  Future<List<ComposeProject>> compose() async {
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(
+        _base.replace(path: 'api/docker/compose'),
+      );
+      final response = await request.close();
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) {
+        throw DockerClientError(response.statusCode, body);
+      }
+      final decoded = jsonDecode(body);
+      final list = decoded is List ? decoded : const <Object?>[];
+      return [for (final item in list) ComposeProject.fromJson(item)];
+    } on DockerClientError {
+      rethrow;
+    } catch (error) {
+      throw DockerClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Take the [action] on the compose project [id] (its URL-encoded
+  /// directory), or on one of its services when [service] is given (issue #21
+  /// follow-on). The bridge blocks until the `docker compose` command
+  /// completes.
+  Future<void> composeAction(
+    String id,
+    ComposeAction action, {
+    String? service,
+  }) async {
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(
+        _base.replace(path: 'api/docker/compose/$id/action'),
+      );
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode({'action': action.wire, 'service': ?service}));
+      final response = await request.close();
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) {
+        throw DockerClientError(response.statusCode, body);
+      }
     } on DockerClientError {
       rethrow;
     } catch (error) {

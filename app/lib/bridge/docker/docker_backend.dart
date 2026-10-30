@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../../model/compose_project.dart';
 import '../../model/container.dart';
 import '../events/bridge_event.dart';
 
@@ -20,7 +21,13 @@ class DockerCliResult {
 }
 
 /// Runs one docker CLI argv and waits for it to exit (the short commands).
-typedef DockerRunner = Future<DockerCliResult> Function(List<String> argv);
+/// [workingDirectory] is the child's working directory (the `docker compose`
+/// commands need it to resolve their compose file); `null` inherits the
+/// bridge's, as the plain `docker` commands do.
+typedef DockerRunner = Future<DockerCliResult> Function(
+  List<String> argv, {
+  String? workingDirectory,
+});
 
 /// One spawned docker CLI child (the streaming commands: `docker logs`,
 /// `docker events`).
@@ -46,7 +53,12 @@ class DockerProcess {
 }
 
 /// Spawns one docker CLI argv as a child (the streaming commands).
-typedef DockerSpawner = Future<DockerProcess> Function(List<String> argv);
+/// [workingDirectory] is the child's working directory; `null` inherits the
+/// bridge's (the streaming commands never set one).
+typedef DockerSpawner = Future<DockerProcess> Function(
+  List<String> argv, {
+  String? workingDirectory,
+});
 
 /// The container does not exist on the host (the docker CLI's `No such
 /// container` / `No such object`).
@@ -68,6 +80,17 @@ class DockerUnavailableError implements Exception {
 
   @override
   String toString() => 'DockerUnavailableError($detail)';
+}
+
+/// No docker-compose file in the project directory, so the compose project is
+/// unknown (a compose action addressed a directory that has no compose file).
+class ComposeNotFoundError implements Exception {
+  const ComposeNotFoundError(this.detail);
+
+  final String detail;
+
+  @override
+  String toString() => 'ComposeNotFoundError($detail)';
 }
 
 /// The container's live log stream (issue #21), one CLI child.
@@ -135,8 +158,10 @@ class DockerBackend {
     final binary = findHostDocker(path: path);
     if (binary == null) return null;
     return DockerBackend(
-      run: (argv) => _hostRun(binary, argv),
-      spawn: (argv) => _hostSpawn(binary, argv),
+      run: (argv, {workingDirectory}) =>
+          _hostRun(binary, argv, workingDirectory: workingDirectory),
+      spawn: (argv, {workingDirectory}) =>
+          _hostSpawn(binary, argv, workingDirectory: workingDirectory),
       emit: emit,
     );
   }
@@ -186,6 +211,100 @@ class DockerBackend {
     }
     final process = await _spawn(['logs', if (follow) '--follow', name]);
     return DockerLogStream._(process);
+  }
+
+  /// The compose files the bridge looks for in a repo root, in priority order
+  /// (the first that exists wins).
+  static const List<String> composeFileNames = [
+    'docker-compose.yml',
+    'docker-compose.yaml',
+    'compose.yml',
+    'compose.yaml',
+  ];
+
+  /// The compose file in the directory [dir] (the first of
+  /// [composeFileNames] that exists there), or `null` when the directory has
+  /// no compose file. A cheap filesystem check, no process.
+  static String? findComposeFile(String dir) {
+    final base = dir.endsWith('/') ? dir : '$dir/';
+    for (final name in composeFileNames) {
+      final file = File('$base$name');
+      if (file.existsSync()) return file.path;
+    }
+    return null;
+  }
+
+  /// The compose projects among the given repo directories (issue #21 follow-
+  /// on): for each [dirs] entry that holds a compose file, the creatable
+  /// services (`docker compose config --services`) merged with their live
+  /// state (`docker compose ps --all --format json`). Directories without a
+  /// compose file are skipped; the result is in [dirs] order.
+  Future<List<ComposeProject>> composeProjects(List<String> dirs) async {
+    final projects = <ComposeProject>[];
+    for (final dir in dirs) {
+      final composeFile = DockerBackend.findComposeFile(dir);
+      if (composeFile == null) continue;
+      final config = await _run([
+        'compose',
+        'config',
+        '--services',
+      ], workingDirectory: dir);
+      if (config.exitCode != 0) {
+        throw DockerUnavailableError(config.stderr.trim());
+      }
+      final ps = await _run([
+        'compose',
+        'ps',
+        '--all',
+        '--format',
+        'json',
+      ], workingDirectory: dir);
+      if (ps.exitCode != 0) {
+        throw DockerUnavailableError(ps.stderr.trim());
+      }
+      projects.add(
+        ComposeProject(
+          id: ComposeProject.encodeId(dir),
+          project: _composeProjectName(dir),
+          path: dir,
+          composeFile: composeFile,
+          services: parseComposeServices(
+            configServices: _serviceNames(config.stdout),
+            psOutput: ps.stdout,
+          ),
+        ),
+      );
+    }
+    return projects;
+  }
+
+  /// Start (creating if needed) the compose services [services] in the
+  /// project [dir] (`docker compose up -d`); `null` starts the whole project.
+  Future<void> composeUp(String dir, {List<String>? services}) =>
+      _composeAct(dir, ['compose', 'up', '-d', ...?services]);
+
+  /// Stop the compose services [services] in the project [dir] (keeping their
+  /// containers, `docker compose stop`); `null` stops the whole project.
+  Future<void> composeStop(String dir, {List<String>? services}) =>
+      _composeAct(dir, ['compose', 'stop', ...?services]);
+
+  Future<void> _composeAct(String dir, List<String> argv) async {
+    if (DockerBackend.findComposeFile(dir) == null) {
+      throw ComposeNotFoundError(dir);
+    }
+    final result = await _run(argv, workingDirectory: dir);
+    if (result.exitCode != 0) {
+      throw DockerUnavailableError(result.stderr.trim());
+    }
+  }
+
+  /// The compose project name the docker CLI derives for a directory: the
+  /// directory's basename, lower-cased, with characters outside
+  /// `[a-z0-9_-]` replaced by `-` (as `docker compose` does).
+  static String _composeProjectName(String dir) {
+    final trimmed = dir.endsWith('/') ? dir.substring(0, dir.length - 1) : dir;
+    final base = trimmed.split('/').last;
+    return base.toLowerCase().replaceAll(RegExp('[^a-z0-9_-]'), '-');
   }
 
   Future<void> _act(List<String> argv, String name) async {
@@ -293,6 +412,65 @@ List<DockerContainer> parseContainerList(String output) {
   return rows;
 }
 
+/// Merges the creatable service names (from `docker compose config
+/// --services`) with their live state (from `docker compose ps --all --format
+/// json`, one JSON object per line). A service in [configServices] that is
+/// absent from [psOutput] has never been created (its [ComposeService.state]
+/// is `null`). The result keeps [configServices] order.
+List<ComposeService> parseComposeServices({
+  required List<String> configServices,
+  required String psOutput,
+}) {
+  final live = <String, Map<String, Object?>>{};
+  for (final line in const LineSplitter().convert(psOutput)) {
+    if (line.trim().isEmpty) continue;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(line);
+    } catch (_) {
+      continue; // A malformed line is not a service.
+    }
+    if (decoded is! Map<String, Object?>) continue;
+    final service = decoded['Service'];
+    if (service is String && service.isNotEmpty) live[service] = decoded;
+  }
+  return [
+    for (final name in configServices)
+      _composeServiceFromLive(name, live[name]),
+  ];
+}
+
+/// One service row: [liveState] is the `ps` row when the service is created,
+/// `null` when it has never been created.
+ComposeService _composeServiceFromLive(
+  String name,
+  Map<String, Object?>? liveState,
+) {
+  if (liveState == null) {
+    return ComposeService(
+      name: name,
+      state: null,
+      image: null,
+      container: null,
+    );
+  }
+  final image = liveState['Image'];
+  final container = liveState['Name'];
+  return ComposeService(
+    name: name,
+    state: DockerState.fromWire(liveState['State']),
+    image: image is String && image.isNotEmpty ? image : null,
+    container: container is String && container.isNotEmpty ? container : null,
+  );
+}
+
+/// The service names in `docker compose config --services` output (one per
+/// line, trimmed, empties dropped).
+List<String> _serviceNames(String output) => [
+  for (final line in const LineSplitter().convert(output))
+    if (line.trim().isNotEmpty) line.trim(),
+];
+
 /// One `docker ps` JSON row → the contract row (name, image, state,
 /// uptime).
 DockerContainer _parseContainerLine(Map<String, Object?> row) {
@@ -330,10 +508,15 @@ String? findHostDocker({String? path}) {
   return null;
 }
 
-Future<DockerCliResult> _hostRun(String binary, List<String> argv) async {
+Future<DockerCliResult> _hostRun(
+  String binary,
+  List<String> argv, {
+  String? workingDirectory,
+}) async {
   final result = await Process.run(
     binary,
     argv,
+    workingDirectory: workingDirectory,
     stdoutEncoding: utf8,
     stderrEncoding: utf8,
   );
@@ -344,8 +527,16 @@ Future<DockerCliResult> _hostRun(String binary, List<String> argv) async {
   );
 }
 
-Future<DockerProcess> _hostSpawn(String binary, List<String> argv) async {
-  final process = await Process.start(binary, argv);
+Future<DockerProcess> _hostSpawn(
+  String binary,
+  List<String> argv, {
+  String? workingDirectory,
+}) async {
+  final process = await Process.start(
+    binary,
+    argv,
+    workingDirectory: workingDirectory,
+  );
   return DockerProcess(
     stdout: process.stdout
         .transform(const Utf8Decoder())
