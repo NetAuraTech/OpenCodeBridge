@@ -352,7 +352,13 @@ class BridgeServer {
       BridgeServer._unavailable(response);
       return;
     }
-    response.headers.contentType = ContentType.parse('text/event-stream');
+    // The charset matters: HttpResponse encodes its `write`s with the
+    // content-type's charset (default Latin-1, which throws on any character
+    // above U+00FF and used to drop the whole SSE connection on one such
+    // token). The stream is UTF-8, matching the client's Utf8Decoder.
+    response.headers.contentType = ContentType.parse(
+      'text/event-stream; charset=utf-8',
+    );
     response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
     response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
     response.bufferOutput = false;

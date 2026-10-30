@@ -504,7 +504,11 @@ void main() {
     test('GET /api/events streams opencode events verbatim as SSE', () async {
       final tap = await _SseTap.open(base);
       try {
-        expect(tap.contentType, 'text/event-stream');
+        expect(
+          tap.contentType,
+          'text/event-stream; charset=utf-8',
+          reason: 'the client decodes the stream as UTF-8',
+        );
         await _until(
           () => tap.ready,
           message: 'expected the initial `: connected` comment',
@@ -524,6 +528,53 @@ void main() {
         await tap.close();
       }
     });
+
+    test(
+      'a non-ASCII delta arrives as UTF-8 and leaves the connection live',
+      () async {
+        final tap = await _SseTap.open(base);
+        try {
+          await _until(
+            () => tap.ready,
+            message: 'expected the initial `: connected` comment',
+          );
+          // One character at each UTF-8 width: é is 2 bytes, — and 中 are
+          // 2/3 bytes. Under the old Latin-1 response default, — and 中 made
+          // the write throw and the whole connection was dropped.
+          upstream.add(
+            OpencodeEvent(
+              raw:
+                  '{"id":"evt_u","created":1,"type":"session.text.delta",'
+                  '"data":{"delta":"naïve — 中文"}}',
+              type: 'session.text.delta',
+            ),
+          );
+          await _until(
+            () => tap.dataPayloads.length == 1,
+            message: 'expected the non-ASCII delta frame',
+          );
+          expect(
+            tap.dataPayloads.single,
+            contains('naïve — 中文'),
+            reason: 'the delta must arrive as UTF-8, verbatim',
+          );
+          // The connection must still be in the fan-out: a follow-up (pure
+          // ASCII) frame must reach the very same tap.
+          upstream.add(
+            OpencodeEvent(raw: _payload(2), type: 'session.updated'),
+          );
+          await _until(
+            () => tap.dataPayloads.length == 2,
+            message:
+                'expected the frame after the non-ASCII one (the '
+                'connection must still be live)',
+          );
+          expect(tap.dataPayloads[1], _payload(2));
+        } finally {
+          await tap.close();
+        }
+      },
+    );
 
     test('a successful DELETE emits a bridge-native session.closed on the '
         'stream', () async {
