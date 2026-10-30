@@ -87,7 +87,8 @@ class SessionMessage {
   /// without one (a locally-appended user prompt).
   final String? id;
 
-  /// `user` or `assistant`.
+  /// `user`, `assistant`, or `compaction` (a context-compaction marker of
+  /// the history, whose [text] is the summary the compaction wrote).
   final String role;
 
   /// The message's text; `null` when the message carries only tools.

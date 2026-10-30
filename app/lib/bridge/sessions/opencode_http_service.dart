@@ -249,9 +249,10 @@ class OpencodeHttpService implements OpencodeService {
   /// messages, which used to wipe the whole screen) — the service
   /// paginates it newest-first by cursor (at most 200 per page), so the
   /// client walks every page and sorts back to chronological.
-  /// Only `user` and `assistant` turns are conversational; the other
-  /// message kinds (compaction, system, synthetic, shell, …) carry no
-  /// display content.
+  /// `user` and `assistant` turns are conversational; `compaction` items
+  /// carry the summary the compaction wrote (the structured view renders
+  /// them as a divider in the history); the other message kinds (system,
+  /// synthetic, shell, …) carry no display content.
   @override
   Future<List<SessionMessage>> getMessages(String id) async {
     const limit = 200;
@@ -387,6 +388,15 @@ class OpencodeHttpService implements OpencodeService {
     if (type == 'user') {
       final text = item['text'] is String ? item['text'] as String : null;
       return SessionMessage(id: id, role: 'user', text: text);
+    }
+    if (type == 'compaction') {
+      // The item's `summary` is the text the compaction wrote; a running
+      // compaction carries none yet. Its `tokens` describe the summary
+      // model call, not the session's context, so no contextTokens here.
+      final summary = item['summary'] is String
+          ? item['summary'] as String
+          : null;
+      return SessionMessage(id: id, role: 'compaction', text: summary);
     }
     if (type != 'assistant') return null;
     final content = item['content'];

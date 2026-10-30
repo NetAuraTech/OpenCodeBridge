@@ -140,6 +140,14 @@ void main() {
       ],
     },
     {
+      'type': 'compaction',
+      'id': 'm4',
+      'time': {'created': 3},
+      'status': 'completed',
+      'reason': 'manual',
+      'summary': 'the compressed context',
+    },
+    {
       'type': 'system',
       'id': 'm3',
       'time': {'created': 5},
@@ -411,9 +419,10 @@ void main() {
       () async {
         final service = OpencodeHttpService(baseUrl: base, password: password);
         final messages = await service.getMessages('ses_1');
-        // The 200 synthetic fillers are skipped, leaving the two turns,
-        // back in chronological order despite the newest-first pages.
-        expect(messages, hasLength(2));
+        // The 200 synthetic fillers are skipped, leaving the two turns and
+        // the compaction marker, back in chronological order despite the
+        // newest-first pages.
+        expect(messages, hasLength(3));
         expect(
           messages[0],
           const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
@@ -436,6 +445,15 @@ void main() {
         expect(assistant.tools[1].error, 'denied');
         // The context gauge: the model call's total input (100 + 5000 + 10).
         expect(assistant.contextTokens, 5110);
+        // The compaction marker keeps the summary the compaction wrote.
+        expect(
+          messages[2],
+          const SessionMessage(
+            id: 'm4',
+            role: 'compaction',
+            text: 'the compressed context',
+          ),
+        );
         // The client walked the pages: a full first page, then the rest.
         expect(messageOffsets, [0, 200]);
       },

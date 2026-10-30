@@ -73,6 +73,11 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// True while a prompt send (endpoint 7) is in flight.
   bool _promptBusy = false;
 
+  /// True while the session's context compaction streams (from the first
+  /// `session.compaction.delta` to its `session.compaction.ended`): the
+  /// compaction marker pane shows it.
+  bool _compacting = false;
+
   /// The permission request whose reply (endpoint 9) is in flight.
   String? _replyBusyId;
 
@@ -92,6 +97,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// in-flight message the service's context includes (not a duplicate);
   /// re-seeded after every load and turn-boundary normalize.
   final Map<String, int> _liveMessages = {};
+
+  /// The index in [_messages] of the session's compaction marker — the
+  /// history's last compaction item when the history ends in one (re-seeded
+  /// after every load), the live marker while the compaction streams — or
+  /// `null` while there is none.
+  int? _compactionIndex;
 
   /// In-flight tool call id -> its index in its message's tool list (the
   /// list is append-only, so the index is stable).
@@ -204,6 +215,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _messages = results[1] as List<SessionMessage>;
         _pending = results[2] as List<PermissionRequest>;
         _loading = false;
+        _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
       });
@@ -249,6 +261,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         }
       }
     }
+    _compactionIndex =
+        _messages.isNotEmpty && _messages.last.role == 'compaction'
+        ? _messages.length - 1
+        : null;
   }
 
   /// Routes the live events of this session (§8). The streaming events grow
@@ -276,6 +292,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         break;
       case 'session.step.ended':
         _applyStepEnded(event.data);
+        break;
+      case 'session.compaction.delta':
+        _applyCompactionDelta(event.data);
+        break;
+      case 'session.compaction.ended':
+        _applyCompactionEnded(event.data);
         break;
       case 'session.text.started':
         _applyPartStarted(event.data, reasoning: false);
@@ -450,6 +472,56 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _pendingReasoning.clear();
     });
     _followBottomNextFrame();
+  }
+
+  /// The session's compaction marker: the history's last compaction item
+  /// (re-seeded after every load), or a fresh marker appended to the
+  /// history on first sight (the service's marker id is unknown until the
+  /// turn-boundary re-fetch, so the live one is keyed by a fixed id).
+  int _ensureCompactionMessage() {
+    final index = _compactionIndex;
+    if (index != null &&
+        index < _messages.length &&
+        _messages[index].role == 'compaction') {
+      return index;
+    }
+    _messages = [
+      ..._messages,
+      const SessionMessage(id: 'compaction', role: 'compaction'),
+    ];
+    _compactionIndex = _messages.length - 1;
+    _liveMessages['compaction'] = _compactionIndex!;
+    return _compactionIndex!;
+  }
+
+  /// A streamed token of the compaction summary. The `session.compaction`
+  /// payload carries only the session's id and the token (no message id),
+  /// so the marker is tracked by [_compactionIndex]; the token buffers like
+  /// a text delta toward the marker's text, so the summary is visible as
+  /// it is written.
+  void _applyCompactionDelta(Map<String, Object?> data) {
+    final text = data['text'] is String ? data['text'] as String : null;
+    if (text == null || !mounted) return;
+    _compacting = true;
+    _ensureCompactionMessage();
+    (_pendingDeltas['compaction'] ??= StringBuffer()).write(text);
+    _scheduleFlush();
+  }
+
+  /// The compaction finished: the payload carries the full summary, which is
+  /// authoritative and replaces the streamed one, and the marker settles.
+  void _applyCompactionEnded(Map<String, Object?> data) {
+    final text = data['text'] is String ? data['text'] as String : null;
+    if (!mounted) return;
+    _pendingDeltas.remove('compaction');
+    setState(() {
+      _compacting = false;
+      if (text != null) {
+        final index = _ensureCompactionMessage();
+        final message = _messages[index];
+        _setMessageAt(index, _rebuildMessage(message, text: text));
+      }
+    });
   }
 
   /// A tool card appears (or the late event's card is created): the card is
@@ -649,6 +721,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
         _pending = results[2] as List<PermissionRequest>;
+        _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
       });
@@ -768,6 +841,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                         return const _CenteredMessage(text: 'No messages yet.');
                       }
                       final message = _messages[index];
+                      if (message.role == 'compaction') {
+                        return _CompactionPane(
+                          message: message,
+                          inFlight: _compacting && index == _compactionIndex,
+                        );
+                      }
                       final inFlight =
                           _turnActive &&
                           message.id != null &&
@@ -956,6 +1035,71 @@ class _MessagePane extends StatelessWidget {
               child: Text(message.text!),
             ),
           for (final tool in message.tools) _ToolCard(tool: tool),
+        ],
+      ),
+    );
+  }
+}
+
+/// One context-compaction marker of the history (endpoint 6): a divider
+/// between the compacted history and what followed, with the summary the
+/// compaction wrote. While the compaction runs, its summary streams in token
+/// by token (`session.compaction.delta`) and the marker shows it.
+class _CompactionPane extends StatelessWidget {
+  const _CompactionPane({required this.message, required this.inFlight});
+
+  final SessionMessage message;
+
+  /// True while the session's compaction is streaming into this marker.
+  final bool inFlight;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Divider(height: 1, color: scheme.outlineVariant)),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (inFlight)
+                      const SizedBox(
+                        width: 10,
+                        height: 10,
+                        child: CircularProgressIndicator(strokeWidth: 1.5),
+                      )
+                    else
+                      Icon(Icons.compress, size: 14, color: scheme.outline),
+                    const SizedBox(width: 6),
+                    Text(
+                      inFlight ? 'Compacting…' : 'Compacted context',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: scheme.outline,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(child: Divider(height: 1, color: scheme.outlineVariant)),
+            ],
+          ),
+          if (message.text != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                message.text!,
+                style: TextStyle(fontSize: 12, color: scheme.outline),
+              ),
+            ),
         ],
       ),
     );

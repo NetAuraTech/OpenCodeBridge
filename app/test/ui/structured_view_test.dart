@@ -184,6 +184,60 @@ void main() {
       expect(find.text('Cost \$0.0000'), findsOneWidget);
     });
 
+    testWidgets('renders the compaction marker with the summary it wrote', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'user', text: 'do the thing'),
+          SessionMessage(
+            id: 'm4',
+            role: 'compaction',
+            text: '## Objective\n- the compressed context',
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(find.text('Compacted context'), findsOneWidget);
+      expect(
+        find.text('## Objective\n- the compressed context'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('session.compaction.delta streams the summary live, and '
+        'session.compaction.ended settles it', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final events = await _pump(tester, client: client);
+
+      events.add(
+        _event(
+          'session.compaction.delta',
+          aggregateID: 'ses_1',
+          data: const {'text': '## Objective'},
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 60));
+
+      expect(find.text('Compacting…'), findsOneWidget);
+      expect(find.text('## Objective'), findsOneWidget);
+
+      events.add(
+        _event(
+          'session.compaction.ended',
+          aggregateID: 'ses_1',
+          data: const {'text': '## Objective\n- done', 'reason': 'manual'},
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Compacted context'), findsOneWidget);
+      expect(find.text('## Objective\n- done'), findsOneWidget);
+    });
+
     testWidgets('sends the prompt, posts only the text, and clears the input', (
       tester,
     ) async {
