@@ -124,14 +124,15 @@ class _DockerTabState extends State<DockerTab> {
     }
   }
 
-  /// A docker container stopped (cleanly) or crashed (non-zero exit): the
-  /// list re-fetches so the state and uptime columns are up to date.
+  /// A docker container stopped (cleanly) or crashed (non-zero exit): both
+  /// views re-fetch so the state and uptime columns stay up to date in the
+  /// container list and in the compose section.
   void _onEvent(BridgeEvent event) {
     if (event.type != 'docker.container.stopped' &&
         event.type != 'docker.container.crashed') {
       return;
     }
-    _load();
+    _refreshAll();
   }
 
   Future<void> _load() async {
@@ -200,14 +201,17 @@ class _DockerTabState extends State<DockerTab> {
     }
   }
 
-  /// Pull-to-refresh: the container list and the compose projects.
+  /// Re-fetches both views of the containers — the list and the compose
+  /// projects — so they can never disagree. Used by pull-to-refresh and
+  /// after every operation that can change a container's state.
   Future<void> _refreshAll() async {
     await _load();
     await _loadCompose();
   }
 
   /// Opens the detail for [row]: state, the start/stop/restart actions, and
-  /// the live log stream. When the detail closes, the list re-loads.
+  /// the live log stream. When the detail closes, both views re-load — the
+  /// actions could have changed a container the compose section also shows.
   Future<void> _openDetail(DockerContainer row) async {
     final client = _client;
     if (client == null) return;
@@ -220,7 +224,7 @@ class _DockerTabState extends State<DockerTab> {
         ),
       ),
     );
-    if (mounted) await _load();
+    if (mounted) await _refreshAll();
   }
 
   @override
@@ -254,7 +258,7 @@ class _DockerTabState extends State<DockerTab> {
             projects: _composeProjects,
             loading: _composeLoading,
             error: _composeError,
-            reload: _loadCompose,
+            reload: _refreshAll,
           ),
         ],
       ),
@@ -767,7 +771,8 @@ typedef _ComposeOnAction = void Function(
 /// docker-compose projects detected in the repos opencode lists, each a group
 /// of its creatable services. The state of each service and project, and the
 /// up/stop actions, are the bridge's `docker compose` endpoints. Refreshes via
-/// [reload] after its own actions and on pull.
+/// [reload] after its own actions and on pull; [reload] also re-fetches the
+/// container list, since the section and the list show the same containers.
 class _ComposeSection extends StatefulWidget {
   const _ComposeSection({
     required this.client,
@@ -788,7 +793,8 @@ class _ComposeSection extends StatefulWidget {
   /// The last compose load failure, if any.
   final String? error;
 
-  /// Re-fetches the compose projects (the parent's loader).
+  /// Re-fetches the container list and the compose projects (the parent's
+  /// loader), keeping the two views of the same containers in sync.
   final Future<void> Function() reload;
 
   @override

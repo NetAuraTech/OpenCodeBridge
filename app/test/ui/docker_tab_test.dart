@@ -35,6 +35,7 @@ class _FakeDockerClient extends DockerClient {
   Object? composeError;
   Object? composeActionError;
   var listCalls = 0;
+  var composeCalls = 0;
 
   @override
   Future<List<DockerContainer>> list() async {
@@ -71,6 +72,7 @@ class _FakeDockerClient extends DockerClient {
 
   @override
   Future<List<ComposeProject>> compose() async {
+    composeCalls++;
     final error = composeError;
     if (error is Object) throw error;
     return composeProjects;
@@ -320,6 +322,41 @@ void main() {
 
         expect(client.listCalls, before + 1);
       });
+
+      testWidgets('closing the detail re-fetches the compose section too', (
+        tester,
+      ) async {
+        final (client, _) = await _pumpTab(
+          tester,
+          rows: [_web],
+          composeProjects: [
+            ComposeProject(
+              id: Uri.encodeComponent('/repo'),
+              project: 'demo',
+              path: '/repo',
+              composeFile: '/repo/docker-compose.yml',
+              services: [
+                const ComposeService(
+                  name: 'web',
+                  state: DockerState.running,
+                  image: 'nginx:latest',
+                  container: 'demo-web-1',
+                ),
+              ],
+            ),
+          ],
+        );
+
+        await tester.tap(find.byKey(const ValueKey('container-web')));
+        await tester.pumpAndSettle();
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+
+        // The action may have changed a container the compose section also
+        // shows, so it re-fetches alongside the list.
+        expect(client.listCalls, 2);
+        expect(client.composeCalls, 2);
+      });
     });
 
     group('live logs', () {
@@ -396,6 +433,24 @@ void main() {
         await tester.pump();
 
         expect(client.listCalls, 2);
+      });
+
+      testWidgets('a container event re-fetches the compose section too', (
+        tester,
+      ) async {
+        final (client, events) = await _pumpTab(tester, rows: [_web]);
+        expect(client.listCalls, 1);
+        expect(client.composeCalls, 1);
+
+        events.controller.add(
+          _dockerEvent('docker.container.stopped', {'name': 'web'}),
+        );
+        await tester.pump();
+
+        // A stopped or crashed container changes what the compose section
+        // shows as well, so both views re-fetch.
+        expect(client.listCalls, 2);
+        expect(client.composeCalls, 2);
       });
 
       testWidgets('non-docker events leave the list alone', (tester) async {
@@ -531,6 +586,24 @@ void main() {
           find.text('The bridge could not list compose projects (status 502).'),
           findsOneWidget,
         );
+      });
+
+      testWidgets('a compose action re-fetches the container list too', (
+        tester,
+      ) async {
+        final (client, _) = await _pumpTab(tester, composeProjects: [demo]);
+        expect(client.listCalls, 1);
+        expect(client.composeCalls, 1);
+
+        await tester.tap(
+          find.byKey(ValueKey('compose-btn-proj|${demo.id}|up')),
+        );
+        await tester.pumpAndSettle();
+
+        // The container list re-fetches alongside the compose projects, so
+        // the two views of the same containers stay in sync.
+        expect(client.listCalls, 2);
+        expect(client.composeCalls, 2);
       });
     });
   });
