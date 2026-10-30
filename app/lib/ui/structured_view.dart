@@ -936,6 +936,8 @@ class _CostBar extends StatelessWidget {
         ? used / limit
         : null;
     final speed = _speedText(prefill, decode);
+    final speedColor = _TuiSpeedColors.resolve(Theme.of(context).brightness)
+        .forPhase(prefill, decode);
     return Container(
       key: const ValueKey('structured-cost'),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -1025,7 +1027,10 @@ class _CostBar extends StatelessWidget {
                         .colorScheme
                         .surfaceContainerHighest,
                   ),
-                  child: Text(speed, style: const TextStyle(fontSize: 12)),
+                  child: Text(
+                    speed,
+                    style: TextStyle(fontSize: 12, color: speedColor),
+                  ),
                 ),
               ],
             ],
@@ -1162,6 +1167,39 @@ class _TuiMarkdownColors {
   final Color blockQuote;
 
   static _TuiMarkdownColors resolve(Brightness brightness) =>
+      brightness == Brightness.dark ? _dark : _light;
+}
+
+/// The speed chip's colors: the `text.feedback` section of the opencode TUI
+/// theme document — `info` (`$hue.cyan.200`) for the prefill throughput and
+/// `success` (`$hue.green.200`) for the decode throughput, the same colors
+/// the `llama-speed` TUI plugin renders.
+class _TuiSpeedColors {
+  const _TuiSpeedColors({required this.prefill, required this.decode});
+
+  static const _light = _TuiSpeedColors(
+    prefill: Color(0xFF318795),
+    decode: Color(0xFF3D9A57),
+  );
+
+  static const _dark = _TuiSpeedColors(
+    prefill: Color(0xFF56B6C2),
+    decode: Color(0xFF7FD88F),
+  );
+
+  final Color prefill;
+
+  final Color decode;
+
+  /// The color for the active phase (at most one of [prefill] / [decode] is
+  /// set at a time); `null` while idle (the chip is not rendered then).
+  Color? forPhase(double? prefill, double? decode) => prefill != null
+      ? this.prefill
+      : decode != null
+      ? this.decode
+      : null;
+
+  static _TuiSpeedColors resolve(Brightness brightness) =>
       brightness == Brightness.dark ? _dark : _light;
 }
 

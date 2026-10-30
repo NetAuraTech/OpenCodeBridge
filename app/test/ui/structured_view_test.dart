@@ -198,6 +198,11 @@ void main() {
       await tester.pump();
 
       expect(find.text('prefill 1200 tok/s'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.text('prefill 1200 tok/s')).style?.color,
+        const Color(0xFF318795),
+        reason: 'prefill is drawn in the TUI theme info color (light)',
+      );
 
       events.add(
         _event('llama.speed', data: const {'prefill': null, 'decode': 45.5}),
@@ -206,6 +211,11 @@ void main() {
       await tester.pump();
 
       expect(find.text('decode 45.5 tok/s'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.text('decode 45.5 tok/s')).style?.color,
+        const Color(0xFF3D9A57),
+        reason: 'decode is drawn in the TUI theme success color (light)',
+      );
 
       events.add(
         _event('llama.speed', data: const {'prefill': null, 'decode': null}),
