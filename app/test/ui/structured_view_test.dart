@@ -1,0 +1,373 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/client/events_client.dart';
+import 'package:opencodebridge/client/sessions_client.dart';
+import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/session_detail.dart';
+import 'package:opencodebridge/ui/structured_view.dart';
+
+const _zero = TokenUsage(
+  input: 0,
+  output: 0,
+  reasoning: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+);
+const _detail0 = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+);
+const _detail1 = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0.0123,
+  tokens: TokenUsage(
+    input: 10,
+    output: 20,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  ),
+  outcome: null,
+);
+
+/// A scripted [SessionsClient] for the structured view tests.
+class _FakeClient extends SessionsClient {
+  _FakeClient({
+    this.details = const [],
+    this.messages = const [],
+    this.messageLists = const [],
+    this.permissionLists = const [],
+    this.promptError,
+  }) : super(Uri.parse('http://bridge.test/'));
+
+  /// Per-call details: the n-th call returns the n-th detail, the last
+  /// detail repeats.
+  final List<SessionDetail> details;
+
+  /// The history when [messageLists] is empty.
+  final List<SessionMessage> messages;
+
+  /// Per-call histories: the n-th call returns the n-th list, the last
+  /// repeats.
+  final List<List<SessionMessage>> messageLists;
+
+  /// Per-call pending lists: the n-th call returns the n-th list, the last
+  /// repeats.
+  final List<List<PermissionRequest>> permissionLists;
+
+  final List<(String, String)> prompts = [];
+
+  final List<(String, String, PermissionReply)> replies = [];
+
+  int detailCalls = 0;
+  int messageCalls = 0;
+  int permissionCalls = 0;
+
+  Object? promptError;
+  Object? replyError;
+
+  @override
+  Future<SessionDetail> getDetail(String id) async {
+    detailCalls++;
+    final index =
+        detailCalls - 1 < details.length ? detailCalls - 1 : details.length - 1;
+    return details[index];
+  }
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async {
+    messageCalls++;
+    if (messageLists.isEmpty) return messages;
+    final index =
+        messageCalls - 1 < messageLists.length
+            ? messageCalls - 1
+            : messageLists.length - 1;
+    return messageLists[index];
+  }
+
+  @override
+  Future<void> prompt(String id, String text) async {
+    final error = promptError;
+    if (error is Object) throw error;
+    prompts.add((id, text));
+  }
+
+  @override
+  Future<List<PermissionRequest>> getPermissions(String id) async {
+    permissionCalls++;
+    if (permissionLists.isEmpty) return const [];
+    final index =
+        permissionCalls - 1 < permissionLists.length
+            ? permissionCalls - 1
+            : permissionLists.length - 1;
+    return permissionLists[index];
+  }
+
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {
+    final error = replyError;
+    if (error is Object) throw error;
+    replies.add((id, requestID, reply));
+  }
+}
+
+Future<StreamController<BridgeEvent>> _pump(
+  WidgetTester tester, {
+  required _FakeClient client,
+}) async {
+  final events = StreamController<BridgeEvent>.broadcast();
+  await tester.pumpWidget(
+    MaterialApp(
+      home: StructuredSessionScreen(
+        sessionId: 'ses_1',
+        title: 'external session',
+        client: client,
+        events: events.stream,
+      ),
+    ),
+  );
+  await tester.pump();
+  await tester.pump();
+  return events;
+}
+
+BridgeEvent _event(
+  String type, {
+  String? aggregateID,
+  Map<String, Object?>? data,
+}) =>
+    BridgeEvent(
+      id: 'evt_$type',
+      created: 1,
+      type: type,
+      data: data ?? const {},
+      durable: aggregateID == null
+          ? null
+          : Durable(aggregateID: aggregateID, seq: 1),
+    );
+
+void main() {
+  group('StructuredSessionScreen', () {
+    testWidgets(
+      'renders the history, the tools in flight, and the cost bar',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'fix the tests'),
+            SessionMessage(
+              role: 'assistant',
+              tools: [
+                ToolCall(
+                  name: 'shell',
+                  status: 'running',
+                  input: {'command': 'ls'},
+                ),
+              ],
+            ),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        expect(find.text('You'), findsOneWidget);
+        expect(find.text('fix the tests'), findsOneWidget);
+        expect(find.text('Assistant'), findsOneWidget);
+        expect(find.text('shell · running'), findsOneWidget);
+        expect(find.text('Cost \$0.0000'), findsOneWidget);
+      },
+    );
+
+    testWidgets('sends the prompt, posts only the text, and clears the input',
+        (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('structured-prompt-input')),
+        'keep going',
+      );
+      await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+      await tester.pump();
+
+      expect(client.prompts, const [('ses_1', 'keep going')]);
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('structured-prompt-input')),
+      );
+      expect(field.controller?.text, isEmpty);
+    });
+
+    testWidgets('a prompt failure keeps the text and reports it', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        promptError: const SessionsClientError(
+          502,
+          'opencode_unreachable',
+        ),
+      );
+      await _pump(tester, client: client);
+
+      await tester.enterText(
+        find.byKey(const ValueKey('structured-prompt-input')),
+        'keep going',
+      );
+      await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.prompts, isEmpty);
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('structured-prompt-input')),
+      );
+      expect(field.controller?.text, 'keep going');
+      expect(find.text('Could not send the message (status 502).'), findsOneWidget);
+    });
+
+    testWidgets('the input stays enabled mid-turn (tools in flight)', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(
+            role: 'assistant',
+            tools: [ToolCall(name: 'shell', status: 'running')],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      final field = tester.widget<TextField>(
+        find.byKey(const ValueKey('structured-prompt-input')),
+      );
+      expect(field.enabled, isTrue);
+      final send = tester.widget<FilledButton>(
+        find.byKey(const ValueKey('structured-prompt-send')),
+      );
+      expect(send.onPressed, isNotNull);
+    });
+
+    testWidgets(
+      'permission.asked shows the banner; replying once records it and '
+      'clears the banner',
+      (tester) async {
+        const request = PermissionRequest(
+          id: 'per_1',
+          action: 'shell',
+          resources: ['rm -rf node_modules'],
+        );
+        final client = _FakeClient(
+          details: const [_detail0],
+          permissionLists: const [
+            <PermissionRequest>[],
+            <PermissionRequest>[request],
+            <PermissionRequest>[],
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
+
+        events.add(_event('permission.asked', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('Permission requested: shell'), findsOneWidget);
+        expect(find.text('rm -rf node_modules'), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('permission-once-per_1')),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.replies, const [('ses_1', 'per_1', PermissionReply.once)]);
+        expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
+      },
+    );
+
+    testWidgets('session.usage.updated refreshes the cost bar', (tester) async {
+      final client = _FakeClient(details: const [_detail0, _detail1]);
+      final events = await _pump(tester, client: client);
+
+      expect(find.text('Cost \$0.0000'), findsOneWidget);
+
+      events.add(_event('session.usage.updated', aggregateID: 'ses_1'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Cost \$0.0123'), findsOneWidget);
+    });
+
+    testWidgets(
+      'session.execution.succeeded refreshes the history',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [
+            <SessionMessage>[],
+            <SessionMessage>[
+              SessionMessage(role: 'assistant', text: 'done'),
+            ],
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        expect(find.text('No messages yet.'), findsOneWidget);
+
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('done'), findsOneWidget);
+      },
+    );
+
+    testWidgets('events of another session are ignored', (tester) async {
+      final client = _FakeClient(details: const [_detail0, _detail1]);
+      final events = await _pump(tester, client: client);
+
+      events.add(_event('session.usage.updated', aggregateID: 'ses_other'));
+      events.add(_event('permission.asked', aggregateID: 'ses_other'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.detailCalls, 1);
+      expect(client.permissionCalls, 1);
+      expect(find.text('Cost \$0.0000'), findsOneWidget);
+    });
+
+    testWidgets(
+      'an event without a durable is matched by the payload sessionID',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0, _detail1]);
+        final events = await _pump(tester, client: client);
+
+        events.add(
+          _event(
+            'session.usage.updated',
+            data: const {'sessionID': 'ses_1'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.detailCalls, 2);
+      },
+    );
+  });
+}

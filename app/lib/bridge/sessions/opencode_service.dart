@@ -1,15 +1,21 @@
+library;
+
+import '../../model/message.dart';
+import '../../model/permission.dart';
+import '../../model/session_detail.dart';
+
 /// The bridge's seam over the shared opencode service (ADR-0001: the app
 /// never talks to the service directly; the bridge owns it and its
-/// credentials). The sessions slice needs exactly four things of it, and this
-/// is the pre-agreed seam the bridge depends on:
+/// credentials). This is the pre-agreed seam the bridge depends on:
 ///
 /// - every session, with its project id (the service's session list);
 /// - the project list (display names + canonical directories) and the project
 ///   display names derived from it;
 /// - the TUI-attached / agent-working set (the service's active list);
 /// - creating a new session in a project;
-/// - deletion of a session.
-library;
+/// - deletion of a session;
+/// - the structured-view reads (detail, messages) and writes (prompt,
+///   permission reply) of spec section 5 (endpoints 5–9).
 
 /// One session as the shared opencode service reports it: the identity and
 /// non-derivable facts the bridge composes a home-list row from (spec §5, §6).
@@ -88,4 +94,27 @@ abstract class OpencodeService {
 
   /// Delete a session (and its child sessions) on the service.
   Future<void> deleteSession(String id);
+
+  /// The session's detail: state plus costs and token usage (spec §5,
+  /// endpoint 5).
+  Future<SessionDetail> getDetail(String id);
+
+  /// The session's history as structured-view messages, with the tools in
+  /// flight (spec §5, endpoint 6). User and assistant turns only.
+  Future<List<SessionMessage>> getMessages(String id);
+
+  /// Send a prompt to the session (spec §5, endpoint 7). Input is enabled at
+  /// any time; a mid-turn prompt is accepted with `delivery: steer` and the
+  /// service runs turns sequentially.
+  Future<void> prompt(String id, String text);
+
+  /// The session's pending permission requests (spec §5, endpoint 8).
+  Future<List<PermissionRequest>> pendingPermissions(String id);
+
+  /// Reply to a pending permission request (spec §5, endpoint 9).
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  );
 }

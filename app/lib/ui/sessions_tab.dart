@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../bridge/terminal/terminal_backend.dart';
+import '../client/events_client.dart';
 import '../client/sessions_client.dart';
 import '../model/project.dart';
 import '../model/session.dart';
+import 'structured_view.dart';
 import 'terminal_view.dart';
 
 /// The Sessions tab: the home list (spec section 5 endpoint 1, section 6).
@@ -11,16 +13,19 @@ import 'terminal_view.dart';
 /// Shows every session of the shared opencode service, grouped by project
 /// (collapsible), newest first, with the active indicator and a per-session
 /// delete action. App-launched sessions whose window is closed collect in
-/// the Closed section at the bottom; tapping one reopens its window. The
-/// New session button starts a session in a project (spec §5, fill-in †):
-/// the bridge creates the session, its PTY, and its terminal window, and
-/// in server mode the app follows the terminal.
+/// the Closed section at the bottom; tapping one reopens its window. Tapping
+/// an *external* row opens the structured view (spec §6); tapping an
+/// app-launched live row follows its terminal (server mode). The New session
+/// button starts a session in a project (spec §5, fill-in †): the bridge
+/// creates the session, its PTY, and its terminal window, and in server mode
+/// the app follows the terminal.
 class SessionsTab extends StatefulWidget {
   const SessionsTab({
     super.key,
     required this.apiBase,
     this.client,
     this.terminals,
+    this.events,
   });
 
   /// Where the bridge's sessions API lives. `null` when this client has no
@@ -36,12 +41,25 @@ class SessionsTab extends StatefulWidget {
   /// mode, where the app cannot follow the terminal.
   final TerminalBackend? terminals;
 
+  /// The source of the bridge's unified event stream (spec §8) the tab's
+  /// views listen to. Defaults to a real [EventsClient] at [apiBase] (owned
+  /// and disconnected by the tab); tests inject a scripted source.
+  final EventSource? events;
+
   @override
   State<SessionsTab> createState() => SessionsTabState();
 }
 
 class SessionsTabState extends State<SessionsTab> {
   SessionsClient? _client;
+
+  /// The event stream source (spec §8) the tab's views listen to, `null`
+  /// when there is no bridge to listen on.
+  EventSource? _events;
+
+  /// True when [_events] is this tab's own [EventsClient] (to disconnect in
+  /// [dispose]); a provided [EventSource] is owned by the caller.
+  bool _ownsEvents = false;
 
   /// The fetched rows, `null` until the first successful load.
   List<Session>? _rows;
@@ -68,6 +86,7 @@ class SessionsTabState extends State<SessionsTab> {
     final base = widget.apiBase;
     if (base != null) {
       _client = widget.client ?? SessionsClient(base);
+      _setupEvents(base);
       _load();
     } else {
       _loading = false;
@@ -79,7 +98,39 @@ class SessionsTabState extends State<SessionsTab> {
     super.didUpdateWidget(oldWidget);
     if (widget.apiBase != oldWidget.apiBase && widget.apiBase != null) {
       _client = widget.client ?? SessionsClient(widget.apiBase!);
+      _setupEvents(widget.apiBase!);
       _load();
+    }
+  }
+
+  @override
+  void dispose() {
+    _teardownEvents();
+    super.dispose();
+  }
+
+  /// Sets up the event source (spec §8): the provided one, or a real
+  /// [EventsClient] at [base] owned (and disconnected) by the tab.
+  void _setupEvents(Uri base) {
+    _teardownEvents();
+    final provided = widget.events;
+    if (provided != null) {
+      _events = provided;
+    } else {
+      _events = EventsClient(base);
+      _ownsEvents = true;
+    }
+    _events!.connect();
+  }
+
+  /// Stops the event source, disconnecting it only when the tab owns it.
+  void _teardownEvents() {
+    final source = _events;
+    if (source == null) return;
+    _events = null;
+    if (_ownsEvents) {
+      _ownsEvents = false;
+      source.disconnect();
     }
   }
 
@@ -180,11 +231,35 @@ class SessionsTabState extends State<SessionsTab> {
   /// attached simultaneously. When the view closes, the list re-loads so
   /// the section the session belongs to is up to date.
   Future<void> _openTerminal(Session session, TerminalBackend terminals) async {
+    final client = _client;
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (context) => TerminalScreen(
           title: session.title.isNotEmpty ? session.title : session.location,
           attach: () => terminals.proxyFor(session.id).attach(),
+          sessionId: session.id,
+          client: client,
+          events: _events?.events,
+        ),
+      ),
+    );
+    if (mounted) await _load();
+  }
+
+  /// Opens [session] in the structured view (spec §6: *External* →
+  /// structured view). The structured view is fully usable without a TUI:
+  /// the session stays sendable after its terminal window closes. When the
+  /// view closes, the list re-loads.
+  Future<void> _openStructured(Session session) async {
+    final client = _client;
+    if (client == null) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => StructuredSessionScreen(
+          sessionId: session.id,
+          title: session.title.isNotEmpty ? session.title : session.location,
+          client: client,
+          events: _events?.events,
         ),
       ),
     );
@@ -370,15 +445,21 @@ class SessionsTabState extends State<SessionsTab> {
     );
   }
 
-  /// The tap target of a live / external row: following the terminal in
-  /// server mode; `null` otherwise (nothing to follow).
+  /// The tap target of a live / external row:
+  ///   * *external* → the structured view (spec §6), always (the session
+  ///     stays fully usable without a TUI);
+  ///   * *app-launched live* → following the terminal in server mode;
+  ///   * otherwise → `null` (nothing to open from a live row).
   VoidCallback? _rowTap(Session session) {
-    final terminals = widget.terminals;
-    if (terminals == null ||
-        session.classification != SessionClassification.appLaunchedLive) {
-      return null;
-    }
-    return () => _openTerminal(session, terminals);
+    final client = _client;
+    if (client == null) return null;
+    return switch (session.classification) {
+      SessionClassification.external => () => _openStructured(session),
+      SessionClassification.appLaunchedLive => widget.terminals == null
+          ? null
+          : () => _openTerminal(session, widget.terminals!),
+      SessionClassification.appLaunchedClosed => null,
+    };
   }
 }
 

@@ -4,7 +4,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/bridge/sessions/session_store.dart';
+import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 
 /// A scripted [OpencodeService] for the backend tests.
 class FakeOpencodeService implements OpencodeService {
@@ -14,6 +17,9 @@ class FakeOpencodeService implements OpencodeService {
     this.active = const {},
     this.allProjects = const [],
     this.createdSession,
+    this.detail,
+    this.messages = const [],
+    this.permissions = const [],
   });
 
   final List<OpencodeSession> sessions;
@@ -24,9 +30,17 @@ class FakeOpencodeService implements OpencodeService {
   /// The session [createSession] returns (the fake does not consult [names]).
   final OpencodeSession? createdSession;
 
+  final SessionDetail? detail;
+  final List<SessionMessage> messages;
+  final List<PermissionRequest> permissions;
+
   final List<String> deleted = [];
 
   final List<String> created = [];
+
+  final List<(String, String)> prompts = [];
+
+  final List<(String, String, PermissionReply)> replies = [];
 
   @override
   Future<List<OpencodeSession>> listSessions() async => sessions;
@@ -53,6 +67,34 @@ class FakeOpencodeService implements OpencodeService {
   @override
   Future<void> deleteSession(String id) async {
     deleted.add(id);
+  }
+
+  @override
+  Future<SessionDetail> getDetail(String id) async {
+    final d = detail;
+    if (d == null) throw const OpencodeServiceError(404, 'no detail scripted');
+    return d;
+  }
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async => messages;
+
+  @override
+  Future<void> prompt(String id, String text) async {
+    prompts.add((id, text));
+  }
+
+  @override
+  Future<List<PermissionRequest>> pendingPermissions(String id) async =>
+      permissions;
+
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {
+    replies.add((id, requestID, reply));
   }
 }
 
@@ -301,6 +343,93 @@ void main() {
 
       expect(await backend.exists('ses_1'), isTrue);
       expect(await backend.exists('ses_gone'), isFalse);
+    });
+  });
+
+  group('SessionsBackend structured view', () {
+    const detail = SessionDetail(
+      id: 'ses_1',
+      title: 'one',
+      location: '/one',
+      cost: 0.5,
+      tokens: TokenUsage(
+        input: 10,
+        output: 20,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      ),
+      outcome: null,
+    );
+    const messages = [
+      SessionMessage(role: 'user', text: 'go'),
+      SessionMessage(
+        role: 'assistant',
+        tools: [ToolCall(name: 'shell', status: 'running')],
+      ),
+    ];
+    const permissions = [
+      PermissionRequest(id: 'req_1', action: 'shell', resources: ['ls']),
+    ];
+
+    test('detail, messages, permissions pass through to the service',
+        () async {
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService(
+        detail: detail,
+        messages: messages,
+        permissions: permissions,
+      );
+      final backend = SessionsBackend(service: service, store: store);
+
+      expect(await backend.getDetail('ses_1'), detail);
+      expect(await backend.getMessages('ses_1'), messages);
+      expect(await backend.pendingPermissions('ses_1'), permissions);
+    });
+
+    test('a service error on the detail passes through', () async {
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService();
+      final backend = SessionsBackend(service: service, store: store);
+
+      await expectLater(
+        backend.getDetail('ses_1'),
+        throwsA(isA<OpencodeServiceError>()),
+      );
+    });
+
+    test('prompt and reply record the id, text/request id, and decision',
+        () async {
+      final store = await SessionStore.load(dir: dir);
+      final service = FakeOpencodeService();
+      final backend = SessionsBackend(service: service, store: store);
+
+      await backend.prompt('ses_1', 'keep going');
+      await backend.replyPermission(
+        'ses_1',
+        'req_1',
+        PermissionReply.once,
+      );
+      await backend.replyPermission(
+        'ses_1',
+        'req_1',
+        PermissionReply.always,
+      );
+      await backend.replyPermission(
+        'ses_1',
+        'req_2',
+        PermissionReply.reject,
+      );
+
+      expect(service.prompts, const [('ses_1', 'keep going')]);
+      expect(
+        service.replies,
+        const [
+          ('ses_1', 'req_1', PermissionReply.once),
+          ('ses_1', 'req_1', PermissionReply.always),
+          ('ses_1', 'req_2', PermissionReply.reject),
+        ],
+      );
     });
   });
 }

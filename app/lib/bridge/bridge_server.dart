@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/permission.dart';
 import '../model/session.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
@@ -269,6 +270,45 @@ class BridgeServer {
         await BridgeServer._createSession(request, sessions, windows);
         return;
       }
+      // The structured-view reads (spec section 5, endpoints 5–8).
+      if (request.method == 'GET') {
+        final id = BridgeServer._sessionIdIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._detail(request, id, sessions);
+          return;
+        }
+      }
+      if (request.method == 'GET' || request.method == 'POST') {
+        final id = BridgeServer._messagesSessionIn(request.uri.path);
+        if (id != null) {
+          if (request.method == 'GET') {
+            await BridgeServer._messages(request, id, sessions);
+          } else {
+            await BridgeServer._prompt(request, id, sessions);
+          }
+          return;
+        }
+      }
+      if (request.method == 'GET') {
+        final id = BridgeServer._permissionsSessionIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._permissions(request, id, sessions);
+          return;
+        }
+      }
+      // Endpoint 9: the permission reply.
+      if (request.method == 'POST') {
+        final reply = BridgeServer._permissionReplyIn(request.uri.path);
+        if (reply != null) {
+          await BridgeServer._permissionReply(
+            request,
+            reply.$1,
+            reply.$2,
+            sessions,
+          );
+          return;
+        }
+      }
       if (request.method == 'POST') {
         final id = BridgeServer._windowSessionIn(request.uri.path);
         if (id != null) {
@@ -342,6 +382,50 @@ class BridgeServer {
     return Uri.decodeComponent(id);
   }
 
+  /// The single session id in a messages path, or `null` when [path] is not
+  /// `api/sessions/{id}/messages` (endpoint 6 read, endpoint 7 write).
+  static String? _messagesSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/messages';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The single session id in a permissions path, or `null` when [path] is not
+  /// `api/sessions/{id}/permissions` (endpoint 8).
+  static String? _permissionsSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/permissions';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The (session id, request id) in a permission-reply path, or `null` when
+  /// [path] is not `api/sessions/{id}/permissions/{requestID}/reply`
+  /// (endpoint 9).
+  static (String, String)? _permissionReplyIn(String path) {
+    const prefix = '/api/sessions/';
+    const mid = '/permissions/';
+    const suffix = '/reply';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final rest = path.substring(prefix.length, path.length - suffix.length);
+    final i = rest.indexOf(mid);
+    if (i < 0) return null;
+    final id = rest.substring(0, i);
+    final requestID = rest.substring(i + mid.length);
+    if (id.isEmpty ||
+        id.contains('/') ||
+        requestID.isEmpty ||
+        requestID.contains('/')) {
+      return null;
+    }
+    return (Uri.decodeComponent(id), Uri.decodeComponent(requestID));
+  }
+
   static Future<void> _listSessions(
     HttpRequest request,
     SessionsBackend? sessions,
@@ -385,6 +469,151 @@ class BridgeServer {
     } on OpencodeServiceError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// Endpoint 5 (spec section 5): the session's detail — state plus costs and
+  /// token usage. Unknown session is a 404; a service failure is a 502.
+  static Future<void> _detail(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final detail = await sessions.getDetail(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode(detail.toJson()));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 6 (spec section 5): the session's history as structured-view
+  /// messages (with the tools in flight). Unknown session is a 404; a service
+  /// failure is a 502.
+  static Future<void> _messages(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final messages = await sessions.getMessages(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final m in messages) m.toJson()]));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 7 (spec section 5): send a prompt. The body is `{"text": "…"}`;
+  /// anything else is a 400. The prompt is enabled at any time — the service
+  /// queues a mid-turn prompt (`delivery: steer`). Unknown session is a 404;
+  /// a service failure is a 502.
+  static Future<void> _prompt(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    String? text;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      text = decoded is Map<String, Object?> ? decoded['text'] as String? : null;
+    } catch (_) {
+      text = null; // A non-JSON body is an invalid body.
+    }
+    if (text == null || text.trim().isEmpty) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      await sessions.prompt(id, text);
+      response.statusCode = HttpStatus.accepted;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 8 (spec section 5): the session's pending permission requests.
+  /// Unknown session is a 404; a service failure is a 502.
+  static Future<void> _permissions(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final requests = await sessions.pendingPermissions(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(
+        jsonEncode([for (final r in requests) r.toJson()]),
+      );
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Endpoint 9 (spec section 5): reply to a pending permission request. The
+  /// body is `{"reply": "once"|"always"|"reject"}`; anything else is a 400.
+  /// An unknown session or request is a 404; a service failure is a 502.
+  static Future<void> _permissionReply(
+    HttpRequest request,
+    String id,
+    String requestID,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    PermissionReply? reply;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      final decision =
+          decoded is Map<String, Object?> ? decoded['reply'] : null;
+      reply = PermissionReply.fromWire(decision); // throws on an unknown value
+    } catch (_) {
+      reply = null; // A non-JSON body or unknown decision is invalid.
+    }
+    if (reply == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      await sessions.replyPermission(id, requestID, reply);
+      response.statusCode = HttpStatus.noContent;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
     }
     await response.close();
   }
@@ -538,6 +767,18 @@ class BridgeServer {
     response.statusCode = HttpStatus.serviceUnavailable;
     response.write(jsonEncode({'error': 'opencode_unavailable'}));
     response.close();
+  }
+
+  /// Maps a service failure to the bridge contract: a 404 from the service is
+  /// a 404; anything else is a 502.
+  static void _serviceError(HttpResponse response, OpencodeServiceError e) {
+    if (e.statusCode == HttpStatus.notFound) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+    } else {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'opencode_unreachable'}));
+    }
   }
 
   /// The single session id in a terminal path, or `null` when [path] is not

@@ -13,6 +13,9 @@ import 'package:opencodebridge/bridge/terminal/terminal_backend.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_frames.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_models.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window_token.dart';
+import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 
 /// Endpoint 10 (`GET /api/sessions/{id}/terminal`, WebSocket) end-to-end over
 /// a real [HttpServer]: the attach replays from the cursor, fans live output
@@ -333,4 +336,20 @@ class _NoopSessions implements OpencodeService {
       throw const OpencodeServiceError(500, 'not scripted');
   @override
   Future<void> deleteSession(String id) async {}
+  @override
+  Future<SessionDetail> getDetail(String id) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async => const [];
+  @override
+  Future<void> prompt(String id, String text) async {}
+  @override
+  Future<List<PermissionRequest>> pendingPermissions(String id) async =>
+      const [];
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {}
 }

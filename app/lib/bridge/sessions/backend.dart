@@ -1,4 +1,7 @@
+import '../../model/message.dart';
+import '../../model/permission.dart';
 import '../../model/session.dart';
+import '../../model/session_detail.dart';
 import 'opencode_service.dart';
 import 'reconcile.dart';
 import 'session_store.dart';
@@ -92,6 +95,26 @@ class SessionsBackend {
       await store.save();
     }
   }
+
+  // The structured-view reads/writes (spec §5, endpoints 5–9) are pure
+  // pass-throughs to the service seam: no persistence or live fact is
+  // involved, so they are exposed directly.
+  Future<SessionDetail> getDetail(String id) => service.getDetail(id);
+
+  Future<List<SessionMessage>> getMessages(String id) =>
+      service.getMessages(id);
+
+  Future<void> prompt(String id, String text) => service.prompt(id, text);
+
+  Future<List<PermissionRequest>> pendingPermissions(String id) =>
+      service.pendingPermissions(id);
+
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) =>
+      service.replyPermission(id, requestID, reply);
 
   /// One home-list row, from the service's session plus the persistence and
   /// live facts (spec §6 classification).

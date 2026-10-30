@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../model/message.dart';
+import '../../model/permission.dart';
+import '../../model/session_detail.dart';
 import 'opencode_service.dart';
 import 'paths.dart';
 
@@ -150,6 +153,176 @@ class OpencodeHttpService implements OpencodeService {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// Endpoint 5 (spec §5): the session's detail — state plus costs and token
+  /// usage. The service's `Session.Info` flattens to the bridge contract.
+  @override
+  Future<SessionDetail> getDetail(String id) async {
+    final body = await _get(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}'),
+    );
+    final outer = jsonDecode(body);
+    final data = outer is Map<String, Object?> ? outer['data'] : null;
+    final map = data is Map<String, Object?> ? data : const <String, Object?>{};
+    final title = map['title'] is String ? map['title'] as String : null;
+    final outcome = map['outcome'] is String ? map['outcome'] as String : null;
+    return SessionDetail(
+      id: map['id'] as String? ?? '',
+      title: title ?? '',
+      location: _nestedString(map, 'location', 'directory'),
+      cost: (map['cost'] as num?)?.toDouble() ?? 0,
+      tokens: _tokensFrom(map['tokens']),
+      outcome: outcome,
+    );
+  }
+
+  /// Endpoint 6 (spec §5): the session's history as structured-view messages.
+  /// Only `user` and `assistant` turns are conversational; the other
+  /// message kinds (system, synthetic, shell, …) carry no display content.
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async {
+    final body = await _get(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/context'),
+    );
+    final outer = jsonDecode(body);
+    final map = outer is Map<String, Object?> ? outer : const <String, Object?>{};
+    final data = map['data'];
+    final list = data is List ? data : const <Object?>[];
+    final messages = <SessionMessage>[];
+    for (final item in list) {
+      if (item is Map<String, Object?>) {
+        final message = _messageFrom(item);
+        if (message != null) messages.add(message);
+      }
+    }
+    return messages;
+  }
+
+  /// Endpoint 7 (spec §5): send a prompt. `delivery: steer` is the verified
+  /// mid-turn delivery — the service accepts it at any time and runs turns
+  /// sequentially.
+  @override
+  Future<void> prompt(String id, String text) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/prompt'),
+      jsonEncode({'text': text, 'delivery': 'steer'}),
+    );
+  }
+
+  /// Endpoint 8 (spec §5): the session's pending permission requests. The
+  /// service's `Permission.Request` flattens to the bridge contract.
+  @override
+  Future<List<PermissionRequest>> pendingPermissions(String id) async {
+    final body = await _get(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/permission'),
+    );
+    final outer = jsonDecode(body);
+    final map = outer is Map<String, Object?> ? outer : const <String, Object?>{};
+    final data = map['data'];
+    final list = data is List ? data : const <Object?>[];
+    return [
+      for (final item in list)
+        if (item is Map<String, Object?>)
+          PermissionRequest(
+            id: item['id'] as String? ?? '',
+            action: item['action'] as String? ?? '',
+            resources: _stringList(item['resources']),
+          ),
+    ];
+  }
+
+  /// Endpoint 9 (spec §5): reply to a pending permission request. The bridge
+  /// contract's `reply` becomes the service's `decision`.
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {
+    await _post(
+      _base.replace(
+        path:
+            '/api/session/${Uri.encodeComponent(id)}'
+            '/permission/${Uri.encodeComponent(requestID)}/reply',
+      ),
+      jsonEncode({'decision': reply.wire}),
+    );
+  }
+
+  /// The service's `TokenUsage.Info` flattens `cache.{read,write}` to the
+  /// contract's `cacheRead`/`cacheWrite`.
+  static TokenUsage _tokensFrom(Object? json) {
+    final map = json is Map<String, Object?> ? json : const {};
+    final cache = map['cache'] is Map<String, Object?>
+        ? map['cache'] as Map<String, Object?>
+        : const <String, Object?>{};
+    return TokenUsage(
+      input: (map['input'] as num?)?.toInt() ?? 0,
+      output: (map['output'] as num?)?.toInt() ?? 0,
+      reasoning: (map['reasoning'] as num?)?.toInt() ?? 0,
+      cacheRead: (cache['read'] as num?)?.toInt() ?? 0,
+      cacheWrite: (cache['write'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// One context message. Returns `null` for the non-conversational kinds the
+  /// structured view does not render.
+  static SessionMessage? _messageFrom(Map<String, Object?> item) {
+    final type = item['type'] as String?;
+    if (type == 'user') {
+      final text = item['text'] is String ? item['text'] as String : null;
+      return SessionMessage(role: 'user', text: text);
+    }
+    if (type != 'assistant') return null;
+    final content = item['content'];
+    final texts = <String>[];
+    final tools = <ToolCall>[];
+    if (content is List) {
+      for (final part in content) {
+        if (part is! Map<String, Object?>) continue;
+        final partType = part['type'] as String?;
+        if (partType == 'text' || partType == 'reasoning') {
+          final t = part['text'] is String ? part['text'] as String : '';
+          if (t.isNotEmpty) texts.add(t);
+        } else if (partType == 'tool') {
+          tools.add(_toolCallFrom(part));
+        }
+      }
+    }
+    return SessionMessage(
+      role: 'assistant',
+      text: texts.isEmpty ? null : texts.join('\n'),
+      tools: tools,
+    );
+  }
+
+  /// One assistant tool part (the service's `Session.Message.Assistant.Tool`)
+  /// flattens to a contract [ToolCall]; the error text is the structured
+  /// error's `message`.
+  static ToolCall _toolCallFrom(Map<String, Object?> part) {
+    final state = part['state'] is Map<String, Object?>
+        ? part['state'] as Map<String, Object?>
+        : const <String, Object?>{};
+    final status = state['status'] as String? ?? '';
+    String? error;
+    if (status == 'error') {
+      final e = state['error'];
+      if (e is Map<String, Object?> && e['message'] is String) {
+        error = e['message'] as String;
+      }
+    }
+    return ToolCall(
+      name: part['name'] as String? ?? '',
+      status: status,
+      input: state['input'],
+      error: error,
+    );
+  }
+
+  static List<String> _stringList(Object? json) {
+    final list = json is List ? json : const <Object?>[];
+    return [for (final item in list) if (item is String) item];
   }
 
   /// A GET to [uri] with the service auth, returning the raw body. Non-200 ->

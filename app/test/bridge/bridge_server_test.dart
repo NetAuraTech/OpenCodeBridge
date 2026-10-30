@@ -14,6 +14,9 @@ import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/bridge/sessions/session_store.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window.dart';
 import 'package:opencodebridge/bridge/terminal/window_manager.dart';
+import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 
 void main() {
   group('BridgeServer', () {
@@ -206,6 +209,262 @@ void main() {
       final (status, _) = await _delete(base, 'api/sessions');
       expect(status, 404);
     });
+  });
+
+  group('BridgeServer structured view', () {
+    late BridgeServer server;
+    late Uri base;
+    late Directory dir;
+    late _FakeService service;
+    late SessionStore store;
+
+    const detail = SessionDetail(
+      id: 'ses_one',
+      title: 'one',
+      location: '/one',
+      cost: 0.75,
+      tokens: TokenUsage(
+        input: 10,
+        output: 5,
+        reasoning: 1,
+        cacheRead: 2,
+        cacheWrite: 0,
+      ),
+      outcome: 'succeeded',
+    );
+    const messages = [
+      SessionMessage(role: 'user', text: 'hi'),
+      SessionMessage(
+        role: 'assistant',
+        text: 'hello',
+        tools: [ToolCall(name: 'bash', status: 'running')],
+      ),
+    ];
+    const permissions = [
+      PermissionRequest(id: 'per_1', action: 'shell', resources: ['ls']),
+    ];
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-srv-structured',
+      );
+      service = _FakeService(
+        detail: detail,
+        messages: messages,
+        permissions: permissions,
+      );
+      store = await SessionStore.load(dir: dir);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service, store: store),
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('GET /api/sessions/{id} returns the detail', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_one');
+      expect(status, 200);
+      expect(jsonDecode(body), detail.toJson());
+    });
+
+    test('GET /api/sessions/{id} is 404 for an unknown session', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_missing');
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test('GET /api/sessions/{id} is 502 when the service is down', () async {
+      service.failDetail = true;
+      final (status, body) = await _get(base, 'api/sessions/ses_one');
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+    });
+
+    test('GET /api/sessions/{id}/messages returns the history', () async {
+      final (status, body) = await _get(
+        base,
+        'api/sessions/ses_one/messages',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), [
+        for (final m in messages) m.toJson(),
+      ]);
+    });
+
+    test('GET /api/sessions/{id}/messages is 404 for an unknown session',
+        () async {
+          final (status, body) = await _get(
+            base,
+            'api/sessions/ses_missing/messages',
+          );
+          expect(status, 404);
+          expect(jsonDecode(body), {'error': 'not_found'});
+        });
+
+    test('GET /api/sessions/{id}/messages is 502 when the service is down',
+        () async {
+          service.failMessages = true;
+          final (status, body) = await _get(
+            base,
+            'api/sessions/ses_one/messages',
+          );
+          expect(status, 502);
+          expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+        });
+
+    test('POST /api/sessions/{id}/messages sends the prompt and is 202',
+        () async {
+          final (status, body) = await _postRaw(
+            base,
+            'api/sessions/ses_one/messages',
+            jsonEncode({'text': 'hello there'}),
+          );
+          expect(status, 202);
+          expect(body, isEmpty);
+          expect(service.prompts, [('ses_one', 'hello there')]);
+        });
+
+    test('POST /api/sessions/{id}/messages with an invalid body is 400',
+        () async {
+          for (final raw in <String>['', 'not json', '{}', '{"text": ""}']) {
+            final (status, body) = await _postRaw(
+              base,
+              'api/sessions/ses_one/messages',
+              raw,
+            );
+            expect(status, 400, reason: raw);
+            expect(jsonDecode(body), {'error': 'invalid_body'});
+          }
+          expect(service.prompts, isEmpty);
+        });
+
+    test('POST /api/sessions/{id}/messages is 404 for an unknown session',
+        () async {
+          final (status, body) = await _postRaw(
+            base,
+            'api/sessions/ses_missing/messages',
+            jsonEncode({'text': 'hello'}),
+          );
+          expect(status, 404);
+          expect(jsonDecode(body), {'error': 'not_found'});
+          expect(service.prompts, isEmpty);
+        });
+
+    test('POST /api/sessions/{id}/messages is 502 when the service is down',
+        () async {
+          service.failPrompt = true;
+          final (status, body) = await _postRaw(
+            base,
+            'api/sessions/ses_one/messages',
+            jsonEncode({'text': 'hello'}),
+          );
+          expect(status, 502);
+          expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+        });
+
+    test('GET /api/sessions/{id}/permissions returns the pending requests',
+        () async {
+          final (status, body) = await _get(
+            base,
+            'api/sessions/ses_one/permissions',
+          );
+          expect(status, 200);
+          expect(jsonDecode(body), [
+            for (final p in permissions) p.toJson(),
+          ]);
+        });
+
+    test('GET /api/sessions/{id}/permissions is 404 for an unknown session',
+        () async {
+          final (status, body) = await _get(
+            base,
+            'api/sessions/ses_missing/permissions',
+          );
+          expect(status, 404);
+          expect(jsonDecode(body), {'error': 'not_found'});
+        });
+
+    test(
+      'GET /api/sessions/{id}/permissions is 502 when the service is down',
+      () async {
+        service.failPermissions = true;
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/permissions',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
+
+    test(
+      'POST .../permissions/{requestID}/reply replies and is 204',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/permissions/per_1/reply',
+          jsonEncode({'reply': 'always'}),
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+        expect(service.replies, [('ses_one', 'per_1', PermissionReply.always)]);
+      },
+    );
+
+    test(
+      'POST .../permissions/{requestID}/reply with an invalid decision is 400',
+      () async {
+        for (final raw in <String>[
+          '',
+          'not json',
+          '{}',
+          '{"reply": "maybe"}',
+          '{"reply": ""}',
+        ]) {
+          final (status, body) = await _postRaw(
+            base,
+            'api/sessions/ses_one/permissions/per_1/reply',
+            raw,
+          );
+          expect(status, 400, reason: raw);
+          expect(jsonDecode(body), {'error': 'invalid_body'});
+        }
+        expect(service.replies, isEmpty);
+      },
+    );
+
+    test(
+      'POST .../permissions/{requestID}/reply is 404 for an unknown request',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/permissions/per_missing/reply',
+          jsonEncode({'reply': 'once'}),
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+        expect(service.replies, isEmpty);
+      },
+    );
+
+    test(
+      'POST .../permissions/{requestID}/reply is 502 when the service is down',
+      () async {
+        service.failReply = true;
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/permissions/per_1/reply',
+          jsonEncode({'reply': 'reject'}),
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
   });
 
   group('BridgeServer events', () {
@@ -677,11 +936,22 @@ void main() {
 
 /// A scripted service for the sessions-endpoint tests.
 class _FakeService implements OpencodeService {
+  _FakeService({
+    this.detail,
+    this.messages = const [],
+    this.permissions = const [],
+  });
+
   final List<String> deleted = [];
   final Set<String> removedFromService = {};
   var failList = false;
   var failProjects = false;
   var failCreate = false;
+  var failDetail = false;
+  var failMessages = false;
+  var failPermissions = false;
+  var failPrompt = false;
+  var failReply = false;
 
   /// The session id [createSession] mints, by project id.
   final Map<String, OpencodeSession> created = {
@@ -693,6 +963,14 @@ class _FakeService implements OpencodeService {
       location: '/created',
     ),
   };
+
+  final SessionDetail? detail;
+  final List<SessionMessage> messages;
+  final List<PermissionRequest> permissions;
+
+  final List<(String, String)> prompts = [];
+
+  final List<(String, String, PermissionReply)> replies = [];
 
   @override
   Future<List<OpencodeSession>> listSessions() async {
@@ -741,6 +1019,55 @@ class _FakeService implements OpencodeService {
       default:
         deleted.add(id);
     }
+  }
+
+  // The structured-view ops are keyed to the scripted session: any other id
+  // is a 404, so the endpoint tests can exercise the unknown-session path.
+  bool _known(String id) => detail != null && id == detail!.id;
+
+  @override
+  Future<SessionDetail> getDetail(String id) async {
+    if (failDetail) throw const OpencodeServiceError(0, 'service down');
+    final d = detail;
+    if (d == null || id != d.id) {
+      throw const OpencodeServiceError(404, 'not found');
+    }
+    return d;
+  }
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async {
+    if (failMessages) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return messages;
+  }
+
+  @override
+  Future<void> prompt(String id, String text) async {
+    if (failPrompt) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    prompts.add((id, text));
+  }
+
+  @override
+  Future<List<PermissionRequest>> pendingPermissions(String id) async {
+    if (failPermissions) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return permissions;
+  }
+
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {
+    if (failReply) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    if (!permissions.any((p) => p.id == requestID)) {
+      throw const OpencodeServiceError(404, 'not found');
+    }
+    replies.add((id, requestID, reply));
   }
 }
 

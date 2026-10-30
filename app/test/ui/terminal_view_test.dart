@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_attach_proxy.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_frames.dart';
+import 'package:opencodebridge/client/events_client.dart';
+import 'package:opencodebridge/client/sessions_client.dart';
+import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/ui/terminal_view.dart';
 import 'package:xterm/xterm.dart';
 
@@ -140,4 +143,144 @@ void main() {
       expect(attacher.closed, isTrue);
     });
   });
+
+  group('TerminalScreen permission banner', () {
+    Future<({_FakeClient client, StreamController<BridgeEvent> events})>
+        pumpWithBanner(WidgetTester tester, _FakeClient client) async {
+      final events = StreamController<BridgeEvent>.broadcast();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TerminalScreen(
+            title: 'fix the flaky test',
+            attach: () => Future.value(_FakeAttacher()),
+            sessionId: 'ses_1',
+            client: client,
+            events: events.stream,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      return (client: client, events: events);
+    }
+
+    testWidgets('renders the pending requests below the terminal', (
+      tester,
+    ) async {
+      const request = PermissionRequest(
+        id: 'per_1',
+        action: 'shell',
+        resources: ['rm -rf node_modules'],
+      );
+      final client = _FakeClient(permissions: [request]);
+      await pumpWithBanner(tester, client);
+
+      expect(find.byType(TerminalView), findsOneWidget);
+      expect(find.text('Permission requested: shell'), findsOneWidget);
+      expect(find.text('rm -rf node_modules'), findsOneWidget);
+    });
+
+    testWidgets('replying applies the decision and clears the request', (
+      tester,
+    ) async {
+      const request = PermissionRequest(
+        id: 'per_1',
+        action: 'shell',
+        resources: ['ls'],
+      );
+      final client = _FakeClient(permissions: [request]);
+      await pumpWithBanner(tester, client);
+
+      await tester.tap(find.byKey(const ValueKey('permission-once-per_1')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        client.replies,
+        const [('ses_1', 'per_1', PermissionReply.once)],
+      );
+      // The re-fetch after the reply found no pending request.
+      expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
+    });
+
+    testWidgets('permission.asked shows the banner live', (tester) async {
+      final client = _FakeClient(permissions: []);
+      final pump = await pumpWithBanner(tester, client);
+
+      expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
+
+      client.permissions.add(
+        const PermissionRequest(
+          id: 'per_1',
+          action: 'shell',
+          resources: ['ls'],
+        ),
+      );
+      pump.events.add(
+        BridgeEvent(
+          id: 'evt_1',
+          created: 1,
+          type: 'permission.asked',
+          data: const {},
+          durable: const Durable(aggregateID: 'ses_1', seq: 1),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Permission requested: shell'), findsOneWidget);
+    });
+
+    testWidgets('events of another session do not touch the banner', (
+      tester,
+    ) async {
+      final client = _FakeClient(permissions: []);
+      final pump = await pumpWithBanner(tester, client);
+
+      pump.events.add(
+        BridgeEvent(
+          id: 'evt_1',
+          created: 1,
+          type: 'permission.asked',
+          data: const {},
+          durable: const Durable(aggregateID: 'ses_other', seq: 1),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.permissionCalls, 1, reason: 'only the initial load');
+      expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
+    });
+  });
+}
+
+/// A scripted [SessionsClient] for the terminal banner tests: the pending
+/// list is mutable so a reply can clear the request and the post-reply
+/// re-fetch renders an empty banner.
+class _FakeClient extends SessionsClient {
+  _FakeClient({this.permissions = const []})
+    : super(Uri.parse('http://bridge.test/'));
+
+  final List<PermissionRequest> permissions;
+
+  final List<(String, String, PermissionReply)> replies = [];
+
+  int permissionCalls = 0;
+
+  @override
+  Future<List<PermissionRequest>> getPermissions(String id) async {
+    permissionCalls++;
+    return permissions;
+  }
+
+  @override
+  Future<void> replyPermission(
+    String id,
+    String requestID,
+    PermissionReply reply,
+  ) async {
+    replies.add((id, requestID, reply));
+    permissions.removeWhere((request) => request.id == requestID);
+  }
 }
