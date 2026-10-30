@@ -229,15 +229,25 @@ void main() {
       } else if (path == '/api/session/active') {
         resp.write(jsonEncode({'data': active}));
       } else if (path == '/api/session/ses_1/message' && req.method == 'GET') {
-        final params = req.uri.queryParameters;
-        final limit = int.parse(params['limit'] ?? '50');
-        final offset = int.parse(params['offset'] ?? '0');
+        final cursor = req.uri.queryParameters['cursor'];
+        final limit = int.parse(req.uri.queryParameters['limit'] ?? '50');
+        // The real service serves the history newest-first by cursor, the
+        // cursor skipping `offset` of the newest items (opaque here: an
+        // integer, like the session list fake).
+        final offset = cursor == null ? 0 : int.parse(cursor);
         messageOffsets.add(offset);
-        // The real service serves the history newest-first, addressing
-        // pages by skipping `offset` of the newest items.
         final newestFirst = historyMessages.reversed.toList();
+        final page = newestFirst.skip(offset).take(limit).toList();
         resp.write(
-          jsonEncode({'data': newestFirst.skip(offset).take(limit).toList()}),
+          jsonEncode({
+            'data': page,
+            'cursor': {
+              'next': offset + limit < historyMessages.length
+                  ? '${offset + limit}'
+                  : null,
+              'previous': null,
+            },
+          }),
         );
       } else if (path == '/api/session/ses_1/permission' &&
           req.method == 'GET') {

@@ -247,30 +247,34 @@ class OpencodeHttpService implements OpencodeService {
   /// messages, oldest first. The history (not the context: after a
   /// compaction the service's `/context` view drops the compacted
   /// messages, which used to wipe the whole screen) — the service
-  /// paginates it newest-first (`limit`/`offset`, at most 200 per page),
-  /// so the client walks every page and sorts back to chronological.
+  /// paginates it newest-first by cursor (at most 200 per page), so the
+  /// client walks every page and sorts back to chronological.
   /// Only `user` and `assistant` turns are conversational; the other
   /// message kinds (compaction, system, synthetic, shell, …) carry no
   /// display content.
   @override
   Future<List<SessionMessage>> getMessages(String id) async {
-    const page = 200;
+    const limit = 200;
     final items = <Object?>[];
-    for (var offset = 0; offset < page * _maxPages; offset += page) {
+    String? cursor;
+    for (var page = 0; page < _maxPages; page++) {
+      final params = <String, String>{'limit': '$limit'};
+      if (cursor != null) params['cursor'] = cursor;
       final body = await _get(
         _base.replace(
           path: '/api/session/${Uri.encodeComponent(id)}/message',
-          queryParameters: {'limit': '$page', 'offset': '$offset'},
+          queryParameters: params,
         ),
       );
-      final outer = jsonDecode(body);
-      final map = outer is Map<String, Object?>
-          ? outer
+      final decoded = jsonDecode(body);
+      final map = decoded is Map<String, Object?>
+          ? decoded
           : const <String, Object?>{};
       final data = map['data'];
       final list = data is List ? data : const <Object?>[];
       items.addAll(list);
-      if (list.length < page) break;
+      cursor = _nextCursor(decoded);
+      if (cursor == null) break;
     }
     items.sort((a, b) => _messageOrder(a, b));
     final messages = <SessionMessage>[];
