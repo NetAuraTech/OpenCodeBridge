@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/access/access_session.dart';
+import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/client/docker_client.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/model/compose_project.dart';
 import 'package:opencodebridge/model/container.dart';
 import 'package:opencodebridge/ui/docker_tab.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// A scripted [DockerClient] for the tab tests.
 class _FakeDockerClient extends DockerClient {
@@ -128,6 +131,7 @@ Future<(_FakeDockerClient, _FakeEventsSource)> _pumpTab(
   WidgetTester tester, {
   List<DockerContainer> rows = const [],
   List<ComposeProject> composeProjects = const [],
+  AccessSession? access,
 }) async {
   final client = _FakeDockerClient(
     rows: List.of(rows),
@@ -141,6 +145,7 @@ Future<(_FakeDockerClient, _FakeEventsSource)> _pumpTab(
           apiBase: Uri.parse('http://bridge.test/'),
           client: client,
           events: events,
+          access: access,
         ),
       ),
     ),
@@ -632,6 +637,46 @@ void main() {
         // the two views of the same containers stay in sync.
         expect(client.listCalls, 2);
         expect(client.composeCalls, 2);
+      });
+    });
+
+    group('access login completion (issue #41)', () {
+      testWidgets('the login finishing re-fetches both views and the events', (
+        tester,
+      ) async {
+        SharedPreferences.setMockInitialValues({});
+        final store = await AccessTokenStore.load();
+        final access = AccessSession(
+          tunnelBase: () => Uri.parse('https://tunnel.test/'),
+          store: store,
+        );
+        final (client, events) = await _pumpTab(
+          tester,
+          rows: [_web],
+          access: access,
+        );
+        expect(client.listCalls, 1);
+        expect(client.composeCalls, 1);
+        expect(events.reconnectCalls, 0);
+
+        // The browser bounce brought the app to the foreground before the
+        // token exchange finished (the foreground re-fetch saw a 401); the
+        // login completes now: the tab goes out again with the token.
+        store.save(
+          'tunnel.test',
+          AccessLoginRecord(
+            clientId: 'c1',
+            accessToken: 'tok',
+            refreshToken: 'rtok',
+            accessTokenExpiresAt: DateTime.now().add(const Duration(hours: 1)),
+          ),
+        );
+        await access.restore();
+        await tester.pump();
+
+        expect(client.listCalls, 2);
+        expect(client.composeCalls, 2);
+        expect(events.reconnectCalls, 1);
       });
     });
   });

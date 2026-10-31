@@ -92,7 +92,7 @@ class _HomeShellState extends State<HomeShell> {
           auth: widget.auth,
           access: widget.access,
         ),
-        DockerTab(apiBase: _apiBase, auth: widget.auth),
+        DockerTab(apiBase: _apiBase, auth: widget.auth, access: widget.access),
         SettingsTab(
           settings: widget.settings,
           mode: widget.mode,
