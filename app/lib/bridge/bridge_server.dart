@@ -469,9 +469,10 @@ class BridgeServer {
     } on TunnelSetupWriteError catch (e) {
       response.statusCode = HttpStatus.internalServerError;
       response.write(
-        jsonEncode(
-          {'error': 'tunnel_files_not_writable', 'details': e.message},
-        ),
+        jsonEncode({
+          'error': 'tunnel_files_not_writable',
+          'details': e.message,
+        }),
       );
       await response.close();
       return;

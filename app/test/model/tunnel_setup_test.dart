@@ -13,11 +13,13 @@ void main() {
       for (final value in [null, '', '   ']) {
         expect(
           () => normalizeTunnelName(value),
-          throwsA(isA<TunnelSetupError>().having(
-            (e) => e.message,
-            'message',
-            'the tunnel name is missing',
-          )),
+          throwsA(
+            isA<TunnelSetupError>().having(
+              (e) => e.message,
+              'message',
+              'the tunnel name is missing',
+            ),
+          ),
         );
       }
     });
@@ -93,12 +95,15 @@ void main() {
       );
 
       expect(credentials.tunnelId, _kUuid);
-      expect(credentials.source, '{\n'
-          '    "OwnerID": "owner",\n'
-          '    "TunnelID": "$_kUuid",\n'
-          '    "APIKey": "key",\n'
-          '    "OwnerEmail": "user@example.com"\n'
-          '  }');
+      expect(
+        credentials.source,
+        '{\n'
+        '    "OwnerID": "owner",\n'
+        '    "TunnelID": "$_kUuid",\n'
+        '    "APIKey": "key",\n'
+        '    "OwnerEmail": "user@example.com"\n'
+        '  }',
+      );
       expect(credentials.ownerEmail, 'user@example.com');
       expect(credentials.accountId, isNull);
     });
@@ -114,15 +119,13 @@ void main() {
 
     test('accepts the APIToken and AccessToken token fields', () {
       expect(
-        TunnelCredentials.parse(
-          '{"TunnelID": "$_kUuid", "APIToken": "t"}',
-        ).tunnelId,
+        TunnelCredentials.parse('{"TunnelID": "$_kUuid", "APIToken": "t"}')
+            .tunnelId,
         _kUuid,
       );
       expect(
-        TunnelCredentials.parse(
-          '{"TunnelID": "$_kUuid", "AccessToken": "t"}',
-        ).tunnelId,
+        TunnelCredentials.parse('{"TunnelID": "$_kUuid", "AccessToken": "t"}')
+            .tunnelId,
         _kUuid,
       );
     });
@@ -130,9 +133,8 @@ void main() {
     test('lowercases the TunnelID', () {
       final uppercase = _kUuid.toUpperCase();
       expect(
-        TunnelCredentials.parse(
-          '{"TunnelID": "$uppercase", "APIKey": "key"}',
-        ).tunnelId,
+        TunnelCredentials.parse('{"TunnelID": "$uppercase", "APIKey": "key"}')
+            .tunnelId,
         _kUuid,
       );
     });
@@ -187,9 +189,7 @@ void main() {
         ),
       );
       expect(
-        () => TunnelCredentials.parse(
-          '{"TunnelID": "nope", "APIKey": "key"}',
-        ),
+        () => TunnelCredentials.parse('{"TunnelID": "nope", "APIKey": "key"}'),
         throwsA(
           isA<TunnelSetupError>().having(
             (e) => e.message,
@@ -230,10 +230,7 @@ void main() {
 
     test('accessAppSpec grants the owner email when present', () {
       expect(
-        accessAppSpec(
-          'bridge.example.com',
-          ownerEmail: 'user@example.com',
-        ),
+        accessAppSpec('bridge.example.com', ownerEmail: 'user@example.com'),
         'Self-hosted app for https://bridge.example.com '
         'with an email policy allowing user@example.com',
       );
@@ -249,10 +246,7 @@ void main() {
         dashboardDeepLink('dns/records', accountId: 'ab12cd'),
         'https://dash.cloudflare.com/ab12cd/dns/records',
       );
-      expect(
-        dashboardDeepLink('access/apps'),
-        'https://dash.cloudflare.com/',
-      );
+      expect(dashboardDeepLink('access/apps'), 'https://dash.cloudflare.com/');
     });
   });
 }

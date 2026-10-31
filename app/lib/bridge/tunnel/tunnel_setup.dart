@@ -53,8 +53,12 @@ class TunnelSetup {
         : throw const TunnelSetupError(
             'the setup payload is not a JSON object',
           );
-    final tunnel = normalizeTunnelName(payload['tunnel'] is String ? payload['tunnel'] as String : null);
-    final hostname = normalizeHostname(payload['hostname'] is String ? payload['hostname'] as String : null);
+    final tunnel = normalizeTunnelName(
+      payload['tunnel'] is String ? payload['tunnel'] as String : null,
+    );
+    final hostname = normalizeHostname(
+      payload['hostname'] is String ? payload['hostname'] as String : null,
+    );
     final credentialsSource = payload['credentials'];
     final credentials = TunnelCredentials.parse(
       credentialsSource is String ? credentialsSource : null,

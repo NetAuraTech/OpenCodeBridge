@@ -332,19 +332,22 @@ void main() {
   });
 
   group('TunnelSupervisor.applySetup', () {
-    test('re-runs the pass and (re)starts the child on the fresh files', () async {
-      final supervisor = await started();
-      addTearDown(() => supervisor.stop());
-      final firstChild = host.lastChild;
+    test(
+      're-runs the pass and (re)starts the child on the fresh files',
+      () async {
+        final supervisor = await started();
+        addTearDown(() => supervisor.stop());
+        final firstChild = host.lastChild;
 
-      host.connections = 3;
-      await supervisor.applySetup();
+        host.connections = 3;
+        await supervisor.applySetup();
 
-      expect(host.spawned, hasLength(2));
-      expect(firstChild!.killed, isTrue);
-      final report = await supervisor.report();
-      expect(report.status, TunnelStatus.up);
-    });
+        expect(host.spawned, hasLength(2));
+        expect(firstChild!.killed, isTrue);
+        final report = await supervisor.report();
+        expect(report.status, TunnelStatus.up);
+      },
+    );
 
     test('spawns the child when none runs and every step is met', () async {
       await host.setup(withConfig: false);

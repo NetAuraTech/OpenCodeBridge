@@ -34,14 +34,13 @@ class TunnelSetupWizardDialog extends StatefulWidget {
     BuildContext context, {
     required TunnelClient client,
     String? initialHostname,
-  }) =>
-      showDialog<TunnelReport>(
-        context: context,
-        builder: (context) => TunnelSetupWizardDialog(
-          client: client,
-          initialHostname: initialHostname,
-        ),
-      );
+  }) => showDialog<TunnelReport>(
+    context: context,
+    builder: (context) => TunnelSetupWizardDialog(
+      client: client,
+      initialHostname: initialHostname,
+    ),
+  );
 
   @override
   State<TunnelSetupWizardDialog> createState() =>
@@ -127,8 +126,11 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
     });
     var done = false;
     try {
-      final report =
-          await widget.client.setup(name, hostname, credentials.source);
+      final report = await widget.client.setup(
+        name,
+        hostname,
+        credentials.source,
+      );
       done = true;
       if (!mounted) return;
       Navigator.of(context).pop(report);
@@ -170,10 +172,7 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
         ..add(
           Text(
             'To finish, create in the Cloudflare dashboard:',
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
           ),
         )
         ..add(const SizedBox(height: 4));
@@ -202,10 +201,7 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
           value: access,
           copyValue: access,
           link: Uri.parse(
-            dashboardDeepLink(
-              'access/apps',
-              accountId: credentials?.accountId,
-            ),
+            dashboardDeepLink('access/apps', accountId: credentials?.accountId),
           ),
         ),
       );
@@ -222,9 +218,8 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
               children: [
                 Text(
                   'Set up the tunnel',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: Theme.of(context).textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 12),
                 TextField(
@@ -258,7 +253,9 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
                   const SizedBox(height: 8),
                   Text(
                     _error!,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
                   ),
                 ],
                 const SizedBox(height: 8),
@@ -267,7 +264,9 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
                   children: [
                     TextButton(
                       key: const ValueKey('setup-cancel'),
-                      onPressed: _busy ? null : () => Navigator.of(context).pop(),
+                      onPressed: _busy
+                          ? null
+                          : () => Navigator.of(context).pop(),
                       child: const Text('Cancel'),
                     ),
                     const SizedBox(width: 8),

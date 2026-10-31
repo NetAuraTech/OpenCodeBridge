@@ -78,9 +78,7 @@ class TunnelCredentials {
     }
     final map = decoded is Map<String, Object?>
         ? decoded
-        : throw const TunnelSetupError(
-            'the credentials are not a JSON object',
-          );
+        : throw const TunnelSetupError('the credentials are not a JSON object');
     final tunnelId = map['TunnelID'];
     if (tunnelId is! String || tunnelId.trim().isEmpty) {
       throw const TunnelSetupError('the credentials carry no TunnelID');
@@ -187,7 +185,6 @@ String accessAppSpec(String hostname, {String? ownerEmail}) =>
 /// #34): the account-scoped short form (e.g.
 /// `https://dash.cloudflare.com/<accountId>/dns/records`), the dashboard
 /// root when the credentials carry no account id.
-String dashboardDeepLink(String path, {String? accountId}) =>
-    accountId == null
-        ? 'https://dash.cloudflare.com/'
-        : 'https://dash.cloudflare.com/$accountId/$path';
+String dashboardDeepLink(String path, {String? accountId}) => accountId == null
+    ? 'https://dash.cloudflare.com/'
+    : 'https://dash.cloudflare.com/$accountId/$path';

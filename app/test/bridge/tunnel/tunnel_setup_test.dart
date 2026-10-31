@@ -128,25 +128,28 @@ void main() {
     if (dir.existsSync()) dir.deleteSync(recursive: true);
   });
 
-  test('apply writes the credentials verbatim and the generated config', () async {
-    await build(credentialsDir: Directory('${dir.path}/.cloudflared'));
+  test(
+    'apply writes the credentials verbatim and the generated config',
+    () async {
+      await build(credentialsDir: Directory('${dir.path}/.cloudflared'));
 
-    await setup.apply(payload());
+      await setup.apply(payload());
 
-    final credentialsFile = File(
-      '${dir.path}/.cloudflared/$_kCredentialsUuid.json',
-    );
-    expect(credentialsFile.readAsStringSync(), _kCredentialsJson);
-    expect(
-      host.config.file.readAsStringSync(),
-      'tunnel: my-tunnel\n'
-      'credentials-file: ${dir.path}/.cloudflared/$_kCredentialsUuid.json\n'
-      'ingress:\n'
-      '  - hostname: bridge.example.com\n'
-      '    service: http://127.0.0.1:48201\n'
-      '  - service: http_status:404\n',
-    );
-  });
+      final credentialsFile = File(
+        '${dir.path}/.cloudflared/$_kCredentialsUuid.json',
+      );
+      expect(credentialsFile.readAsStringSync(), _kCredentialsJson);
+      expect(
+        host.config.file.readAsStringSync(),
+        'tunnel: my-tunnel\n'
+        'credentials-file: ${dir.path}/.cloudflared/$_kCredentialsUuid.json\n'
+        'ingress:\n'
+        '  - hostname: bridge.example.com\n'
+        '    service: http://127.0.0.1:48201\n'
+        '  - service: http_status:404\n',
+      );
+    },
+  );
 
   test('apply (re)starts the tunnel child when every step is met', () async {
     await build(credentialsDir: Directory('${dir.path}/.cloudflared'));
@@ -154,20 +157,17 @@ void main() {
     await setup.apply(payload());
 
     expect(host.argvs, hasLength(1));
-    expect(
-      host.argvs.single,
-      [
-        '${dir.path}/cloudflared',
-        'tunnel',
-        'run',
-        'my-tunnel',
-        '--config',
-        '${dir.path}/cloudflared.yml',
-        '--no-autoupdate',
-        '--metrics',
-        '127.0.0.1:20241',
-      ],
-    );
+    expect(host.argvs.single, [
+      '${dir.path}/cloudflared',
+      'tunnel',
+      'run',
+      'my-tunnel',
+      '--config',
+      '${dir.path}/cloudflared.yml',
+      '--no-autoupdate',
+      '--metrics',
+      '127.0.0.1:20241',
+    ]);
   });
 
   test('apply is idempotent: the same files, the child (re)started', () async {
@@ -179,9 +179,8 @@ void main() {
 
     expect(host.config.file.readAsStringSync(), first);
     expect(
-      File(
-        '${dir.path}/.cloudflared/$_kCredentialsUuid.json',
-      ).readAsStringSync(),
+      File('${dir.path}/.cloudflared/$_kCredentialsUuid.json')
+          .readAsStringSync(),
       _kCredentialsJson,
     );
     expect(host.argvs, hasLength(2));
@@ -197,10 +196,7 @@ void main() {
       payload(hostname: 'no dot'),
       '{not json}',
     ]) {
-      await expectLater(
-        setup.apply(body),
-        throwsA(isA<TunnelSetupError>()),
-      );
+      await expectLater(setup.apply(body), throwsA(isA<TunnelSetupError>()));
     }
 
     expect(host.config.file.existsSync(), isFalse);

@@ -74,7 +74,11 @@ class TunnelClient {
     }
   }
 
-  static Future<String> _post(Uri base, String path, {String body = '{}'}) async {
+  static Future<String> _post(
+    Uri base,
+    String path, {
+    String body = '{}',
+  }) async {
     final client = HttpClient();
     try {
       final request = await client.postUrl(base.replace(path: path));

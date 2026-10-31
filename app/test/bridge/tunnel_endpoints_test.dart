@@ -220,69 +220,78 @@ void main() {
       expect(host.lastChild, isNot(initialChild));
     });
 
-    test(
-      'POST /api/tunnel/setup writes the app-owned files and (re)starts the child',
-      () async {
-        final credentials = jsonEncode(
-          {'TunnelID': _kCredentialsUuid, 'APIKey': 'secret'},
-        );
-        final (status, reported) = await request(
-          base,
-          'POST',
-          '/api/tunnel/setup',
-          body: jsonEncode(
-            {'tunnel': 'setup-tunnel', 'hostname': 'setup.example.com', 'credentials': credentials},
-          ),
-        );
-        expect(status, HttpStatus.ok);
-        // The answer is the fresh report, already on the fresh files.
-        expect(reported['status'], 'up');
-        expect(reported['hostname'], 'setup.example.com');
-        expect(reported['missing'], <String>[]);
+    test('POST /api/tunnel/setup writes the app-owned files and (re)starts the child', () async {
+      final credentials = jsonEncode({
+        'TunnelID': _kCredentialsUuid,
+        'APIKey': 'secret',
+      });
+      final (status, reported) = await request(
+        base,
+        'POST',
+        '/api/tunnel/setup',
+        body: jsonEncode({
+          'tunnel': 'setup-tunnel',
+          'hostname': 'setup.example.com',
+          'credentials': credentials,
+        }),
+      );
+      expect(status, HttpStatus.ok);
+      // The answer is the fresh report, already on the fresh files.
+      expect(reported['status'], 'up');
+      expect(reported['hostname'], 'setup.example.com');
+      expect(reported['missing'], <String>[]);
 
-        // The pasted credentials are written verbatim.
-        expect(
-          File('${dir.path}/.cloudflared/$_kCredentialsUuid.json')
-              .readAsStringSync(),
-          credentials,
-        );
-        // The generated config routes the hostname to the bridge's loopback
-        // port, after the catch-all cloudflared requires.
-        final configText = host.configFile.readAsStringSync();
-        expect(configText, contains('tunnel: setup-tunnel'));
-        expect(
-          configText,
-          contains('credentials-file: ${dir.path}/.cloudflared/$_kCredentialsUuid.json'),
-        );
-        expect(configText, contains('hostname: setup.example.com'));
-        expect(configText, contains('service: http://127.0.0.1:48201'));
-        expect(configText, contains('http_status:404'));
-        // The child was (re)started on the fresh files.
-        expect(initialChild.killed, isTrue);
-        expect(host.lastChild, isNot(initialChild));
-      },
-    );
+      // The pasted credentials are written verbatim.
+      expect(
+        File('${dir.path}/.cloudflared/$_kCredentialsUuid.json')
+            .readAsStringSync(),
+        credentials,
+      );
+      // The generated config routes the hostname to the bridge's loopback
+      // port, after the catch-all cloudflared requires.
+      final configText = host.configFile.readAsStringSync();
+      expect(configText, contains('tunnel: setup-tunnel'));
+      expect(
+        configText,
+        contains(
+          'credentials-file: ${dir.path}/.cloudflared/$_kCredentialsUuid.json',
+        ),
+      );
+      expect(configText, contains('hostname: setup.example.com'));
+      expect(configText, contains('service: http://127.0.0.1:48201'));
+      expect(configText, contains('http_status:404'));
+      // The child was (re)started on the fresh files.
+      expect(initialChild.killed, isTrue);
+      expect(host.lastChild, isNot(initialChild));
+    });
 
     test(
       'POST /api/tunnel/setup answers 400 invalid_body on a bad payload',
       () async {
-        final goodCredentials = jsonEncode(
-          {'TunnelID': _kCredentialsUuid, 'APIKey': 'secret'},
-        );
+        final goodCredentials = jsonEncode({
+          'TunnelID': _kCredentialsUuid,
+          'APIKey': 'secret',
+        });
         for (final body in [
           '{not json',
           // A space is not a valid tunnel name.
-          jsonEncode(
-            {'tunnel': 'bad tunnel', 'hostname': 'nope.example.com', 'credentials': goodCredentials},
-          ),
+          jsonEncode({
+            'tunnel': 'bad tunnel',
+            'hostname': 'nope.example.com',
+            'credentials': goodCredentials,
+          }),
           // A hostname that is not a DNS name.
-          jsonEncode(
-            {'tunnel': 'setup-tunnel', 'hostname': 'no dot', 'credentials': goodCredentials},
-          ),
+          jsonEncode({
+            'tunnel': 'setup-tunnel',
+            'hostname': 'no dot',
+            'credentials': goodCredentials,
+          }),
           // Credentials without an API key/token.
-          jsonEncode(
-            {'tunnel': 'setup-tunnel', 'hostname': 'nope.example.com', 'credentials': jsonEncode({'TunnelID': _kCredentialsUuid})},
-          ),
+          jsonEncode({
+            'tunnel': 'setup-tunnel',
+            'hostname': 'nope.example.com',
+            'credentials': jsonEncode({'TunnelID': _kCredentialsUuid}),
+          }),
         ]) {
           final (status, reported) = await request(
             base,
