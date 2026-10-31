@@ -33,6 +33,28 @@ class TunnelClient {
     return TunnelReport.fromJson(jsonDecode(body));
   }
 
+  /// The assisted setup (issue #34, ADR-0003): the bridge, the sole file
+  /// owner, writes the app-owned files from the pasted credentials and the
+  /// chosen hostname, then re-runs the precondition pass, answering with
+  /// the fresh tunnel report.
+  Future<TunnelReport> setup(
+    String tunnel,
+    String hostname,
+    String credentials,
+  ) async {
+    final payload = jsonEncode({
+      'tunnel': tunnel,
+      'hostname': hostname,
+      'credentials': credentials,
+    });
+    final body = await TunnelClient._post(
+      _base,
+      'api/tunnel/setup',
+      body: payload,
+    );
+    return TunnelReport.fromJson(jsonDecode(body));
+  }
+
   static Future<String> _get(Uri base, String path) async {
     final client = HttpClient();
     try {
@@ -52,18 +74,22 @@ class TunnelClient {
     }
   }
 
-  static Future<String> _post(Uri base, String path) async {
+  static Future<String> _post(
+    Uri base,
+    String path, {
+    String body = '{}',
+  }) async {
     final client = HttpClient();
     try {
       final request = await client.postUrl(base.replace(path: path));
       request.headers.contentType = ContentType.json;
-      request.write('{}');
+      request.write(body);
       final response = await request.close();
-      final body = await response.transform(const Utf8Decoder()).join();
+      final raw = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
-        throw TunnelClientError(response.statusCode, body);
+        throw TunnelClientError(response.statusCode, raw);
       }
-      return body;
+      return raw;
     } on TunnelClientError {
       rethrow;
     } catch (error) {

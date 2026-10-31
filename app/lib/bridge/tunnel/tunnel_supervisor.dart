@@ -115,6 +115,7 @@ class TunnelSupervisor {
     this.killGrace = const Duration(seconds: 5),
     this.respawnCap = 3,
     this.respawnWindow = const Duration(seconds: 60),
+    this.connectTimeout = const Duration(seconds: 10),
   });
 
   /// The app-managed cloudflared binary.
@@ -138,6 +139,11 @@ class TunnelSupervisor {
 
   /// The sliding window for the auto-respawn cap.
   final Duration respawnWindow;
+
+  /// How long the recheck / assisted-setup actions wait for a freshly
+  /// (re)started child to hold edge connections, so their report already
+  /// shows the connected tunnel (issue #34).
+  final Duration connectTimeout;
 
   /// The precondition checker for the missing-steps report; `null` means
   /// the caller guarantees the preconditions (tests).
@@ -175,13 +181,44 @@ class TunnelSupervisor {
   }
 
   /// Re-runs the precondition pass (the `POST /api/tunnel/check` action) and
-  /// returns the result, `null` when no checker was given.
+  /// returns the result, `null` when no checker was given. When every step
+  /// is met and no child runs, the child is spawned: the guided-setup
+  /// recheck brings the tunnel up once every step is done (issue #34),
+  /// waiting up to [connectTimeout] for the fresh child's edge connections
+  /// so the answer already shows the connected tunnel.
   Future<PreconditionResult?> check() async {
     final preconditions = this.preconditions;
     if (preconditions == null) return null;
     _binaryError = null;
     _lastCheck = await preconditions.check();
     _lastConfig = _lastCheck!.config;
+    if (_lastCheck!.allMet && _child == null) {
+      _active = true;
+      await _spawn();
+      await _awaitEdgeConnections();
+    }
+    return _lastCheck;
+  }
+
+  /// The assisted-setup completion (issue #34): the setup service has just
+  /// written the app-owned files. Re-runs the precondition pass and, when
+  /// every step is met, (re)starts the child so it runs the fresh files
+  /// (waiting up to [connectTimeout] for its edge connections). When a step
+  /// is still missing, the child is left untouched.
+  Future<PreconditionResult?> applySetup() async {
+    final preconditions = this.preconditions;
+    if (preconditions == null) return null;
+    _binaryError = null;
+    _lastCheck = await preconditions.check();
+    _lastConfig = _lastCheck!.config;
+    if (_lastCheck!.allMet) {
+      await _killChild();
+      _respawnCapExhausted = false;
+      _respawnTimes.clear();
+      _active = true;
+      await _spawn();
+      await _awaitEdgeConnections();
+    }
     return _lastCheck;
   }
 
@@ -202,6 +239,20 @@ class TunnelSupervisor {
   /// Manual restart, for the user after the capped auto-respawn was
   /// exhausted: re-runs the precondition pass and respawns.
   Future<void> restart() async {
+    await _killChild();
+    _respawnCapExhausted = false;
+    _respawnTimes.clear();
+    _binaryError = null;
+    _active = true;
+    await _refreshCheck();
+    if (_lastCheck == null || _lastCheck!.allMet) {
+      await _spawn();
+    }
+  }
+
+  /// Terminates the running child (if any) without touching the auto-respawn
+  /// bookkeeping: [restart] and [applySetup] share it.
+  Future<void> _killChild() async {
     final child = _child;
     _child = null;
     _stopping = true;
@@ -213,13 +264,21 @@ class TunnelSupervisor {
       }
     }
     _stopping = false;
-    _respawnCapExhausted = false;
-    _respawnTimes.clear();
-    _binaryError = null;
-    _active = true;
-    await _refreshCheck();
-    if (_lastCheck == null || _lastCheck!.allMet) {
-      await _spawn();
+  }
+
+  /// Waits for the freshly (re)started child to hold edge connections,
+  /// bounded by [connectTimeout] (issue #34): the recheck / assisted-setup
+  /// answers carry the connected state, not a just-spawned child.
+  Future<void> _awaitEdgeConnections() async {
+    final child = _child;
+    final port = _metricsPort;
+    if (child == null || port == null) return;
+    final deadline = DateTime.now().add(connectTimeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (!(_pidAlive(child.pid))) return;
+      final connections = await _scrape(port);
+      if (connections != null && connections > 0) return;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
     }
   }
 

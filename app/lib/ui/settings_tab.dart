@@ -5,6 +5,7 @@ import '../app_mode.dart';
 import '../client/tunnel_client.dart';
 import '../model/tunnel_report.dart';
 import '../settings/app_settings.dart';
+import 'tunnel_setup_wizard.dart';
 
 /// The Settings tab (spec: section 13): host connection (client mode: the
 /// tunnel URL), the tunnel status (issue #22), the three notification
@@ -89,7 +90,11 @@ class _SettingsTabState extends State<SettingsTab> {
         ),
       const SizedBox(height: 8),
       const _SectionLabel('Tunnel'),
-      _TunnelSection(apiBase: _tunnelApiBase, client: widget.tunnelClient),
+      _TunnelSection(
+        apiBase: _tunnelApiBase,
+        client: widget.tunnelClient,
+        serverMode: widget.mode == AppMode.server,
+      ),
       const SizedBox(height: 8),
       const _SectionLabel('Notifications'),
       SwitchListTile(
@@ -127,7 +132,11 @@ class _SettingsTabState extends State<SettingsTab> {
 /// after every action (the bridge has no tunnel events, so this does not
 /// poll).
 class _TunnelSection extends StatefulWidget {
-  const _TunnelSection({required this.apiBase, this.client});
+  const _TunnelSection({
+    required this.apiBase,
+    this.client,
+    required this.serverMode,
+  });
 
   /// Where the bridge's tunnel API lives; `null` when this client has no
   /// bridge to point at.
@@ -136,6 +145,10 @@ class _TunnelSection extends StatefulWidget {
   /// The client for the bridge's tunnel API; the default builds a real
   /// [TunnelClient] at [apiBase].
   final TunnelClient? client;
+
+  /// Server mode: offers the assisted-setup wizard (issue #34), a
+  /// server-mode feature (client mode only connects to the hostname).
+  final bool serverMode;
 
   @override
   State<_TunnelSection> createState() => _TunnelSectionState();
@@ -244,6 +257,21 @@ class _TunnelSectionState extends State<_TunnelSection> {
           _starting = false;
         });
       }
+    }
+  }
+
+  /// Opens the assisted-setup wizard (issue #34, server mode only); on
+  /// success takes the bridge's fresh report.
+  Future<void> _openSetup() async {
+    final client = _client;
+    if (client == null) return;
+    final report = await TunnelSetupWizardDialog.show(
+      context,
+      client: client,
+      initialHostname: _report?.hostname,
+    );
+    if (report != null) {
+      setState(() => _report = report);
     }
   }
 
@@ -380,6 +408,14 @@ class _TunnelSectionState extends State<_TunnelSection> {
                         )
                       : const Text('Start tunnel'),
                 ),
+                if (widget.serverMode) ...[
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    key: const ValueKey('tunnel-setup'),
+                    onPressed: _checking || _starting ? null : _openSetup,
+                    child: const Text('Set up the tunnel'),
+                  ),
+                ],
               ],
             ),
         ],
