@@ -12,7 +12,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final settings = await AppSettings.load();
       final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
-      monitor.connect(Uri.parse('http://127.0.0.1:1/api/health'));
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
 
       await tester.pumpWidget(
         MaterialApp(

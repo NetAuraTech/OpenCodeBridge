@@ -127,7 +127,7 @@ void main() {
 
   test('restore: no persisted record stays logged out', () async {
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -138,7 +138,7 @@ void main() {
   test('restore: an unexpired record logs in without a browser', () async {
     store.save(base.host, record(age: const Duration(seconds: 30)));
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -153,7 +153,7 @@ void main() {
       record(refreshToken: null, age: const Duration(minutes: 16)),
     );
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -167,7 +167,7 @@ void main() {
     () async {
       store.save(base.host, record(age: const Duration(minutes: 16)));
       final session = AccessSession(
-        tunnelBase: base,
+        tunnelBase: () => base,
         store: store,
         openBrowser: fakeBrowser,
       );
@@ -180,7 +180,7 @@ void main() {
     'connect: the full browser flow logs in and persists the record',
     () async {
       final session = AccessSession(
-        tunnelBase: base,
+        tunnelBase: () => base,
         store: store,
         openBrowser: fakeBrowser,
       );
@@ -210,7 +210,7 @@ void main() {
   test('connect: a mismatched state rejects the redirect', () async {
     browserStateSuffix = '-tampered';
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -230,7 +230,7 @@ void main() {
       record(age: const Duration(minutes: 14, seconds: 35)),
     );
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -242,7 +242,7 @@ void main() {
   test('a 401 (forceRefresh) refreshes even an unexpired token', () async {
     store.save(base.host, record(age: const Duration(seconds: 30)));
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -256,7 +256,7 @@ void main() {
   test('an ended grant session logs out and drops the record', () async {
     store.save(base.host, record(refreshToken: 'refresh-dead'));
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -269,7 +269,7 @@ void main() {
   test('logout drops the record and logs out', () async {
     store.save(base.host, record(age: const Duration(seconds: 30)));
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -282,7 +282,7 @@ void main() {
 
   test('listeners see the connect transitions', () async {
     final session = AccessSession(
-      tunnelBase: base,
+      tunnelBase: () => base,
       store: store,
       openBrowser: fakeBrowser,
     );
@@ -291,6 +291,23 @@ void main() {
     await session.connect();
     expect(seen, [AccessLoginState.connecting, AccessLoginState.loggedIn]);
   });
+
+  test(
+    'connect reads the tunnel base at call time, not construction',
+    () async {
+      var current = Uri.parse('http://127.0.0.1:1/'); // a dead endpoint
+      final session = AccessSession(
+        tunnelBase: () => current,
+        store: store,
+        openBrowser: fakeBrowser,
+      );
+      // The user commits the URL before clicking Connect.
+      current = base;
+      await session.connect();
+      expect(session.state, AccessLoginState.loggedIn);
+      expect(store.recordFor(base.host), isNotNull);
+    },
+  );
 }
 
 Future<String> _read(HttpRequest request) async {

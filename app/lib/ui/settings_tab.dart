@@ -7,6 +7,7 @@ import '../client/authenticated_http.dart';
 import '../client/tunnel_client.dart';
 import '../model/tunnel_report.dart';
 import '../settings/app_settings.dart';
+import '../tunnel_url.dart';
 import 'tunnel_setup_wizard.dart';
 
 /// The Settings tab (spec: section 13): host connection (client mode: the
@@ -73,7 +74,7 @@ class _SettingsTabState extends State<SettingsTab> {
       return widget.localBridgeUri?.replace(path: '/');
     }
     final tunnel = widget.settings.tunnelUrl.trim();
-    return tunnel.isEmpty ? null : Uri.parse(tunnel);
+    return tunnel.isEmpty ? null : parseTunnelUrl(tunnel);
   }
 
   @override

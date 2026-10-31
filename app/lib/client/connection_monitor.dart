@@ -35,14 +35,16 @@ class ConnectionMonitor extends ChangeNotifier {
   /// reads it on every tick.
   void setAuth(AuthHeaderProvider? auth) => _auth = auth;
   Timer? _timer;
-  Uri? _target;
+  Uri Function()? _target;
   LinkState _state = LinkState.connecting;
 
   /// The current link state.
   LinkState get state => _state;
 
-  /// Begins polling [healthUri]. Replaces any previous target.
-  void connect(Uri healthUri) {
+  /// Begins polling the health URI that [healthUri] provides. Replaces any
+  /// previous target; [healthUri] is read on every tick, so a target that
+  /// follows a live setting (the client-mode tunnel URL) needs no rewiring.
+  void connect(Uri Function() healthUri) {
     _target = healthUri;
     _setState(LinkState.connecting);
     _timer?.cancel();
@@ -59,17 +61,17 @@ class ConnectionMonitor extends ChangeNotifier {
   }
 
   Future<void> _tick() async {
-    final target = _target;
-    if (target == null) return;
+    final targetProvider = _target;
+    if (targetProvider == null) return;
     bool reachable = false;
     try {
       final probe = _probe ?? (Uri uri) => _defaultProbe(uri, _auth);
-      reachable = await probe(target);
+      reachable = await probe(targetProvider());
     } catch (_) {
       reachable = false;
     }
-    // Ignore the result if the target changed or we disconnected meanwhile.
-    if (target == _target) {
+    // Ignore the result if we disconnected meanwhile.
+    if (targetProvider == _target) {
       _setState(reachable ? LinkState.connected : LinkState.disconnected);
     }
   }

@@ -29,22 +29,24 @@ const Duration _loginTimeout = Duration(minutes: 5);
 /// session ends.
 class AccessSession {
   AccessSession({
-    required Uri tunnelBase,
+    required this._tunnelBase,
     required this._store,
     this._openBrowser = openInBrowser,
-  }) : _tunnelBase = tunnelBase,
-       _client = AccessOAuthClient(tunnelBase);
+  });
 
-  final Uri _tunnelBase;
+  /// The tunnel base, read at use (not at construction): the tunnel URL in
+  /// Settings is live, so the base follows it.
+  final Uri Function() _tunnelBase;
   final AccessTokenStore _store;
   final BrowserOpener _openBrowser;
-  final AccessOAuthClient _client;
 
   AccessLoginState _state = AccessLoginState.loggedOut;
   Completer<String?>? _refreshInFlight;
   final List<void Function(AccessLoginState)> _listeners = [];
 
-  String get tunnelHost => _tunnelBase.host;
+  /// The tunnel host the login is for. Read live: the tunnel URL in
+  /// Settings can change without a restart.
+  String get tunnelHost => _tunnelBase().host;
 
   AccessLoginState get state => _state;
 
@@ -87,15 +89,16 @@ class AccessSession {
     final previous = _state;
     _setState(AccessLoginState.connecting);
     final loopback = await OAuthLoopbackServer.start();
+    // The tunnel base is read now, not at construction: the URL in Settings
+    // is live (the user may have just typed it).
+    final client = AccessOAuthClient(_tunnelBase());
     try {
-      final clientId = await _client.registerClient(
+      final clientId = await client.registerClient(
         loopback.redirectUri.toString(),
       );
       final state = _randomState();
       final redirectUri = loopback.redirectUri.toString();
-      await _openBrowser(
-        _client.authorizationUrl(clientId, redirectUri, state),
-      );
+      await _openBrowser(client.authorizationUrl(clientId, redirectUri, state));
       final callback = await loopback.waitForRedirect(_loginTimeout);
       if (callback.state != state) {
         throw const OAuthError(
@@ -103,7 +106,7 @@ class AccessSession {
           'the browser redirect carried a different state (CSRF)',
         );
       }
-      final tokens = await _client.exchangeCode(
+      final tokens = await client.exchangeCode(
         clientId,
         callback.code,
         redirectUri,
@@ -163,7 +166,8 @@ class AccessSession {
     final pending = Completer<String?>();
     _refreshInFlight = pending;
     try {
-      final tokens = await _client.refresh(clientId, refreshToken);
+      final tokens = await AccessOAuthClient(_tunnelBase())
+          .refresh(clientId, refreshToken);
       _store.save(
         tunnelHost,
         AccessLoginRecord(

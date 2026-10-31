@@ -7,6 +7,7 @@ import 'app_mode.dart';
 import 'bridge/bridge_server.dart';
 import 'client/connection_monitor.dart';
 import 'settings/app_settings.dart';
+import 'tunnel_url.dart';
 import 'ui/home_shell.dart';
 import 'ui/mode_choice_screen.dart';
 
@@ -65,7 +66,7 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         _bridge = bridge;
         _serverError = null;
         _mode = mode;
-        _monitor.connect(bridge.healthUri);
+        _monitor.connect(() => bridge.healthUri);
       } catch (error) {
         // E.g. the bridge port is already held by another instance.
         _serverError = 'Could not start the bridge: $error';
@@ -81,14 +82,20 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         _access = null;
         _monitor.setAuth(null);
       } else {
-        final base = Uri.parse(url);
+        // The session and the monitor read the tunnel URL live: the Settings
+        // field writes it on every keystroke, so the login and the health
+        // probe follow the URL before it is committed.
         final session = AccessSession(
-          tunnelBase: base,
+          tunnelBase: () => parseTunnelUrl(settings.tunnelUrl),
           store: await AccessTokenStore.load(),
         );
         _access = session;
         _monitor.setAuth(session.authorizationHeader);
-        _monitor.connect(base.replace(path: BridgeServer.healthPath));
+        _monitor.connect(
+          () =>
+              parseTunnelUrl(settings.tunnelUrl)
+                  .replace(path: BridgeServer.healthPath),
+        );
         // A restart within the grant session must not re-login (issue #23).
         await session.restore();
       }
