@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:opencodebridge/client/authenticated_http.dart';
+
 /// The state of the app's link to the bridge, as driven by the health
 /// endpoint. This is what the discreet connection indicator reflects.
 enum LinkState { connecting, connected, disconnected }
@@ -19,22 +21,30 @@ typedef HealthProbe = Future<bool> Function(Uri healthUri);
 class ConnectionMonitor extends ChangeNotifier {
   ConnectionMonitor({
     this.interval = const Duration(seconds: 5),
-    HealthProbe? probe,
-  }) : _probe = probe ?? ConnectionMonitor._defaultProbe;
+    this._probe,
+    this._auth,
+  });
 
   /// How often the health endpoint is polled.
   final Duration interval;
 
-  final HealthProbe _probe;
+  final HealthProbe? _probe;
+  AuthHeaderProvider? _auth;
+
+  /// (Re)sets the Access header provider (issue #23): the default probe
+  /// reads it on every tick.
+  void setAuth(AuthHeaderProvider? auth) => _auth = auth;
   Timer? _timer;
-  Uri? _target;
+  Uri Function()? _target;
   LinkState _state = LinkState.connecting;
 
   /// The current link state.
   LinkState get state => _state;
 
-  /// Begins polling [healthUri]. Replaces any previous target.
-  void connect(Uri healthUri) {
+  /// Begins polling the health URI that [healthUri] provides. Replaces any
+  /// previous target; [healthUri] is read on every tick, so a target that
+  /// follows a live setting (the client-mode tunnel URL) needs no rewiring.
+  void connect(Uri Function() healthUri) {
     _target = healthUri;
     _setState(LinkState.connecting);
     _timer?.cancel();
@@ -51,16 +61,17 @@ class ConnectionMonitor extends ChangeNotifier {
   }
 
   Future<void> _tick() async {
-    final target = _target;
-    if (target == null) return;
+    final targetProvider = _target;
+    if (targetProvider == null) return;
     bool reachable = false;
     try {
-      reachable = await _probe(target);
+      final probe = _probe ?? (Uri uri) => _defaultProbe(uri, _auth);
+      reachable = await probe(targetProvider());
     } catch (_) {
       reachable = false;
     }
-    // Ignore the result if the target changed or we disconnected meanwhile.
-    if (target == _target) {
+    // Ignore the result if we disconnected meanwhile.
+    if (targetProvider == _target) {
       _setState(reachable ? LinkState.connected : LinkState.disconnected);
     }
   }
@@ -71,13 +82,20 @@ class ConnectionMonitor extends ChangeNotifier {
     notifyListeners();
   }
 
-  static Future<bool> _defaultProbe(Uri healthUri) async {
+  /// The default probe: a `GET` on the health URI (issue #23: with [auth],
+  /// carrying the `Authorization: Bearer` header and refreshing on `401`).
+  static Future<bool> _defaultProbe(
+    Uri healthUri,
+    AuthHeaderProvider? auth,
+  ) async {
     final client = HttpClient();
     try {
-      final request = await client
-          .getUrl(healthUri)
-          .timeout(const Duration(seconds: 3));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        healthUri,
+        auth: auth,
+      ).timeout(const Duration(seconds: 3));
       await response.drain<void>();
       return response.statusCode == HttpStatus.ok;
     } catch (_) {

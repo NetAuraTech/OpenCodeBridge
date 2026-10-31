@@ -35,7 +35,7 @@ void main() {
   group('ConnectionMonitor', () {
     test('probe answers reachable -> connected', () async {
       final monitor = ConnectionMonitor(probe: (Uri uri) async => true);
-      monitor.connect(Uri.parse('http://127.0.0.1:1/api/health'));
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
       await monitor.whenState(LinkState.connected);
       expect(monitor.state, LinkState.connected);
       monitor.dispose();
@@ -43,7 +43,7 @@ void main() {
 
     test('probe answers unreachable -> disconnected', () async {
       final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
-      monitor.connect(Uri.parse('http://127.0.0.1:1/api/health'));
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
       await monitor.whenState(LinkState.disconnected);
       expect(monitor.state, LinkState.disconnected);
       monitor.dispose();
@@ -53,7 +53,7 @@ void main() {
       final monitor = ConnectionMonitor(
         probe: (Uri uri) async => throw Exception('boom'),
       );
-      monitor.connect(Uri.parse('http://127.0.0.1:1/api/health'));
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
       await monitor.whenState(LinkState.disconnected);
       monitor.dispose();
     });
@@ -64,7 +64,7 @@ void main() {
         interval: const Duration(milliseconds: 10),
         probe: (Uri uri) async => up,
       );
-      monitor.connect(Uri.parse('http://127.0.0.1:1/api/health'));
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
       await monitor.whenState(LinkState.disconnected);
       up = true;
       await monitor.whenState(LinkState.connected);
@@ -73,7 +73,7 @@ void main() {
 
     test('disconnect() drops to disconnected', () async {
       final monitor = ConnectionMonitor(probe: (Uri uri) async => true);
-      monitor.connect(Uri.parse('http://127.0.0.1:1/api/health'));
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
       await monitor.whenState(LinkState.connected);
       monitor.disconnect();
       expect(monitor.state, LinkState.disconnected);
@@ -83,7 +83,7 @@ void main() {
     test('default probe: live bridge up, then down', () async {
       final server = await BridgeServer.start(port: 0);
       final monitor = ConnectionMonitor();
-      monitor.connect(server.healthUri);
+      monitor.connect(() => server.healthUri);
       await monitor.whenState(LinkState.connected);
       await server.stop();
       await monitor.whenState(LinkState.disconnected);

@@ -1,35 +1,49 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:opencodebridge/client/authenticated_http.dart';
 import 'package:opencodebridge/model/tunnel_report.dart';
 
 /// The app-side client of the bridge's tunnel endpoints (issue #22). The
 /// app talks only to the bridge (ADR-0001): in server mode that is
-/// loopback, in client mode the same API behind the tunnel.
+/// loopback, in client mode the same API behind the tunnel (issue #23:
+/// every request carries `Authorization: Bearer` from [auth], refreshed
+/// on `401` — see [bridgeRequest]).
 class TunnelClient {
-  TunnelClient(this._base);
+  TunnelClient(this._base, {this._auth});
 
   /// The bridge's base URI, e.g. `http://127.0.0.1:48201/`.
   final Uri _base;
 
+  /// The Access login's header provider (issue #23); `null` in server mode.
+  final AuthHeaderProvider? _auth;
+
   /// The current tunnel status: the cloudflared child's liveness plus its
   /// registered edge connections, and the setup steps still missing.
   Future<TunnelReport> report() async {
-    final body = await TunnelClient._get(_base, 'api/tunnel');
+    final body = await TunnelClient._get(_base, 'api/tunnel', _auth);
     return TunnelReport.fromJson(jsonDecode(body));
   }
 
   /// Re-runs the precondition pass on the bridge (the guided-setup recheck)
   /// and returns the fresh tunnel report.
   Future<TunnelReport> check() async {
-    final body = await TunnelClient._post(_base, 'api/tunnel/check');
+    final body = await TunnelClient._post(
+      _base,
+      'api/tunnel/check',
+      auth: _auth,
+    );
     return TunnelReport.fromJson(jsonDecode(body));
   }
 
   /// The manual tunnel start, for after the guided setup or a capped
   /// auto-respawn. The bridge answers with the fresh tunnel report.
   Future<TunnelReport> start() async {
-    final body = await TunnelClient._post(_base, 'api/tunnel/start');
+    final body = await TunnelClient._post(
+      _base,
+      'api/tunnel/start',
+      auth: _auth,
+    );
     return TunnelReport.fromJson(jsonDecode(body));
   }
 
@@ -39,7 +53,7 @@ class TunnelClient {
   /// user's own `~/.cloudflared/`. [TunnelClientError] when the login
   /// fails or times out.
   Future<void> login() async {
-    await TunnelClient._post(_base, 'api/tunnel/login');
+    await TunnelClient._post(_base, 'api/tunnel/login', auth: _auth);
   }
 
   /// The assisted setup (issue #34, ADR-0003): the bridge, the sole file
@@ -61,15 +75,24 @@ class TunnelClient {
       _base,
       'api/tunnel/setup',
       body: jsonEncode(payload),
+      auth: _auth,
     );
     return TunnelReport.fromJson(jsonDecode(body));
   }
 
-  static Future<String> _get(Uri base, String path) async {
+  static Future<String> _get(
+    Uri base,
+    String path,
+    AuthHeaderProvider? auth,
+  ) async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(base.replace(path: path));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        base.replace(path: path),
+        auth: auth,
+      );
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw TunnelClientError(response.statusCode, body);
@@ -88,13 +111,18 @@ class TunnelClient {
     Uri base,
     String path, {
     String body = '{}',
+    AuthHeaderProvider? auth,
   }) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(base.replace(path: path));
-      request.headers.contentType = ContentType.json;
-      request.write(body);
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        base.replace(path: path),
+        body: body,
+        contentType: ContentType.json,
+        auth: auth,
+      );
       final raw = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw TunnelClientError(response.statusCode, raw);

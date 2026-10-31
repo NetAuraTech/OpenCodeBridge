@@ -1,10 +1,13 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'access/access_session.dart';
+import 'access/token_store.dart';
 import 'app_mode.dart';
 import 'bridge/bridge_server.dart';
 import 'client/connection_monitor.dart';
 import 'settings/app_settings.dart';
+import 'tunnel_url.dart';
 import 'ui/home_shell.dart';
 import 'ui/mode_choice_screen.dart';
 
@@ -27,6 +30,7 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
   AppMode? _mode;
   BridgeServer? _bridge;
   String? _serverError;
+  AccessSession? _access;
 
   /// The desktop host: server or client at every launch.
   bool get _showsModeChoice => defaultTargetPlatform == TargetPlatform.linux;
@@ -62,19 +66,38 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         _bridge = bridge;
         _serverError = null;
         _mode = mode;
-        _monitor.connect(bridge.healthUri);
+        _monitor.connect(() => bridge.healthUri);
       } catch (error) {
         // E.g. the bridge port is already held by another instance.
         _serverError = 'Could not start the bridge: $error';
       }
+      _access = null;
+      _monitor.setAuth(null);
     } else {
       _mode = mode;
       _serverError = null;
       final url = settings.tunnelUrl.trim();
       if (url.isEmpty) {
         _monitor.disconnect();
+        _access = null;
+        _monitor.setAuth(null);
       } else {
-        _monitor.connect(Uri.parse(url).replace(path: BridgeServer.healthPath));
+        // The session and the monitor read the tunnel URL live: the Settings
+        // field writes it on every keystroke, so the login and the health
+        // probe follow the URL before it is committed.
+        final session = AccessSession(
+          tunnelBase: () => parseTunnelUrl(settings.tunnelUrl),
+          store: await AccessTokenStore.load(),
+        );
+        _access = session;
+        _monitor.setAuth(session.authorizationHeader);
+        _monitor.connect(
+          () =>
+              parseTunnelUrl(settings.tunnelUrl)
+                  .replace(path: BridgeServer.healthPath),
+        );
+        // A restart within the grant session must not re-login (issue #23).
+        await session.restore();
       }
     }
     if (mounted) setState(() {});
@@ -111,6 +134,8 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         localBridgeUri: _bridge?.healthUri,
         terminals: _bridge?.terminals,
         onTunnelUrlCommitted: () => _enter(settings, AppMode.client),
+        auth: _mode == AppMode.client ? _access?.authorizationHeader : null,
+        access: _mode == AppMode.client ? _access : null,
       ),
     );
   }

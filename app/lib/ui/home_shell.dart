@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../access/access_session.dart';
 import '../app_mode.dart';
 import '../bridge/terminal/terminal_backend.dart';
+import '../client/authenticated_http.dart';
 import '../client/connection_monitor.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
@@ -21,6 +23,8 @@ class HomeShell extends StatefulWidget {
     this.localBridgeUri,
     this.terminals,
     this.onTunnelUrlCommitted,
+    this.auth,
+    this.access,
   });
 
   final ConnectionMonitor monitor;
@@ -36,6 +40,14 @@ class HomeShell extends StatefulWidget {
 
   /// Re-points the connection at the tunnel URL after it is committed.
   final VoidCallback? onTunnelUrlCommitted;
+
+  /// The Access login's header provider (issue #23, client mode); `null` in
+  /// server mode.
+  final AuthHeaderProvider? auth;
+
+  /// The tunnel's Access login (issue #23, client mode) for the Settings
+  /// tab; `null` in server mode or without a tunnel URL.
+  final AccessSession? access;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -74,13 +86,19 @@ class _HomeShellState extends State<HomeShell> {
     body: IndexedStack(
       index: _tab,
       children: [
-        SessionsTab(apiBase: _apiBase, terminals: widget.terminals),
-        DockerTab(apiBase: _apiBase),
+        SessionsTab(
+          apiBase: _apiBase,
+          terminals: widget.terminals,
+          auth: widget.auth,
+        ),
+        DockerTab(apiBase: _apiBase, auth: widget.auth),
         SettingsTab(
           settings: widget.settings,
           mode: widget.mode,
           localBridgeUri: widget.localBridgeUri,
           onTunnelUrlCommitted: widget.onTunnelUrlCommitted,
+          access: widget.access,
+          auth: widget.auth,
         ),
       ],
     ),
