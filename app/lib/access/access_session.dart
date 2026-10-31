@@ -31,8 +31,8 @@ class AccessSession {
   AccessSession({
     required this._tunnelBase,
     required this._store,
-    this._openBrowser = openInBrowser,
-  });
+    BrowserOpener? openBrowser,
+  }) : _openBrowser = openBrowser ?? defaultBrowserOpener();
 
   /// The tunnel base, read at use (not at construction): the tunnel URL in
   /// Settings is live, so the base follows it.

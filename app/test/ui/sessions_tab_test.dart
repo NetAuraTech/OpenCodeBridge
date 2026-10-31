@@ -188,6 +188,14 @@ class _FakeEventsSource implements EventSource {
     await _controller.close();
     await _gaps.close();
   }
+
+  /// How often the tab forced a fresh connection (issue #41, foreground).
+  var reconnectCalls = 0;
+
+  @override
+  Future<void> reconnect() async {
+    reconnectCalls++;
+  }
 }
 
 /// A [TerminalBackend] over a fake terminal service with one running PTY,
@@ -203,6 +211,7 @@ Future<_FakeSessionsClient> _pumpTab(
   List<Session> rows = const [],
   List<Project> projects = const [],
   TerminalBackend? terminals,
+  _FakeEventsSource? events,
 }) async {
   final client = _FakeSessionsClient(
     rows: List<Session>.of(rows),
@@ -215,7 +224,7 @@ Future<_FakeSessionsClient> _pumpTab(
           apiBase: Uri.parse('http://bridge.test/'),
           client: client,
           terminals: terminals,
-          events: _FakeEventsSource(),
+          events: events ?? _FakeEventsSource(),
         ),
       ),
     ),
@@ -641,6 +650,27 @@ void main() {
           find.text('No bridge configured. Set the tunnel URL in Settings.'),
           findsOneWidget,
         );
+      });
+    });
+
+    group('foreground return (issue #41)', () {
+      testWidgets('resumed re-connects events and re-fetches the list', (
+        tester,
+      ) async {
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(tester, rows: [_one], events: events);
+        expect(client.listCalls, 1);
+        expect(events.reconnectCalls, 0);
+
+        // Android suspends the app and brings it back to the foreground.
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pump();
+
+        expect(events.reconnectCalls, 1);
+        expect(client.listCalls, 2);
       });
     });
   });

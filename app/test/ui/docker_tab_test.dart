@@ -111,6 +111,14 @@ class _FakeEventsSource implements EventSource {
     await _controller.close();
     await _gaps.close();
   }
+
+  /// How often the tab forced a fresh connection (issue #41, foreground).
+  var reconnectCalls = 0;
+
+  @override
+  Future<void> reconnect() async {
+    reconnectCalls++;
+  }
 }
 
 BridgeEvent _dockerEvent(String type, Map<String, Object?> data) =>
@@ -499,6 +507,26 @@ void main() {
 
         // Only the list behind the detail re-fetches.
         expect(client.listCalls, before + 1);
+      });
+
+      testWidgets('resumed re-connects events and re-fetches both views', (
+        tester,
+      ) async {
+        final (client, events) = await _pumpTab(tester, rows: [_web]);
+        expect(client.listCalls, 1);
+        expect(client.composeCalls, 1);
+        expect(events.reconnectCalls, 0);
+
+        // Android suspends the app and brings it back to the foreground.
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pump();
+
+        expect(events.reconnectCalls, 1);
+        expect(client.listCalls, 2);
+        expect(client.composeCalls, 2);
       });
     });
 

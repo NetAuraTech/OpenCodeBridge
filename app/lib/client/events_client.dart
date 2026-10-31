@@ -89,6 +89,11 @@ abstract class EventSource {
 
   /// Stop receiving and release the connection.
   Future<void> disconnect();
+
+  /// Force a fresh connection (issue #41, app lifecycle): on returning to
+  /// the foreground, the stream reconnects (with the current Access token)
+  /// instead of waiting for the dropped connection to time out.
+  Future<void> reconnect();
 }
 
 /// The app-side client of the bridge's unified event stream (spec §8,
@@ -162,6 +167,15 @@ class EventsClient implements EventSource {
     final client = _client;
     _client = null;
     if (client != null) client.close(force: true);
+  }
+
+  /// Force a fresh connection (issue #41, app lifecycle): drop the current
+  /// stream (if any) and reconnect. The per-session seq map survives, so a
+  /// gap spanning the drop is still detected.
+  @override
+  Future<void> reconnect() async {
+    await disconnect();
+    await connect();
   }
 
   Future<void> _loop(int generation) async {

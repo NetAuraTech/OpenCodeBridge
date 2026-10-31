@@ -40,10 +40,10 @@ class DockerTab extends StatefulWidget {
   final EventSource? events;
 
   @override
-  State<DockerTab> createState() => _DockerTabState();
+  State<DockerTab> createState() => DockerTabState();
 }
 
-class _DockerTabState extends State<DockerTab> {
+class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
   DockerClient? _client;
 
   /// The event stream source (spec §8) the tab listens to, `null` when there
@@ -78,6 +78,7 @@ class _DockerTabState extends State<DockerTab> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final base = widget.apiBase;
     if (base != null) {
       _client = widget.client ?? DockerClient(base, auth: widget.auth);
@@ -88,6 +89,19 @@ class _DockerTabState extends State<DockerTab> {
       _loading = false;
       _composeLoading = false;
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed || _client == null) return;
+    // Android suspends the app (issue #41): on returning to the foreground,
+    // reconnect the event stream with the current Access token and re-fetch
+    // both views, so container state that changed while backgrounded shows
+    // up on return.
+    final events = _events;
+    if (events != null) unawaited(events.reconnect());
+    _refreshAll();
   }
 
   @override
@@ -104,6 +118,7 @@ class _DockerTabState extends State<DockerTab> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _teardownEvents();
     super.dispose();
   }

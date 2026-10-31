@@ -21,10 +21,11 @@ class OpenCodeBridgeApp extends StatefulWidget {
   const OpenCodeBridgeApp({super.key});
 
   @override
-  State<OpenCodeBridgeApp> createState() => _OpenCodeBridgeAppState();
+  State<OpenCodeBridgeApp> createState() => OpenCodeBridgeAppState();
 }
 
-class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
+class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
+    with WidgetsBindingObserver {
   final ConnectionMonitor _monitor = ConnectionMonitor();
   AppSettings? _settings;
   AppMode? _mode;
@@ -38,7 +39,18 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _boot();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Android suspends the app (issue #41): on returning to the foreground,
+    // re-probe the bridge now so the indicator does not wait for the next
+    // tick. (If Android killed the process, a fresh launch already runs the
+    // full restore: settings, Access login, and connections.)
+    if (state == AppLifecycleState.resumed) _monitor.reprobe();
   }
 
   Future<void> _boot() async {
@@ -142,6 +154,7 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _monitor.dispose();
     final bridge = _bridge;
     if (bridge != null) bridge.stop();

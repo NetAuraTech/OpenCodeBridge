@@ -980,28 +980,28 @@ class _CostBar extends StatelessWidget {
       ),
       child: Column(
         children: [
-          Row(
+          // A Wrap (issue #41): the chips take their natural width, so at
+          // phone width the bar wraps to a second line instead of
+          // overflowing; at desktop width it lays out on one line, as before.
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
             children: [
-              Expanded(
-                child: Text(
-                  'Cost \$${detail.cost.toStringAsFixed(4)}',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
+              Text(
+                'Cost \$${detail.cost.toStringAsFixed(4)}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               if (tokenText != null)
-                Flexible(
-                  child: Text(
-                    tokenText,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.outline,
-                    ),
+                Text(
+                  tokenText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.outline,
                   ),
                 ),
-              if (used != null) ...[
-                const SizedBox(width: 8),
+              if (used != null)
                 Container(
                   key: const ValueKey('structured-context'),
                   padding: const EdgeInsets.symmetric(
@@ -1021,9 +1021,7 @@ class _CostBar extends StatelessWidget {
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
-              ],
-              if (detail.outcome != null) ...[
-                const SizedBox(width: 8),
+              if (detail.outcome != null)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 6,
@@ -1040,9 +1038,7 @@ class _CostBar extends StatelessWidget {
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
-              ],
-              if (speed != null) ...[
-                const SizedBox(width: 8),
+              if (speed != null)
                 Container(
                   key: const ValueKey('structured-speed'),
                   padding: const EdgeInsets.symmetric(
@@ -1060,7 +1056,6 @@ class _CostBar extends StatelessWidget {
                     style: TextStyle(fontSize: 12, color: speedColor),
                   ),
                 ),
-              ],
             ],
           ),
           if (fraction != null)

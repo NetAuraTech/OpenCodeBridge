@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../bridge/terminal/terminal_backend.dart';
@@ -56,7 +58,7 @@ class SessionsTab extends StatefulWidget {
   State<SessionsTab> createState() => SessionsTabState();
 }
 
-class SessionsTabState extends State<SessionsTab> {
+class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   SessionsClient? _client;
 
   /// The event stream source (spec §8) the tab's views listen to, `null`
@@ -89,6 +91,7 @@ class SessionsTabState extends State<SessionsTab> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final base = widget.apiBase;
     if (base != null) {
       _client = widget.client ?? SessionsClient(base, auth: widget.auth);
@@ -97,6 +100,19 @@ class SessionsTabState extends State<SessionsTab> {
     } else {
       _loading = false;
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed || _client == null) return;
+    // Android suspends the app (issue #41): on returning to the foreground,
+    // reconnect the event stream with the current Access token and re-fetch
+    // the list, so rows that changed while backgrounded (a session closed on
+    // the host, a turn ended) show up on return.
+    final events = _events;
+    if (events != null) unawaited(events.reconnect());
+    _load();
   }
 
   @override
@@ -112,6 +128,7 @@ class SessionsTabState extends State<SessionsTab> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _teardownEvents();
     super.dispose();
   }
@@ -524,6 +541,12 @@ class _NewSessionButton extends StatelessWidget {
 
 /// The new-session project picker (spec §5, fill-in †): the shared opencode
 /// service's projects, the only parameter of a new session.
+///
+/// A plain [Dialog] rather than an [AlertDialog] (issue #41): an
+/// [AlertDialog] sizes itself to its content's intrinsic width, and the
+/// project list is a viewport, which cannot report intrinsic dimensions.
+/// Here the list takes the width the dialog is given, capped on desktop,
+/// so the picker fits both a phone and a desktop window.
 class _ProjectPicker extends StatelessWidget {
   const _ProjectPicker({required this.projects});
 
@@ -531,13 +554,27 @@ class _ProjectPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
+    return Dialog(
       key: const ValueKey('project-picker'),
-      title: const Text('New session'),
-      content: projects.isEmpty
-          ? const _CenteredMessage(text: 'No projects found.')
-          : SizedBox(
-              width: 400,
+      constraints: const BoxConstraints(maxWidth: 560),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+            child: Text(
+              'New session',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+          if (projects.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(24),
+              child: Text('No projects found.'),
+            )
+          else
+            SizedBox(
               height: 320,
               child: ListView.builder(
                 itemCount: projects.length,
@@ -552,12 +589,18 @@ class _ProjectPicker extends StatelessWidget {
                 },
               ),
             ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-      ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancel'),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
