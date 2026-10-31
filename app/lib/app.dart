@@ -53,7 +53,12 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
   Future<void> _enter(AppSettings settings, AppMode mode) async {
     if (mode == AppMode.server) {
       try {
-        final bridge = await BridgeServer.start();
+        // The bridge is the tunnel's supervisor (ADR-0002): it starts the
+        // cloudflared child after the port is bound, so a second instance
+        // (detected by the port conflict) never spawns a second tunnel.
+        final bridge = await BridgeServer.start(
+          tunnel: BridgeServer.defaultTunnel(),
+        );
         _bridge = bridge;
         _serverError = null;
         _mode = mode;
