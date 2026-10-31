@@ -54,10 +54,11 @@ void main() {
         chmods: chmods,
       )).ensure();
 
+      // The real GitHub release URL: cloudflared tags carry no `v` prefix.
       expect(downloads, [
         Uri.parse(
           'https://github.com/cloudflare/cloudflared/releases/download/'
-          'v${CloudflaredBinary.pinnedVersion}/cloudflared-linux-amd64',
+          '${CloudflaredBinary.pinnedVersion}/cloudflared-linux-amd64',
         ),
       ]);
       expect(chmods, ['${dir.path}/cloudflared.download']);
