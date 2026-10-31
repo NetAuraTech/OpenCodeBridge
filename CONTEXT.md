@@ -22,6 +22,14 @@ _Avoid_: remote mode, consumer mode
 The locally-managed named Cloudflare tunnel that server mode runs, exposing the bridge's localhost port through the user's domain behind Cloudflare Access.
 _Avoid_: cloudflared (the binary), reverse proxy
 
+**App-owned files**:
+The two files the tunnel runs on that the app owns and writes: the credentials `~/.cloudflared/<uuid>.json` and the config `~/.config/opencodebridge/cloudflared.yml`. The user never writes them by hand.
+_Avoid_: tunnel files, config files
+
+**Assisted setup**:
+The in-app, server-mode wizard that collects the tunnel name, public hostname, and pasted credentials and has the bridge write the app-owned files, then re-checks and (re)starts the tunnel.
+_Avoid_: setup wizard, tunnel wizard, onboarding
+
 ### Sessions
 
 **Session**:

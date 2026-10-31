@@ -7,6 +7,7 @@ import '../model/container.dart';
 import '../model/permission.dart';
 import '../model/session.dart';
 import '../model/tunnel_report.dart';
+import '../model/tunnel_setup.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
@@ -27,6 +28,7 @@ import 'terminal/window_manager.dart';
 import 'tunnel/cloudflared_binary.dart';
 import 'tunnel/cloudflared_config.dart';
 import 'tunnel/tunnel_preconditions.dart';
+import 'tunnel/tunnel_setup.dart';
 import 'tunnel/tunnel_supervisor.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
@@ -87,6 +89,11 @@ class BridgeServer {
   /// guided setup or a capped auto-respawn.
   static const String tunnelStartPath = '/api/tunnel/start';
 
+  /// The assisted tunnel setup (issue #34, ADR-0003): the bridge, the sole
+  /// file owner, writes the app-owned files from the wizard's input and
+  /// answers with the fresh tunnel report.
+  static const String tunnelSetupPath = '/api/tunnel/setup';
+
   final HttpServer _server;
 
   /// The terminal backend (endpoint 10); `null` when this machine has no
@@ -145,6 +152,9 @@ class BridgeServer {
   /// tunnel child is spawned. The default is no tunnel, in which case the
   /// tunnel endpoints report `not_configured`; the app passes
   /// [BridgeServer.defaultTunnel] in server mode.
+  /// [tunnelSetup], when provided, builds the assisted-setup service
+  /// (issue #34, ADR-0003) for the supervisor (tests); the default writes
+  /// the app-owned files at the host paths.
   /// [dockerLogKeepAlive] paces the keep-alive comment on a followed
   /// container's log stream (20s, as on the events stream); the keep-alive
   /// write is what surfaces a client disconnect, so tests shorten it.
@@ -162,6 +172,7 @@ class BridgeServer {
     LlamaSpeedFeed? speedFeed,
     DockerBackend? docker,
     TunnelSupervisor? tunnel,
+    TunnelSetup Function(TunnelSupervisor)? tunnelSetup,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
   }) async {
     final server = await HttpServer.bind(host, port);
@@ -180,6 +191,10 @@ class BridgeServer {
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
     final tunnelSupervisor = tunnel;
+    final tunnelSetupService =
+        tunnelSetup ??
+        (supervisor) =>
+            TunnelSetup(supervisor: supervisor, bridgePort: defaultPort);
     speed?.start();
     if (tunnelSupervisor != null) {
       await tunnelSupervisor.start();
@@ -201,6 +216,7 @@ class BridgeServer {
         windowManager,
         dockerBackend,
         tunnelSupervisor,
+        tunnelSetupService,
         dockerLogKeepAlive,
       );
     });
@@ -420,6 +436,52 @@ class BridgeServer {
     await response.close();
   }
 
+  /// The assisted tunnel setup (issue #34, ADR-0003): the bridge, the sole
+  /// file owner, writes the app-owned files from the pasted credentials and
+  /// the chosen hostname, then re-runs the precondition pass and, when
+  /// every step is met, (re)starts the tunnel child — answering with the
+  /// fresh report. An invalid payload answers 400 with the explanation;
+  /// unwriteable files answer 500; a bridge without a tunnel supervisor
+  /// answers 404.
+  static Future<void> _tunnelSetup(
+    HttpRequest request,
+    TunnelSupervisor? tunnel,
+    TunnelSetup Function(TunnelSupervisor) tunnelSetup,
+  ) async {
+    final response = request.response;
+    response.headers.contentType = ContentType.json;
+    if (tunnel == null) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'tunnel_not_configured'}));
+      await response.close();
+      return;
+    }
+    final body = await utf8.decodeStream(request);
+    try {
+      await tunnelSetup(tunnel).apply(body);
+    } on TunnelSetupError catch (e) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(
+        jsonEncode({'error': 'invalid_body', 'details': e.message}),
+      );
+      await response.close();
+      return;
+    } on TunnelSetupWriteError catch (e) {
+      response.statusCode = HttpStatus.internalServerError;
+      response.write(
+        jsonEncode(
+          {'error': 'tunnel_files_not_writable', 'details': e.message},
+        ),
+      );
+      await response.close();
+      return;
+    }
+    response.statusCode = HttpStatus.ok;
+    final report = await tunnel.report();
+    response.write(jsonEncode(report.toJson()));
+    await response.close();
+  }
+
   static Future<void> _handle(
     HttpRequest request,
     HealthReport Function() report,
@@ -428,6 +490,7 @@ class BridgeServer {
     TerminalWindowManager? windows,
     DockerBackend? docker,
     TunnelSupervisor? tunnel,
+    TunnelSetup Function(TunnelSupervisor) tunnelSetup,
     Duration dockerLogKeepAlive,
   ) async {
     final response = request.response;
@@ -517,6 +580,11 @@ class BridgeServer {
           tunnel,
           (supervisor) => supervisor.restart(),
         );
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.tunnelSetupPath) {
+        await BridgeServer._tunnelSetup(request, tunnel, tunnelSetup);
         return;
       }
       if (request.method == 'POST' &&

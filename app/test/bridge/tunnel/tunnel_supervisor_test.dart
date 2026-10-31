@@ -125,6 +125,7 @@ class FakeHost {
     scrape: (int port) async => connections,
     portHolder: (int port) async => portHolder,
     killGrace: const Duration(milliseconds: 50),
+    connectTimeout: const Duration(milliseconds: 10),
   );
 
   FakeTunnelProcess? get lastChild => spawned.isEmpty ? null : spawned.last;
@@ -288,6 +289,95 @@ void main() {
       expect(report.status, TunnelStatus.down);
       expect(report.running, isTrue);
       expect(report.registeredConnections, 0);
+    });
+  });
+
+  group('TunnelSupervisor.check', () {
+    test('spawns the child when every step is met', () async {
+      await host.setup();
+      host.connections = 3;
+      final supervisor = host.supervisor();
+      addTearDown(() => supervisor.stop());
+
+      final check = await supervisor.check();
+
+      expect(check, isNotNull);
+      expect(check!.allMet, isTrue);
+      expect(host.spawned, hasLength(1));
+      final report = await supervisor.report();
+      expect(report.status, TunnelStatus.up);
+    });
+
+    test('does not spawn while a step is missing', () async {
+      await host.setup(withConfig: false);
+      final supervisor = host.supervisor();
+      addTearDown(() => supervisor.stop());
+
+      final check = await supervisor.check();
+
+      expect(check!.allMet, isFalse);
+      expect(check.missing.map((s) => s.id), [TunnelSetupStep.config]);
+      expect(host.spawned, isEmpty);
+    });
+
+    test('leaves a running child alone', () async {
+      final supervisor = await started();
+      addTearDown(() => supervisor.stop());
+
+      final check = await supervisor.check();
+
+      expect(check!.allMet, isTrue);
+      expect(host.spawned, hasLength(1));
+    });
+  });
+
+  group('TunnelSupervisor.applySetup', () {
+    test('re-runs the pass and (re)starts the child on the fresh files', () async {
+      final supervisor = await started();
+      addTearDown(() => supervisor.stop());
+      final firstChild = host.lastChild;
+
+      host.connections = 3;
+      await supervisor.applySetup();
+
+      expect(host.spawned, hasLength(2));
+      expect(firstChild!.killed, isTrue);
+      final report = await supervisor.report();
+      expect(report.status, TunnelStatus.up);
+    });
+
+    test('spawns the child when none runs and every step is met', () async {
+      await host.setup(withConfig: false);
+      final supervisor = host.supervisor();
+      addTearDown(() => supervisor.stop());
+      expect(host.spawned, isEmpty);
+
+      host.connections = 3;
+      await host.configFile.writeAsString(
+        'tunnel: my-tunnel\n'
+        'credentials-file: ${dir.path}/$_kCredentialsUuid.json\n'
+        'ingress:\n'
+        '  - hostname: bridge.example.com\n'
+        '    service: http://127.0.0.1:48201\n',
+      );
+      await supervisor.applySetup();
+
+      expect(host.spawned, hasLength(1));
+    });
+
+    test('leaves the child untouched while a step is missing', () async {
+      final supervisor = await started();
+      addTearDown(() => supervisor.stop());
+      final firstChild = host.lastChild;
+
+      await host.configFile.delete();
+      await supervisor.applySetup();
+
+      expect(host.spawned, hasLength(1));
+      expect(firstChild!.killed, isFalse);
+      final report = await supervisor.report();
+      expect(report.status, TunnelStatus.down);
+      expect(report.missing, contains(TunnelSetupStep.config));
     });
   });
 }

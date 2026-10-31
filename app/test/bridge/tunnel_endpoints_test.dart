@@ -7,6 +7,7 @@ import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_binary.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_config.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_preconditions.dart';
+import 'package:opencodebridge/bridge/tunnel/tunnel_setup.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_supervisor.dart';
 import 'package:opencodebridge/model/tunnel_report.dart';
 
@@ -103,22 +104,29 @@ class FakeHost {
     scrape: (int port) async => connections,
     portHolder: (int port) async => null,
     killGrace: const Duration(milliseconds: 50),
+    connectTimeout: const Duration(milliseconds: 10),
   );
 
   FakeTunnelProcess? get lastChild => spawned.isEmpty ? null : spawned.last;
 }
 
-/// One bridge request: the status code and the decoded JSON body.
+/// One bridge request: the status code and the decoded JSON body. [body] is
+/// sent as the raw request body (the `POST /api/tunnel/setup` payload).
 Future<(int, Map<String, Object?>)> request(
   Uri base,
   String method,
-  String path,
-) async {
+  String path, {
+  String? body,
+}) async {
   final client = HttpClient();
   try {
     final request = method == 'GET'
         ? await client.getUrl(base.replace(path: path))
         : await client.postUrl(base.replace(path: path));
+    if (body != null) {
+      request.headers.contentType = ContentType.json;
+      request.write(body);
+    }
     final response = await request.close();
     final raw = await response.transform(const Utf8Decoder()).join();
     return (response.statusCode, jsonDecode(raw) as Map<String, Object?>);
@@ -143,7 +151,16 @@ void main() {
       host = FakeHost(dir);
       await host.setup();
       tunnel = host.supervisor();
-      server = await BridgeServer.start(port: 0, tunnel: tunnel);
+      server = await BridgeServer.start(
+        port: 0,
+        tunnel: tunnel,
+        tunnelSetup: (supervisor) => TunnelSetup(
+          supervisor: supervisor,
+          bridgePort: 48201,
+          credentialsDir: Directory('${dir.path}/.cloudflared'),
+          configFile: host.config,
+        ),
+      );
       base = server.baseUri;
       await Future<void>.delayed(const Duration(milliseconds: 10));
       initialChild = host.lastChild!;
@@ -203,6 +220,85 @@ void main() {
       expect(host.lastChild, isNot(initialChild));
     });
 
+    test(
+      'POST /api/tunnel/setup writes the app-owned files and (re)starts the child',
+      () async {
+        final credentials = jsonEncode(
+          {'TunnelID': _kCredentialsUuid, 'APIKey': 'secret'},
+        );
+        final (status, reported) = await request(
+          base,
+          'POST',
+          '/api/tunnel/setup',
+          body: jsonEncode(
+            {'tunnel': 'setup-tunnel', 'hostname': 'setup.example.com', 'credentials': credentials},
+          ),
+        );
+        expect(status, HttpStatus.ok);
+        // The answer is the fresh report, already on the fresh files.
+        expect(reported['status'], 'up');
+        expect(reported['hostname'], 'setup.example.com');
+        expect(reported['missing'], <String>[]);
+
+        // The pasted credentials are written verbatim.
+        expect(
+          File('${dir.path}/.cloudflared/$_kCredentialsUuid.json')
+              .readAsStringSync(),
+          credentials,
+        );
+        // The generated config routes the hostname to the bridge's loopback
+        // port, after the catch-all cloudflared requires.
+        final configText = host.configFile.readAsStringSync();
+        expect(configText, contains('tunnel: setup-tunnel'));
+        expect(
+          configText,
+          contains('credentials-file: ${dir.path}/.cloudflared/$_kCredentialsUuid.json'),
+        );
+        expect(configText, contains('hostname: setup.example.com'));
+        expect(configText, contains('service: http://127.0.0.1:48201'));
+        expect(configText, contains('http_status:404'));
+        // The child was (re)started on the fresh files.
+        expect(initialChild.killed, isTrue);
+        expect(host.lastChild, isNot(initialChild));
+      },
+    );
+
+    test(
+      'POST /api/tunnel/setup answers 400 invalid_body on a bad payload',
+      () async {
+        final goodCredentials = jsonEncode(
+          {'TunnelID': _kCredentialsUuid, 'APIKey': 'secret'},
+        );
+        for (final body in [
+          '{not json',
+          // A space is not a valid tunnel name.
+          jsonEncode(
+            {'tunnel': 'bad tunnel', 'hostname': 'nope.example.com', 'credentials': goodCredentials},
+          ),
+          // A hostname that is not a DNS name.
+          jsonEncode(
+            {'tunnel': 'setup-tunnel', 'hostname': 'no dot', 'credentials': goodCredentials},
+          ),
+          // Credentials without an API key/token.
+          jsonEncode(
+            {'tunnel': 'setup-tunnel', 'hostname': 'nope.example.com', 'credentials': jsonEncode({'TunnelID': _kCredentialsUuid})},
+          ),
+        ]) {
+          final (status, reported) = await request(
+            base,
+            'POST',
+            '/api/tunnel/setup',
+            body: body,
+          );
+          expect(status, HttpStatus.badRequest);
+          expect(reported['error'], 'invalid_body');
+          expect(reported['details'], isA<String>());
+        }
+        // A bad payload leaves the child untouched.
+        expect(initialChild.killed, isFalse);
+      },
+    );
+
     test('stop() terminates the tunnel child', () async {
       await server.stop();
       expect(initialChild.killed, isTrue);
@@ -238,9 +334,13 @@ void main() {
     });
 
     test(
-      'the check and start actions answer 404 tunnel_not_configured',
+      'the check, start, and setup actions answer 404 tunnel_not_configured',
       () async {
-        for (final path in ['/api/tunnel/check', '/api/tunnel/start']) {
+        for (final path in [
+          '/api/tunnel/check',
+          '/api/tunnel/start',
+          '/api/tunnel/setup',
+        ]) {
           final (status, reported) = await request(base, 'POST', path);
           expect(status, HttpStatus.notFound);
           expect(reported, {'error': 'tunnel_not_configured'});

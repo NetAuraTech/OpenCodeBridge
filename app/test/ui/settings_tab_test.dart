@@ -16,6 +16,11 @@ class FakeTunnelClient extends TunnelClient {
   Object? reportError;
   final List<String> actions = [];
 
+  /// The last assisted-setup arguments, recorded by [setup].
+  String? setupTunnel;
+  String? setupHostname;
+  String? setupCredentials;
+
   @override
   Future<TunnelReport> report() async {
     final error = reportError;
@@ -34,6 +39,21 @@ class FakeTunnelClient extends TunnelClient {
   @override
   Future<TunnelReport> start() async {
     actions.add('start');
+    final error = reportError;
+    if (error is Object) throw error;
+    return reportValue!;
+  }
+
+  @override
+  Future<TunnelReport> setup(
+    String tunnel,
+    String hostname,
+    String credentials,
+  ) async {
+    actions.add('setup');
+    setupTunnel = tunnel;
+    setupHostname = hostname;
+    setupCredentials = credentials;
     final error = reportError;
     if (error is Object) throw error;
     return reportValue!;
@@ -254,5 +274,237 @@ void main() {
       expect(find.text('No bridge configured.'), findsOneWidget);
       expect(tunnel.actions, isEmpty);
     });
+  });
+
+  group('SettingsTab assisted setup (issue #34)', () {
+    const String kSetupCredentialsJson =
+        '{"TunnelID":"11111111-2222-3333-4444-555555555555","APIKey":"secret"}';
+
+    testWidgets(
+      'server mode with a down tunnel offers the assisted setup',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+
+        expect(find.byKey(const ValueKey('tunnel-setup')), findsOneWidget);
+        expect(find.text('Set up the tunnel'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'client mode does not offer the assisted setup',
+      (tester) async {
+        SharedPreferences.setMockInitialValues(
+          {'host.tunnelUrl': 'https://bridge.example.com/'},
+        );
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.client,
+          tunnelClient: tunnel,
+        );
+
+        expect(find.text('Tunnel down'), findsOneWidget);
+        expect(find.byKey(const ValueKey('tunnel-setup')), findsNothing);
+        expect(find.text('Set up the tunnel'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'an up tunnel needs no setup',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kUpReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+
+        expect(find.byKey(const ValueKey('tunnel-setup')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'the wizard collects the three inputs and shows the manual steps',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+        await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('setup-tunnel-name')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('setup-hostname')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('setup-credentials')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('setup-submit')), findsOneWidget);
+        expect(find.byKey(const ValueKey('setup-cancel')), findsOneWidget);
+
+        // A valid hostname plus credentials reveals the manual steps.
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-hostname')),
+          'bridge.example.com',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-credentials')),
+          '{"TunnelID":"11111111-2222-3333-4444-555555555555",'
+          '"APIKey":"secret","OwnerEmail":"user@example.com"}',
+        );
+        await tester.pump();
+
+        expect(
+          find.textContaining(
+            'bridge.example.com → 11111111-2222-3333-4444-555555555555.cfargotunnel.com',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining(
+            'Self-hosted app for https://bridge.example.com',
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'an invalid tunnel name shows the app-side error and does not submit',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+        await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
+        await tester.pump();
+
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-tunnel-name')),
+          'has space',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-hostname')),
+          'bridge.example.com',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-credentials')),
+          kSetupCredentialsJson,
+        );
+        await tester.ensureVisible(find.byKey(const ValueKey('setup-submit')));
+        await tester.tap(find.byKey(const ValueKey('setup-submit')));
+        await tester.pump();
+
+        expect(
+          find.textContaining('the tunnel name is invalid'),
+          findsOneWidget,
+        );
+        expect(tunnel.actions, isNot(contains('setup')));
+      },
+    );
+
+    testWidgets(
+      'a valid setup submits and the tab adopts the fresh report',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+        await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
+        await tester.pump();
+
+        tunnel.reportValue = _kUpReport;
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-tunnel-name')),
+          'my-tunnel',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-hostname')),
+          'bridge.example.com',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-credentials')),
+          kSetupCredentialsJson,
+        );
+        await tester.ensureVisible(find.byKey(const ValueKey('setup-submit')));
+        await tester.tap(find.byKey(const ValueKey('setup-submit')));
+        await tester.pumpAndSettle();
+
+        expect(tunnel.actions, ['setup']);
+        expect(tunnel.setupTunnel, 'my-tunnel');
+        expect(tunnel.setupHostname, 'bridge.example.com');
+        expect(tunnel.setupCredentials, kSetupCredentialsJson);
+        // The dialog is gone; the tab shows the fresh report.
+        expect(find.byKey(const ValueKey('setup-submit')), findsNothing);
+        expect(find.text('Tunnel up'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'a bridge 400 shows the bridge details',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+        await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
+        await tester.pump();
+
+        tunnel.reportError = const TunnelClientError(
+          400,
+          '{"error":"invalid_body","details":"the credentials carry no API key or token"}',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-tunnel-name')),
+          'my-tunnel',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-hostname')),
+          'bridge.example.com',
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-credentials')),
+          kSetupCredentialsJson,
+        );
+        await tester.ensureVisible(find.byKey(const ValueKey('setup-submit')));
+        await tester.tap(find.byKey(const ValueKey('setup-submit')));
+        await tester.pump();
+
+        expect(
+          find.text('the credentials carry no API key or token'),
+          findsOneWidget,
+        );
+        // The dialog stays open for a retry.
+        expect(find.byKey(const ValueKey('setup-submit')), findsOneWidget);
+      },
+    );
   });
 }

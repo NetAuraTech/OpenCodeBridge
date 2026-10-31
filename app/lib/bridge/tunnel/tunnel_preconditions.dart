@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../sessions/paths.dart';
 import 'cloudflared_binary.dart';
 import 'cloudflared_config.dart';
 import '../../model/tunnel_report.dart';
@@ -205,7 +206,7 @@ class TunnelPreconditionChecker {
 
   /// The credentials file exists and carries a `TunnelID`.
   bool _credentialsMet(String credentialsFile) {
-    final file = File(credentialsFile);
+    final file = File(_expandHome(credentialsFile));
     if (!file.existsSync()) return false;
     try {
       final decoded = jsonDecode(file.readAsStringSync());
@@ -214,6 +215,17 @@ class TunnelPreconditionChecker {
     } catch (_) {
       return false;
     }
+  }
+
+  /// Expands a leading `~` to the home directory: cloudflared itself
+  /// expands `~` in `credentials-file`, so the checker probes the same
+  /// path (issue #34).
+  static String _expandHome(String path) {
+    if (path == '~') return homeDirectory();
+    if (!path.startsWith('~/')) return path;
+    final rest = path.substring(2);
+    final home = homeDirectory();
+    return home == '/' ? '/$rest' : '$home/$rest';
   }
 }
 

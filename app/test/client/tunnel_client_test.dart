@@ -11,6 +11,7 @@ void main() {
     late TunnelClient client;
     late Map<String, Object?> reportBody;
     late List<String> paths;
+    late List<String> bodies;
 
     /// When set, the server answers every tunnel path with 404 and this
     /// error body.
@@ -18,6 +19,7 @@ void main() {
 
     setUp(() async {
       paths = [];
+      bodies = [];
       notFound = null;
       reportBody = {
         'status': 'up',
@@ -33,6 +35,7 @@ void main() {
       client = TunnelClient(base);
       server.listen((request) async {
         final response = request.response;
+        bodies.add(await utf8.decodeStream(request));
         paths.add('${request.method} ${request.uri.path}');
         response.headers.contentType = ContentType.json;
         final error = notFound;
@@ -74,6 +77,23 @@ void main() {
       final report = await client.start();
 
       expect(paths, ['POST /api/tunnel/start']);
+      expect(report.registeredConnections, 2);
+    });
+
+    test('setup() POSTs the assisted setup payload', () async {
+      const credentials =
+          '{"TunnelID":"11111111-2222-3333-4444-555555555555","APIKey":"secret"}';
+      final report = await client.setup(
+        'my-tunnel',
+        'bridge.example.com',
+        credentials,
+      );
+
+      expect(paths, ['POST /api/tunnel/setup']);
+      final sent = jsonDecode(bodies.single) as Map<String, Object?>;
+      expect(sent['tunnel'], 'my-tunnel');
+      expect(sent['hostname'], 'bridge.example.com');
+      expect(sent['credentials'], credentials);
       expect(report.registeredConnections, 2);
     });
 
