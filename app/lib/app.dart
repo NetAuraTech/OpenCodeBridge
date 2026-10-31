@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'access/access_session.dart';
+import 'access/token_store.dart';
 import 'app_mode.dart';
 import 'bridge/bridge_server.dart';
 import 'client/connection_monitor.dart';
@@ -27,6 +29,7 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
   AppMode? _mode;
   BridgeServer? _bridge;
   String? _serverError;
+  AccessSession? _access;
 
   /// The desktop host: server or client at every launch.
   bool get _showsModeChoice => defaultTargetPlatform == TargetPlatform.linux;
@@ -67,14 +70,27 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         // E.g. the bridge port is already held by another instance.
         _serverError = 'Could not start the bridge: $error';
       }
+      _access = null;
+      _monitor.setAuth(null);
     } else {
       _mode = mode;
       _serverError = null;
       final url = settings.tunnelUrl.trim();
       if (url.isEmpty) {
         _monitor.disconnect();
+        _access = null;
+        _monitor.setAuth(null);
       } else {
-        _monitor.connect(Uri.parse(url).replace(path: BridgeServer.healthPath));
+        final base = Uri.parse(url);
+        final session = AccessSession(
+          tunnelBase: base,
+          store: await AccessTokenStore.load(),
+        );
+        _access = session;
+        _monitor.setAuth(session.authorizationHeader);
+        _monitor.connect(base.replace(path: BridgeServer.healthPath));
+        // A restart within the grant session must not re-login (issue #23).
+        await session.restore();
       }
     }
     if (mounted) setState(() {});
@@ -111,6 +127,8 @@ class _OpenCodeBridgeAppState extends State<OpenCodeBridgeApp> {
         localBridgeUri: _bridge?.healthUri,
         terminals: _bridge?.terminals,
         onTunnelUrlCommitted: () => _enter(settings, AppMode.client),
+        auth: _mode == AppMode.client ? _access?.authorizationHeader : null,
+        access: _mode == AppMode.client ? _access : null,
       ),
     );
   }

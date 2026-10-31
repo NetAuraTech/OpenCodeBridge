@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:opencodebridge/client/authenticated_http.dart';
+
 /// The state of the app's link to the bridge, as driven by the health
 /// endpoint. This is what the discreet connection indicator reflects.
 enum LinkState { connecting, connected, disconnected }
@@ -19,13 +21,19 @@ typedef HealthProbe = Future<bool> Function(Uri healthUri);
 class ConnectionMonitor extends ChangeNotifier {
   ConnectionMonitor({
     this.interval = const Duration(seconds: 5),
-    HealthProbe? probe,
-  }) : _probe = probe ?? ConnectionMonitor._defaultProbe;
+    this._probe,
+    this._auth,
+  });
 
   /// How often the health endpoint is polled.
   final Duration interval;
 
-  final HealthProbe _probe;
+  final HealthProbe? _probe;
+  AuthHeaderProvider? _auth;
+
+  /// (Re)sets the Access header provider (issue #23): the default probe
+  /// reads it on every tick.
+  void setAuth(AuthHeaderProvider? auth) => _auth = auth;
   Timer? _timer;
   Uri? _target;
   LinkState _state = LinkState.connecting;
@@ -55,7 +63,8 @@ class ConnectionMonitor extends ChangeNotifier {
     if (target == null) return;
     bool reachable = false;
     try {
-      reachable = await _probe(target);
+      final probe = _probe ?? (Uri uri) => _defaultProbe(uri, _auth);
+      reachable = await probe(target);
     } catch (_) {
       reachable = false;
     }
@@ -71,13 +80,20 @@ class ConnectionMonitor extends ChangeNotifier {
     notifyListeners();
   }
 
-  static Future<bool> _defaultProbe(Uri healthUri) async {
+  /// The default probe: a `GET` on the health URI (issue #23: with [auth],
+  /// carrying the `Authorization: Bearer` header and refreshing on `401`).
+  static Future<bool> _defaultProbe(
+    Uri healthUri,
+    AuthHeaderProvider? auth,
+  ) async {
     final client = HttpClient();
     try {
-      final request = await client
-          .getUrl(healthUri)
-          .timeout(const Duration(seconds: 3));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        healthUri,
+        auth: auth,
+      ).timeout(const Duration(seconds: 3));
       await response.drain<void>();
       return response.statusCode == HttpStatus.ok;
     } catch (_) {

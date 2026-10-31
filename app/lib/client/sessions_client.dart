@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:opencodebridge/client/authenticated_http.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
@@ -9,20 +10,29 @@ import 'package:opencodebridge/model/session_detail.dart';
 
 /// The app-side client of the bridge's sessions endpoints (spec section 5).
 /// The app talks only to the bridge (ADR-0001): in server mode that is
-/// loopback, in client mode the same API behind the tunnel.
+/// loopback, in client mode the same API behind the tunnel (issue #23:
+/// every request carries `Authorization: Bearer` from [auth], refreshed
+/// on `401` — see [bridgeRequest]).
 class SessionsClient {
-  SessionsClient(this._base);
+  SessionsClient(this._base, {this._auth});
 
   /// The bridge's base URI, e.g. `http://127.0.0.1:48201/`.
   final Uri _base;
+
+  /// The Access login's header provider (issue #23); `null` in server mode.
+  final AuthHeaderProvider? _auth;
 
   /// Every session on the shared service, newest first (spec section 5,
   /// endpoint 1).
   Future<List<Session>> list() async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(_base.replace(path: 'api/sessions'));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        _base.replace(path: 'api/sessions'),
+        auth: _auth,
+      );
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw SessionsClientError(response.statusCode, body);
@@ -44,8 +54,12 @@ class SessionsClient {
   Future<List<Project>> projects() async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(_base.replace(path: 'api/projects'));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        _base.replace(path: 'api/projects'),
+        auth: _auth,
+      );
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw SessionsClientError(response.statusCode, body);
@@ -69,10 +83,14 @@ class SessionsClient {
   Future<Session> create(String projectId) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(_base.replace(path: 'api/sessions'));
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'project': projectId}));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/sessions'),
+        body: jsonEncode({'project': projectId}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.created) {
         throw SessionsClientError(response.statusCode, body);
@@ -92,10 +110,12 @@ class SessionsClient {
   Future<void> openWindow(String id) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(
+      final response = await bridgeRequest(
+        client,
+        'POST',
         _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/window'),
+        auth: _auth,
       );
-      final response = await request.close();
       await response.drain<void>();
       if (response.statusCode != HttpStatus.noContent &&
           response.statusCode != HttpStatus.ok) {
@@ -118,10 +138,12 @@ class SessionsClient {
   Future<void> delete(String id) async {
     final client = HttpClient();
     try {
-      final request = await client.deleteUrl(
+      final response = await bridgeRequest(
+        client,
+        'DELETE',
         _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}'),
+        auth: _auth,
       );
-      final response = await request.close();
       await response.drain<void>();
       if (response.statusCode != HttpStatus.noContent &&
           response.statusCode != HttpStatus.ok) {
@@ -144,10 +166,12 @@ class SessionsClient {
   Future<SessionDetail> getDetail(String id) async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(
+      final response = await bridgeRequest(
+        client,
+        'GET',
         _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}'),
+        auth: _auth,
       );
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw SessionsClientError(response.statusCode, body);
@@ -167,10 +191,12 @@ class SessionsClient {
   Future<List<SessionMessage>> getMessages(String id) async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(
+      final response = await bridgeRequest(
+        client,
+        'GET',
         _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/messages'),
+        auth: _auth,
       );
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw SessionsClientError(response.statusCode, body);
@@ -193,12 +219,14 @@ class SessionsClient {
   Future<void> prompt(String id, String text) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(
+      final response = await bridgeRequest(
+        client,
+        'POST',
         _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/messages'),
+        body: jsonEncode({'text': text}),
+        contentType: ContentType.json,
+        auth: _auth,
       );
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'text': text}));
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.accepted) {
         throw SessionsClientError(response.statusCode, body);
@@ -217,12 +245,14 @@ class SessionsClient {
   Future<List<PermissionRequest>> getPermissions(String id) async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(
+      final response = await bridgeRequest(
+        client,
+        'GET',
         _base.replace(
           path: 'api/sessions/${Uri.encodeComponent(id)}/permissions',
         ),
+        auth: _auth,
       );
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw SessionsClientError(response.statusCode, body);
@@ -247,16 +277,18 @@ class SessionsClient {
   ) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(
+      final response = await bridgeRequest(
+        client,
+        'POST',
         _base.replace(
           path:
               'api/sessions/${Uri.encodeComponent(id)}/permissions/'
               '${Uri.encodeComponent(requestID)}/reply',
         ),
+        body: jsonEncode({'reply': reply.wire}),
+        contentType: ContentType.json,
+        auth: _auth,
       );
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'reply': reply.wire}));
-      final response = await request.close();
       await response.drain<void>();
       if (response.statusCode != HttpStatus.noContent &&
           response.statusCode != HttpStatus.ok) {

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../bridge/terminal/terminal_backend.dart';
+import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/sessions_client.dart';
 import '../model/project.dart';
@@ -26,6 +27,7 @@ class SessionsTab extends StatefulWidget {
     this.client,
     this.terminals,
     this.events,
+    this.auth,
   });
 
   /// Where the bridge's sessions API lives. `null` when this client has no
@@ -35,6 +37,10 @@ class SessionsTab extends StatefulWidget {
   /// The client for the bridge's sessions API. Defaults to a real
   /// [SessionsClient] at [apiBase]; tests inject a fake.
   final SessionsClient? client;
+
+  /// The Access login's header provider (issue #23, client mode); `null` in
+  /// server mode.
+  final AuthHeaderProvider? auth;
 
   /// Present in server mode with a shared opencode service: the terminal
   /// backend the tab attaches to in-process (spec §12). `null` in client
@@ -85,7 +91,7 @@ class SessionsTabState extends State<SessionsTab> {
     super.initState();
     final base = widget.apiBase;
     if (base != null) {
-      _client = widget.client ?? SessionsClient(base);
+      _client = widget.client ?? SessionsClient(base, auth: widget.auth);
       _setupEvents(base);
       _load();
     } else {
@@ -97,7 +103,8 @@ class SessionsTabState extends State<SessionsTab> {
   void didUpdateWidget(covariant SessionsTab oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.apiBase != oldWidget.apiBase && widget.apiBase != null) {
-      _client = widget.client ?? SessionsClient(widget.apiBase!);
+      _client =
+          widget.client ?? SessionsClient(widget.apiBase!, auth: widget.auth);
       _setupEvents(widget.apiBase!);
       _load();
     }
@@ -117,7 +124,7 @@ class SessionsTabState extends State<SessionsTab> {
     if (provided != null) {
       _events = provided;
     } else {
-      _events = EventsClient(base);
+      _events = EventsClient(base, auth: widget.auth);
       _ownsEvents = true;
     }
     _events!.connect();

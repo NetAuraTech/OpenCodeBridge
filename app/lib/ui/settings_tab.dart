@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../access/access_session.dart';
 import '../app_info.dart';
 import '../app_mode.dart';
+import '../client/authenticated_http.dart';
 import '../client/tunnel_client.dart';
 import '../model/tunnel_report.dart';
 import '../settings/app_settings.dart';
@@ -22,6 +24,8 @@ class SettingsTab extends StatefulWidget {
     this.localBridgeUri,
     this.onTunnelUrlCommitted,
     this.tunnelClient,
+    this.access,
+    this.auth,
   });
 
   final AppSettings settings;
@@ -30,6 +34,10 @@ class SettingsTab extends StatefulWidget {
   /// Present in server mode: where the embedded bridge listens.
   final Uri? localBridgeUri;
 
+  /// The Cloudflare Access login for the tunnel (issue #23, client mode);
+  /// `null` when there is no tunnel URL yet.
+  final AccessSession? access;
+
   /// Called when the user commits the tunnel URL (submit or focus loss), so
   /// the app can re-point its connection at the new bridge.
   final VoidCallback? onTunnelUrlCommitted;
@@ -37,6 +45,10 @@ class SettingsTab extends StatefulWidget {
   /// The client for the bridge's tunnel API; the default builds a real
   /// [TunnelClient] at the bridge (tests inject a fake).
   final TunnelClient? tunnelClient;
+
+  /// The Access login's header provider (issue #23, client mode); `null` in
+  /// server mode.
+  final AuthHeaderProvider? auth;
 
   @override
   State<SettingsTab> createState() => _SettingsTabState();
@@ -89,11 +101,17 @@ class _SettingsTabState extends State<SettingsTab> {
           child: Text('Local bridge: ${widget.localBridgeUri}'),
         ),
       const SizedBox(height: 8),
+      if (widget.mode == AppMode.client) ...[
+        const _SectionLabel('Access login'),
+        _AccessSection(session: widget.access),
+        const SizedBox(height: 8),
+      ],
       const _SectionLabel('Tunnel'),
       _TunnelSection(
         apiBase: _tunnelApiBase,
         client: widget.tunnelClient,
         serverMode: widget.mode == AppMode.server,
+        auth: widget.auth,
       ),
       const SizedBox(height: 8),
       const _SectionLabel('Notifications'),
@@ -136,6 +154,7 @@ class _TunnelSection extends StatefulWidget {
     required this.apiBase,
     this.client,
     required this.serverMode,
+    this.auth,
   });
 
   /// Where the bridge's tunnel API lives; `null` when this client has no
@@ -145,6 +164,9 @@ class _TunnelSection extends StatefulWidget {
   /// The client for the bridge's tunnel API; the default builds a real
   /// [TunnelClient] at [apiBase].
   final TunnelClient? client;
+
+  /// The Access login's header provider (issue #23, client mode).
+  final AuthHeaderProvider? auth;
 
   /// Server mode: offers the assisted-setup wizard (issue #34), a
   /// server-mode feature (client mode only connects to the hostname).
@@ -186,7 +208,9 @@ class _TunnelSectionState extends State<_TunnelSection> {
   }
 
   void _init(Uri? base) {
-    _client = base == null ? null : (widget.client ?? TunnelClient(base));
+    _client = base == null
+        ? null
+        : (widget.client ?? TunnelClient(base, auth: widget.auth));
     _report = null;
     _error = null;
     _loading = _client != null;
@@ -417,6 +441,153 @@ class _TunnelSectionState extends State<_TunnelSection> {
                   ),
                 ],
               ],
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The Cloudflare Access login state (issue #23): the tunnel's Managed
+/// OAuth — connect (the browser IdP login), logged-in, logged-out, and the
+/// actions to move between them.
+class _AccessSection extends StatefulWidget {
+  const _AccessSection({this.session});
+
+  /// The tunnel's Access login; `null` when there is no tunnel URL yet.
+  final AccessSession? session;
+
+  @override
+  State<_AccessSection> createState() => _AccessSectionState();
+}
+
+class _AccessSectionState extends State<_AccessSection> {
+  AccessLoginState? _state;
+
+  /// True while connect or logout is in flight (its button shows progress).
+  bool _acting = false;
+
+  /// The last connect failure, if any.
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _state = widget.session?.state;
+    widget.session?.addListener(_onChange);
+  }
+
+  @override
+  void didUpdateWidget(covariant _AccessSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.session != oldWidget.session) {
+      oldWidget.session?.removeListener(_onChange);
+      _state = widget.session?.state;
+      _error = null;
+      widget.session?.addListener(_onChange);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.session?.removeListener(_onChange);
+    super.dispose();
+  }
+
+  void _onChange(AccessLoginState state) {
+    if (mounted) setState(() => _state = state);
+  }
+
+  Future<void> _connect() async {
+    final session = widget.session;
+    if (session == null || _acting) return;
+    setState(() {
+      _acting = true;
+      _error = null;
+    });
+    try {
+      await session.connect();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _acting = false);
+    }
+  }
+
+  Future<void> _logout() async {
+    final session = widget.session;
+    if (session == null || _acting) return;
+    setState(() => _acting = true);
+    try {
+      await session.logout();
+    } finally {
+      if (mounted) setState(() => _acting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final session = widget.session;
+    if (session == null) {
+      return Padding(
+        padding: const EdgeInsets.all(16),
+        child: Text(
+          'Set a tunnel URL to log in to the tunnel\'s Access.',
+          style: TextStyle(color: Theme.of(context).colorScheme.outline),
+        ),
+      );
+    }
+    final state = _state;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  state == AccessLoginState.connecting
+                      ? 'Waiting for the browser login…'
+                      : state == AccessLoginState.loggedIn
+                      ? 'Logged in.'
+                      : 'Not logged in.',
+                  key: const ValueKey('access-state'),
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (state == AccessLoginState.loggedIn)
+                OutlinedButton(
+                  key: const ValueKey('access-logout'),
+                  onPressed: _acting ? null : _logout,
+                  child: const Text('Log out'),
+                )
+              else
+                OutlinedButton(
+                  key: const ValueKey('access-connect'),
+                  onPressed: _acting || state == AccessLoginState.connecting
+                      ? null
+                      : _connect,
+                  child: _acting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Connect'),
+                ),
+            ],
+          ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                _error!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
             ),
         ],
       ),
