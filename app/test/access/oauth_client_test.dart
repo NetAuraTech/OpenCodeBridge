@@ -7,6 +7,7 @@ import 'package:opencodebridge/access/oauth_client.dart';
 
 void main() {
   late HttpServer server;
+  late String host;
   late Uri base;
   late Map<String, Object?> registrationBody;
   late Map<String, String?> lastForm;
@@ -28,7 +29,7 @@ void main() {
     };
     tokenStatus = HttpStatus.ok;
     server = await HttpServer.bind('127.0.0.1', 0);
-    final host = '127.0.0.1:${server.port}';
+    host = '127.0.0.1:${server.port}';
     base = Uri.parse('http://$host/');
 
     server.listen((req) async {
@@ -142,7 +143,8 @@ void main() {
       ]);
       expect(registrationBody['response_types'], ['code']);
       expect(registrationBody['token_endpoint_auth_method'], 'none');
-      expect(registrationBody['resource'], base.toString());
+      // The resource is the bare origin, without a trailing slash.
+      expect(registrationBody['resource'], 'http://$host');
     });
 
     test('throws when registration is unavailable', () async {
@@ -192,7 +194,7 @@ void main() {
       expect(challenge, isNot(startsWith('-')));
       expect(challenge, isNot(startsWith('_')));
       expect(url.queryParameters['code_challenge_method'], 'S256');
-      expect(url.queryParameters['resource'], base.toString());
+      expect(url.queryParameters['resource'], 'http://$host');
     });
   });
 

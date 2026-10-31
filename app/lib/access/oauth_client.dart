@@ -102,6 +102,11 @@ class AccessOAuthClient {
   /// present it in the code exchange to claim its challenge.
   String? _codeVerifier;
 
+  /// The RFC 8707 resource indicator: the tunnel origin without a trailing
+  /// slash (the authorization server compares it against the Access
+  /// application's origin when redeeming the code).
+  String get _resource => _base.toString().replaceFirst(RegExp(r'/+$'), '');
+
   /// Step 1: `GET /.well-known/oauth-authorization-server`.
   Future<AccessMetadata> discover() async {
     final Map<String, Object?> raw;
@@ -165,7 +170,7 @@ class AccessOAuthClient {
         'token_endpoint_auth_method': 'none',
         // RFC 8707: bind the registration to the resource the tokens will
         // be used against, so the token endpoint can enforce it.
-        'resource': _base.toString(),
+        'resource': _resource,
       }),
     );
     final clientId = raw['client_id'];
@@ -207,7 +212,7 @@ class AccessOAuthClient {
         'state': state,
         'code_challenge': challenge,
         'code_challenge_method': 'S256',
-        'resource': _base.toString(),
+        'resource': _resource,
       },
     );
   }
