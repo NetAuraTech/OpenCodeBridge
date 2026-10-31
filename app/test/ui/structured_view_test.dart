@@ -34,6 +34,21 @@ const _detailCtx = SessionDetail(
   contextLimit: 100,
 );
 
+/// A long, uneven history (a short first half, a long second half): the
+/// lazy list estimates the un-built tail from the built children's
+/// average, so a one-shot jump to the (estimated) bottom lands short of
+/// the true bottom and must be corrected frame by frame.
+final List<SessionMessage> _longHistory = List.generate(
+  400,
+  (i) => SessionMessage(
+    role: i.isEven ? 'user' : 'assistant',
+    text: i < 200
+        ? 'message $i'
+        : 'message $i ' +
+              List.filled(12, 'lorem ipsum dolor sit amet').join(' '),
+  ),
+);
+
 /// A scripted [SessionsClient] for the structured view tests.
 class _FakeClient extends SessionsClient {
   _FakeClient({
@@ -918,5 +933,43 @@ void main() {
       final border = decoration!.border as Border;
       expect(border.left, isA<BorderSide>());
     });
+
+    testWidgets('opening a long conversation settles at the last message', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: _longHistory,
+      );
+      await _pump(tester, client: client);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('message 399 '), findsOneWidget);
+    });
+
+    testWidgets(
+      'a jump-to-end button appears when scrolled up and returns to the end',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: _longHistory,
+        );
+        await _pump(tester, client: client);
+        await tester.pumpAndSettle();
+
+        final button = find.byKey(const ValueKey('structured-jump-to-end'));
+        expect(button, findsNothing);
+        expect(find.textContaining('message 399 '), findsOneWidget);
+
+        await tester.drag(find.byType(ListView), const Offset(0, 600));
+        await tester.pump();
+        expect(button, findsOneWidget);
+
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+        expect(button, findsNothing);
+        expect(find.textContaining('message 399 '), findsOneWidget);
+      },
+    );
   });
 }

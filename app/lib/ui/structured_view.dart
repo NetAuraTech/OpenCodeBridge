@@ -133,6 +133,11 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// (re-engage by scrolling back to the bottom).
   bool _stick = true;
 
+  /// Whether the viewport sits at the bottom of the history (within the
+  /// stick threshold): shows the jump-to-end button while the user has
+  /// scrolled up.
+  bool _atBottom = true;
+
   final ScrollController _scroll = ScrollController();
 
   StreamSubscription<BridgeEvent>? _events;
@@ -187,7 +192,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final position = _scroll.position;
-    _stick = position.pixels >= position.maxScrollExtent - 8;
+    final atBottom = position.pixels >= position.maxScrollExtent - 8;
+    _stick = atBottom;
+    if (atBottom != _atBottom) {
+      _atBottom = atBottom;
+      if (mounted) setState(() {});
+    }
   }
 
   /// Keeps the history at the bottom for the next frame when [_stick] holds
@@ -202,7 +212,31 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     final position = _scroll.position;
     if (position.pixels < position.maxScrollExtent) {
       position.jumpTo(position.maxScrollExtent);
+      // The list is lazy: the un-built tail's extent is an estimate
+      // (the built children's average), so one jump lands short of the
+      // true bottom. Re-check next frame — the tail builds as the
+      // viewport advances, the estimate tightens, and this converges
+      // onto the last message.
+      _followBottomNextFrame();
     }
+  }
+
+  /// The jump-to-end button: animates to the bottom and re-engages the
+  /// bottom-follow. The animation's target is the *estimated* max while
+  /// the tail is still un-built, so a settle pass follows the animation;
+  /// it is a no-op if the user scrolled away mid-flight (which drops
+  /// [_stick] and cancels it).
+  void _jumpToEnd() {
+    if (!_scroll.hasClients) return;
+    _stick = true;
+    final position = _scroll.position;
+    position
+        .animateTo(
+          position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        )
+        .whenComplete(_followBottomNextFrame);
   }
 
   /// The initial state: detail (costs), history (tools in flight), and the
@@ -892,31 +926,58 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   decode: _decode,
                 ),
                 Expanded(
-                  // Lazy: only the visible messages build and lay out. A
-                  // non-lazy list re-laid out the whole history on every
-                  // streamed flush — the slow frame that starved the event
-                  // loop (and, with it, the relay) during a long session.
-                  child: ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                    itemCount: _messages.isEmpty ? 1 : _messages.length,
-                    itemBuilder: (context, index) {
-                      if (_messages.isEmpty) {
-                        return const _CenteredMessage(text: 'No messages yet.');
-                      }
-                      final message = _messages[index];
-                      if (message.role == 'compaction') {
-                        return _CompactionPane(
-                          message: message,
-                          inFlight: _compacting && index == _compactionIndex,
-                        );
-                      }
-                      final inFlight =
-                          _turnActive &&
-                          message.id != null &&
-                          _liveMessages.containsKey(message.id);
-                      return _MessagePane(message: message, inFlight: inFlight);
-                    },
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        // Lazy: only the visible messages build and lay
+                        // out. A non-lazy list re-laid out the whole
+                        // history on every streamed flush — the slow frame
+                        // that starved the event loop (and, with it, the
+                        // relay) during a long session.
+                        child: ListView.builder(
+                          controller: _scroll,
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                          itemCount: _messages.isEmpty ? 1 : _messages.length,
+                          itemBuilder: (context, index) {
+                            if (_messages.isEmpty) {
+                              return const _CenteredMessage(
+                                text: 'No messages yet.',
+                              );
+                            }
+                            final message = _messages[index];
+                            if (message.role == 'compaction') {
+                              return _CompactionPane(
+                                message: message,
+                                inFlight:
+                                    _compacting && index == _compactionIndex,
+                              );
+                            }
+                            final inFlight =
+                                _turnActive &&
+                                message.id != null &&
+                                _liveMessages.containsKey(message.id);
+                            return _MessagePane(
+                              message: message,
+                              inFlight: inFlight,
+                            );
+                          },
+                        ),
+                      ),
+                      // The user scrolled up (or the initial settle hasn't
+                      // reached the end yet): float the jump-to-end button
+                      // over the list, just above the prompt bar.
+                      if (!_atBottom)
+                        Positioned(
+                          right: 12,
+                          bottom: 12,
+                          child: FloatingActionButton.small(
+                            key: const ValueKey('structured-jump-to-end'),
+                            tooltip: 'Go to the end',
+                            onPressed: _jumpToEnd,
+                            child: const Icon(Icons.vertical_align_bottom),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 _PromptBar(
