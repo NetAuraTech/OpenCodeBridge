@@ -286,6 +286,30 @@ void main() {
       expect(lastForm['refresh_token'], 'refresh-1');
     });
 
+    test('an error without a description falls back to the body', () async {
+      tokenStatus = HttpStatus.internalServerError;
+      tokenResponse = <String, Object?>{'error': 'server_error'};
+      final client = AccessOAuthClient(base);
+      await client.discover();
+      client.authorizationUrl(
+        'dyn-client-1',
+        'http://127.0.0.1:54321/callback',
+        'state-xyz',
+      );
+      await expectLater(
+        () => client.exchangeCode(
+          'dyn-client-1',
+          'good-code',
+          'http://127.0.0.1:54321/callback',
+        ),
+        throwsA(
+          isA<OAuthError>()
+              .having((e) => e.code, 'code', 'server_error')
+              .having((e) => e.description, 'description', contains('"error"')),
+        ),
+      );
+    });
+
     test('an ended grant session (invalid_grant) is an OAuthError', () async {
       tokenStatus = HttpStatus.badRequest;
       tokenResponse = <String, Object?>{
