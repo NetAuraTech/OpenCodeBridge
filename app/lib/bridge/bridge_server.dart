@@ -6,6 +6,7 @@ import '../model/compose_project.dart';
 import '../model/container.dart';
 import '../model/permission.dart';
 import '../model/session.dart';
+import '../model/tunnel_report.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
@@ -23,6 +24,10 @@ import 'terminal/terminal_frames.dart';
 import 'terminal/terminal_window.dart';
 import 'terminal/terminal_window_token.dart';
 import 'terminal/window_manager.dart';
+import 'tunnel/cloudflared_binary.dart';
+import 'tunnel/cloudflared_config.dart';
+import 'tunnel/tunnel_preconditions.dart';
+import 'tunnel/tunnel_supervisor.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
@@ -39,6 +44,7 @@ class BridgeServer {
     this._windows,
     this._speed,
     this._docker,
+    this._tunnel,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -69,6 +75,18 @@ class BridgeServer {
   /// per-project action hangs off it by the project's address.
   static const String dockerComposePath = '/api/docker/compose';
 
+  /// The tunnel status (issue #22): the cloudflared child the bridge
+  /// supervises, and the setup steps still missing when the tunnel is down.
+  static const String tunnelPath = '/api/tunnel';
+
+  /// The tunnel recheck (issue #22): re-runs the precondition pass and
+  /// answers with the fresh tunnel report.
+  static const String tunnelCheckPath = '/api/tunnel/check';
+
+  /// The tunnel (re)start (issue #22): the manual start, for after the
+  /// guided setup or a capped auto-respawn.
+  static const String tunnelStartPath = '/api/tunnel/start';
+
   final HttpServer _server;
 
   /// The terminal backend (endpoint 10); `null` when this machine has no
@@ -94,6 +112,11 @@ class BridgeServer {
   /// CLI, in which case the docker endpoints report `docker_unavailable`.
   final DockerBackend? _docker;
 
+  /// The tunnel supervisor (issue #22, ADR-0002); `null` when this bridge
+  /// does not run a tunnel, in which case the tunnel endpoints report
+  /// `not_configured`.
+  final TunnelSupervisor? _tunnel;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -116,6 +139,12 @@ class BridgeServer {
   /// [docker], when provided, serves the docker endpoints (issue #21,
   /// tests); the default builds a [DockerBackend] over the host docker CLI,
   /// its container exits re-emitted onto the event stream.
+  /// [tunnel], when provided, is the cloudflared child the bridge
+  /// supervises (issue #22); it is started here, after the port is bound,
+  /// so a port conflict (a second server-mode instance) fails before any
+  /// tunnel child is spawned. The default is no tunnel, in which case the
+  /// tunnel endpoints report `not_configured`; the app passes
+  /// [BridgeServer.defaultTunnel] in server mode.
   /// [dockerLogKeepAlive] paces the keep-alive comment on a followed
   /// container's log stream (20s, as on the events stream); the keep-alive
   /// write is what surfaces a client disconnect, so tests shorten it.
@@ -132,6 +161,7 @@ class BridgeServer {
     TerminalWindowManager? windows,
     LlamaSpeedFeed? speedFeed,
     DockerBackend? docker,
+    TunnelSupervisor? tunnel,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
   }) async {
     final server = await HttpServer.bind(host, port);
@@ -149,7 +179,11 @@ class BridgeServer {
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
+    final tunnelSupervisor = tunnel;
     speed?.start();
+    if (tunnelSupervisor != null) {
+      await tunnelSupervisor.start();
+    }
     server.listen((request) async {
       final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
       if (termBackend != null &&
@@ -166,6 +200,7 @@ class BridgeServer {
         eventHub,
         windowManager,
         dockerBackend,
+        tunnelSupervisor,
         dockerLogKeepAlive,
       );
     });
@@ -176,6 +211,7 @@ class BridgeServer {
       windowManager,
       speed,
       dockerBackend,
+      tunnelSupervisor,
     );
   }
 
@@ -198,6 +234,7 @@ class BridgeServer {
     await _windows?.close();
     await _speed?.close();
     await _docker?.close();
+    await _tunnel?.stop();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -291,6 +328,27 @@ class BridgeServer {
     }
   }
 
+  /// The default tunnel supervisor (issue #22, ADR-0002): the app-managed
+  /// pinned cloudflared binary, the app-owned config
+  /// `~/.config/opencodebridge/cloudflared.yml`, and the precondition
+  /// checker against the bridge's fixed port. It is not started here:
+  /// [BridgeServer.start] starts it, after the port is bound, so a second
+  /// server-mode instance (detected by the port conflict) never spawns a
+  /// second tunnel child.
+  static TunnelSupervisor defaultTunnel() {
+    final binary = CloudflaredBinary();
+    final configFile = CloudflaredConfigFile();
+    return TunnelSupervisor(
+      binary: binary,
+      configFile: configFile,
+      preconditions: TunnelPreconditionChecker(
+        binary: binary,
+        configFile: configFile,
+        bridgePort: defaultPort,
+      ),
+    );
+  }
+
   /// The default window manager (spec §7): the host window spawner (gnome
   /// terminal / xterm), the app binary as the attach client, and the
   /// terminal backend's per-startup window token. Returns `null` when this
@@ -318,6 +376,50 @@ class BridgeServer {
     docker: ComponentStatus.notConfigured,
   );
 
+  /// The tunnel status (issue #22): the child's liveness plus its registered
+  /// edge connections. A bridge without a tunnel supervisor (one that does
+  /// not run a tunnel) answers `not_configured`.
+  static Future<void> _tunnelStatus(
+    HttpRequest request,
+    TunnelSupervisor? tunnel,
+  ) async {
+    final response = request.response;
+    response.headers.contentType = ContentType.json;
+    response.statusCode = HttpStatus.ok;
+    final report = tunnel == null
+        ? const TunnelReport(
+            status: TunnelStatus.notConfigured,
+            running: false,
+            registeredConnections: 0,
+          )
+        : await tunnel.report();
+    response.write(jsonEncode(report.toJson()));
+    await response.close();
+  }
+
+  /// The tunnel recheck and manual start (issue #22): each runs its half of
+  /// the supervisor, then answers with the fresh report. A bridge without a
+  /// tunnel supervisor answers 404.
+  static Future<void> _tunnelAction(
+    HttpRequest request,
+    TunnelSupervisor? tunnel,
+    Future<void> Function(TunnelSupervisor) action,
+  ) async {
+    final response = request.response;
+    response.headers.contentType = ContentType.json;
+    if (tunnel == null) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'tunnel_not_configured'}));
+      await response.close();
+      return;
+    }
+    await action(tunnel);
+    response.statusCode = HttpStatus.ok;
+    final report = await tunnel.report();
+    response.write(jsonEncode(report.toJson()));
+    await response.close();
+  }
+
   static Future<void> _handle(
     HttpRequest request,
     HealthReport Function() report,
@@ -325,6 +427,7 @@ class BridgeServer {
     EventHub? events,
     TerminalWindowManager? windows,
     DockerBackend? docker,
+    TunnelSupervisor? tunnel,
     Duration dockerLogKeepAlive,
   ) async {
     final response = request.response;
@@ -390,6 +493,31 @@ class BridgeServer {
           await BridgeServer._handleComposeAction(request, dir, docker);
           return;
         }
+      }
+      // The tunnel endpoints (issue #22), checked before the session matchers
+      // (a bare list path would otherwise read as a session id to them).
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.tunnelPath) {
+        await BridgeServer._tunnelStatus(request, tunnel);
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.tunnelCheckPath) {
+        await BridgeServer._tunnelAction(
+          request,
+          tunnel,
+          (supervisor) => supervisor.check(),
+        );
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.tunnelStartPath) {
+        await BridgeServer._tunnelAction(
+          request,
+          tunnel,
+          (supervisor) => supervisor.restart(),
+        );
+        return;
       }
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.sessionsPath) {
