@@ -1,5 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+
+import 'package:crypto/crypto.dart';
 
 /// The Cloudflare Access application's OAuth metadata (issue #23, step 1:
 /// RFC 8414/9728 discovery at `/.well-known/oauth-authorization-server`
@@ -95,12 +98,31 @@ class AccessOAuthClient {
 
   AccessMetadata? _metadata;
 
+  /// The in-flight PKCE code verifier (RFC 7636); a public client must
+  /// present it in the code exchange to claim its challenge.
+  String? _codeVerifier;
+
   /// Step 1: `GET /.well-known/oauth-authorization-server`.
   Future<AccessMetadata> discover() async {
-    final raw = await _httpJson(
-      'GET',
-      _base.replace(path: '.well-known/oauth-authorization-server'),
-    );
+    final Map<String, Object?> raw;
+    try {
+      raw = await _httpJson(
+        'GET',
+        _base.replace(path: '.well-known/oauth-authorization-server'),
+      );
+    } on OAuthError catch (error) {
+      if (error.code != 'bad_response') rethrow;
+      // A web page where JSON was expected: without Managed OAuth the
+      // Access app redirects non-browser clients to its login page (and
+      // HttpClient follows the redirect), so discovery answers HTML.
+      throw const OAuthError(
+        'discovery_failed',
+        'the endpoint answered a web page, not JSON: enable Managed OAuth '
+            'on the Access application (dashboard: Access controls > '
+            'Applications > <app> > Edit > Advanced settings > Managed '
+            'OAuth), and allow loopback clients for the browser login',
+      );
+    }
     final authorization = raw['authorization_endpoint'];
     final token = raw['token_endpoint'];
     final registration = raw['registration_endpoint'];
@@ -139,6 +161,11 @@ class AccessOAuthClient {
         'redirect_uris': [redirectUri],
         'grant_types': ['authorization_code', 'refresh_token'],
         'response_types': ['code'],
+        // A public client: no secret, the browser login plus PKCE below.
+        'token_endpoint_auth_method': 'none',
+        // RFC 8707: bind the registration to the resource the tokens will
+        // be used against, so the token endpoint can enforce it.
+        'resource': _base.toString(),
       }),
     );
     final clientId = raw['client_id'];
@@ -153,7 +180,8 @@ class AccessOAuthClient {
 
   /// Step 3: the URL to open in the user's browser for the IdP login
   /// (email one-time passcode or Google). [state] is the app's anti-CSRF
-  /// value; it comes back on the loopback redirect.
+  /// value; it comes back on the loopback redirect. The PKCE challenge is
+  /// minted here; its verifier is presented by [exchangeCode].
   Uri authorizationUrl(String clientId, String redirectUri, String state) {
     final metadata = _metadata;
     if (metadata == null) {
@@ -161,28 +189,53 @@ class AccessOAuthClient {
         'call discover() or registerClient() before authorizationUrl()',
       );
     }
+    // RFC 7636 S256: challenge = base64url(SHA-256(verifier)). Cloudflare
+    // mangles a challenge that starts with `-` or `_` (its URL parameter
+    // parsing), so regenerate until it starts alphanumeric.
+    var challenge = '';
+    do {
+      final verifier = _randomCodeVerifier();
+      challenge = base64UrlEncode(sha256.convert(verifier.codeUnits).bytes)
+          .replaceAll('=', '');
+      _codeVerifier = verifier;
+    } while (challenge.startsWith('-') || challenge.startsWith('_'));
     return metadata.authorizationEndpoint.replace(
       queryParameters: {
         'response_type': 'code',
         'client_id': clientId,
         'redirect_uri': redirectUri,
         'state': state,
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'resource': _base.toString(),
       },
     );
   }
 
+  static String _randomCodeVerifier() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64UrlEncode(bytes).replaceAll('=', '');
+  }
+
   /// Step 4: exchange the authorization code for the opaque access token
-  /// and the refresh token.
+  /// and the refresh token; presents the PKCE verifier minted by
+  /// [authorizationUrl].
   Future<AccessTokens> exchangeCode(
     String clientId,
     String code,
     String redirectUri,
   ) async {
+    final verifier = _codeVerifier;
+    if (verifier == null) {
+      throw StateError('call authorizationUrl() before exchangeCode()');
+    }
     return _tokenRequest({
       'grant_type': 'authorization_code',
       'client_id': clientId,
       'code': code,
       'redirect_uri': redirectUri,
+      'code_verifier': verifier,
     });
   }
 

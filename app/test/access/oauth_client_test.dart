@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/oauth_client.dart';
 
@@ -98,10 +99,11 @@ void main() {
         await server.close(force: true);
         final plain = await HttpServer.bind('127.0.0.1', 0);
         plain.listen((req) async {
-          // An Access-protected hostname without Managed OAuth answers the
-          // well-known path with a non-JSON page (a login redirect).
+          // An Access-protected hostname without Managed OAuth redirects
+          // non-browser clients to its login page; the followed answer is
+          // a non-JSON HTML page.
           req.response
-            ..statusCode = HttpStatus.notFound
+            ..statusCode = HttpStatus.ok
             ..write('<html>login</html>');
           await req.response.close();
         });
@@ -110,7 +112,13 @@ void main() {
             () =>
                 AccessOAuthClient(Uri.parse('http://127.0.0.1:${plain.port}/'))
                     .discover(),
-            throwsA(isA<OAuthError>()),
+            throwsA(
+              isA<OAuthError>().having(
+                (e) => e.code,
+                'code',
+                'discovery_failed',
+              ),
+            ),
           );
         } finally {
           await plain.close(force: true);
@@ -133,6 +141,8 @@ void main() {
         'refresh_token',
       ]);
       expect(registrationBody['response_types'], ['code']);
+      expect(registrationBody['token_endpoint_auth_method'], 'none');
+      expect(registrationBody['resource'], base.toString());
     });
 
     test('throws when registration is unavailable', () async {
@@ -168,11 +178,34 @@ void main() {
       );
       expect(url.queryParameters['state'], 'state-xyz');
     });
+
+    test('carries the S256 PKCE challenge and the RFC 8707 resource', () async {
+      final client = AccessOAuthClient(base);
+      await client.discover();
+      final url = client.authorizationUrl(
+        'dyn-client-1',
+        'http://127.0.0.1:54321/callback',
+        'state-xyz',
+      );
+      final challenge = url.queryParameters['code_challenge'];
+      expect(challenge, isNotNull);
+      expect(challenge, isNot(startsWith('-')));
+      expect(challenge, isNot(startsWith('_')));
+      expect(url.queryParameters['code_challenge_method'], 'S256');
+      expect(url.queryParameters['resource'], base.toString());
+    });
   });
 
   group('exchangeCode / refresh', () {
     test('exchanges the code for the opaque pair', () async {
-      final tokens = await AccessOAuthClient(base).exchangeCode(
+      final client = AccessOAuthClient(base);
+      await client.discover();
+      client.authorizationUrl(
+        'dyn-client-1',
+        'http://127.0.0.1:54321/callback',
+        'state-xyz',
+      );
+      final tokens = await client.exchangeCode(
         'dyn-client-1',
         'good-code',
         'http://127.0.0.1:54321/callback',
@@ -184,11 +217,55 @@ void main() {
       expect(lastForm['code'], 'good-code');
     });
 
+    test('presents the PKCE verifier that mints the challenge', () async {
+      final client = AccessOAuthClient(base);
+      await client.discover();
+      final url = client.authorizationUrl(
+        'dyn-client-1',
+        'http://127.0.0.1:54321/callback',
+        'state-xyz',
+      );
+      await client.exchangeCode(
+        'dyn-client-1',
+        'good-code',
+        'http://127.0.0.1:54321/callback',
+      );
+      final verifier = lastForm['code_verifier'];
+      expect(verifier, isNotNull);
+      expect(
+        base64UrlEncode(sha256.convert(verifier!.codeUnits).bytes)
+            .replaceAll('=', ''),
+        url.queryParameters['code_challenge'],
+      );
+    });
+
+    test('without a started flow the exchange throws', () async {
+      final client = AccessOAuthClient(base);
+      await client.discover();
+      expect(
+        () => client.exchangeCode(
+          'dyn-client-1',
+          'good-code',
+          'http://127.0.0.1:1/cb',
+        ),
+        throwsStateError,
+      );
+    });
+
     test('a bad code is an invalid_grant OAuthError', () async {
+      final client = AccessOAuthClient(base);
+      await client.discover();
+      client.authorizationUrl(
+        'dyn-client-1',
+        'http://127.0.0.1:54321/callback',
+        'state-xyz',
+      );
       await expectLater(
-        () =>
-            AccessOAuthClient(base)
-                .exchangeCode('dyn-client-1', 'wrong', 'http://127.0.0.1:1/cb'),
+        () => client.exchangeCode(
+          'dyn-client-1',
+          'wrong',
+          'http://127.0.0.1:1/cb',
+        ),
         throwsA(
           isA<OAuthError>().having((e) => e.code, 'code', 'invalid_grant'),
         ),
