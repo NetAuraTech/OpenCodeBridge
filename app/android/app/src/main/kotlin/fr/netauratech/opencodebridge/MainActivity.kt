@@ -1,4 +1,4 @@
-package com.netaura.opencodebridge
+package fr.netauratech.opencodebridge
 
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
