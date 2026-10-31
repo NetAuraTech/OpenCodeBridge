@@ -67,6 +67,8 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
   }
 
   Future<void> _enter(AppSettings settings, AppMode mode) async {
+    // A re-entry makes a new client session: detach from the previous one.
+    _access?.removeListener(_onAccessState);
     if (mode == AppMode.server) {
       try {
         // The bridge is the tunnel's supervisor (ADR-0002): it starts the
@@ -108,11 +110,23 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
               parseTunnelUrl(settings.tunnelUrl)
                   .replace(path: BridgeServer.healthPath),
         );
+        // The login finishing must re-probe now, not on the next tick: the
+        // browser bounce brought the app to the foreground before the token
+        // exchange finished, so the foreground re-probe saw a `401`
+        // (issue #41).
+        session.addListener(_onAccessState);
         // A restart within the grant session must not re-login (issue #23).
         await session.restore();
       }
     }
     if (mounted) setState(() {});
+  }
+
+  /// The Access login state changed: on logged-in, the token is in hand, so
+  /// the connection indicator re-probes immediately rather than on the next
+  /// tick (issue #41).
+  void _onAccessState(AccessLoginState state) {
+    if (state == AccessLoginState.loggedIn) _monitor.reprobe();
   }
 
   @override

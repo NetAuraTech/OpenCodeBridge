@@ -7,6 +7,8 @@ import 'package:opencodebridge/bridge/terminal/opencode_terminal_service.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_backend.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_models.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window_token.dart';
+import 'package:opencodebridge/access/access_session.dart';
+import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/message.dart';
@@ -16,6 +18,7 @@ import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
 import 'package:opencodebridge/ui/structured_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
 const _one = Session(
@@ -212,6 +215,7 @@ Future<_FakeSessionsClient> _pumpTab(
   List<Project> projects = const [],
   TerminalBackend? terminals,
   _FakeEventsSource? events,
+  AccessSession? access,
 }) async {
   final client = _FakeSessionsClient(
     rows: List<Session>.of(rows),
@@ -225,6 +229,7 @@ Future<_FakeSessionsClient> _pumpTab(
           client: client,
           terminals: terminals,
           events: events ?? _FakeEventsSource(),
+          access: access,
         ),
       ),
     ),
@@ -671,6 +676,45 @@ void main() {
 
         expect(events.reconnectCalls, 1);
         expect(client.listCalls, 2);
+      });
+    });
+
+    group('access login completion (issue #41)', () {
+      testWidgets('the login finishing re-fetches the list and the events', (
+        tester,
+      ) async {
+        SharedPreferences.setMockInitialValues({});
+        final store = await AccessTokenStore.load();
+        final access = AccessSession(
+          tunnelBase: () => Uri.parse('https://tunnel.test/'),
+          store: store,
+        );
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(
+          tester,
+          rows: [_one],
+          events: events,
+          access: access,
+        );
+        expect(client.listCalls, 1);
+
+        // The browser bounce brought the app to the foreground before the
+        // token exchange finished (the resumed re-fetch saw a 401); the
+        // login completes now: the tab goes out again with the token.
+        store.save(
+          'tunnel.test',
+          AccessLoginRecord(
+            clientId: 'c1',
+            accessToken: 'tok',
+            refreshToken: 'rtok',
+            accessTokenExpiresAt: DateTime.now().add(const Duration(hours: 1)),
+          ),
+        );
+        await access.restore();
+        await tester.pump();
+
+        expect(client.listCalls, 2);
+        expect(events.reconnectCalls, 1);
       });
     });
   });
