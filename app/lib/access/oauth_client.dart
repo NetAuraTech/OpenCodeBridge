@@ -4,6 +4,8 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 
+import 'curl_form_post.dart';
+
 /// The Cloudflare Access application's OAuth metadata (issue #23, step 1:
 /// RFC 8414/9728 discovery at `/.well-known/oauth-authorization-server`
 /// on the tunnel hostname). The Access application is the authorization
@@ -262,7 +264,7 @@ class AccessOAuthClient {
 
   Future<AccessTokens> _tokenRequest(Map<String, String> form) async {
     final metadata = _metadata ??= await discover();
-    final raw = await _httpJson('POST', metadata.tokenEndpoint, form: form);
+    final raw = await _tokenEndpointJson(metadata.tokenEndpoint, form);
     final accessToken = raw['access_token'];
     if (accessToken is! String || accessToken.isEmpty) {
       throw const OAuthError('token_failed', 'no access token in the response');
@@ -277,6 +279,31 @@ class AccessOAuthClient {
       expiresIn: expiresIn,
       acquiredAt: DateTime.now(),
     );
+  }
+
+  /// The token grants, posted with the system `curl` when it is on the
+  /// PATH: Cloudflare's beta Managed OAuth 500s the token endpoint for the
+  /// Dart SDK's TLS fingerprint (the byte-identical form answers 200 from
+  /// curl and 500 from HttpClient; issue #23 field test, Ray
+  /// a534fa469e03f52a). Discovery and registration are unaffected and keep
+  /// the Dart client. Without curl, the Dart client stands in — it answers
+  /// as soon as Cloudflare fixes the endpoint (then this workaround can go).
+  Future<Map<String, Object?>> _tokenEndpointJson(
+    Uri url,
+    Map<String, String> form,
+  ) async {
+    try {
+      final (status, rawBody) = await CurlFormPost.post(
+        url,
+        Uri(queryParameters: form).query,
+      );
+      return _decodeResponse(status, rawBody);
+    } on ProcessException {
+      // No curl on the PATH (rare on a desktop): the Dart client.
+      return _httpJson('POST', url, form: form);
+    } on CurlPostFailure catch (error) {
+      throw OAuthError('network', error.message);
+    }
   }
 
   Future<Map<String, Object?>> _httpJson(
@@ -300,46 +327,7 @@ class AccessOAuthClient {
       }
       final response = await request.close();
       final rawBody = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode == HttpStatus.ok ||
-          response.statusCode == HttpStatus.created) {
-        Object? decoded;
-        try {
-          decoded = rawBody.isEmpty ? <String, Object?>{} : jsonDecode(rawBody);
-        } catch (_) {
-          throw const OAuthError(
-            'bad_response',
-            'the endpoint did not answer JSON',
-          );
-        }
-        if (decoded is! Map<String, Object?>) {
-          throw const OAuthError(
-            'bad_response',
-            'the endpoint did not answer JSON',
-          );
-        }
-        return decoded;
-      }
-      Object? error;
-      Object? description;
-      try {
-        final decoded = jsonDecode(rawBody);
-        if (decoded is Map<String, Object?>) {
-          error = decoded['error'];
-          description = decoded['error_description'];
-        }
-      } catch (_) {
-        // Not JSON: the status code is the error.
-      }
-      if (description is! String || description.isEmpty) {
-        // No description (an HTML error page, a bare 500): the body is the
-        // only clue about what the endpoint did not like.
-        final trimmed = rawBody.trim();
-        description = trimmed.isEmpty ? null : trimmed;
-      }
-      throw OAuthError(
-        error is String ? error : 'http_${response.statusCode}',
-        description is String ? description : null,
-      );
+      return _decodeResponse(response.statusCode, rawBody);
     } on OAuthError {
       rethrow;
     } catch (error) {
@@ -347,5 +335,52 @@ class AccessOAuthClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// The shared interpretation of an Access endpoint answer (both
+  /// transports): a 2xx JSON comes back, anything else is an [OAuthError]
+  /// — the RFC 6749 code when the endpoint sent one, else `http_<status>`
+  /// whose description is the body (an HTML error page is the only clue
+  /// about what the endpoint did not like).
+  Map<String, Object?> _decodeResponse(int status, String rawBody) {
+    if (status == HttpStatus.ok || status == HttpStatus.created) {
+      Object? decoded;
+      try {
+        decoded = rawBody.isEmpty ? <String, Object?>{} : jsonDecode(rawBody);
+      } catch (_) {
+        throw const OAuthError(
+          'bad_response',
+          'the endpoint did not answer JSON',
+        );
+      }
+      if (decoded is! Map<String, Object?>) {
+        throw const OAuthError(
+          'bad_response',
+          'the endpoint did not answer JSON',
+        );
+      }
+      return decoded;
+    }
+    Object? error;
+    Object? description;
+    try {
+      final decoded = jsonDecode(rawBody);
+      if (decoded is Map<String, Object?>) {
+        error = decoded['error'];
+        description = decoded['error_description'];
+      }
+    } catch (_) {
+      // Not JSON: the status code is the error.
+    }
+    if (description is! String || description.isEmpty) {
+      // No description (an HTML error page, a bare 500): the body is the
+      // only clue about what the endpoint did not like.
+      final trimmed = rawBody.trim();
+      description = trimmed.isEmpty ? null : trimmed;
+    }
+    throw OAuthError(
+      error is String ? error : 'http_$status',
+      description is String ? description : null,
+    );
   }
 }

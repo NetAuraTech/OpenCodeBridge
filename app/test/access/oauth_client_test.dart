@@ -18,10 +18,22 @@ void main() {
     'expires_in': 900,
   };
   var tokenStatus = HttpStatus.ok;
+  late String? tokenUserAgent;
+  var curlOnPath = false;
+
+  setUpAll(() async {
+    try {
+      await Process.run('curl', ['--version']);
+      curlOnPath = true;
+    } on ProcessException {
+      curlOnPath = false;
+    }
+  });
 
   setUp(() async {
     registrationEnabled = true;
     lastForm = {};
+    tokenUserAgent = null;
     tokenResponse = <String, Object?>{
       'access_token': 'oauth:opaque-1',
       'refresh_token': 'refresh-1',
@@ -58,6 +70,7 @@ void main() {
       } else if (path == '/token') {
         final raw = await _read(req);
         lastForm = Uri.splitQueryString(raw);
+        tokenUserAgent = req.headers.value('user-agent');
         if (lastForm['grant_type'] == 'authorization_code' &&
             lastForm['code'] != 'good-code') {
           response
@@ -318,6 +331,17 @@ void main() {
         ),
       );
     });
+
+    test(
+      'the token grant rides the system curl (issue #23 TLS workaround)',
+      () async {
+        // No curl on this machine: the Dart-client fallback path.
+        if (!curlOnPath) return;
+        await AccessOAuthClient(base).refresh('dyn-client-1', 'refresh-1');
+        // The Dart HttpClient sends no User-Agent; curl announces itself.
+        expect(tokenUserAgent, startsWith('curl'));
+      },
+    );
 
     test('an ended grant session (invalid_grant) is an OAuthError', () async {
       tokenStatus = HttpStatus.badRequest;
