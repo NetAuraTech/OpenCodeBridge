@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_binary.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_config.dart';
+import 'package:opencodebridge/bridge/tunnel/tunnel_cli.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_preconditions.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_setup.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_supervisor.dart';
@@ -38,6 +39,38 @@ class FakeTunnelProcess implements TunnelProcess {
   bool kill() {
     killed = true;
     if (diesOnKill) exit(0);
+    return true;
+  }
+}
+
+/// A fake CLI child: exits with [code], carrying [err] on stderr.
+class FakeCliProcess implements CliProcess {
+  FakeCliProcess(this.code, {this.err = ''});
+
+  final int code;
+  final String err;
+
+  final Completer<int> _exited = Completer<int>();
+
+  @override
+  int get pid => 9001;
+
+  @override
+  Future<int> get exitCode {
+    Future<void>.delayed(const Duration(milliseconds: 1))
+        .then((_) => _exited.complete(code));
+    return _exited.future;
+  }
+
+  @override
+  Stream<List<int>> get stdout => Stream.value(const <int>[]);
+
+  @override
+  Stream<List<int>> get stderr => Stream.value(utf8.encode(err));
+
+  @override
+  bool kill() {
+    if (!_exited.isCompleted) _exited.complete(code);
     return true;
   }
 }
@@ -143,6 +176,11 @@ void main() {
     late Uri base;
     late TunnelSupervisor tunnel;
     late FakeTunnelProcess initialChild;
+    late List<List<String>> cliArgvs;
+
+    /// The exit code / stderr the fake CLI child reports (tests set these).
+    int cliCode = 0;
+    String cliErr = '';
 
     setUp(() async {
       dir = await Directory.systemTemp.createTemp(
@@ -151,6 +189,7 @@ void main() {
       host = FakeHost(dir);
       await host.setup();
       tunnel = host.supervisor();
+      cliArgvs = [];
       server = await BridgeServer.start(
         port: 0,
         tunnel: tunnel,
@@ -159,6 +198,14 @@ void main() {
           bridgePort: 48201,
           credentialsDir: Directory('${dir.path}/.cloudflared'),
           configFile: host.config,
+          cli: TunnelCli(
+            binary: host.binary,
+            spawner: (List<String> argv) async {
+              cliArgvs.add(argv);
+              return FakeCliProcess(cliCode, err: cliErr);
+            },
+            timeout: const Duration(milliseconds: 100),
+          ),
         ),
       );
       base = server.baseUri;
@@ -308,6 +355,36 @@ void main() {
       },
     );
 
+    test(
+      'POST /api/tunnel/login drives the app-managed tunnel login',
+      () async {
+        final (status, reported) = await request(
+          base,
+          'POST',
+          '/api/tunnel/login',
+        );
+        expect(status, HttpStatus.ok);
+        expect(reported, {'status': 'ok'});
+        // The bridge ran the app-managed binary's `tunnel login`.
+        expect(cliArgvs, [
+          ['${dir.path}/cloudflared', 'tunnel', 'login'],
+        ]);
+      },
+    );
+
+    test('POST /api/tunnel/login answers 500 when the login fails', () async {
+      cliCode = 1;
+      cliErr = 'Error: not logged in';
+      final (status, reported) = await request(
+        base,
+        'POST',
+        '/api/tunnel/login',
+      );
+      expect(status, HttpStatus.internalServerError);
+      expect(reported['error'], 'tunnel_login_failed');
+      expect(reported['details'], contains('the Cloudflare login failed'));
+    });
+
     test('stop() terminates the tunnel child', () async {
       await server.stop();
       expect(initialChild.killed, isTrue);
@@ -342,19 +419,18 @@ void main() {
       });
     });
 
-    test(
-      'the check, start, and setup actions answer 404 tunnel_not_configured',
-      () async {
-        for (final path in [
-          '/api/tunnel/check',
-          '/api/tunnel/start',
-          '/api/tunnel/setup',
-        ]) {
-          final (status, reported) = await request(base, 'POST', path);
-          expect(status, HttpStatus.notFound);
-          expect(reported, {'error': 'tunnel_not_configured'});
-        }
-      },
-    );
+    test('the login, check, start, and setup actions answer 404 '
+        'tunnel_not_configured', () async {
+      for (final path in [
+        '/api/tunnel/login',
+        '/api/tunnel/check',
+        '/api/tunnel/start',
+        '/api/tunnel/setup',
+      ]) {
+        final (status, reported) = await request(base, 'POST', path);
+        expect(status, HttpStatus.notFound);
+        expect(reported, {'error': 'tunnel_not_configured'});
+      }
+    });
   });
 }

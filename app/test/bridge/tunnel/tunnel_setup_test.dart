@@ -5,18 +5,30 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_binary.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_config.dart';
+import 'package:opencodebridge/bridge/tunnel/tunnel_cli.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_preconditions.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_setup.dart';
 import 'package:opencodebridge/bridge/tunnel/tunnel_supervisor.dart';
 import 'package:opencodebridge/model/tunnel_setup.dart';
 
 const String _kCredentialsUuid = '11111111-2222-3333-4444-555555555555';
+const String _kCreatedUuid = '99999999-8888-7777-6666-555555555555';
 const int _kChildPid = 4242;
 const String _kCredentialsJson =
     '{\n'
     '  "OwnerID": "owner",\n'
     '  "TunnelID": "$_kCredentialsUuid",\n'
     '  "APIKey": "secret",\n'
+    '  "OwnerEmail": "user@example.com"\n'
+    '}';
+
+/// The credentials file the app-driven `tunnel create` writes (the CLI
+/// owns it, verbatim).
+const String _kCreatedJson =
+    '{\n'
+    '  "OwnerID": "owner",\n'
+    '  "TunnelID": "$_kCreatedUuid",\n'
+    '  "APIKey": "created-secret",\n'
     '  "OwnerEmail": "user@example.com"\n'
     '}';
 
@@ -39,6 +51,39 @@ class FakeTunnelProcess implements TunnelProcess {
   bool kill() {
     killed = true;
     if (!_exited.isCompleted) _exited.complete(0);
+    return true;
+  }
+}
+
+/// A fake CLI child for the app-driven create (issue #37): the real
+/// `tunnel create` writes the credentials file; here the spawner's
+/// [cliEffect] does it.
+class FakeCliProcess implements CliProcess {
+  FakeCliProcess({this.code = 0, this.err = ''});
+
+  final int code;
+  final String err;
+  final Completer<int> _exited = Completer<int>();
+
+  @override
+  int get pid => 9001;
+
+  @override
+  Future<int> get exitCode {
+    Future<void>.delayed(const Duration(milliseconds: 1))
+        .then((_) => _exited.complete(code));
+    return _exited.future;
+  }
+
+  @override
+  Stream<List<int>> get stdout => Stream.value(const <int>[]);
+
+  @override
+  Stream<List<int>> get stderr => Stream.value(utf8.encode(err));
+
+  @override
+  bool kill() {
+    if (!_exited.isCompleted) _exited.complete(code);
     return true;
   }
 }
@@ -90,8 +135,15 @@ void main() {
   late Directory dir;
   late FakeHost host;
   late TunnelSetup setup;
+  late List<List<String>> cliArgvs;
 
-  Future<void> build({required Directory credentialsDir}) async {
+  Future<void> build({
+    required Directory credentialsDir,
+    int cliCode = 0,
+    String cliErr = '',
+    Future<void> Function(List<String> argv)? cliEffect,
+  }) async {
+    cliArgvs = [];
     await host.setup();
     final preconditions = TunnelPreconditionChecker(
       binary: host.binary,
@@ -100,9 +152,19 @@ void main() {
       dnsResolves: (String host) async => true,
       accessProbe: (String host) async => AccessVerdict.enforcing,
     );
+    final cli = TunnelCli(
+      binary: host.binary,
+      spawner: (List<String> argv) async {
+        cliArgvs.add(argv);
+        await cliEffect?.call(argv);
+        return FakeCliProcess(code: cliCode, err: cliErr);
+      },
+      timeout: const Duration(milliseconds: 100),
+    );
     setup = TunnelSetup(
       supervisor: host.supervisor(preconditions),
       bridgePort: 48201,
+      cli: cli,
       credentialsDir: credentialsDir,
       configFile: host.config,
     );
@@ -112,11 +174,12 @@ void main() {
     String tunnel = 'my-tunnel',
     String hostname = 'bridge.example.com',
     String? credentials,
+    bool includeCredentials = true,
   }) =>
       '{'
       '"tunnel": "$tunnel",'
-      '"hostname": "$hostname",'
-      '"credentials": ${jsonEncode(credentials ?? _kCredentialsJson)}'
+      '"hostname": "$hostname"'
+      '${includeCredentials ? ', "credentials": ${jsonEncode(credentials ?? _kCredentialsJson)}' : ''}'
       '}';
 
   setUp(() async {
@@ -157,16 +220,19 @@ void main() {
     await setup.apply(payload());
 
     expect(host.argvs, hasLength(1));
+    // `cloudflared tunnel [tunnel command options] run [TUNNEL]`: the
+    // command options go before `run`, the tunnel name is the last
+    // argument.
     expect(host.argvs.single, [
       '${dir.path}/cloudflared',
       'tunnel',
-      'run',
-      'my-tunnel',
       '--config',
       '${dir.path}/cloudflared.yml',
       '--no-autoupdate',
       '--metrics',
       '127.0.0.1:20241',
+      'run',
+      'my-tunnel',
     ]);
   });
 
@@ -217,6 +283,71 @@ void main() {
       setup.apply(payload()),
       throwsA(isA<TunnelSetupWriteError>()),
     );
+    expect(host.spawned, isEmpty);
+  });
+
+  test('apply without pasted credentials drives the CLI create', () async {
+    await build(
+      credentialsDir: Directory('${dir.path}/.cloudflared'),
+      cliEffect: (List<String> argv) async {
+        // The real `tunnel create` writes the credentials file itself.
+        await Directory('${dir.path}/.cloudflared').create(recursive: true);
+        await File('${dir.path}/.cloudflared/$_kCreatedUuid.json')
+            .writeAsString(_kCreatedJson);
+      },
+    );
+
+    await setup.apply(payload(includeCredentials: false));
+
+    expect(cliArgvs, [
+      ['${dir.path}/cloudflared', 'tunnel', 'create', 'my-tunnel'],
+    ]);
+    expect(
+      File('${dir.path}/.cloudflared/$_kCreatedUuid.json').readAsStringSync(),
+      _kCreatedJson,
+    );
+    expect(
+      host.config.file.readAsStringSync(),
+      'tunnel: my-tunnel\n'
+      'credentials-file: ${dir.path}/.cloudflared/$_kCreatedUuid.json\n'
+      'ingress:\n'
+      '  - hostname: bridge.example.com\n'
+      '    service: http://127.0.0.1:48201\n'
+      '  - service: http_status:404\n',
+    );
+    expect(host.argvs, hasLength(1));
+  });
+
+  test('a failed create throws and writes nothing', () async {
+    await build(
+      credentialsDir: Directory('${dir.path}/.cloudflared'),
+      cliCode: 1,
+      cliErr: 'Error: not logged in',
+    );
+
+    await expectLater(
+      setup.apply(payload(includeCredentials: false)),
+      throwsA(
+        isA<TunnelSetupCreateError>().having(
+          (e) => e.message,
+          'message',
+          contains('not logged in'),
+        ),
+      ),
+    );
+    expect(cliArgvs, hasLength(1));
+    expect(host.config.file.existsSync(), isFalse);
+    expect(host.spawned, isEmpty);
+  });
+
+  test('a create that writes no credentials file throws', () async {
+    await build(credentialsDir: Directory('${dir.path}/.cloudflared'));
+
+    await expectLater(
+      setup.apply(payload(includeCredentials: false)),
+      throwsA(isA<TunnelSetupCreateError>()),
+    );
+    expect(host.config.file.existsSync(), isFalse);
     expect(host.spawned, isEmpty);
   });
 

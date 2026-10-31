@@ -27,8 +27,12 @@ The two files the tunnel runs on that the app owns and writes: the credentials `
 _Avoid_: tunnel files, config files
 
 **Assisted setup**:
-The in-app, server-mode wizard that collects the tunnel name, public hostname, and pasted credentials and has the bridge write the app-owned files, then re-checks and (re)starts the tunnel.
+The in-app, server-mode wizard that collects the tunnel name, public hostname, and — optionally — pasted credentials, and has the bridge write the app-owned files, then re-checks and (re)starts the tunnel.
 _Avoid_: setup wizard, tunnel wizard, onboarding
+
+**App-driven login**:
+The in-app Cloudflare login: the bridge runs the app-managed `cloudflared tunnel login`, which opens the default browser on the OAuth consent page; the session lands in the user's own `~/.cloudflared/`, never in the app. Without pasted credentials, the wizard's submit also drives `cloudflared tunnel create` the same way.
+_Avoid_: SSO, OAuth login (too generic), cloudflared login
 
 ### Sessions
 

@@ -45,11 +45,18 @@ class FakeTunnelClient extends TunnelClient {
   }
 
   @override
+  Future<void> login() async {
+    actions.add('login');
+    final error = reportError;
+    if (error is Object) throw error;
+  }
+
+  @override
   Future<TunnelReport> setup(
     String tunnel,
-    String hostname,
-    String credentials,
-  ) async {
+    String hostname, [
+    String? credentials,
+  ]) async {
     actions.add('setup');
     setupTunnel = tunnel;
     setupHostname = hostname;
@@ -365,6 +372,39 @@ void main() {
           find.textContaining('Self-hosted app for https://bridge.example.com'),
           findsOneWidget,
         );
+      },
+    );
+
+    testWidgets(
+      'without credentials the login offer shows and drives the login',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final tunnel = FakeTunnelClient()..reportValue = _kDownReport;
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          tunnelClient: tunnel,
+        );
+        await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
+        await tester.pump();
+
+        // No credentials pasted: the app-driven login offer shows.
+        expect(find.byKey(const ValueKey('setup-login')), findsOneWidget);
+
+        await tester.tap(find.byKey(const ValueKey('setup-login')));
+        await tester.pump();
+
+        expect(tunnel.actions, contains('login'));
+        expect(find.textContaining('Logged in to Cloudflare'), findsOneWidget);
+
+        // Pasting credentials hides the login offer.
+        await tester.enterText(
+          find.byKey(const ValueKey('setup-credentials')),
+          kSetupCredentialsJson,
+        );
+        await tester.pump();
+        expect(find.byKey(const ValueKey('setup-login')), findsNothing);
       },
     );
 

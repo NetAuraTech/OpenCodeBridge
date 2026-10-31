@@ -130,6 +130,19 @@ void main() {
       );
     });
 
+    test('accepts the TunnelSecret field cloudflared 2026.10.7 writes', () {
+      // The pinned cloudflared's `tunnel create` writes this shape: no
+      // APIKey, the secret lives in TunnelSecret.
+      final credentials = TunnelCredentials.parse(
+        '{"AccountTag": "139fab53aa401f1bf73e2cdd94a85abe", '
+        '"TunnelSecret": "secret", '
+        '"TunnelID": "$_kUuid", '
+        '"Endpoint": ""}',
+      );
+
+      expect(credentials.tunnelId, _kUuid);
+    });
+
     test('lowercases the TunnelID', () {
       final uppercase = _kUuid.toUpperCase();
       expect(
@@ -201,7 +214,11 @@ void main() {
     });
 
     test('rejects an empty API key or token', () {
-      for (final token in ['"APIKey": ""', '"APIKey": "  "']) {
+      for (final token in [
+        '"APIKey": ""',
+        '"APIKey": "  "',
+        '"TunnelSecret": ""',
+      ]) {
         expect(
           () => TunnelCredentials.parse('{"TunnelID": "$_kUuid", $token}'),
           throwsA(

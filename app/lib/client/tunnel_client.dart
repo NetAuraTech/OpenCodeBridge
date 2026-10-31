@@ -33,24 +33,34 @@ class TunnelClient {
     return TunnelReport.fromJson(jsonDecode(body));
   }
 
+  /// The app-driven Cloudflare login (issue #37, ADR-0003): the bridge runs
+  /// the app-managed `cloudflared tunnel login`, which opens the default
+  /// browser on Cloudflare's consent page and stores the session in the
+  /// user's own `~/.cloudflared/`. [TunnelClientError] when the login
+  /// fails or times out.
+  Future<void> login() async {
+    await TunnelClient._post(_base, 'api/tunnel/login');
+  }
+
   /// The assisted setup (issue #34, ADR-0003): the bridge, the sole file
   /// owner, writes the app-owned files from the pasted credentials and the
   /// chosen hostname, then re-runs the precondition pass, answering with
   /// the fresh tunnel report.
+  ///
+  /// [credentials] is optional (issue #37): when absent, the bridge drives
+  /// `cloudflared tunnel create <tunnel>` (the Cloudflare login is
+  /// required) and uses the credentials file the CLI writes.
   Future<TunnelReport> setup(
     String tunnel,
-    String hostname,
-    String credentials,
-  ) async {
-    final payload = jsonEncode({
-      'tunnel': tunnel,
-      'hostname': hostname,
-      'credentials': credentials,
-    });
+    String hostname, [
+    String? credentials,
+  ]) async {
+    final payload = <String, Object?>{'tunnel': tunnel, 'hostname': hostname};
+    if (credentials != null) payload['credentials'] = credentials;
     final body = await TunnelClient._post(
       _base,
       'api/tunnel/setup',
-      body: payload,
+      body: jsonEncode(payload),
     );
     return TunnelReport.fromJson(jsonDecode(body));
   }

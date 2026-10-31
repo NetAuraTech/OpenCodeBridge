@@ -31,6 +31,18 @@ class TunnelSetupWriteError implements Exception {
   String toString() => 'TunnelSetupWriteError: $message';
 }
 
+/// The app-driven `cloudflared tunnel create` failed (issue #37): usually
+/// the Cloudflare login is missing or expired.
+class TunnelSetupCreateError implements Exception {
+  const TunnelSetupCreateError(this.message);
+
+  /// The human-readable explanation, shown as-is.
+  final String message;
+
+  @override
+  String toString() => 'TunnelSetupCreateError: $message';
+}
+
 /// The tunnel credentials: the content of the credentials file
 /// `~/.cloudflared/<uuid>.json` that `cloudflared tunnel create <NAME>`
 /// writes, pasted into the wizard.
@@ -91,7 +103,7 @@ class TunnelCredentials {
     if (!_hasToken(map)) {
       throw const TunnelSetupError(
         'the credentials carry no API key or token (expected a non-empty '
-        'APIKey or APIToken field)',
+        'APIKey, APIToken, or TunnelSecret field)',
       );
     }
     return TunnelCredentials(
@@ -108,7 +120,10 @@ class TunnelCredentials {
   );
 
   static bool _hasToken(Map<String, Object?> map) {
-    for (final field in ['APIKey', 'APIToken', 'AccessToken']) {
+    // The pinned cloudflared (2026.10.7) writes the tunnel secret as
+    // TunnelSecret; the older CLI versions use APIKey / APIToken /
+    // AccessToken.
+    for (final field in ['APIKey', 'APIToken', 'AccessToken', 'TunnelSecret']) {
       final value = map[field];
       if (value is String && value.trim().isNotEmpty) return true;
     }
