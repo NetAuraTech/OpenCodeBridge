@@ -55,11 +55,28 @@ typedef AccessProbe = Future<AccessVerdict> Function(String hostname);
 /// A challenge (a redirect to the Access login, or a Cloudflare Access
 /// error) means Access is enforcing. A 2xx answer means the request reached
 /// the origin without a challenge — the dangerous case.
-Future<AccessVerdict> accessProbe(String hostname) async {
-  final client = HttpClient();
+Future<AccessVerdict> accessProbe(String hostname) =>
+    probeAccess(Uri.https(hostname, '/'));
+
+/// Runs the unauthenticated GET of [uri] and judges the raw answer.
+///
+/// The first response is judged as-is (redirects are never followed: the
+/// Access challenge is itself a 302, and its 200 login page would look
+/// like an open origin). [clientFactory] is injected by tests; production
+/// uses a plain client.
+Future<AccessVerdict> probeAccess(
+  Uri uri, {
+  HttpClient Function()? clientFactory,
+}) async {
+  final client = clientFactory?.call() ?? HttpClient();
   client.connectionTimeout = const Duration(seconds: 5);
   try {
-    final request = await client.getUrl(Uri.https(hostname, '/'));
+    final request = await client.getUrl(uri);
+    // dart:io follows redirects by default; the Access challenge is itself a
+    // 302, and following it would hide the challenge behind the 200 login
+    // page, which the probe would judge as an open tunnel.
+    request.followRedirects = false;
+    request.maxRedirects = 0;
     final response = await request.close().timeout(const Duration(seconds: 10));
     try {
       final status = response.statusCode;

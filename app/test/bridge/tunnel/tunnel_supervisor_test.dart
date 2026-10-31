@@ -161,17 +161,20 @@ void main() {
         final supervisor = await started();
         addTearDown(() => supervisor.stop());
 
+        // `cloudflared tunnel [tunnel command options] run [TUNNEL]`: the
+        // command options go before `run`, the tunnel name is the last
+        // argument; anything else makes the CLI refuse the command.
         expect(host.argvs, [
           [
             '${dir.path}/cloudflared',
             'tunnel',
-            'run',
-            'my-tunnel',
             '--config',
             '${dir.path}/cloudflared.yml',
             '--no-autoupdate',
             '--metrics',
             '127.0.0.1:$kPrimaryMetricsPort',
+            'run',
+            'my-tunnel',
           ],
         ]);
         expect(supervisor.metricsPort, kPrimaryMetricsPort);
@@ -199,7 +202,11 @@ void main() {
       addTearDown(() => supervisor.stop());
 
       expect(host.signals, [(999, ProcessSignal.sigterm)]);
-      expect(host.argvs.single.last, '127.0.0.1:$kPrimaryMetricsPort');
+      final argv = host.argvs.single;
+      expect(
+        argv[argv.indexOf('--metrics') + 1],
+        '127.0.0.1:$kPrimaryMetricsPort',
+      );
     });
 
     test('falls back to the fallback port for a foreign holder', () async {
@@ -208,7 +215,11 @@ void main() {
       addTearDown(() => supervisor.stop());
 
       expect(host.signals, isEmpty);
-      expect(host.argvs.single.last, '127.0.0.1:$kFallbackMetricsPort');
+      final argv = host.argvs.single;
+      expect(
+        argv[argv.indexOf('--metrics') + 1],
+        '127.0.0.1:$kFallbackMetricsPort',
+      );
     });
   });
 

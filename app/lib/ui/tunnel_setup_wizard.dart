@@ -8,9 +8,11 @@ import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
 
 /// The assisted tunnel setup wizard (issue #34, ADR-0003): collects the
-/// tunnel name, the public hostname, and the credentials JSON paste,
-/// validates them app-side (with the clear error messages), submits them
-/// to `POST /api/tunnel/setup`, and pops with the bridge's fresh report on
+/// tunnel name, the public hostname, and the credentials JSON paste
+/// (optional, issue #37: without a paste the wizard offers the app-driven
+/// Cloudflare login, and the bridge creates the tunnel itself), validates
+/// them app-side (with the clear error messages), submits them to
+/// `POST /api/tunnel/setup`, and pops with the bridge's fresh report on
 /// success. The two manual dashboard steps (the DNS route, the Access
 /// application) are displayed with their exact values, a copy action, and
 /// a dashboard deep link.
@@ -56,6 +58,12 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
 
   /// True while the setup is being submitted.
   bool _busy = false;
+
+  /// True while the app-driven Cloudflare login runs (issue #37).
+  bool _loggingIn = false;
+
+  /// Whether the login succeeded during this dialog's life.
+  bool _loggedIn = false;
 
   /// The last validation or bridge error, shown as-is.
   String? _error;
@@ -106,16 +114,21 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
   }
 
   /// Validates the three inputs app-side (the first error wins), then
-  /// submits the setup to the bridge and pops with its fresh report.
+  /// submits the setup to the bridge and pops with its fresh report. The
+  /// credentials are optional (issue #37): without a paste, the bridge
+  /// creates the tunnel itself (the Cloudflare login is required).
   Future<void> _submit() async {
     if (_busy) return;
     String name;
     String hostname;
-    TunnelCredentials credentials;
+    String? credentialsSource;
     try {
       name = normalizeTunnelName(_tunnelName.text);
       hostname = normalizeHostname(_hostname.text);
-      credentials = TunnelCredentials.parse(_credentials.text);
+      final paste = _credentials.text;
+      if (paste.trim().isNotEmpty) {
+        credentialsSource = TunnelCredentials.parse(paste).source;
+      }
     } on TunnelSetupError catch (e) {
       setState(() => _error = e.message);
       return;
@@ -129,7 +142,7 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
       final report = await widget.client.setup(
         name,
         hostname,
-        credentials.source,
+        credentialsSource,
       );
       done = true;
       if (!mounted) return;
@@ -142,6 +155,27 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
       setState(() => _error = 'The bridge could not apply the setup.');
     } finally {
       if (!done && mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Runs the app-driven Cloudflare login (issue #37): the bridge runs the
+  /// app-managed `cloudflared tunnel login`, which opens the default
+  /// browser on Cloudflare's consent page.
+  Future<void> _login() async {
+    if (_busy || _loggingIn) return;
+    setState(() {
+      _loggingIn = true;
+      _error = null;
+    });
+    try {
+      await widget.client.login();
+      if (!mounted) return;
+      setState(() => _loggedIn = true);
+    } on TunnelClientError catch (e) {
+      if (!mounted) return;
+      setState(() => _error = _bridgeError(e));
+    } finally {
+      if (mounted) setState(() => _loggingIn = false);
     }
   }
 
@@ -244,10 +278,38 @@ class _TunnelSetupWizardDialogState extends State<TunnelSetupWizardDialog> {
                   controller: _credentials,
                   maxLines: 8,
                   decoration: const InputDecoration(
-                    labelText: 'Credentials (the pasted JSON)',
+                    labelText: 'Credentials (optional, the pasted JSON)',
                     hintText: '{\n  "TunnelID": "…",\n  "APIKey": "…"\n}',
                   ),
                 ),
+                if (_credentials.text.trim().isEmpty) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _loggedIn
+                              ? 'Logged in to Cloudflare: the tunnel will be created when you save.'
+                              : 'No credentials at hand? Log in and the app creates the tunnel.',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      OutlinedButton(
+                        key: const ValueKey('setup-login'),
+                        onPressed: _busy || _loggingIn ? null : _login,
+                        child: _loggingIn
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('Log in to Cloudflare'),
+                      ),
+                    ],
+                  ),
+                ],
                 ...manual,
                 if (_error != null) ...[
                   const SizedBox(height: 8),

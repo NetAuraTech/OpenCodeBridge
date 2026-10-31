@@ -121,6 +121,10 @@ class TunnelSupervisor {
   /// The app-managed cloudflared binary.
   final CloudflaredBinary _binary;
 
+  /// The app-managed cloudflared binary (the app-driven CLI, issue #37,
+  /// runs the same file).
+  CloudflaredBinary get binary => _binary;
+
   /// The app-owned tunnel config.
   final CloudflaredConfigFile _configFile;
 
@@ -325,16 +329,19 @@ class TunnelSupervisor {
       return;
     }
     final port = await _resolveMetricsPort();
+    // `cloudflared tunnel [tunnel command options] run [TUNNEL]`: the
+    // command options go before `run`, the tunnel name is the last
+    // argument; anything else makes the CLI refuse the command.
     final argv = [
       binary.path,
       'tunnel',
-      'run',
-      config.tunnel,
       '--config',
       _configFile.file.path,
       '--no-autoupdate',
       '--metrics',
       '127.0.0.1:$port',
+      'run',
+      config.tunnel,
     ];
     try {
       final child = await _spawner(argv);

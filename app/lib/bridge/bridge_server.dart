@@ -16,6 +16,7 @@ import 'events/opencode_http_event_service.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
 import 'sessions/opencode_http_service.dart';
+import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
 import 'sessions/session_store.dart';
 import 'terminal/opencode_http_terminal_service.dart';
@@ -27,6 +28,7 @@ import 'terminal/terminal_window_token.dart';
 import 'terminal/window_manager.dart';
 import 'tunnel/cloudflared_binary.dart';
 import 'tunnel/cloudflared_config.dart';
+import 'tunnel/tunnel_cli.dart';
 import 'tunnel/tunnel_preconditions.dart';
 import 'tunnel/tunnel_setup.dart';
 import 'tunnel/tunnel_supervisor.dart';
@@ -94,6 +96,12 @@ class BridgeServer {
   /// answers with the fresh tunnel report.
   static const String tunnelSetupPath = '/api/tunnel/setup';
 
+  /// The app-driven Cloudflare login (issue #37, ADR-0003): the bridge runs
+  /// the app-managed `cloudflared tunnel login`, which opens the browser on
+  /// Cloudflare's consent page and stores the session in the user's own
+  /// `~/.cloudflared/`.
+  static const String tunnelLoginPath = '/api/tunnel/login';
+
   final HttpServer _server;
 
   /// The terminal backend (endpoint 10); `null` when this machine has no
@@ -154,7 +162,8 @@ class BridgeServer {
   /// [BridgeServer.defaultTunnel] in server mode.
   /// [tunnelSetup], when provided, builds the assisted-setup service
   /// (issue #34, ADR-0003) for the supervisor (tests); the default writes
-  /// the app-owned files at the host paths.
+  /// the app-owned files at the host paths and drives the app-managed
+  /// cloudflared CLI (the login and the create, issue #37).
   /// [dockerLogKeepAlive] paces the keep-alive comment on a followed
   /// container's log stream (20s, as on the events stream); the keep-alive
   /// write is what surfaces a client disconnect, so tests shorten it.
@@ -193,8 +202,12 @@ class BridgeServer {
     final tunnelSupervisor = tunnel;
     final tunnelSetupService =
         tunnelSetup ??
-        (supervisor) =>
-            TunnelSetup(supervisor: supervisor, bridgePort: defaultPort);
+        (supervisor) => TunnelSetup(
+          supervisor: supervisor,
+          bridgePort: defaultPort,
+          cli: TunnelCli(binary: supervisor.binary),
+          credentialsDir: Directory('${homeDirectory()}/.cloudflared'),
+        );
     speed?.start();
     if (tunnelSupervisor != null) {
       await tunnelSupervisor.start();
@@ -466,6 +479,13 @@ class BridgeServer {
       );
       await response.close();
       return;
+    } on TunnelSetupCreateError catch (e) {
+      response.statusCode = HttpStatus.internalServerError;
+      response.write(
+        jsonEncode({'error': 'tunnel_create_failed', 'details': e.message}),
+      );
+      await response.close();
+      return;
     } on TunnelSetupWriteError catch (e) {
       response.statusCode = HttpStatus.internalServerError;
       response.write(
@@ -481,6 +501,44 @@ class BridgeServer {
     final report = await tunnel.report();
     response.write(jsonEncode(report.toJson()));
     await response.close();
+  }
+
+  /// The app-driven Cloudflare login (issue #37, ADR-0003): the bridge runs
+  /// the app-managed `cloudflared tunnel login`, which opens the default
+  /// browser on Cloudflare's consent page and stores the session in the
+  /// user's own `~/.cloudflared/` — the app never sees a token. Answers
+  /// `{'status': 'ok'}`; a failed or timed-out login answers 500 with the
+  /// explanation; a bridge without a tunnel supervisor answers 404.
+  static Future<void> _tunnelLogin(
+    HttpRequest request,
+    TunnelSupervisor? tunnel,
+    TunnelSetup Function(TunnelSupervisor) tunnelSetup,
+  ) async {
+    final response = request.response;
+    response.headers.contentType = ContentType.json;
+    if (tunnel == null) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'tunnel_not_configured'}));
+      await response.close();
+      return;
+    }
+    try {
+      final run = await tunnelSetup(tunnel).cli.login();
+      if (!run.success) {
+        throw CloudflaredCliError(
+          'the Cloudflare login failed: ${run.firstOutputLine}',
+        );
+      }
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode({'status': 'ok'}));
+      await response.close();
+    } on CloudflaredCliError catch (e) {
+      response.statusCode = HttpStatus.internalServerError;
+      response.write(
+        jsonEncode({'error': 'tunnel_login_failed', 'details': e.message}),
+      );
+      await response.close();
+    }
   }
 
   static Future<void> _handle(
@@ -586,6 +644,11 @@ class BridgeServer {
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.tunnelSetupPath) {
         await BridgeServer._tunnelSetup(request, tunnel, tunnelSetup);
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.tunnelLoginPath) {
+        await BridgeServer._tunnelLogin(request, tunnel, tunnelSetup);
         return;
       }
       if (request.method == 'POST' &&

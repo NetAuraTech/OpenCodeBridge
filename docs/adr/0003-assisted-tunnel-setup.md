@@ -20,8 +20,16 @@ The app is already the single API the user talks to (ADR-0001) and already runs 
 
 ## Consequences
 
-- The user's one-time setup shrinks to: run the two `cloudflared` CLI commands (auth, `tunnel create`), paste the credentials into the wizard, and create the two dashboard steps the wizard spells out exactly. The config file and the credentials file are written by the app, not the user.
+- The user's one-time setup shrinks to: log in (the wizard's app-driven login), give the tunnel a name and a hostname in the wizard, and create the two dashboard steps the wizard spells out exactly. The config file and the credentials file are written by the app, not the user.
 - The bridge now has write access to `~/.cloudflared` and `~/.config/opencodebridge` (the app-owned config dir it already owns); an unwriteable path is a distinct `TunnelSetupWriteError` → 500, separate from a bad payload → 400.
 - The endpoint answers a fresh `TunnelReport`, so the UI can adopt the post-setup state with the same code path as check/start — no new report shape.
-- The app never stores a Cloudflare API token beyond the user's own credentials file (which it writes verbatim from the user's paste); the dashboard steps remain a human-in-the-loop step by design.
+- The app never stores a Cloudflare API token beyond the user's own credentials file (which it writes verbatim from the user's paste, or that the app-driven create writes — see Follow-up); the dashboard steps remain a human-in-the-loop step by design.
 - Re-running the wizard over an existing setup is safe and is the supported way to fix a broken or stale app-owned config without touching the user's other cloudflared state.
+
+## Follow-up (ticket #37)
+
+The wizard still required the user to run the two `cloudflared` CLI commands from a terminal — but the only `cloudflared` on the machine is the app-managed binary (ADR-0002), and the Cloudflare dashboard's Create-a-Tunnel flow produces no credentials file. Ticket #37 moves those two commands into the app, driving the same app-managed binary:
+
+- **The app-driven Cloudflare login.** A new `POST /api/tunnel/login` endpoint (server mode) runs the app-managed `cloudflared tunnel login`, which opens the default browser on Cloudflare's OAuth consent page and, on success, stores the session in the user's own `~/.cloudflared/`. The wizard's credentials paste becomes **optional**: while it is empty the wizard offers a **Log in to Cloudflare** button that drives this endpoint.
+- **The app-driven create.** When the setup payload carries no pasted credentials, `POST /api/tunnel/setup` drives `cloudflared tunnel create <NAME>` (the login session is required) and uses the `~/.cloudflared/<uuid>.json` the CLI itself writes, instead of writing the paste verbatim.
+- **The ADR-0003 boundary is kept.** The app still never touches a Cloudflare token: the login session and the credentials file are written by `cloudflared` itself into the user's home directory; the app only spawns the binary and reads its exit status, and writes the app-owned config as before.

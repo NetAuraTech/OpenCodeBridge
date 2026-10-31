@@ -186,4 +186,52 @@ void main() {
       expect(check.missing.map((s) => s.id), [TunnelSetupStep.access]);
     });
   });
+
+  group('the default access probe', () {
+    late HttpServer server;
+
+    setUp(() async {
+      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    });
+
+    tearDown(() async {
+      await server.close(force: true);
+    });
+
+    void respond(int status, {String? location}) {
+      server.listen((request) {
+        request.response.statusCode = status;
+        if (location != null) {
+          request.response.headers.set(HttpHeaders.locationHeader, location);
+        }
+        request.response.close();
+      });
+    }
+
+    Uri uri() => Uri.parse('http://127.0.0.1:${server.port}/');
+
+    test('a redirect to the Access login is enforcing', () async {
+      respond(302, location: '/cdn-cgi/access/login');
+
+      expect(await probeAccess(uri()), AccessVerdict.enforcing);
+    });
+
+    test('a challenge answer is enforcing', () async {
+      respond(403);
+
+      expect(await probeAccess(uri()), AccessVerdict.enforcing);
+    });
+
+    test('a plain answer is open', () async {
+      respond(200);
+
+      expect(await probeAccess(uri()), AccessVerdict.open);
+    });
+
+    test('a redirect elsewhere is open', () async {
+      respond(302, location: '/elsewhere');
+
+      expect(await probeAccess(uri()), AccessVerdict.open);
+    });
+  });
 }
