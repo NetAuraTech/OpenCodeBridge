@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../client/authenticated_http.dart';
 import '../client/docker_client.dart';
 import '../client/events_client.dart';
 import '../model/compose_project.dart';
@@ -13,7 +14,13 @@ import '../model/container.dart';
 /// the bridge's native `docker.container.*` events (spec §8), so neither
 /// polls.
 class DockerTab extends StatefulWidget {
-  const DockerTab({super.key, required this.apiBase, this.client, this.events});
+  const DockerTab({
+    super.key,
+    required this.apiBase,
+    this.client,
+    this.events,
+    this.auth,
+  });
 
   /// Where the bridge's docker API lives. `null` when this client has no
   /// bridge to point at (client mode without a tunnel URL yet).
@@ -22,6 +29,10 @@ class DockerTab extends StatefulWidget {
   /// The client for the bridge's docker API. Defaults to a real
   /// [DockerClient] at [apiBase]; tests inject a fake.
   final DockerClient? client;
+
+  /// The Access login's header provider (issue #23, client mode); `null` in
+  /// server mode.
+  final AuthHeaderProvider? auth;
 
   /// The source of the bridge's unified event stream (spec §8) the tab and
   /// its detail listen to. Defaults to a real [EventsClient] at [apiBase]
@@ -69,7 +80,7 @@ class _DockerTabState extends State<DockerTab> {
     super.initState();
     final base = widget.apiBase;
     if (base != null) {
-      _client = widget.client ?? DockerClient(base);
+      _client = widget.client ?? DockerClient(base, auth: widget.auth);
       _setupEvents(base);
       _load();
       _loadCompose();
@@ -83,7 +94,8 @@ class _DockerTabState extends State<DockerTab> {
   void didUpdateWidget(covariant DockerTab oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.apiBase != oldWidget.apiBase && widget.apiBase != null) {
-      _client = widget.client ?? DockerClient(widget.apiBase!);
+      _client =
+          widget.client ?? DockerClient(widget.apiBase!, auth: widget.auth);
       _setupEvents(widget.apiBase!);
       _load();
       _loadCompose();
@@ -104,7 +116,7 @@ class _DockerTabState extends State<DockerTab> {
     if (provided != null) {
       _events = provided;
     } else {
-      _events = EventsClient(base);
+      _events = EventsClient(base, auth: widget.auth);
       _ownsEvents = true;
     }
     unawaited(_events!.connect());

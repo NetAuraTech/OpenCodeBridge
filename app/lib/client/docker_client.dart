@@ -1,27 +1,35 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:opencodebridge/client/authenticated_http.dart';
 import 'package:opencodebridge/model/compose_project.dart';
 import 'package:opencodebridge/model/container.dart';
 import 'package:opencodebridge/sse/sse.dart';
 
 /// The app-side client of the bridge's docker endpoints (issue #21). The
 /// app talks only to the bridge (ADR-0001): in server mode that is
-/// loopback, in client mode the same API behind the tunnel.
+/// loopback, in client mode the same API behind the tunnel (issue #23:
+/// every request carries `Authorization: Bearer` from [auth], refreshed
+/// on `401` — see [bridgeRequest]).
 class DockerClient {
-  DockerClient(this._base);
+  DockerClient(this._base, {this._auth});
 
   /// The bridge's base URI, e.g. `http://127.0.0.1:48201/`.
   final Uri _base;
+
+  /// The Access login's header provider (issue #23); `null` in server mode.
+  final AuthHeaderProvider? _auth;
 
   /// Every container on the host: name, image, state, uptime (issue #21).
   Future<List<DockerContainer>> list() async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(
+      final response = await bridgeRequest(
+        client,
+        'GET',
         _base.replace(path: 'api/docker/containers'),
+        auth: _auth,
       );
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw DockerClientError(response.statusCode, body);
@@ -44,10 +52,12 @@ class DockerClient {
   Future<List<ComposeProject>> compose() async {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(
+      final response = await bridgeRequest(
+        client,
+        'GET',
         _base.replace(path: 'api/docker/compose'),
+        auth: _auth,
       );
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw DockerClientError(response.statusCode, body);
@@ -75,12 +85,14 @@ class DockerClient {
   }) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(
+      final response = await bridgeRequest(
+        client,
+        'POST',
         _base.replace(path: 'api/docker/compose/$id/action'),
+        body: jsonEncode({'action': action.wire, 'service': ?service}),
+        contentType: ContentType.json,
+        auth: _auth,
       );
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'action': action.wire, 'service': ?service}));
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw DockerClientError(response.statusCode, body);
@@ -99,14 +111,16 @@ class DockerClient {
   Future<void> action(String name, DockerAction action) async {
     final client = HttpClient();
     try {
-      final request = await client.postUrl(
+      final response = await bridgeRequest(
+        client,
+        'POST',
         _base.replace(
           path: 'api/docker/containers/${Uri.encodeComponent(name)}/action',
         ),
+        body: jsonEncode({'action': action.wire}),
+        contentType: ContentType.json,
+        auth: _auth,
       );
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode({'action': action.wire}));
-      final response = await request.close();
       final body = await response.transform(const Utf8Decoder()).join();
       if (response.statusCode != HttpStatus.ok) {
         throw DockerClientError(response.statusCode, body);
@@ -129,13 +143,15 @@ class DockerClient {
   Stream<String> logs(String name, {bool follow = true}) async* {
     final client = HttpClient();
     try {
-      final request = await client.getUrl(
+      final response = await bridgeRequest(
+        client,
+        'GET',
         _base.replace(
           path: 'api/docker/containers/${Uri.encodeComponent(name)}/logs',
           query: follow ? 'follow=1' : null,
         ),
+        auth: _auth,
       );
-      final response = await request.close();
       if (response.statusCode != HttpStatus.ok) {
         final body = await response.transform(const Utf8Decoder()).join();
         throw DockerClientError(response.statusCode, body);

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:opencodebridge/client/authenticated_http.dart';
 import 'package:opencodebridge/sse/sse.dart';
 
 /// The durable position of an opencode event within its session aggregate.
@@ -104,6 +105,7 @@ class EventsClient implements EventSource {
   EventsClient(
     this._base, {
     this.reconnectDelay = const Duration(milliseconds: 500),
+    this._auth,
   });
 
   /// The bridge's base URI, e.g. `http://127.0.0.1:48201/`.
@@ -111,6 +113,11 @@ class EventsClient implements EventSource {
 
   /// How long to wait before reconnecting after the stream drops.
   final Duration reconnectDelay;
+
+  /// The Access login's header provider (issue #23); `null` in server mode.
+  /// Re-read on every (re)connect, so a dropped stream comes back with a
+  /// refreshed token.
+  final AuthHeaderProvider? _auth;
 
   final StreamController<BridgeEvent> _events =
       StreamController<BridgeEvent>.broadcast();
@@ -173,8 +180,12 @@ class EventsClient implements EventSource {
     final client = HttpClient();
     _client = client;
     try {
-      final request = await client.getUrl(_base.replace(path: 'api/events'));
-      final response = await request.close();
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        _base.replace(path: 'api/events'),
+        auth: _auth,
+      );
       if (response.statusCode != HttpStatus.ok) {
         await response.drain<void>();
         throw EventsClientError(
