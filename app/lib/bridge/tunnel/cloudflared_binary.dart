@@ -42,9 +42,11 @@ class CloudflaredBinary {
       return binary;
     }
     final arch = await _resolveArch();
+    // The release tag carries no `v` prefix (cloudflared tags are the bare
+    // calendar version, e.g. 2026.10.7).
     final url = Uri.parse(
       'https://github.com/cloudflare/cloudflared/releases/download/'
-      'v$pinnedVersion/cloudflared-linux-$arch',
+      '$pinnedVersion/cloudflared-linux-$arch',
     );
     await dir.create(recursive: true);
     final tmp = File('${dir.path}/$_fileName.download');
