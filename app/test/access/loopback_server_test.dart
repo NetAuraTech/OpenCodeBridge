@@ -86,6 +86,30 @@ void main() {
       final response = await _get('$callback?code=late&state=s');
       expect(response.statusCode, HttpStatus.ok);
     });
+
+    test(
+      'with the bounce the completion page brings the browser back to the app',
+      () async {
+        final bouncing = await OAuthLoopbackServer.start(returnToApp: true);
+        try {
+          final response = await _get('${bouncing.redirectUri}?code=c&state=s');
+          expect(response.statusCode, HttpStatus.ok);
+          expect(response.body, contains('opencodebridge://auth'));
+        } finally {
+          await bouncing.close();
+        }
+      },
+    );
+
+    test('without the bounce the completion page stays a plain page', () async {
+      final plain = await OAuthLoopbackServer.start(returnToApp: false);
+      try {
+        final response = await _get('${plain.redirectUri}?code=c&state=s');
+        expect(response.body, isNot(contains('opencodebridge://')));
+      } finally {
+        await plain.close();
+      }
+    });
   });
 }
 

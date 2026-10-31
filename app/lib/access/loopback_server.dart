@@ -14,14 +14,16 @@ class RedirectCallback {
 /// The app's own OAuth redirect URI receiver (issue #23): a one-shot
 /// [HttpServer] on `127.0.0.1` at an ephemeral port, registered as the
 /// dynamic-client loopback redirect URI. The IdP's browser lands here with
-/// `?code=…&state=…`; the user sees a completion page and closes it.
+/// `?code=…&state=…`; the user sees a completion page (on Android it
+/// bounces them back to the app).
 ///
 /// Only the first request is captured; later ones get the same completion
 /// page (the app-side state check rejects a replayed or stale redirect).
 class OAuthLoopbackServer {
-  OAuthLoopbackServer._(this._server);
+  OAuthLoopbackServer._(this._server, this._returnToApp);
 
   final HttpServer _server;
+  final bool _returnToApp;
   Completer<RedirectCallback>? _pending;
   RedirectCallback? _captured;
 
@@ -29,9 +31,16 @@ class OAuthLoopbackServer {
   /// `http://127.0.0.1:<port>/callback`.
   Uri get redirectUri => Uri.parse('http://127.0.0.1:${_server.port}/callback');
 
-  static Future<OAuthLoopbackServer> start() async {
+  /// Starts the loopback receiver. When [returnToApp] (unset: Android), the
+  /// completion page bounces the browser back to the app through the
+  /// `opencodebridge://` deep link: by then the code is already in the app's
+  /// hand, the bounce only brings the app back in front.
+  static Future<OAuthLoopbackServer> start({bool? returnToApp}) async {
     final server = await HttpServer.bind('127.0.0.1', 0);
-    final loopback = OAuthLoopbackServer._(server);
+    final loopback = OAuthLoopbackServer._(
+      server,
+      returnToApp ?? Platform.isAndroid,
+    );
     server.listen(loopback._handleRequest);
     return loopback;
   }
@@ -66,7 +75,7 @@ class OAuthLoopbackServer {
       response
         ..statusCode = HttpStatus.ok
         ..headers.contentType = ContentType.parse('text/html; charset=utf-8');
-      response.write(_completionPage);
+      response.write(_returnToApp ? _completionPageAndroid : _completionPage);
     } else {
       // A redirect without a code: the IdP errored in the browser.
       response
@@ -96,6 +105,25 @@ const String _completionPage = '''
   <body style="font-family: sans-serif; padding: 2rem">
     <h2>OpenCodeBridge</h2>
     <p>Login complete. You can close this window and return to the app.</p>
+  </body>
+</html>
+''';
+
+/// The Android variant: the code is already in the app's hand, the page
+/// only bounces the browser back to the app (the opencodebridge:// deep
+/// link, declared in the Android manifest; the JS replace leads, the meta
+/// refresh covers a blocked script).
+const String _completionPageAndroid = '''
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="1; url=opencodebridge://auth">
+  </head>
+  <body style="font-family: sans-serif; padding: 2rem">
+    <h2>OpenCodeBridge</h2>
+    <p>Login complete. Returning to the app…</p>
+    <script>window.location.replace("opencodebridge://auth");</script>
   </body>
 </html>
 ''';
