@@ -328,11 +328,7 @@ class AccessOAuthClient {
         // No description (an HTML error page, a bare 500): the body is the
         // only clue about what the endpoint did not like.
         final trimmed = rawBody.trim();
-        description = trimmed.isEmpty
-            ? null
-            : trimmed.length > 200
-            ? trimmed.substring(0, 200)
-            : trimmed;
+        description = trimmed.isEmpty ? null : trimmed;
       }
       throw OAuthError(
         error is String ? error : 'http_${response.statusCode}',
