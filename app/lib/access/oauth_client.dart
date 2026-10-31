@@ -241,6 +241,9 @@ class AccessOAuthClient {
       'code': code,
       'redirect_uri': redirectUri,
       'code_verifier': verifier,
+      // RFC 8707: required in the token request because the authorization
+      // request carried it; the AS compares it with the grant's resource.
+      'resource': _resource,
     });
   }
 
@@ -251,6 +254,9 @@ class AccessOAuthClient {
       'grant_type': 'refresh_token',
       'client_id': clientId,
       'refresh_token': refreshToken,
+      // The refresh grant was created for this resource in the
+      // authorization request.
+      'resource': _resource,
     });
   }
 

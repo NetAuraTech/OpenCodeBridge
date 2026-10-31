@@ -217,6 +217,10 @@ void main() {
       expect(tokens.expiresIn, const Duration(seconds: 900));
       expect(lastForm['grant_type'], 'authorization_code');
       expect(lastForm['code'], 'good-code');
+      // RFC 8707: the resource is required in the token request because it
+      // was in the authorization request; the AS compares it with the
+      // grant's.
+      expect(lastForm['resource'], 'http://$host');
     });
 
     test('presents the PKCE verifier that mints the challenge', () async {
@@ -286,6 +290,9 @@ void main() {
       expect(tokens.refreshToken, 'refresh-2');
       expect(lastForm['grant_type'], 'refresh_token');
       expect(lastForm['refresh_token'], 'refresh-1');
+      // The same resource as the authorization request: the refresh grant
+      // was created for it.
+      expect(lastForm['resource'], 'http://$host');
     });
 
     test('an error without a description falls back to the body', () async {
