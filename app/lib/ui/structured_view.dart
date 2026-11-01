@@ -901,6 +901,88 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
+  /// Tab in the prompt (the menu closed): toggles the session's mode,
+  /// `plan` to `build` and `build` (or unset) to `plan`, via the service's
+  /// `setAgent` — the session's agent is the single source of truth (the
+  /// service's TUIs see the same switch), so normalize afterwards and the
+  /// cost bar's mode chip follows.
+  Future<void> _toggleMode() async {
+    if (_promptBusy || _commandBusy) return;
+    final next = _detail?.agent == 'plan' ? 'build' : 'plan';
+    try {
+      await widget.client.setAgent(widget.sessionId, next);
+      if (!mounted) return;
+      _snackBar('Mode: $next.');
+      _normalize();
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not switch the mode (${_describe(e)}).');
+    } catch (_) {
+      if (mounted) _snackBar('Could not switch the mode.');
+    }
+  }
+
+  /// Ctrl+T in the prompt (the menu closed): cycles the current model's
+  /// variants (the reasoning effort) — the TUI's `variant.cycle`: none to
+  /// the first variant, the last back to none. The session must carry a
+  /// model the registry knows and that exposes variants; otherwise it is
+  /// reported, nothing is set.
+  Future<void> _cycleVariant() async {
+    if (_promptBusy || _commandBusy) return;
+    final id = widget.sessionId;
+    try {
+      final current = await widget.client.currentModel(id);
+      ModelOption? model;
+      if (current != null) {
+        for (final m in await widget.client.listModels(id)) {
+          if (m.id == current.id && m.providerId == current.providerId) {
+            model = m;
+            break;
+          }
+        }
+      }
+      if (model == null) {
+        if (!mounted) return;
+        _snackBar('No model set for the session.');
+        return;
+      }
+      final named = [
+        for (final v in model.variants)
+          if (v != 'default') v,
+      ];
+      if (named.isEmpty) {
+        if (!mounted) return;
+        _snackBar('No variants available.');
+        return;
+      }
+      final variant = _nextVariant(current?.variant, named);
+      await widget.client.setModel(
+        id,
+        ModelRef(id: model.id, providerId: model.providerId, variant: variant),
+      );
+      if (!mounted) return;
+      _snackBar(
+        variant == null ? 'Variant set to none.' : 'Variant set to $variant.',
+      );
+      _normalize();
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not cycle the variant (${_describe(e)}).');
+    } catch (_) {
+      if (mounted) _snackBar('Could not cycle the variant.');
+    }
+  }
+
+  /// The TUI's `cycleModelVariant` on the named variants (the ids that are
+  /// not `default`): none (or an id the registry no longer carries) cycles
+  /// to the first, the last cycles to none, otherwise the next.
+  static String? _nextVariant(String? current, List<String> named) {
+    if (named.isEmpty) return null;
+    final value = current == 'default' ? null : current;
+    if (value == null) return named.first;
+    final index = named.indexOf(value);
+    if (index == -1 || index == named.length - 1) return null;
+    return named[index + 1];
+  }
+
   /// Applies the decision to a pending request (endpoint 9) and re-fetches
   /// the pending list: the turn continues once the service records it.
   Future<void> _reply(PermissionRequest request, PermissionReply reply) async {
@@ -1364,8 +1446,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   }
 
   /// The menu's pickers (models, agents, variants, skills, connect): a
-  /// dialog listing [items]; resolves the picked item, or `null` when the
-  /// user cancels (or there is nothing to pick).
+  /// dialog over a [_PickDialog] listing [items]; resolves the picked item,
+  /// or `null` when the user cancels (or there is nothing to pick).
   Future<T?> _pick<T extends Object>(
     String title,
     List<T> items,
@@ -1375,33 +1457,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     if (!mounted || items.isEmpty) return null;
     return showDialog<T>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(title),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 420),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final item in items)
-                  Builder(
-                    builder: (itemContext) {
-                      final sub = hint?.call(item);
-                      return ListTile(
-                        dense: true,
-                        title: Text(label(item)),
-                        subtitle: (sub == null || sub.isEmpty)
-                            ? null
-                            : Text(sub),
-                        onTap: () => Navigator.of(itemContext).pop(item),
-                      );
-                    },
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
+      builder: (dialogContext) =>
+          _PickDialog<T>(title: title, items: items, label: label, hint: hint),
     );
   }
 
@@ -1505,9 +1562,124 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   commands: _commands,
                   onCommand: _runCommand,
                   onMenuOpened: _onMenuOpened,
+                  onToggleMode: _toggleMode,
+                  onCycleVariant: _cycleVariant,
                 ),
               ],
             ),
+    );
+  }
+}
+
+/// The menu's picker dialog (models, agents, variants, skills, connect): a
+/// title, a search field (keyed `structured-pick-search`) that live-filters
+/// the rows by label and hint, and the filtered rows. A row tap or Enter on
+/// the search field (picking the first filtered row) resolves the item;
+/// closing the dialog resolves `null`.
+class _PickDialog<T extends Object> extends StatefulWidget {
+  const _PickDialog({
+    required this.title,
+    required this.items,
+    required this.label,
+    this.hint,
+  });
+
+  final String title;
+  final List<T> items;
+  final String Function(T item) label;
+
+  /// The row's secondary line (e.g. the model's provider), or `null`.
+  final String? Function(T item)? hint;
+
+  @override
+  State<_PickDialog<T>> createState() => _PickDialogState<T>();
+}
+
+class _PickDialogState<T extends Object> extends State<_PickDialog<T>> {
+  late final TextEditingController _search = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _search.addListener(_searchChanged);
+  }
+
+  @override
+  void dispose() {
+    _search.removeListener(_searchChanged);
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _searchChanged() => setState(() {});
+
+  /// The rows matching the search: the label or the hint contains the query
+  /// (case-insensitive); an empty query matches every row.
+  List<T> get _filtered {
+    final query = _search.text.trim().toLowerCase();
+    if (query.isEmpty) return widget.items;
+    return [
+      for (final item in widget.items)
+        if (widget.label(item).toLowerCase().contains(query) ||
+            (widget.hint?.call(item) ?? '').toLowerCase().contains(query))
+          item,
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _filtered;
+    return AlertDialog(
+      title: Text(widget.title),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 480),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              key: const ValueKey('structured-pick-search'),
+              controller: _search,
+              autofocus: true,
+              decoration: const InputDecoration(hintText: 'Search...'),
+              onSubmitted: (_) {
+                if (filtered.isNotEmpty) {
+                  Navigator.of(context).pop(filtered.first);
+                }
+              },
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (filtered.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text('No match.'),
+                      )
+                    else
+                      for (final item in filtered)
+                        Builder(
+                          builder: (itemContext) {
+                            final sub = widget.hint?.call(item);
+                            return ListTile(
+                              dense: true,
+                              title: Text(widget.label(item)),
+                              subtitle: (sub == null || sub.isEmpty)
+                                  ? null
+                                  : Text(sub),
+                              onTap: () => Navigator.of(itemContext).pop(item),
+                            );
+                          },
+                        ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1573,6 +1745,7 @@ class _CostBar extends StatelessWidget {
                 'Cost \$${detail.cost.toStringAsFixed(4)}',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
+              ..._identityChips(context, detail),
               if (tokenText != null)
                 Text(
                   tokenText,
@@ -1584,41 +1757,18 @@ class _CostBar extends StatelessWidget {
                   ),
                 ),
               if (used != null)
-                Container(
-                  key: const ValueKey('structured-context'),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainerHighest,
-                  ),
-                  child: Text(
-                    limit == null
-                        ? 'context $used'
-                        : 'context $used / $limit · ${_percent(used, limit)}',
-                    style: const TextStyle(fontSize: 12),
-                  ),
+                _chip(
+                  context,
+                  const ValueKey('structured-context'),
+                  limit == null
+                      ? 'context $used'
+                      : 'context $used / $limit · ${_percent(used, limit)}',
                 ),
               if (detail.outcome != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainerHighest,
-                  ),
-                  child: Text(
-                    detail.outcome!,
-                    style: const TextStyle(fontSize: 12),
-                  ),
+                _chip(
+                  context,
+                  const ValueKey('structured-outcome'),
+                  detail.outcome!,
                 ),
               if (speed != null)
                 Container(
@@ -1653,6 +1803,55 @@ class _CostBar extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+
+  /// The header's identity chips: the session's model
+  /// (`providerID/modelID`), its variant (the reasoning effort) when set,
+  /// and its mode (the agent, e.g. `build` or `plan`) — the session's
+  /// `Session.Info` model/agent, or no chip when the service reports none
+  /// yet.
+  static List<Widget> _identityChips(
+    BuildContext context,
+    SessionDetail detail,
+  ) {
+    final model = detail.model;
+    final chips = <Widget>[];
+    if (model != null) {
+      chips.add(
+        _chip(
+          context,
+          const ValueKey('structured-model'),
+          model.providerId.isEmpty
+              ? model.id
+              : '${model.providerId}/${model.id}',
+        ),
+      );
+      if (model.variant != null) {
+        chips.add(
+          _chip(context, const ValueKey('structured-variant'), model.variant!),
+        );
+      }
+    }
+    if (detail.agent != null) {
+      chips.add(
+        _chip(context, const ValueKey('structured-mode'), detail.agent!),
+      );
+    }
+    return chips;
+  }
+
+  /// One header chip (the rounded, elevated pill the context/outcome/speed
+  /// chips use).
+  static Widget _chip(BuildContext context, Key key, String text) {
+    return Container(
+      key: key,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(4),
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      ),
+      child: Text(text, style: const TextStyle(fontSize: 12)),
     );
   }
 
@@ -2113,6 +2312,11 @@ class _ToolCard extends StatelessWidget {
 /// takes the text typed after the name and keeps the menu open until the
 /// argument is typed (the TUI behavior). A prefix that matches no command
 /// stays put on Enter — it is neither run nor sent.
+///
+/// With the menu closed, two keys take on the TUI's mode shortcuts: Tab
+/// toggles the session's mode (`build`/`plan`, the TUI's `agent.cycle`)
+/// and Ctrl+T cycles the current model's variant (the TUI's
+/// `variant.cycle`); both are reported through the screen's handlers.
 class _PromptBar extends StatefulWidget {
   const _PromptBar({
     required this.controller,
@@ -2121,6 +2325,8 @@ class _PromptBar extends StatefulWidget {
     required this.commands,
     required this.onCommand,
     required this.onMenuOpened,
+    required this.onToggleMode,
+    required this.onCycleVariant,
   });
 
   final TextEditingController controller;
@@ -2140,6 +2346,13 @@ class _PromptBar extends StatefulWidget {
   /// The menu is open; the screen may need to fetch the project's custom
   /// commands.
   final VoidCallback onMenuOpened;
+
+  /// Tab (the menu closed): toggles the session's mode, `build` or `plan`.
+  final VoidCallback onToggleMode;
+
+  /// Ctrl+T (the menu closed): cycles the current model's variant (the
+  /// reasoning effort), like the TUI's `variant.cycle`.
+  final VoidCallback onCycleVariant;
 
   @override
   State<_PromptBar> createState() => _PromptBarState();
@@ -2222,7 +2435,10 @@ class _PromptBarState extends State<_PromptBar> {
   }
 
   /// The arrow keys move the menu selection (the TUI parity); Esc closes
-  /// the menu by clearing the field.
+  /// the menu by clearing the field. With the menu closed, Tab toggles the
+  /// session's mode (`build`/`plan`) and Ctrl+T cycles the current model's
+  /// variant (the TUI's `agent.cycle` / `variant.cycle`), without inserting
+  /// anything in the field.
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent) {
       final key = event.logicalKey;
@@ -2240,6 +2456,16 @@ class _PromptBarState extends State<_PromptBar> {
       if (key == LogicalKeyboardKey.escape) {
         widget.controller.clear();
       }
+      if (_menuOpen) return KeyEventResult.ignored;
+      if (key == LogicalKeyboardKey.tab) {
+        widget.onToggleMode();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyT &&
+          HardwareKeyboard.instance.isControlPressed) {
+        widget.onCycleVariant();
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
   }
@@ -2252,83 +2478,103 @@ class _PromptBarState extends State<_PromptBar> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (_menuOpen)
-          _matches.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.fromLTRB(24, 8, 24, 0),
-                  child: Text('No matching command'),
-                )
-              : ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 280),
-                  child: ListView.builder(
-                    key: const ValueKey('structured-command-menu'),
-                    shrinkWrap: true,
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: _matches.length,
-                    itemBuilder: (context, index) {
-                      final command = _matches[index];
-                      final selected = index == _selected;
-                      return Material(
-                        color: selected
-                            ? scheme.secondaryContainer
-                            : Colors.transparent,
-                        child: InkWell(
-                          key: ValueKey(
-                            'structured-command-row-${command.name}',
-                          ),
-                          onTap: () => _activate(command),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 8,
+          Container(
+            key: const ValueKey('structured-command-menu-card'),
+            margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: scheme.outlineVariant),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color.fromRGBO(0, 0, 0, 0.16),
+                  blurRadius: 12,
+                  offset: Offset(0, 4),
+                ),
+              ],
+            ),
+            child: _matches.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    child: const Text('No matching command'),
+                  )
+                : ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 280),
+                    child: ListView.builder(
+                      key: const ValueKey('structured-command-menu'),
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: _matches.length,
+                      itemBuilder: (context, index) {
+                        final command = _matches[index];
+                        final selected = index == _selected;
+                        return Material(
+                          color: selected
+                              ? scheme.secondaryContainer
+                              : Colors.transparent,
+                          child: InkWell(
+                            key: ValueKey(
+                              'structured-command-row-${command.name}',
                             ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Text(
-                                      '/${command.name}',
-                                      style: TextStyle(
-                                        fontWeight: selected
-                                            ? FontWeight.bold
-                                            : FontWeight.w600,
-                                      ),
-                                    ),
-                                    if (command.takesArg &&
-                                        command.argHint != null)
+                            onTap: () => _activate(command),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 8,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
                                       Text(
-                                        ' ${command.argHint}',
+                                        '/${command.name}',
                                         style: TextStyle(
-                                          color: scheme.outline,
-                                          fontSize: 13,
+                                          fontWeight: selected
+                                              ? FontWeight.bold
+                                              : FontWeight.w600,
                                         ),
                                       ),
-                                    const Spacer(),
-                                    if (command.family == CommandFamily.custom)
-                                      Text(
-                                        'custom',
-                                        style: const TextStyle(fontSize: 11),
-                                      ),
-                                  ],
-                                ),
-                                if (command.subtitle != command.name)
-                                  Text(
-                                    command.subtitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: scheme.outline,
-                                      fontSize: 12,
-                                    ),
+                                      if (command.takesArg &&
+                                          command.argHint != null)
+                                        Text(
+                                          ' ${command.argHint}',
+                                          style: TextStyle(
+                                            color: scheme.outline,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                      const Spacer(),
+                                      if (command.family ==
+                                          CommandFamily.custom)
+                                        Text(
+                                          'custom',
+                                          style: const TextStyle(fontSize: 11),
+                                        ),
+                                    ],
                                   ),
-                              ],
+                                  if (command.subtitle != command.name)
+                                    Text(
+                                      command.subtitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: scheme.outline,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
-                ),
+          ),
         Padding(
           key: const ValueKey('structured-prompt'),
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),

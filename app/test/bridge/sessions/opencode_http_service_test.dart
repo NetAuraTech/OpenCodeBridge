@@ -62,7 +62,8 @@ void main() {
     'outcome': 'succeeded',
     'location': {'directory': '/one'},
     'time': {'created': 100, 'updated': 200},
-    'model': {'id': 'mod1', 'providerID': 'prov1'},
+    'model': {'id': 'mod1', 'providerID': 'prov1', 'variant': 'v1'},
+    'agent': 'plan',
   };
 
   // The detail of `ses_2`: the model is unknown to the registry, so the
@@ -616,6 +617,21 @@ void main() {
             cacheWrite: 2,
           ),
         );
+        expect(
+          detail.model,
+          const ModelRef(id: 'mod1', providerId: 'prov1', variant: 'v1'),
+        );
+        expect(detail.agent, 'plan');
+      },
+    );
+
+    test(
+      'getDetail leaves model and agent null when the service omits them',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final detail = await service.getDetail('ses_3');
+        expect(detail.model, isNull);
+        expect(detail.agent, isNull);
       },
     );
 
@@ -852,7 +868,7 @@ void main() {
     test('currentModel parses the session model ref', () async {
       expect(
         await service.currentModel('ses_1'),
-        const ModelRef(id: 'mod1', providerId: 'prov1'),
+        const ModelRef(id: 'mod1', providerId: 'prov1', variant: 'v1'),
       );
     });
 

@@ -35,6 +35,74 @@ const _detailCtx = SessionDetail(
   outcome: null,
   contextLimit: 100,
 );
+const _detailModel = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  model: ModelRef(
+    id: 'flint-40b-free',
+    providerId: 'opencode',
+    variant: 'medium',
+  ),
+  agent: 'plan',
+);
+const _detailAgentPlan = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  agent: 'plan',
+);
+const _detailAgentBuild = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  agent: 'build',
+);
+const _detailVarNone = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  model: ModelRef(id: 'mod1', providerId: 'prov1'),
+);
+const _detailVarLow = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  model: ModelRef(id: 'mod1', providerId: 'prov1', variant: 'low'),
+);
+const _detailVarMedium = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  model: ModelRef(id: 'mod1', providerId: 'prov1', variant: 'medium'),
+);
+const _detailVarHigh = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  model: ModelRef(id: 'mod1', providerId: 'prov1', variant: 'high'),
+);
 
 /// A long, uneven history (a short first half, a long second half): enough
 /// to be far longer than the viewport, so the anchor (the newest message)
@@ -61,6 +129,7 @@ class _FakeClient extends SessionsClient {
     this.commands = const [],
     this.models = const [],
     this.runCommandError,
+    this.currentModels = const <ModelRef?>[null],
   }) : super(Uri.parse('http://bridge.test/'));
 
   /// The project's custom commands (`listCommands`), for the `/` menu.
@@ -77,6 +146,15 @@ class _FakeClient extends SessionsClient {
   final List<(String, String)> renames = [];
 
   final List<ModelRef> setModels = [];
+
+  /// The agents set (the Tab mode toggle): (sessionId, agentId) pairs.
+  final List<(String, String)> agents = [];
+
+  /// Per-call current models (the Ctrl+T variant cycle): the n-th call
+  /// returns the n-th ref, the last ref repeats.
+  final List<ModelRef?> currentModels;
+
+  int currentModelCalls = 0;
 
   int compacts = 0;
   int mcpsCalls = 0;
@@ -117,6 +195,20 @@ class _FakeClient extends SessionsClient {
   @override
   Future<void> setModel(String id, ModelRef model) async {
     setModels.add(model);
+  }
+
+  @override
+  Future<void> setAgent(String id, String agentId) async {
+    agents.add((id, agentId));
+  }
+
+  @override
+  Future<ModelRef?> currentModel(String id) async {
+    currentModelCalls++;
+    final index = currentModelCalls - 1 < currentModels.length
+        ? currentModelCalls - 1
+        : currentModels.length - 1;
+    return currentModels[index];
   }
 
   /// Per-call details: the n-th call returns the n-th detail, the last
@@ -319,6 +411,32 @@ void main() {
 
       expect(find.byKey(const ValueKey('structured-speed')), findsNothing);
     });
+
+    testWidgets('the header shows the model, variant, and mode chips', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detailModel]);
+      await _pump(tester, client: client);
+
+      expect(find.text('opencode/flint-40b-free'), findsOneWidget);
+      expect(find.text('medium'), findsOneWidget);
+      expect(find.text('plan'), findsOneWidget);
+      expect(find.byKey(const ValueKey('structured-model')), findsOneWidget);
+      expect(find.byKey(const ValueKey('structured-variant')), findsOneWidget);
+      expect(find.byKey(const ValueKey('structured-mode')), findsOneWidget);
+    });
+
+    testWidgets(
+      'the header shows no model, variant, or mode chips when unset',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+
+        expect(find.byKey(const ValueKey('structured-model')), findsNothing);
+        expect(find.byKey(const ValueKey('structured-variant')), findsNothing);
+        expect(find.byKey(const ValueKey('structured-mode')), findsNothing);
+      },
+    );
 
     testWidgets('renders the compaction marker with the summary it wrote', (
       tester,
@@ -1111,6 +1229,42 @@ void main() {
       expect(client.commandCalls, 1);
     });
 
+    testWidgets(
+      'the menu renders as a card (background, border, rounded, shadowed)',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+        await _typePrompt(tester, '/');
+        await tester.pump();
+
+        final card = tester.widget<Container>(
+          find.byKey(const ValueKey('structured-command-menu-card')),
+        );
+        expect(card.decoration, isA<BoxDecoration>());
+        final decoration = card.decoration! as BoxDecoration;
+        expect(decoration.color, isNotNull);
+        expect(decoration.border, isA<Border>());
+        expect(decoration.borderRadius, isNotNull);
+        expect(decoration.boxShadow, isNotEmpty);
+      },
+    );
+
+    testWidgets('the empty menu keeps its card and the no-match line', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/zzz');
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+      expect(find.text('No matching command'), findsOneWidget);
+    });
+
     testWidgets('the menu live-filters by name and alias prefix', (
       tester,
     ) async {
@@ -1316,6 +1470,106 @@ void main() {
       expect(find.text('Model set to Model One.'), findsOneWidget);
     });
 
+    testWidgets('the pickers filter their rows with the search field', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        models: const [
+          ModelOption(
+            id: 'mod1',
+            providerId: 'prov1',
+            name: 'Model One',
+            variants: [],
+          ),
+          ModelOption(
+            id: 'mod2',
+            providerId: 'prov2',
+            name: 'Model Two',
+            variants: [],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/models');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(find.text('Switch model'), findsOneWidget);
+      expect(find.text('Model One'), findsOneWidget);
+      expect(find.text('Model Two'), findsOneWidget);
+
+      // Typing filters the rows live (the label, case-insensitive).
+      await tester.enterText(
+        find.byKey(const ValueKey('structured-pick-search')),
+        'two',
+      );
+      await tester.pump();
+      expect(find.text('Model One'), findsNothing);
+      expect(find.text('Model Two'), findsOneWidget);
+
+      // The hint (the provider) filters too.
+      await tester.enterText(
+        find.byKey(const ValueKey('structured-pick-search')),
+        'prov2',
+      );
+      await tester.pump();
+      expect(find.text('Model One'), findsNothing);
+      expect(find.text('Model Two'), findsOneWidget);
+
+      // No match: the rows are replaced by the no-match line.
+      await tester.enterText(
+        find.byKey(const ValueKey('structured-pick-search')),
+        'zzz',
+      );
+      await tester.pump();
+      expect(find.text('Model One'), findsNothing);
+      expect(find.text('Model Two'), findsNothing);
+      expect(find.text('No match.'), findsOneWidget);
+    });
+
+    testWidgets('the picker search picks the first filtered row on Enter', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        models: const [
+          ModelOption(
+            id: 'mod1',
+            providerId: 'prov1',
+            name: 'Model One',
+            variants: [],
+          ),
+          ModelOption(
+            id: 'mod2',
+            providerId: 'prov2',
+            name: 'Model Two',
+            variants: [],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/models');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(find.text('Switch model'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('structured-pick-search')),
+        'one',
+      );
+      await tester.pump();
+      await _pressEnter(tester);
+      await tester.pump();
+
+      expect(client.setModels, const [
+        ModelRef(id: 'mod1', providerId: 'prov1'),
+      ]);
+      expect(find.text('Model set to Model One.'), findsOneWidget);
+    });
+
     testWidgets('`/help` lists the commands', (tester) async {
       final client = _FakeClient(details: const [_detail0]);
       await _pump(tester, client: client);
@@ -1339,6 +1593,146 @@ void main() {
       await _pressEnter(tester);
 
       expect(find.text('Not available from this screen.'), findsOneWidget);
+    });
+  });
+
+  group('StructuredSessionScreen mode and variant keys (issue #46)', () {
+    Future<void> pressControlT(WidgetTester tester) async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyT);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyT);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('Tab toggles the mode, but not while the menu is open', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0, _detailAgentPlan, _detailAgentBuild],
+      );
+      await _pump(tester, client: client);
+
+      // The menu open: Tab is the focus navigation, not a mode toggle.
+      await _typePrompt(tester, '/models');
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      expect(client.agents, isEmpty);
+
+      // Esc closes the menu and clears the field; from there on, Tab
+      // toggles the mode (unset to plan, plan to build).
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.agents, const [('ses_1', 'plan')]);
+      expect(find.text('Mode: plan.'), findsOneWidget);
+      expect(find.text('plan'), findsOneWidget);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.agents, const [('ses_1', 'plan'), ('ses_1', 'build')]);
+      expect(find.text('Mode: build.'), findsOneWidget);
+      expect(find.text('build'), findsOneWidget);
+      // The keys consumed the events: nothing was typed in the field.
+      expect(_promptText(tester), isEmpty);
+    });
+
+    testWidgets('Ctrl+T cycles the current model variant, wrapping to none', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [
+          _detailVarNone,
+          _detailVarLow,
+          _detailVarMedium,
+          _detailVarHigh,
+          _detailVarNone,
+        ],
+        models: const [
+          ModelOption(
+            id: 'mod1',
+            providerId: 'prov1',
+            name: 'Model One',
+            variants: ['low', 'medium', 'high'],
+          ),
+        ],
+        currentModels: const [
+          ModelRef(id: 'mod1', providerId: 'prov1'),
+          ModelRef(id: 'mod1', providerId: 'prov1', variant: 'low'),
+          ModelRef(id: 'mod1', providerId: 'prov1', variant: 'medium'),
+          ModelRef(id: 'mod1', providerId: 'prov1', variant: 'high'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+
+      // A bare T is a character, not the shortcut: no cycle, no insertion.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyT);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyT);
+      await tester.pump();
+      expect(client.currentModelCalls, 0);
+      expect(client.setModels, isEmpty);
+      expect(_promptText(tester), isEmpty);
+
+      // The model chip is the session's model from the detail.
+      expect(find.text('prov1/mod1'), findsOneWidget);
+
+      await pressControlT(tester);
+      expect(find.text('Variant set to low.'), findsOneWidget);
+      expect(find.text('low'), findsOneWidget);
+
+      await pressControlT(tester);
+      expect(find.text('Variant set to medium.'), findsOneWidget);
+      expect(find.text('medium'), findsOneWidget);
+
+      await pressControlT(tester);
+      expect(find.text('Variant set to high.'), findsOneWidget);
+      expect(find.text('high'), findsOneWidget);
+
+      // High is the last variant: it cycles back to none (the model is set
+      // without a variant).
+      await pressControlT(tester);
+      expect(client.setModels, const [
+        ModelRef(id: 'mod1', providerId: 'prov1', variant: 'low'),
+        ModelRef(id: 'mod1', providerId: 'prov1', variant: 'medium'),
+        ModelRef(id: 'mod1', providerId: 'prov1', variant: 'high'),
+        ModelRef(id: 'mod1', providerId: 'prov1'),
+      ]);
+      expect(find.text('Variant set to none.'), findsOneWidget);
+      expect(find.byKey(const ValueKey('structured-variant')), findsNothing);
+    });
+
+    testWidgets('Ctrl+T with no session model reports it and sets nothing', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.keyT);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.keyT);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.setModels, isEmpty);
+      expect(find.text('No model set for the session.'), findsOneWidget);
     });
   });
 }

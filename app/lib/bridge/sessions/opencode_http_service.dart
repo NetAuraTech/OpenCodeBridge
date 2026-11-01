@@ -179,6 +179,8 @@ class OpencodeHttpService implements OpencodeService {
       tokens: _tokensFrom(map['tokens']),
       outcome: outcome,
       contextLimit: await _contextLimitFor(model),
+      model: model == null ? null : ModelRef.fromJson(model),
+      agent: map['agent'] is String ? map['agent'] as String : null,
     );
   }
 
