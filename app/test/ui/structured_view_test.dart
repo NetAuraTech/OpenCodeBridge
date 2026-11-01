@@ -1453,6 +1453,31 @@ void main() {
       expect(_promptText(tester), isEmpty);
     });
 
+    testWidgets('the selection highlight runs edge to edge of the card', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/');
+      await tester.pump();
+
+      // The highlight is the row's background: it spans the whole card
+      // width, with no padding on either side of it.
+      final row = tester.getRect(_commandRowFinder('models'));
+      final list = tester.getRect(_menuFinder());
+      expect(
+        row.left,
+        list.left,
+        reason: 'no left padding around the highlight',
+      );
+      expect(
+        row.right,
+        list.right,
+        reason: 'no right padding around the highlight',
+      );
+    });
+
     testWidgets('Esc closes the menu by clearing the field', (tester) async {
       final client = _FakeClient(details: const [_detail0]);
       await _pump(tester, client: client);

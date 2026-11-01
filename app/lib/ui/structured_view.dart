@@ -2518,87 +2518,96 @@ class _PromptBarState extends State<_PromptBar> {
                 ),
               ],
             ),
-            child: _matches.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    child: const Text('No matching command'),
-                  )
-                : ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 280),
-                    child: ListView.builder(
-                      key: const ValueKey('structured-command-menu'),
-                      shrinkWrap: true,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      itemCount: _matches.length,
-                      itemBuilder: (context, index) {
-                        final command = _matches[index];
-                        final selected = index == _selected;
-                        return Material(
-                          color: selected
-                              ? scheme.secondaryContainer
-                              : Colors.transparent,
-                          child: InkWell(
-                            key: ValueKey(
-                              'structured-command-row-${command.name}',
-                            ),
-                            onTap: () => _activate(command),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 8,
+            child: ClipRRect(
+              // The rows run edge to edge (the selection highlight is full
+              // width); the clip keeps them inside the card's rounded
+              // corners.
+              borderRadius: BorderRadius.circular(8),
+              child: _matches.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      child: const Text('No matching command'),
+                    )
+                  : ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: ListView.builder(
+                        key: const ValueKey('structured-command-menu'),
+                        shrinkWrap: true,
+                        itemCount: _matches.length,
+                        itemBuilder: (context, index) {
+                          final command = _matches[index];
+                          final selected = index == _selected;
+                          return Material(
+                            color: selected
+                                ? scheme.secondaryContainer
+                                : Colors.transparent,
+                            child: InkWell(
+                              key: ValueKey(
+                                'structured-command-row-${command.name}',
                               ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Text(
-                                        '/${command.name}',
-                                        style: TextStyle(
-                                          fontWeight: selected
-                                              ? FontWeight.bold
-                                              : FontWeight.w600,
-                                        ),
-                                      ),
-                                      if (command.takesArg &&
-                                          command.argHint != null)
+                              onTap: () => _activate(command),
+                              child: Padding(
+                                // The text keeps its inset now that the row
+                                // (and its highlight) is full width.
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 8,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
                                         Text(
-                                          ' ${command.argHint}',
+                                          '/${command.name}',
                                           style: TextStyle(
-                                            color: scheme.outline,
-                                            fontSize: 13,
+                                            fontWeight: selected
+                                                ? FontWeight.bold
+                                                : FontWeight.w600,
                                           ),
                                         ),
-                                      const Spacer(),
-                                      if (command.family ==
-                                          CommandFamily.custom)
-                                        Text(
-                                          'custom',
-                                          style: const TextStyle(fontSize: 11),
-                                        ),
-                                    ],
-                                  ),
-                                  if (command.subtitle != command.name)
-                                    Text(
-                                      command.subtitle,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: scheme.outline,
-                                        fontSize: 12,
-                                      ),
+                                        if (command.takesArg &&
+                                            command.argHint != null)
+                                          Text(
+                                            ' ${command.argHint}',
+                                            style: TextStyle(
+                                              color: scheme.outline,
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                        const Spacer(),
+                                        if (command.family ==
+                                            CommandFamily.custom)
+                                          Text(
+                                            'custom',
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                            ),
+                                          ),
+                                      ],
                                     ),
-                                ],
+                                    if (command.subtitle != command.name)
+                                      Text(
+                                        command.subtitle,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: scheme.outline,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                        );
-                      },
+                          );
+                        },
+                      ),
                     ),
-                  ),
+            ),
           ),
         Padding(
           key: const ValueKey('structured-prompt'),
