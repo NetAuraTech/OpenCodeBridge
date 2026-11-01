@@ -1384,6 +1384,75 @@ void main() {
       expect(find.text('MCP servers'), findsOneWidget);
     });
 
+    testWidgets(
+      'up moves the selection up one row, without jumping to the top',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+
+        await _typePrompt(tester, '/');
+        await tester.pump();
+        expect(_menuFinder(), findsOneWidget);
+
+        // Four downs select `undo` (catalog index 4)…
+        for (var i = 0; i < 4; i++) {
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+          await tester.pump();
+        }
+        // …one up returns to `compact` (index 3) — not the top row. The arrows
+        // must not move the field's cursor: it stays at the end of the text.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowUp);
+        await tester.pump();
+
+        final editable = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        expect(
+          editable.textEditingValue.selection,
+          const TextSelection.collapsed(offset: 1),
+          reason: 'the menu owns the arrows; the field cursor stays put',
+        );
+
+        await _pressEnter(tester);
+        await tester.pump();
+
+        expect(
+          client.compacts,
+          1,
+          reason: 'up must land on `compact` (one up)',
+        );
+        expect(_promptText(tester), isEmpty);
+      },
+    );
+
+    testWidgets('a down after an up moves one row, it is not swallowed', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/');
+      await tester.pump();
+
+      // Down to `compact` (index 3), up to `variants` (index 2)…
+      for (var i = 0; i < 3; i++) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+      }
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      // …and a single down returns to `compact`: the first down after an up
+      // must not be eaten by the field's cursor moving.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+
+      await _pressEnter(tester);
+      await tester.pump();
+
+      expect(client.compacts, 1, reason: 'the down after the up must run');
+      expect(_promptText(tester), isEmpty);
+    });
+
     testWidgets('Esc closes the menu by clearing the field', (tester) async {
       final client = _FakeClient(details: const [_detail0]);
       await _pump(tester, client: client);

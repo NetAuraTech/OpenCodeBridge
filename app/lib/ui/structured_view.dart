@@ -2378,8 +2378,13 @@ class _PromptBarState extends State<_PromptBar> {
   @override
   void didUpdateWidget(covariant _PromptBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // The custom commands landed while the menu is open: re-filter.
-    if (oldWidget.commands != widget.commands && _menuOpen) _syncMenu();
+    // The custom commands landed while the menu is open: re-filter (the
+    // synced token is invalidated so the re-filter re-selects the top row,
+    // as a re-typed token would).
+    if (oldWidget.commands != widget.commands && _menuOpen) {
+      _syncedToken = null;
+      _syncMenu();
+    }
   }
 
   @override
@@ -2388,24 +2393,33 @@ class _PromptBarState extends State<_PromptBar> {
     super.dispose();
   }
 
+  /// The command token [_syncMenu] last filtered; a selection-only change
+  /// (the cursor moved) re-runs [_syncMenu] without re-selecting the top
+  /// row, so the menu's selection survives cursor moves.
+  String? _syncedToken;
+
   /// Re-filters the menu from the field's text. The command token is the
   /// text after the leading slash up to the first space (the TUI's live
-  /// filter); everything after the space is the command's argument.
+  /// filter); everything after the space is the command's argument. A
+  /// re-typed token re-selects the top row (the TUI does the same); a
+  /// selection-only change (the cursor moved) keeps the current row.
   void _syncMenu() {
     final text = widget.controller.text;
+    String? token;
     var matches = const <SlashCommand>[];
     if (text.startsWith('/')) {
       final space = text.indexOf(' ');
-      final token = space >= 0 ? text.substring(1, space) : text.substring(1);
+      token = space >= 0 ? text.substring(1, space) : text.substring(1);
       matches = [
         for (final c in widget.commands)
           if (c.matches(token)) c,
       ];
     }
+    final tokenChanged = token != _syncedToken;
+    _syncedToken = token;
     setState(() {
       _matches = matches;
-      // A re-typed prefix re-selects the top row (the TUI does the same).
-      _selected = matches.isEmpty ? -1 : 0;
+      if (tokenChanged) _selected = matches.isEmpty ? -1 : 0;
     });
     if (_menuOpen) widget.onMenuOpened();
   }
@@ -2434,29 +2448,40 @@ class _PromptBarState extends State<_PromptBar> {
     widget.onSend();
   }
 
-  /// The arrow keys move the menu selection (the TUI parity); Esc closes
-  /// the menu by clearing the field. With the menu closed, Tab toggles the
-  /// session's mode (`build`/`plan`) and Ctrl+T cycles the current model's
-  /// variant (the TUI's `agent.cycle` / `variant.cycle`), without inserting
-  /// anything in the field.
+  /// The arrow keys move the menu selection (the TUI parity) and nothing
+  /// else: they are handled here, before the app's text shortcuts can move
+  /// the field's cursor — a cursor move would re-run [_syncMenu] and jump
+  /// the selection back to the top row. Esc closes the menu by clearing the
+  /// field. With the menu closed, Tab toggles the session's mode
+  /// (`build`/`plan`) and Ctrl+T cycles the current model's variant (the
+  /// TUI's `agent.cycle` / `variant.cycle`), without inserting anything in
+  /// the field.
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent) {
       final key = event.logicalKey;
-      if (_matches.isNotEmpty && _selected >= 0) {
-        if (key == LogicalKeyboardKey.arrowDown) {
-          setState(() {
-            _selected = _selected + 1 < _matches.length
-                ? _selected + 1
-                : _selected;
-          });
-        } else if (key == LogicalKeyboardKey.arrowUp) {
-          setState(() => _selected = _selected - 1 >= 0 ? _selected - 1 : 0);
-        }
-      }
       if (key == LogicalKeyboardKey.escape) {
         widget.controller.clear();
       }
-      if (_menuOpen) return KeyEventResult.ignored;
+      if (_menuOpen) {
+        if (key == LogicalKeyboardKey.arrowDown ||
+            key == LogicalKeyboardKey.arrowUp) {
+          if (_matches.isNotEmpty && _selected >= 0) {
+            if (key == LogicalKeyboardKey.arrowDown) {
+              setState(() {
+                _selected = _selected + 1 < _matches.length
+                    ? _selected + 1
+                    : _selected;
+              });
+            } else {
+              setState(
+                () => _selected = _selected - 1 >= 0 ? _selected - 1 : 0,
+              );
+            }
+          }
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      }
       if (key == LogicalKeyboardKey.tab) {
         widget.onToggleMode();
         return KeyEventResult.handled;
