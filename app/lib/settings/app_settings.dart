@@ -16,6 +16,7 @@ class AppSettings {
   static const String _keyNotifyPermission = 'notify.permissionAsked';
   static const String _keyNotifyTurnEnded = 'notify.turnEnded';
   static const String _keyNotifyDocker = 'notify.dockerContainer';
+  static const String _keyFirebaseProject = 'notify.firebaseProject';
 
   final SharedPreferences _prefs;
 
@@ -62,4 +63,16 @@ class AppSettings {
 
   set notifyDockerContainer(bool value) =>
       _prefs.setBool(_keyNotifyDocker, value);
+
+  /// The Firebase project's `google-services.json` (issue #24, pasted in
+  /// Settings): the FCM token's setup step. `''` when not set yet.
+  String get firebaseProjectJson => _prefs.getString(_keyFirebaseProject) ?? '';
+
+  set firebaseProjectJson(String json) {
+    if (json.trim().isEmpty) {
+      _prefs.remove(_keyFirebaseProject);
+    } else {
+      _prefs.setString(_keyFirebaseProject, json);
+    }
+  }
 }

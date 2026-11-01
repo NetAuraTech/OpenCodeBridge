@@ -53,6 +53,11 @@ class EventHub {
     unawaited(connection.done.then((_) => _live.remove(connection)));
   }
 
+  /// Detaches [connection] from the fan-out without closing it (the
+  /// bridge's notify reload swaps the push dispatcher for a fresh one);
+  /// the caller owns the connection's close.
+  void remove(EventConnection connection) => _live.remove(connection);
+
   /// Fan out a verbatim `data:` payload to every live connection.
   void emit(String rawPayload) {
     if (_closed) return;

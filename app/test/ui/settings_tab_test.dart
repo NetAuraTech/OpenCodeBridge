@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/access_session.dart';
+import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
 import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/app_info.dart';
 import 'package:opencodebridge/app_mode.dart';
@@ -96,6 +99,10 @@ void main() {
     FakeTunnelClient? tunnelClient,
     AccessSession? access,
     String? tunnelUrl,
+    VoidCallback? onNotifyToggled,
+    VoidCallback? onPushProjectCommitted,
+    VoidCallback? onServiceAccountCommitted,
+    String? serviceAccountPath,
   }) async {
     final settings = await AppSettings.load();
     if (tunnelUrl != null) settings.tunnelUrl = tunnelUrl;
@@ -108,6 +115,10 @@ void main() {
             localBridgeUri: localBridgeUri,
             tunnelClient: tunnelClient ?? FakeTunnelClient(),
             access: access,
+            onNotifyToggled: onNotifyToggled,
+            onPushProjectCommitted: onPushProjectCommitted,
+            onServiceAccountCommitted: onServiceAccountCommitted,
+            serviceAccountPath: serviceAccountPath,
           ),
         ),
       ),
@@ -123,7 +134,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final settings = await pumpSettings(tester, mode: AppMode.client);
 
-      final field = find.byType(TextField);
+      final field = find.byKey(const ValueKey('tunnel-url-field'));
       expect(field, findsOneWidget);
 
       await tester.enterText(field, 'https://bridge.example.com');
@@ -141,7 +152,7 @@ void main() {
       final uri = Uri.parse('http://127.0.0.1:48201/');
       await pumpSettings(tester, mode: AppMode.server, localBridgeUri: uri);
 
-      expect(find.byType(TextField), findsNothing);
+      expect(find.byKey(const ValueKey('tunnel-url-field')), findsNothing);
       expect(find.textContaining('http://127.0.0.1:48201/'), findsOneWidget);
     });
 
@@ -162,7 +173,267 @@ void main() {
     testWidgets('shows the app version', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, mode: AppMode.client);
+
+      // About sits below the fold (the push setup grew the tab): scroll to it.
+      await tester.dragUntilVisible(
+        find.textContaining(kAppVersion),
+        find.byType(ListView),
+        const Offset(0, -200),
+      );
       expect(find.textContaining(kAppVersion), findsOneWidget);
+    });
+  });
+
+  group('SettingsTab push (issue #24)', () {
+    const String kGoodProjectJson = '''
+        {
+          "project_info": {
+            "project_number": "123456789012",
+            "project_id": "opencodebridge-test",
+            "storage_bucket": "opencodebridge-test.appspot.com"
+          },
+          "client": [
+            {
+              "client_info": {
+                "mobilesdk_app_id": "1:123456789012:android:abcdef123456",
+                "android_client_info": {
+                  "package_name": "com.example.opencodebridge"
+                }
+              },
+              "oauth_client": [
+                {
+                  "client_id": "123456789012-xyz.apps.googleusercontent.com",
+                  "client_type": 3
+                }
+              ],
+              "api_key": [
+                {
+                  "current_key": "AIzaSyA-test-key"
+                }
+              ]
+            }
+          ]
+        }
+        ''';
+
+    testWidgets('a toggle change re-registers (onNotifyToggled)', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var toggles = 0;
+      final settings = await pumpSettings(
+        tester,
+        onNotifyToggled: () => toggles++,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('notify-turn-ended')));
+      await tester.pump();
+
+      expect(settings.notifyTurnEnded, isTrue);
+      expect(toggles, 1);
+    });
+
+    testWidgets('an invalid paste shows the problem and saves nothing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      final settings = await pumpSettings(
+        tester,
+        onPushProjectCommitted: () => commits++,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('push-project-field')),
+        'not a json',
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('push-project-save')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('push-project-save')));
+      await tester.pump();
+
+      expect(
+        find.text('That is not a valid google-services.json.'),
+        findsOneWidget,
+      );
+      expect(settings.firebaseProjectJson, '');
+      expect(commits, 0);
+    });
+
+    testWidgets('a valid paste saves the project and commits', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      final settings = await pumpSettings(
+        tester,
+        onPushProjectCommitted: () => commits++,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('push-project-field')),
+        kGoodProjectJson,
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('push-project-save')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('push-project-save')));
+      await tester.pump();
+
+      expect(settings.firebaseProjectJson, kGoodProjectJson.trim());
+      expect(commits, 1);
+      expect(
+        find.text('Firebase project: opencodebridge-test.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a saved project shows its project id on load', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'notify.firebaseProject': kGoodProjectJson,
+      });
+      await pumpSettings(tester);
+
+      expect(
+        find.text('Firebase project: opencodebridge-test.'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('SettingsTab service account (issue #24, server mode)', () {
+    const String kAccountJson = '''
+        {
+          "type": "service_account",
+          "project_id": "opencodebridge-test",
+          "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+          "client_email": "svc@opencodebridge-test.iam.gserviceaccount.com",
+          "client_id": "123"
+        }
+        ''';
+
+    late Directory home;
+    late String accountPath;
+
+    setUp(() async {
+      // The section reads and writes the app-owned file; point it at a temp
+      // file (the tab's `serviceAccountPath` seam) instead of the real
+      // `~/.config/opencodebridge/firebase/service-account.json`.
+      home = await Directory.systemTemp.createTemp('opencodebridge-sa-ui');
+      accountPath = '${home.path}/service-account.json';
+    });
+
+    tearDown(() async {
+      await home.delete(recursive: true);
+    });
+
+    testWidgets('an unconfigured host shows not configured', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        serviceAccountPath: accountPath,
+      );
+
+      expect(find.text('Service account: not configured.'), findsOneWidget);
+    });
+
+    testWidgets('a valid paste installs the file and commits', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        onServiceAccountCommitted: () => commits++,
+        serviceAccountPath: accountPath,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('service-account-field')),
+        kAccountJson,
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('service-account-save')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('service-account-save')));
+      await tester.pump();
+
+      final file = File(accountPath);
+      expect(file.existsSync(), isTrue);
+      expect(file.readAsStringSync(), '${kAccountJson.trim()}\n');
+      expect(commits, 1);
+      expect(
+        find.text(
+          'Service account: svc@opencodebridge-test.iam.gserviceaccount.com.',
+        ),
+        findsOneWidget,
+      );
+      // The field clears after a save (the key stays in the file).
+      expect(
+        (tester.widget(
+          find.byKey(const ValueKey('service-account-field')),
+        ) as TextField).controller?.text,
+        '',
+      );
+    });
+
+    testWidgets('an invalid paste shows the problem and saves nothing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        onServiceAccountCommitted: () => commits++,
+        serviceAccountPath: accountPath,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('service-account-field')),
+        'not a json',
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('service-account-save')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('service-account-save')));
+      await tester.pump();
+
+      expect(
+        find.text('That is not a valid service account JSON.'),
+        findsOneWidget,
+      );
+      expect(File(accountPath).existsSync(), isFalse);
+      expect(commits, 0);
+    });
+
+    testWidgets('an installed account shows its email on load', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      FirebaseServiceAccount.install(kAccountJson, path: accountPath);
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        serviceAccountPath: accountPath,
+      );
+
+      expect(
+        find.text(
+          'Service account: svc@opencodebridge-test.iam.gserviceaccount.com.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('client mode shows no service account section', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, mode: AppMode.client);
+
+      expect(find.byKey(const ValueKey('service-account-field')), findsNothing);
+      // The client side keeps the google-services.json field.
+      expect(find.byKey(const ValueKey('push-project-field')), findsOneWidget);
     });
   });
 

@@ -3,20 +3,19 @@ import 'package:flutter/material.dart';
 import '../access/access_session.dart';
 import '../app_info.dart';
 import '../app_mode.dart';
+import '../bridge/notify/firebase_service_account.dart';
 import '../client/authenticated_http.dart';
 import '../client/tunnel_client.dart';
 import '../model/tunnel_report.dart';
+import '../notify/firebase_project.dart';
 import '../settings/app_settings.dart';
 import '../tunnel_url.dart';
 import 'tunnel_setup_wizard.dart';
 
 /// The Settings tab (spec: section 13): host connection (client mode: the
-/// tunnel URL), the tunnel status (issue #22), the three notification
-/// toggles, and the app version.
-///
-/// The notification toggles persist now and become live with the push
-/// ticket; the Cloudflare Access login state arrives with the remote-access
-/// ticket.
+/// tunnel URL), the Access login (issue #23), the tunnel status (issue
+/// #22), the push setup (issue #24: the Firebase project pasted once, and
+/// the three per-event toggles), and the app version.
 class SettingsTab extends StatefulWidget {
   const SettingsTab({
     super.key,
@@ -27,6 +26,10 @@ class SettingsTab extends StatefulWidget {
     this.tunnelClient,
     this.access,
     this.auth,
+    this.onNotifyToggled,
+    this.onPushProjectCommitted,
+    this.onServiceAccountCommitted,
+    this.serviceAccountPath,
   });
 
   final AppSettings settings;
@@ -50,6 +53,23 @@ class SettingsTab extends StatefulWidget {
   /// The Access login's header provider (issue #23, client mode); `null` in
   /// server mode.
   final AuthHeaderProvider? auth;
+
+  /// Called on every push-toggle change (issue #24), so the app can
+  /// re-register this device with the toggles as they are now.
+  final VoidCallback? onNotifyToggled;
+
+  /// Called when the user saves the Firebase project (issue #24), so the
+  /// app can re-initialize the push flow with the pasted project.
+  final VoidCallback? onPushProjectCommitted;
+
+  /// Called when the user saves the service account (issue #24, server
+  /// mode), so the app can reload the running bridge's push dispatch with
+  /// the freshly written file.
+  final VoidCallback? onServiceAccountCommitted;
+
+  /// Where the service account file lives ([FirebaseServiceAccount.defaultPath]
+  /// by default; tests point it at a temp dir).
+  final String? serviceAccountPath;
 
   @override
   State<SettingsTab> createState() => _SettingsTabState();
@@ -87,6 +107,7 @@ class _SettingsTabState extends State<SettingsTab> {
           padding: const EdgeInsets.symmetric(horizontal: 8),
           child: TextField(
             controller: _urlController,
+            key: const ValueKey('tunnel-url-field'),
             decoration: const InputDecoration(
               labelText: 'Tunnel URL',
               hintText: 'https://bridge.example.com',
@@ -118,23 +139,42 @@ class _SettingsTabState extends State<SettingsTab> {
       const SizedBox(height: 8),
       const _SectionLabel('Notifications'),
       SwitchListTile(
+        key: const ValueKey('notify-permission-asked'),
         title: const Text('Permission requested'),
         value: widget.settings.notifyPermissionAsked,
-        onChanged: (value) =>
-            setState(() => widget.settings.notifyPermissionAsked = value),
+        onChanged: (value) {
+          setState(() => widget.settings.notifyPermissionAsked = value);
+          widget.onNotifyToggled?.call();
+        },
       ),
       SwitchListTile(
+        key: const ValueKey('notify-turn-ended'),
         title: const Text('Turn ended'),
         value: widget.settings.notifyTurnEnded,
-        onChanged: (value) =>
-            setState(() => widget.settings.notifyTurnEnded = value),
+        onChanged: (value) {
+          setState(() => widget.settings.notifyTurnEnded = value);
+          widget.onNotifyToggled?.call();
+        },
       ),
       SwitchListTile(
+        key: const ValueKey('notify-docker-container'),
         title: const Text('Docker container stopped or crashed'),
         value: widget.settings.notifyDockerContainer,
-        onChanged: (value) =>
-            setState(() => widget.settings.notifyDockerContainer = value),
+        onChanged: (value) {
+          setState(() => widget.settings.notifyDockerContainer = value);
+          widget.onNotifyToggled?.call();
+        },
       ),
+      if (widget.mode == AppMode.client)
+        _FirebaseProjectSection(
+          settings: widget.settings,
+          onCommitted: widget.onPushProjectCommitted,
+        )
+      else
+        _ServiceAccountSection(
+          onCommitted: widget.onServiceAccountCommitted,
+          path: widget.serviceAccountPath,
+        ),
       const SizedBox(height: 8),
       const _SectionLabel('About'),
       Padding(
@@ -616,6 +656,219 @@ class _AccessSectionState extends State<_AccessSection> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The push setup step (issue #24): the user pastes the `google-services.json`
+/// of their Firebase project (the Firebase Console downloads it for this
+/// app's Android package). It is parsed at runtime, so one build works with
+/// any project and switching projects is a Settings edit, not a rebuild;
+/// saving calls [onCommitted] so the app re-initializes the push flow with
+/// it.
+class _FirebaseProjectSection extends StatefulWidget {
+  const _FirebaseProjectSection({
+    required this.settings,
+    required this.onCommitted,
+  });
+
+  final AppSettings settings;
+  final VoidCallback? onCommitted;
+
+  @override
+  State<_FirebaseProjectSection> createState() =>
+      _FirebaseProjectSectionState();
+}
+
+class _FirebaseProjectSectionState extends State<_FirebaseProjectSection> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.settings.firebaseProjectJson,
+  );
+
+  /// The last save's validation problem, when it had one.
+  String? _problem;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit() {
+    final raw = _controller.text.trim();
+    if (raw.isNotEmpty && FirebaseProject.parse(raw) == null) {
+      setState(() => _problem = 'That is not a valid google-services.json.');
+      return;
+    }
+    widget.settings.firebaseProjectJson = raw;
+    setState(() => _problem = null);
+    widget.onCommitted?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stored = widget.settings.firebaseProjectJson;
+    final storedProject = stored.isEmpty ? null : FirebaseProject.parse(stored);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            storedProject == null
+                ? (stored.isEmpty
+                      ? 'Firebase project: not configured.'
+                      : 'Firebase project: saved value is not valid.')
+                : 'Firebase project: ${storedProject.options.projectId}.',
+            key: const ValueKey('push-project-status'),
+            style: const TextStyle(fontSize: 12),
+          ),
+          TextField(
+            controller: _controller,
+            key: const ValueKey('push-project-field'),
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'google-services.json',
+              helperText:
+                  'Paste the JSON from the Firebase Console (Android app); '
+                  'it configures push on this device only.',
+            ),
+          ),
+          if (_problem != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                _problem!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
+              key: const ValueKey('push-project-save'),
+              onPressed: _commit,
+              child: const Text('Save'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The host's push setup step (issue #24, server mode): the user pastes the
+/// Firebase service account JSON (the Firebase Console's
+/// Project settings → Service accounts download), which the app writes to
+/// the file the bridge reads at
+/// `~/.config/opencodebridge/firebase/service-account.json`. Saving calls
+/// [onCommitted] so the app reloads the running bridge's push dispatch
+/// with it (the bridge stays up; no restart).
+class _ServiceAccountSection extends StatefulWidget {
+  const _ServiceAccountSection({required this.onCommitted, this.path});
+
+  final VoidCallback? onCommitted;
+
+  /// Where the service account file lives ([FirebaseServiceAccount.defaultPath]
+  /// by default; tests point it at a temp dir).
+  final String? path;
+
+  @override
+  State<_ServiceAccountSection> createState() => _ServiceAccountSectionState();
+}
+
+class _ServiceAccountSectionState extends State<_ServiceAccountSection> {
+  late final TextEditingController _controller = TextEditingController();
+
+  /// The installed account, read from the file on init and after each save.
+  late FirebaseServiceAccount? _account;
+
+  /// The last save's validation problem, when it had one.
+  String? _problem;
+
+  @override
+  void initState() {
+    super.initState();
+    _account = FirebaseServiceAccount.tryLoad(path: widget.path);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit() {
+    final raw = _controller.text.trim();
+    if (raw.isEmpty) {
+      setState(() => _problem = 'Paste the service account JSON first.');
+      return;
+    }
+    try {
+      final account = FirebaseServiceAccount.install(raw, path: widget.path);
+      _controller.clear();
+      setState(() {
+        _account = account;
+        _problem = null;
+      });
+      widget.onCommitted?.call();
+    } on ArgumentError {
+      setState(() => _problem = 'That is not a valid service account JSON.');
+    } catch (_) {
+      setState(() => _problem = 'Could not write the service account file.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final account = _account;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            account == null
+                ? 'Service account: not configured.'
+                : 'Service account: ${account.email}.',
+            key: const ValueKey('service-account-status'),
+            style: const TextStyle(fontSize: 12),
+          ),
+          TextField(
+            controller: _controller,
+            key: const ValueKey('service-account-field'),
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'service-account.json',
+              helperText:
+                  'Paste the JSON from the Firebase Console (Project settings → '
+                  'Service accounts); it is saved on this host and lets the '
+                  'bridge send push.',
+            ),
+          ),
+          if (_problem != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                _problem!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
+              key: const ValueKey('service-account-save'),
+              onPressed: _commit,
+              child: const Text('Save'),
+            ),
+          ),
         ],
       ),
     );
