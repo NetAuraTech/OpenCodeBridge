@@ -192,7 +192,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final position = _scroll.position;
-    final atBottom = position.pixels >= position.maxScrollExtent - 8;
+    // The newest message is the list's anchor (offset 0): "at the end" is
+    // the viewport sitting at the anchor (within the stick threshold).
+    final atBottom = position.pixels <= 8;
     _stick = atBottom;
     if (atBottom != _atBottom) {
       _atBottom = atBottom;
@@ -200,43 +202,32 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
-  /// Keeps the history at the bottom for the next frame when [_stick] holds
-  /// (the content just grew by a streamed delta).
-  void _followBottomNextFrame() {
-    if (!mounted) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _followBottom());
+  /// After content grows at the newest end (the list's anchor at offset 0),
+  /// keeps a scrolled-up reader's view stable: the growth shifts every other
+  /// message up by the grown amount, so the reader's scroll follows by the
+  /// same. A following reader needs nothing — the anchor is pinned at offset
+  /// 0, so the newest line stays at the bottom of the viewport for free.
+  void _compensateGrow(double oldScroll, double oldMax) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      if (_stick) return; // the reader returned to the anchor meanwhile.
+      final position = _scroll.position;
+      final delta = position.maxScrollExtent - oldMax;
+      if (delta > 0) position.jumpTo(oldScroll + delta);
+    });
   }
 
-  void _followBottom() {
-    if (!mounted || !_stick || !_scroll.hasClients) return;
-    final position = _scroll.position;
-    if (position.pixels < position.maxScrollExtent) {
-      position.jumpTo(position.maxScrollExtent);
-      // The list is lazy: the un-built tail's extent is an estimate
-      // (the built children's average), so one jump lands short of the
-      // true bottom. Re-check next frame — the tail builds as the
-      // viewport advances, the estimate tightens, and this converges
-      // onto the last message.
-      _followBottomNextFrame();
-    }
-  }
-
-  /// The jump-to-end button: animates to the bottom and re-engages the
-  /// bottom-follow. The animation's target is the *estimated* max while
-  /// the tail is still un-built, so a settle pass follows the animation;
-  /// it is a no-op if the user scrolled away mid-flight (which drops
-  /// [_stick] and cancels it).
+  /// The jump-to-end button: animates back to the anchor (the newest message)
+  /// and re-engages the bottom-follow. The anchor is offset 0, so the
+  /// animation lands exactly — no settle pass is needed.
   void _jumpToEnd() {
     if (!_scroll.hasClients) return;
     _stick = true;
-    final position = _scroll.position;
-    position
-        .animateTo(
-          position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        )
-        .whenComplete(_followBottomNextFrame);
+    _scroll.position.animateTo(
+      0.0,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
   }
 
   /// The initial state: detail (costs), history (tools in flight), and the
@@ -263,8 +254,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _seedLiveMessages();
         _seedContextUsed();
       });
+      // The newest message is the list's anchor (offset 0), so the open
+      // lands on it for free — no settle, no crawl.
       _stick = true;
-      _followBottomNextFrame();
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       setState(() {
@@ -507,6 +499,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _pendingReasoning.clear();
       return;
     }
+    final oldScroll = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+    final oldMax = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
     setState(() {
       for (final entry in _pendingDeltas.entries) {
         final index = _liveMessages[entry.key];
@@ -535,7 +529,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _pendingDeltas.clear();
       _pendingReasoning.clear();
     });
-    _followBottomNextFrame();
+    _compensateGrow(oldScroll, oldMax);
   }
 
   /// The session's compaction marker: the history's last compaction item
@@ -818,7 +812,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _seedLiveMessages();
         _seedContextUsed();
       });
-      _followBottomNextFrame();
+      // A following reader sits on the anchor (offset 0), which is the new
+      // newest message — nothing to re-settle.
     } on SessionsClientError {
       // Transient (e.g. the service restarted): the next boundary
       // re-fetches.
@@ -852,10 +847,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       await widget.client.prompt(widget.sessionId, text);
       _prompt.clear();
       if (!mounted) return;
+      final oldScroll = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+      final oldMax = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
       setState(() {
         _messages = [..._messages, SessionMessage(role: 'user', text: text)];
       });
-      _followBottomNextFrame();
+      _compensateGrow(oldScroll, oldMax);
     } on SessionsClientError catch (e) {
       if (mounted) {
         _snackBar(
@@ -929,13 +926,15 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   child: Stack(
                     children: [
                       Positioned.fill(
-                        // Lazy: only the visible messages build and lay
-                        // out. A non-lazy list re-laid out the whole
-                        // history on every streamed flush — the slow frame
-                        // that starved the event loop (and, with it, the
-                        // relay) during a long session.
+                        // Lazy, reversed chat list: the newest message is the
+                        // anchor (offset 0, the bottom of the screen), so the
+                        // open lands on the newest for free — no settle, no
+                        // crawl. Only the visible messages build and lay out;
+                        // the earlier ones are pulled in as the user scrolls
+                        // up through the history.
                         child: ListView.builder(
                           controller: _scroll,
+                          reverse: true,
                           padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                           itemCount: _messages.isEmpty ? 1 : _messages.length,
                           itemBuilder: (context, index) {
@@ -944,12 +943,15 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                                 text: 'No messages yet.',
                               );
                             }
-                            final message = _messages[index];
+                            // The list is reversed (newest at the anchor), so
+                            // map the list index back to the chronological
+                            // history index.
+                            final i = _messages.length - 1 - index;
+                            final message = _messages[i];
                             if (message.role == 'compaction') {
                               return _CompactionPane(
                                 message: message,
-                                inFlight:
-                                    _compacting && index == _compactionIndex,
+                                inFlight: _compacting && i == _compactionIndex,
                               );
                             }
                             final inFlight =
