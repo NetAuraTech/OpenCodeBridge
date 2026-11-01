@@ -47,6 +47,21 @@ void main() {
     expect(sent.link, 'opencodebridge://session/ses_1');
   });
 
+  test(
+      'permission.asked carries its session in data.sessionID (the real '
+      'wire shape: no durable seq)', () async {
+    await dispatcher.write(jsonEncode({
+      'id': 'evt_2',
+      'type': 'permission.asked',
+      'data': {'sessionID': 'ses_live', 'action': 'shell'},
+    }));
+    expect(sender.sent, hasLength(1));
+    final sent = sender.sent.single;
+    expect(sent.title, 'Permission requested');
+    expect(sent.body, 'label-ses_live');
+    expect(sent.link, 'opencodebridge://session/ses_live');
+  });
+
   test('each execution outcome pushes turnEnded with its title', () async {
     await dispatcher.write(opencode('session.execution.succeeded'));
     await dispatcher.write(opencode('session.execution.failed'));
@@ -63,7 +78,8 @@ void main() {
     );
   });
 
-  test('an opencode event without a durable session id is not a push', () async {
+  test('an opencode event with no session id anywhere is not a push',
+      () async {
     await dispatcher.write(opencode('permission.asked', session: null));
     expect(sender.sent, isEmpty);
   });

@@ -21,8 +21,10 @@ class _Event {
   /// The event's `data` object (the bridge-native `docker.*` payloads).
   final Map<String, Object?> data;
 
-  /// The session id, from `durable.aggregateID`, or `null` when the event
-  /// carries no durable seq.
+  /// The session id, from `durable.aggregateID` when the event carries a
+  /// durable seq, otherwise from `data.sessionID` (every session-scoped
+  /// opencode event includes it — `permission.asked` carries no durable
+  /// seq), or `null` when the event carries no session.
   final String? sessionId;
 }
 
@@ -140,16 +142,20 @@ class PushDispatcher implements EventConnection {
     final type = decoded['type'];
     if (type is! String) return null;
     final data = decoded['data'];
-    final durable = decoded['durable'];
+    final dataMap = data is Map<String, Object?> ? data : const <String, Object?>{};
+    // The session id: the durable seq when the event carries one, otherwise
+    // the `data.sessionID` that session-scoped opencode events include
+    // (`permission.asked` carries no durable seq, so this is its only
+    // session marker).
     String? sessionId;
+    final durable = decoded['durable'];
     if (durable is Map<String, Object?>) {
       final id = durable['aggregateID'];
       if (id is String) sessionId = id;
     }
-    return _Event(
-      type: type,
-      data: data is Map<String, Object?> ? data : const {},
-      sessionId: sessionId,
-    );
+    if (sessionId == null && dataMap['sessionID'] is String) {
+      sessionId = dataMap['sessionID'] as String;
+    }
+    return _Event(type: type, data: dataMap, sessionId: sessionId);
   }
 }
