@@ -64,6 +64,32 @@ class FirebaseServiceAccount {
     }
   }
 
+  /// Installs [raw] as the service-account file at [path] (the
+  /// [defaultPath] by default), validated first: the file is written
+  /// owner-only, and the parsed account is returned. Throws
+  /// [ArgumentError] when [raw] is not a service account JSON (the app's
+  /// Settings save surfaces it); a write failure throws like any
+  /// [File.writeAsStringSync].
+  static FirebaseServiceAccount install(String raw, {String? path}) {
+    final text = raw.trim();
+    final account = fromJsonString(text);
+    if (account == null) {
+      throw ArgumentError.value(text, 'raw', 'not a service account JSON');
+    }
+    final file = File(path ?? defaultPath());
+    file.parent.createSync(recursive: true);
+    file.writeAsStringSync('$text\n');
+    // Owner-only (Dart's `File` exposes no permissions API; the
+    // app-managed files live on Linux, as the cloudflared binary does).
+    try {
+      Process.runSync('chmod', ['600', file.path]);
+    } catch (_) {
+      // No chmod on the PATH: the file is written, permissions are best-
+      // effort.
+    }
+    return account;
+  }
+
   /// Parses one service account JSON, or `null` when it is not one.
   static FirebaseServiceAccount? fromJsonString(String raw) {
     Object? decoded;

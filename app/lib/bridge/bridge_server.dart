@@ -49,13 +49,18 @@ import 'tunnel/tunnel_supervisor.dart';
 class BridgeServer {
   BridgeServer._(
     this._server,
+    this._health,
+    this._sessions,
     this._terminals,
     this._events,
     this._windows,
     this._speed,
     this._docker,
     this._tunnel,
+    this._tunnelSetupService,
+    this._dockerLogKeepAlive,
     this._notify,
+    this._pushDispatcher,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -115,6 +120,15 @@ class BridgeServer {
 
   final HttpServer _server;
 
+  /// The health report served on every health request (the `start`
+  /// parameter, or the scaffold default).
+  final HealthReport Function() _health;
+
+  /// The sessions backend (spec section 5); `null` when this machine has no
+  /// shared opencode service, in which case the sessions endpoints report
+  /// `opencode_unavailable`.
+  final SessionsBackend? _sessions;
+
   /// The terminal backend (endpoint 10); `null` when this machine has no
   /// shared opencode service, in which case the terminal endpoint is 404.
   final TerminalBackend? _terminals;
@@ -143,11 +157,23 @@ class BridgeServer {
   /// `not_configured`.
   final TunnelSupervisor? _tunnel;
 
+  /// The assisted-setup service (issue #34, ADR-0003).
+  final TunnelSetup Function(TunnelSupervisor) _tunnelSetupService;
+
+  /// The keep-alive pacing on a followed container's log stream.
+  final Duration _dockerLogKeepAlive;
+
   /// The push dispatch (issue #24); `null` when this machine has no
   /// Firebase service account (the setup step not done) or no shared
   /// opencode service, in which case the device-token endpoint reports
-  /// `notify_unconfigured`.
-  final NotifyService? _notify;
+  /// `notify_unconfigured`. Replaced wholesale by [reloadNotify] (the
+  /// service-account file changed under a running bridge).
+  NotifyService? _notify;
+
+  /// The event-hub downstream [reloadNotify] built with [_notify] (the hub
+  /// fans its push events out like any other connection); `null` without a
+  /// live push dispatch or a hub.
+  PushDispatcher? _pushDispatcher;
 
   /// Starts the bridge on [host] and [port].
   ///
@@ -189,7 +215,8 @@ class BridgeServer {
   /// Firebase service account (the setup step) and taps the three push
   /// events off the event hub, or stays `null` (no service account, or no
   /// shared opencode service) in which case the endpoint reports
-  /// `notify_unconfigured`.
+  /// `notify_unconfigured`. [notifyCredential] pins that account file to an
+  /// explicit path (tests; the standard resolution otherwise).
   ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
@@ -207,6 +234,8 @@ class BridgeServer {
     TunnelSetup Function(TunnelSupervisor)? tunnelSetup,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
     NotifyService? notify,
+    String? notifyCredential,
+    Future<FcmSender> Function(FirebaseServiceAccount)? notifySenderFactory,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
@@ -223,8 +252,16 @@ class BridgeServer {
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
-    final notifyService =
-        notify ?? await BridgeServer._defaultNotify(backend, eventHub);
+    NotifyService? notifyService;
+    PushDispatcher? pushDispatcher;
+    if (notify != null) {
+      notifyService = notify;
+    } else {
+      (notifyService, pushDispatcher) =
+          await BridgeServer._defaultNotify(backend, eventHub,
+              path: notifyCredential,
+              senderFactory: notifySenderFactory);
+    }
     final tunnelSupervisor = tunnel;
     final tunnelSetupService =
         tunnelSetup ??
@@ -234,62 +271,72 @@ class BridgeServer {
           cli: TunnelCli(binary: supervisor.binary),
           credentialsDir: Directory('${homeDirectory()}/.cloudflared'),
         );
-    speed?.start();
-    if (tunnelSupervisor != null) {
-      await tunnelSupervisor.start();
-    }
-    server.listen((request) async {
-      final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
-      if (termBackend != null &&
-          sessionId != null &&
-          request.method == 'GET' &&
-          BridgeServer._isWebSocket(request)) {
-        await BridgeServer._handleTerminal(request, sessionId, termBackend);
-        return;
-      }
-      await BridgeServer._handle(
-        request,
-        health ?? BridgeServer._scaffoldHealth,
-        backend,
-        eventHub,
-        windowManager,
-        dockerBackend,
-        tunnelSupervisor,
-        tunnelSetupService,
-        dockerLogKeepAlive,
-        notifyService,
-      );
-    });
-    return BridgeServer._(
+    final bridge = BridgeServer._(
       server,
+      health ?? BridgeServer._scaffoldHealth,
+      backend,
       termBackend,
       eventHub,
       windowManager,
       speed,
       dockerBackend,
       tunnelSupervisor,
+      tunnelSetupService,
+      dockerLogKeepAlive,
       notifyService,
+      pushDispatcher,
+    );
+    speed?.start();
+    if (tunnelSupervisor != null) {
+      await tunnelSupervisor.start();
+    }
+    server.listen(bridge._route);
+    return bridge;
+  }
+
+  /// The per-request routing (the closure the HTTP server listens on): the
+  /// terminal attach (10), then every other endpoint. It reads the live
+  /// [_notify] per request, so [reloadNotify] can swap it under a running
+  /// bridge without rebinding the port (issue #24, the Settings save).
+  Future<void> _route(HttpRequest request) async {
+    final sessionId = BridgeServer._terminalSessionIn(request.uri.path);
+    if (_terminals != null &&
+        sessionId != null &&
+        request.method == 'GET' &&
+        BridgeServer._isWebSocket(request)) {
+      await BridgeServer._handleTerminal(request, sessionId, _terminals);
+      return;
+    }
+    await BridgeServer._handle(
+      request,
+      _health,
+      _sessions,
+      _events,
+      _windows,
+      _docker,
+      _tunnel,
+      _tunnelSetupService,
+      _dockerLogKeepAlive,
+      _notify,
     );
   }
 
-  /// The default notify service (issue #24): the Firebase service account
+  /// The default push dispatch (issue #24): the Firebase service account
   /// from the app-owned config (or `GOOGLE_APPLICATION_CREDENTIALS`), the
   /// Admin-SDK sender (the raw FCM HTTP v1 API stays the fallback,
   /// selected with `OPENCODEBRIDGE_FCM_TRANSPORT=http`), and the three push
-  /// events tapped off the event hub. `null` when this machine has no
-  /// service account (the setup step not done) or no shared opencode
-  /// service, in which case the device-token endpoint reports
-  /// `notify_unconfigured`.
-  static Future<NotifyService?> _defaultNotify(
+  /// events tapped off the event hub. `(null, null)` when this machine has
+  /// no service account (the setup step not done), in which case the
+  /// device-token endpoint reports `notify_unconfigured`.
+  static Future<(NotifyService?, PushDispatcher?)> _defaultNotify(
     SessionsBackend? backend,
-    EventHub? hub,
-  ) async {
-    final account = FirebaseServiceAccount.tryLoad();
-    if (account == null) return null;
-    final transport = Platform.environment['OPENCODEBRIDGE_FCM_TRANSPORT'];
-    final sender = transport == 'http'
-        ? await FcmHttpV1Sender.forServiceAccount(account)
-        : FirebaseAdminFcmSender.forServiceAccount(account);
+    EventHub? hub, {
+    String? path,
+    Future<FcmSender> Function(FirebaseServiceAccount)? senderFactory,
+  }) async {
+    final account = FirebaseServiceAccount.tryLoad(path: path);
+    if (account == null) return (null, null);
+    final sender = await (senderFactory ?? _defaultSenderFactory)(account);
     final service = NotifyService(sender: sender);
     Future<String> label(String id) async {
       if (backend == null) return id;
@@ -306,8 +353,46 @@ class BridgeServer {
 
     // The hub fans the push events out like any other downstream; with no
     // hub there is no event stream and no push to send.
-    hub?.add(PushDispatcher(service, sessionLabel: label));
-    return service;
+    final dispatcher = PushDispatcher(service, sessionLabel: label);
+    hub?.add(dispatcher);
+    return (service, dispatcher);
+  }
+
+  /// The default FCM transport (issue #24): the Admin SDK, with the raw FCM
+  /// HTTP v1 API as the fallback (`OPENCODEBRIDGE_FCM_TRANSPORT=http`).
+  static Future<FcmSender> _defaultSenderFactory(
+    FirebaseServiceAccount account,
+  ) async {
+    final transport = Platform.environment['OPENCODEBRIDGE_FCM_TRANSPORT'];
+    if (transport == 'http') {
+      return FcmHttpV1Sender.forServiceAccount(account);
+    }
+    return FirebaseAdminFcmSender.forServiceAccount(account);
+  }
+
+  /// Rebuilds the push dispatch after the service-account file changed
+  /// (issue #24, the Settings save): closes the live [NotifyService] and
+  /// its event-hub dispatcher, then re-runs [_defaultNotify] from the file
+  /// on disk ([path] or the standard resolution, like [start]'s
+  /// `notifyCredential`). With a valid service account, push goes live on
+  /// the running bridge (no restart); without one, the device-token
+  /// endpoint reports `notify_unconfigured` again. [senderFactory]
+  /// overrides the default FCM transport (tests).
+  Future<void> reloadNotify({
+    String? path,
+    Future<FcmSender> Function(FirebaseServiceAccount)? senderFactory,
+  }) async {
+    final dispatcher = _pushDispatcher;
+    if (dispatcher != null) {
+      _events?.remove(dispatcher);
+      await dispatcher.close();
+    }
+    await _notify?.close();
+    final (service, newDispatcher) =
+        await BridgeServer._defaultNotify(_sessions, _events,
+            path: path, senderFactory: senderFactory);
+    _notify = service;
+    _pushDispatcher = newDispatcher;
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.

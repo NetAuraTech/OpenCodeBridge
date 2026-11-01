@@ -207,6 +207,11 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
           if (settings == null || access == null) return;
           _startNotifications(settings, access);
         },
+        onServiceAccountCommitted: () {
+          // The Settings save already wrote the file; the running bridge
+          // picks it up without a restart (issue #24).
+          unawaited(_bridge?.reloadNotify());
+        },
       ),
     );
   }

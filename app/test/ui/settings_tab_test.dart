@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/access_session.dart';
+import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
 import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/app_info.dart';
 import 'package:opencodebridge/app_mode.dart';
@@ -98,6 +101,8 @@ void main() {
     String? tunnelUrl,
     VoidCallback? onNotifyToggled,
     VoidCallback? onPushProjectCommitted,
+    VoidCallback? onServiceAccountCommitted,
+    String? serviceAccountPath,
   }) async {
     final settings = await AppSettings.load();
     if (tunnelUrl != null) settings.tunnelUrl = tunnelUrl;
@@ -112,6 +117,8 @@ void main() {
             access: access,
             onNotifyToggled: onNotifyToggled,
             onPushProjectCommitted: onPushProjectCommitted,
+            onServiceAccountCommitted: onServiceAccountCommitted,
+            serviceAccountPath: serviceAccountPath,
           ),
         ),
       ),
@@ -290,6 +297,149 @@ void main() {
         find.text('Firebase project: opencodebridge-test.'),
         findsOneWidget,
       );
+    });
+  });
+
+  group('SettingsTab service account (issue #24, server mode)', () {
+    const String kAccountJson = '''
+        {
+          "type": "service_account",
+          "project_id": "opencodebridge-test",
+          "private_key": "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+          "client_email": "svc@opencodebridge-test.iam.gserviceaccount.com",
+          "client_id": "123"
+        }
+        ''';
+
+    late Directory home;
+    late String accountPath;
+
+    setUp(() async {
+      // The section reads and writes the app-owned file; point it at a temp
+      // file (the tab's `serviceAccountPath` seam) instead of the real
+      // `~/.config/opencodebridge/firebase/service-account.json`.
+      home = await Directory.systemTemp.createTemp('opencodebridge-sa-ui');
+      accountPath = '${home.path}/service-account.json';
+    });
+
+    tearDown(() async {
+      await home.delete(recursive: true);
+    });
+
+    testWidgets('an unconfigured host shows not configured', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        serviceAccountPath: accountPath,
+      );
+
+      expect(
+        find.text('Service account: not configured.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a valid paste installs the file and commits', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        onServiceAccountCommitted: () => commits++,
+        serviceAccountPath: accountPath,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('service-account-field')),
+        kAccountJson,
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('service-account-save')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('service-account-save')));
+      await tester.pump();
+
+      final file = File(accountPath);
+      expect(file.existsSync(), isTrue);
+      expect(file.readAsStringSync(), '${kAccountJson.trim()}\n');
+      expect(commits, 1);
+      expect(
+        find.text('Service account: svc@opencodebridge-test.iam.gserviceaccount.com.'),
+        findsOneWidget,
+      );
+      // The field clears after a save (the key stays in the file).
+      expect(
+        (tester.widget(find.byKey(const ValueKey('service-account-field')))
+                as TextField)
+            .controller
+            ?.text,
+        '',
+      );
+    });
+
+    testWidgets('an invalid paste shows the problem and saves nothing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        onServiceAccountCommitted: () => commits++,
+        serviceAccountPath: accountPath,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('service-account-field')),
+        'not a json',
+      );
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('service-account-save')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('service-account-save')));
+      await tester.pump();
+
+      expect(
+        find.text('That is not a valid service account JSON.'),
+        findsOneWidget,
+      );
+      expect(File(accountPath).existsSync(), isFalse);
+      expect(commits, 0);
+    });
+
+    testWidgets('an installed account shows its email on load', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      FirebaseServiceAccount.install(kAccountJson, path: accountPath);
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        serviceAccountPath: accountPath,
+      );
+
+      expect(
+        find.text('Service account: svc@opencodebridge-test.iam.gserviceaccount.com.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('client mode shows no service account section', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, mode: AppMode.client);
+
+      expect(find.byKey(const ValueKey('service-account-field')), findsNothing);
+      // The client side keeps the google-services.json field.
+      expect(find.byKey(const ValueKey('push-project-field')), findsOneWidget);
     });
   });
 

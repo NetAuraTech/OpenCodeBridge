@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../access/access_session.dart';
 import '../app_info.dart';
 import '../app_mode.dart';
+import '../bridge/notify/firebase_service_account.dart';
 import '../client/authenticated_http.dart';
 import '../client/tunnel_client.dart';
 import '../model/tunnel_report.dart';
@@ -27,6 +28,8 @@ class SettingsTab extends StatefulWidget {
     this.auth,
     this.onNotifyToggled,
     this.onPushProjectCommitted,
+    this.onServiceAccountCommitted,
+    this.serviceAccountPath,
   });
 
   final AppSettings settings;
@@ -58,6 +61,15 @@ class SettingsTab extends StatefulWidget {
   /// Called when the user saves the Firebase project (issue #24), so the
   /// app can re-initialize the push flow with the pasted project.
   final VoidCallback? onPushProjectCommitted;
+
+  /// Called when the user saves the service account (issue #24, server
+  /// mode), so the app can reload the running bridge's push dispatch with
+  /// the freshly written file.
+  final VoidCallback? onServiceAccountCommitted;
+
+  /// Where the service account file lives ([FirebaseServiceAccount.defaultPath]
+  /// by default; tests point it at a temp dir).
+  final String? serviceAccountPath;
 
   @override
   State<SettingsTab> createState() => _SettingsTabState();
@@ -153,10 +165,16 @@ class _SettingsTabState extends State<SettingsTab> {
           widget.onNotifyToggled?.call();
         },
       ),
-      _FirebaseProjectSection(
-        settings: widget.settings,
-        onCommitted: widget.onPushProjectCommitted,
-      ),
+      if (widget.mode == AppMode.client)
+        _FirebaseProjectSection(
+          settings: widget.settings,
+          onCommitted: widget.onPushProjectCommitted,
+        )
+      else
+        _ServiceAccountSection(
+          onCommitted: widget.onServiceAccountCommitted,
+          path: widget.serviceAccountPath,
+        ),
       const SizedBox(height: 8),
       const _SectionLabel('About'),
       Padding(
@@ -731,6 +749,126 @@ class _FirebaseProjectSectionState extends State<_FirebaseProjectSection> {
             alignment: Alignment.centerRight,
             child: FilledButton(
               key: const ValueKey('push-project-save'),
+              onPressed: _commit,
+              child: const Text('Save'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The host's push setup step (issue #24, server mode): the user pastes the
+/// Firebase service account JSON (the Firebase Console's
+/// Project settings → Service accounts download), which the app writes to
+/// the file the bridge reads at
+/// `~/.config/opencodebridge/firebase/service-account.json`. Saving calls
+/// [onCommitted] so the app reloads the running bridge's push dispatch
+/// with it (the bridge stays up; no restart).
+class _ServiceAccountSection extends StatefulWidget {
+  const _ServiceAccountSection({
+    required this.onCommitted,
+    this.path,
+  });
+
+  final VoidCallback? onCommitted;
+
+  /// Where the service account file lives ([FirebaseServiceAccount.defaultPath]
+  /// by default; tests point it at a temp dir).
+  final String? path;
+
+  @override
+  State<_ServiceAccountSection> createState() =>
+      _ServiceAccountSectionState();
+}
+
+class _ServiceAccountSectionState extends State<_ServiceAccountSection> {
+  late final TextEditingController _controller = TextEditingController();
+
+  /// The installed account, read from the file on init and after each save.
+  late FirebaseServiceAccount? _account;
+
+  /// The last save's validation problem, when it had one.
+  String? _problem;
+
+  @override
+  void initState() {
+    super.initState();
+    _account = FirebaseServiceAccount.tryLoad(path: widget.path);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _commit() {
+    final raw = _controller.text.trim();
+    if (raw.isEmpty) {
+      setState(() => _problem = 'Paste the service account JSON first.');
+      return;
+    }
+    try {
+      final account = FirebaseServiceAccount.install(raw, path: widget.path);
+      _controller.clear();
+      setState(() {
+        _account = account;
+        _problem = null;
+      });
+      widget.onCommitted?.call();
+    } on ArgumentError {
+      setState(() => _problem = 'That is not a valid service account JSON.');
+    } catch (_) {
+      setState(
+        () => _problem = 'Could not write the service account file.',
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final account = _account;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            account == null
+                ? 'Service account: not configured.'
+                : 'Service account: ${account.email}.',
+            key: const ValueKey('service-account-status'),
+            style: const TextStyle(fontSize: 12),
+          ),
+          TextField(
+            controller: _controller,
+            key: const ValueKey('service-account-field'),
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'service-account.json',
+              helperText:
+                  'Paste the JSON from the Firebase Console (Project settings → '
+                  'Service accounts); it is saved on this host and lets the '
+                  'bridge send push.',
+            ),
+          ),
+          if (_problem != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                _problem!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(
+              key: const ValueKey('service-account-save'),
               onPressed: _commit,
               child: const Text('Save'),
             ),

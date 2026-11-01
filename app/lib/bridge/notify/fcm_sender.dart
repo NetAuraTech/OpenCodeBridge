@@ -30,23 +30,37 @@ class FirebaseAdminFcmSender extends FcmSender {
 
   /// Initializes the SDK on [account]'s service account. The app is named
   /// (not the default one) so it never collides with another Firebase app
-  /// in the process, and initializes once per bridge (the registry returns
-  /// the existing app on a repeated call with matching options).
-  static FirebaseAdminFcmSender forServiceAccount(
+  /// in the process. A repeat under the same name (the bridge's notify
+  /// reload, issue #24) replaces the existing app, as the registry refuses
+  /// a second app under one name.
+  static Future<FirebaseAdminFcmSender> forServiceAccount(
     FirebaseServiceAccount account,
-  ) {
-    final app = FirebaseApp.initializeApp(
-      options: AppOptions(
-        credential: Credential.fromServiceAccountParams(
-          privateKey: account.privateKey,
-          email: account.email,
-          projectId: account.projectId,
-        ),
+  ) async {
+    final app = await _initialize(account);
+    return FirebaseAdminFcmSender._(app);
+  }
+
+  static const String _appName = 'opencodebridge-bridge';
+
+  /// Initializes (or re-initializes) the named SDK app for [account].
+  static Future<FirebaseApp> _initialize(FirebaseServiceAccount account) async {
+    final options = AppOptions(
+      credential: Credential.fromServiceAccountParams(
+        privateKey: account.privateKey,
+        email: account.email,
         projectId: account.projectId,
       ),
-      name: 'opencodebridge-bridge',
+      projectId: account.projectId,
     );
-    return FirebaseAdminFcmSender._(app);
+    try {
+      return FirebaseApp.initializeApp(options: options, name: _appName);
+    } on FirebaseAppException {
+      // An app named [_appName] already exists (a previous load, or a
+      // changed account on a reload). The registry will not re-initialize
+      // under an existing name, so delete the stale app and start fresh.
+      await FirebaseApp.deleteApp(FirebaseApp.getApp(_appName));
+      return FirebaseApp.initializeApp(options: options, name: _appName);
+    }
   }
 
   final FirebaseApp _app;

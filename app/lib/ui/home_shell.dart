@@ -31,6 +31,7 @@ class HomeShell extends StatefulWidget {
     this.deepLinks,
     this.onNotifyToggled,
     this.onPushProjectCommitted,
+    this.onServiceAccountCommitted,
   });
 
   final ConnectionMonitor monitor;
@@ -68,6 +69,11 @@ class HomeShell extends StatefulWidget {
   /// (issue #24); the Settings tab calls it when the user saves the Firebase
   /// project.
   final VoidCallback? onPushProjectCommitted;
+
+  /// Reloads the running bridge's push dispatch with the freshly saved
+  /// service account (issue #24, server mode); the Settings tab calls it
+  /// when the user saves the service account.
+  final VoidCallback? onServiceAccountCommitted;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -188,6 +194,7 @@ class _HomeShellState extends State<HomeShell> {
           auth: widget.auth,
           onNotifyToggled: widget.onNotifyToggled,
           onPushProjectCommitted: widget.onPushProjectCommitted,
+          onServiceAccountCommitted: widget.onServiceAccountCommitted,
         ),
       ],
     ),

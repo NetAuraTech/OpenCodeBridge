@@ -78,6 +78,53 @@ void main() {
     });
   });
 
+  group('FirebaseServiceAccount.install', () {
+    test('writes the file owner-only, and it reads back', () async {
+      final dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-sa-install',
+      );
+      try {
+        final file = File('${dir.path}/nested/service-account.json');
+        final account = FirebaseServiceAccount.install(_raw(), path: file.path);
+        expect(file.existsSync(), isTrue);
+        expect(file.readAsStringSync(), '${_raw().trim()}\n');
+        // The private key is not world-readable (0600 octal = 384 decimal;
+        // Dart has no octal literals).
+        expect(file.statSync().mode & 0xFFF, 384);
+
+        final reloaded = FirebaseServiceAccount.tryLoad(path: file.path);
+        expect(reloaded, isNotNull);
+        expect(reloaded!.projectId, account.projectId);
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    });
+
+    test('a non-service-account JSON is an ArgumentError and writes nothing',
+        () async {
+      final dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-sa-install',
+      );
+      try {
+        final file = File('${dir.path}/service-account.json');
+        expect(
+          () => FirebaseServiceAccount.install('not json', path: file.path),
+          throwsArgumentError,
+        );
+        expect(
+          () => FirebaseServiceAccount.install(
+            _raw((map) => map.remove('private_key')),
+            path: file.path,
+          ),
+          throwsArgumentError,
+        );
+        expect(file.existsSync(), isFalse);
+      } finally {
+        await dir.delete(recursive: true);
+      }
+    });
+  });
+
   group('FirebaseServiceAccount.tryLoad', () {
     test('loads a valid file and degrades to null', () async {
       final dir = await Directory.systemTemp.createTemp(
