@@ -2369,6 +2369,10 @@ class _PromptBarState extends State<_PromptBar> {
   /// The selected row in [_matches] (`-1` when there is no match).
   int _selected = -1;
 
+  /// The menu list's scroll position: the keyboard keeps the selected row
+  /// on screen (the TUI does the same).
+  final ScrollController _menuScroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
@@ -2390,6 +2394,7 @@ class _PromptBarState extends State<_PromptBar> {
   @override
   void dispose() {
     widget.controller.removeListener(_syncMenu);
+    _menuScroll.dispose();
     super.dispose();
   }
 
@@ -2421,7 +2426,34 @@ class _PromptBarState extends State<_PromptBar> {
       _matches = matches;
       if (tokenChanged) _selected = matches.isEmpty ? -1 : 0;
     });
-    if (_menuOpen) widget.onMenuOpened();
+    if (_menuOpen) {
+      // The token changed, so the selection is back on the top row: the
+      // menu scrolls with it.
+      if (tokenChanged && matches.isNotEmpty) _showMenuRow(0);
+      widget.onMenuOpened();
+    }
+  }
+
+  /// Scrolls the menu so the row [index] is visible (the keyboard keeps the
+  /// selection on screen, the TUI does the same). The rows have a uniform
+  /// height, so the row's offset is `index × rowHeight` and the list only
+  /// moves when the row is actually off screen.
+  void _showMenuRow(int index) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_menuScroll.hasClients) return;
+      final position = _menuScroll.position;
+      if (position.maxScrollExtent <= 0) return; // everything fits
+      final content = position.maxScrollExtent + position.viewportDimension;
+      final rowHeight = (content / _matches.length).toDouble();
+      final top = index * rowHeight;
+      final bottom = top + rowHeight;
+      final offset = position.pixels;
+      if (top < offset) {
+        _menuScroll.jumpTo(top);
+      } else if (bottom > offset + position.viewportDimension) {
+        _menuScroll.jumpTo(bottom - position.viewportDimension);
+      }
+    });
   }
 
   /// Runs the tapped (or submitted) row: clears the field and hands the
@@ -2477,6 +2509,7 @@ class _PromptBarState extends State<_PromptBar> {
                 () => _selected = _selected - 1 >= 0 ? _selected - 1 : 0,
               );
             }
+            _showMenuRow(_selected);
           }
           return KeyEventResult.handled;
         }
@@ -2535,6 +2568,7 @@ class _PromptBarState extends State<_PromptBar> {
                       constraints: const BoxConstraints(maxHeight: 280),
                       child: ListView.builder(
                         key: const ValueKey('structured-command-menu'),
+                        controller: _menuScroll,
                         shrinkWrap: true,
                         itemCount: _matches.length,
                         itemBuilder: (context, index) {
@@ -2589,16 +2623,20 @@ class _PromptBarState extends State<_PromptBar> {
                                           ),
                                       ],
                                     ),
-                                    if (command.subtitle != command.name)
-                                      Text(
-                                        command.subtitle,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: scheme.outline,
-                                          fontSize: 12,
-                                        ),
+                                    // The subtitle line is always kept so every
+                                    // row has the same height: the keyboard
+                                    // scroll math relies on it.
+                                    Text(
+                                      command.subtitle == command.name
+                                          ? ''
+                                          : command.subtitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: scheme.outline,
+                                        fontSize: 12,
                                       ),
+                                    ),
                                   ],
                                 ),
                               ),

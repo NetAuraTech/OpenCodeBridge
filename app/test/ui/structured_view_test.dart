@@ -325,6 +325,14 @@ const _promptInput = ValueKey('structured-prompt-input');
 
 Finder _menuFinder() => find.byKey(const ValueKey('structured-command-menu'));
 
+/// The menu list's scroll offset in pixels.
+double _menuScrollPixels(WidgetTester tester) => tester
+    .state<ScrollableState>(
+      find.descendant(of: _menuFinder(), matching: find.byType(Scrollable)),
+    )
+    .position
+    .pixels;
+
 Finder _commandRowFinder(String name) =>
     find.byKey(ValueKey('structured-command-row-$name'));
 
@@ -1476,6 +1484,70 @@ void main() {
         list.right,
         reason: 'no right padding around the highlight',
       );
+    });
+
+    testWidgets('the menu scrolls to keep the keyboard selection visible', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/');
+      await tester.pump();
+
+      // Eight downs select `export` (catalog index 8) — past the visible
+      // part of the menu: the list must scroll to keep it on screen.
+      for (var i = 0; i < 8; i++) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        await tester.pump(); // the post-frame scroll
+      }
+
+      expect(_menuScrollPixels(tester), greaterThan(0));
+
+      final row = tester.getRect(_commandRowFinder('export'));
+      final card = tester.getRect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+      );
+      expect(row.top, greaterThanOrEqualTo(card.top));
+      expect(row.bottom, lessThanOrEqualTo(card.bottom));
+    });
+
+    testWidgets('re-typing the token brings the menu back to the top', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        commands: const [
+          OpencodeCommand(name: 'zebra', description: 'a'),
+          OpencodeCommand(name: 'zoo', description: 'b'),
+          OpencodeCommand(name: 'zulu', description: 'c'),
+          OpencodeCommand(name: 'zero', description: 'd'),
+          OpencodeCommand(name: 'zone', description: 'e'),
+          OpencodeCommand(name: 'zoom', description: 'f'),
+          OpencodeCommand(name: 'zest', description: 'g'),
+          OpencodeCommand(name: 'zip', description: 'h'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/z');
+      await tester.pump();
+      await tester.pump(); // the custom commands arrive
+
+      for (var i = 0; i < 7; i++) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        await tester.pump();
+      }
+      expect(_menuScrollPixels(tester), greaterThan(0));
+
+      // Back to the bare slash: the selection resets to the top row, and
+      // the menu scrolls back with it.
+      await _typePrompt(tester, '/');
+      await tester.pump();
+      await tester.pump();
+      expect(_menuScrollPixels(tester), 0);
     });
 
     testWidgets('Esc closes the menu by clearing the field', (tester) async {
