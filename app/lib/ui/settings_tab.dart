@@ -718,7 +718,9 @@ class _FirebaseProjectSectionState extends State<_FirebaseProjectSection> {
         children: [
           Text(
             storedProject == null
-                ? (stored.isEmpty ? 'Firebase project: not configured.' : 'Firebase project: saved value is not valid.')
+                ? (stored.isEmpty
+                      ? 'Firebase project: not configured.'
+                      : 'Firebase project: saved value is not valid.')
                 : 'Firebase project: ${storedProject.options.projectId}.',
             key: const ValueKey('push-project-status'),
             style: const TextStyle(fontSize: 12),
@@ -767,10 +769,7 @@ class _FirebaseProjectSectionState extends State<_FirebaseProjectSection> {
 /// [onCommitted] so the app reloads the running bridge's push dispatch
 /// with it (the bridge stays up; no restart).
 class _ServiceAccountSection extends StatefulWidget {
-  const _ServiceAccountSection({
-    required this.onCommitted,
-    this.path,
-  });
+  const _ServiceAccountSection({required this.onCommitted, this.path});
 
   final VoidCallback? onCommitted;
 
@@ -779,8 +778,7 @@ class _ServiceAccountSection extends StatefulWidget {
   final String? path;
 
   @override
-  State<_ServiceAccountSection> createState() =>
-      _ServiceAccountSectionState();
+  State<_ServiceAccountSection> createState() => _ServiceAccountSectionState();
 }
 
 class _ServiceAccountSectionState extends State<_ServiceAccountSection> {
@@ -821,9 +819,7 @@ class _ServiceAccountSectionState extends State<_ServiceAccountSection> {
     } on ArgumentError {
       setState(() => _problem = 'That is not a valid service account JSON.');
     } catch (_) {
-      setState(
-        () => _problem = 'Could not write the service account file.',
-      );
+      setState(() => _problem = 'Could not write the service account file.');
     }
   }
 

@@ -1512,9 +1512,7 @@ void main() {
     late NotifyService notify;
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-notify',
-      );
+      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-notify');
       notify = NotifyService(sender: _NotifyFakeSender());
       server = await BridgeServer.start(
         port: 0,
@@ -1547,19 +1545,20 @@ void main() {
       });
     });
 
-    test('an empty events list registers the token with no push enabled',
-        () async {
-      final (status, _) = await _postRaw(
-        base,
-        'api/notify/device-token',
-        '{"token":"tok_2","events":[]}',
-      );
-      expect(status, 200);
-      expect(notify.enabledKinds('tok_2'), isEmpty);
-    });
+    test(
+      'an empty events list registers the token with no push enabled',
+      () async {
+        final (status, _) = await _postRaw(
+          base,
+          'api/notify/device-token',
+          '{"token":"tok_2","events":[]}',
+        );
+        expect(status, 200);
+        expect(notify.enabledKinds('tok_2'), isEmpty);
+      },
+    );
 
-    test('a re-registration with the same token replaces its events',
-        () async {
+    test('a re-registration with the same token replaces its events', () async {
       await _postRaw(
         base,
         'api/notify/device-token',
@@ -1593,31 +1592,33 @@ void main() {
       expect(notify.deviceCount, 0);
     });
 
-    test('without a service account the endpoint is 503 notify_unconfigured',
-        () async {
-      // Pin the credential to a missing path so the 503 path is
-      // deterministic whatever account this machine holds (a dev host has
-      // its own).
-      final unconfigured = await BridgeServer.start(
-        port: 0,
-        sessions: SessionsBackend(
-          service: _FakeService(),
-          store: await SessionStore.load(dir: dir),
-        ),
-        notifyCredential: '${dir.path}/no-such-account.json',
-      );
-      try {
-        final (status, body) = await _postRaw(
-          unconfigured.baseUri,
-          'api/notify/device-token',
-          '{"token":"tok_1","events":[]}',
+    test(
+      'without a service account the endpoint is 503 notify_unconfigured',
+      () async {
+        // Pin the credential to a missing path so the 503 path is
+        // deterministic whatever account this machine holds (a dev host has
+        // its own).
+        final unconfigured = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(),
+            store: await SessionStore.load(dir: dir),
+          ),
+          notifyCredential: '${dir.path}/no-such-account.json',
         );
-        expect(status, 503);
-        expect(jsonDecode(body), {'error': 'notify_unconfigured'});
-      } finally {
-        await unconfigured.stop();
-      }
-    });
+        try {
+          final (status, body) = await _postRaw(
+            unconfigured.baseUri,
+            'api/notify/device-token',
+            '{"token":"tok_1","events":[]}',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'notify_unconfigured'});
+        } finally {
+          await unconfigured.stop();
+        }
+      },
+    );
   });
 
   group('BridgeServer push reload (issue #24)', () {
@@ -1665,19 +1666,16 @@ void main() {
     /// default sender parses it at construction), but no delivery happens
     /// in these tests.
     final String kAccountJson = jsonEncode({
-          'type': 'service_account',
-          'project_id': 'opencodebridge-reload-test',
-          'private_key': kPrivateKey,
-          'client_email':
-              'firebase-adminsdk-test@opencodebridge-reload-test.iam.gserviceaccount.com',
-          'client_id': '1234567890',
-          'token_uri': 'https://oauth2.googleapis.com/token',
-        });
+      'type': 'service_account',
+      'project_id': 'opencodebridge-reload-test',
+      'private_key': kPrivateKey,
+      'client_email': 'firebase-adminsdk-test@opencodebridge-reload-test.iam.gserviceaccount.com',
+      'client_id': '1234567890',
+      'token_uri': 'https://oauth2.googleapis.com/token',
+    });
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-reload',
-      );
+      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-reload');
       accountPath = '${dir.path}/service-account.json';
     });
 
@@ -1685,74 +1683,84 @@ void main() {
       await dir.delete(recursive: true);
     });
 
-    test('reloadNotify takes a saved service account live (503 → 200)',
-        () async {
-      final server = await BridgeServer.start(
-        port: 0,
-        sessions: SessionsBackend(
-          service: _FakeService(),
-          store: await SessionStore.load(dir: dir),
-        ),
-        notifyCredential: accountPath,
-        notifySenderFactory: fakeSender,
-      );
-      try {
-        var (status, body) = await _postRaw(
-          server.baseUri,
-          'api/notify/device-token',
-          '{"token":"tok_1","events":[]}',
+    test(
+      'reloadNotify takes a saved service account live (503 → 200)',
+      () async {
+        final server = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(),
+            store: await SessionStore.load(dir: dir),
+          ),
+          notifyCredential: accountPath,
+          notifySenderFactory: fakeSender,
         );
-        expect(status, 503);
-        expect(jsonDecode(body), {'error': 'notify_unconfigured'});
+        try {
+          var (status, body) = await _postRaw(
+            server.baseUri,
+            'api/notify/device-token',
+            '{"token":"tok_1","events":[]}',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'notify_unconfigured'});
 
+          FirebaseServiceAccount.install(kAccountJson, path: accountPath);
+          await server.reloadNotify(
+            path: accountPath,
+            senderFactory: fakeSender,
+          );
+
+          (status, body) = await _postRaw(
+            server.baseUri,
+            'api/notify/device-token',
+            '{"token":"tok_1","events":["turnEnded"]}',
+          );
+          expect(status, 200);
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
+    test(
+      'reloadNotify reports unconfigured again when the file is gone',
+      () async {
         FirebaseServiceAccount.install(kAccountJson, path: accountPath);
-        await server.reloadNotify(path: accountPath, senderFactory: fakeSender);
-
-        (status, body) = await _postRaw(
-          server.baseUri,
-          'api/notify/device-token',
-          '{"token":"tok_1","events":["turnEnded"]}',
+        final server = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: _FakeService(),
+            store: await SessionStore.load(dir: dir),
+          ),
+          notifyCredential: accountPath,
+          notifySenderFactory: fakeSender,
         );
-        expect(status, 200);
-      } finally {
-        await server.stop();
-      }
-    });
+        try {
+          var (status, body) = await _postRaw(
+            server.baseUri,
+            'api/notify/device-token',
+            '{"token":"tok_1","events":[]}',
+          );
+          expect(status, 200);
 
-    test('reloadNotify reports unconfigured again when the file is gone',
-        () async {
-      FirebaseServiceAccount.install(kAccountJson, path: accountPath);
-      final server = await BridgeServer.start(
-        port: 0,
-        sessions: SessionsBackend(
-          service: _FakeService(),
-          store: await SessionStore.load(dir: dir),
-        ),
-        notifyCredential: accountPath,
-        notifySenderFactory: fakeSender,
-      );
-      try {
-        var (status, body) = await _postRaw(
-          server.baseUri,
-          'api/notify/device-token',
-          '{"token":"tok_1","events":[]}',
-        );
-        expect(status, 200);
+          await File(accountPath).delete();
+          await server.reloadNotify(
+            path: accountPath,
+            senderFactory: fakeSender,
+          );
 
-        await File(accountPath).delete();
-        await server.reloadNotify(path: accountPath, senderFactory: fakeSender);
-
-        (status, body) = await _postRaw(
-          server.baseUri,
-          'api/notify/device-token',
-          '{"token":"tok_1","events":[]}',
-        );
-        expect(status, 503);
-        expect(jsonDecode(body), {'error': 'notify_unconfigured'});
-      } finally {
-        await server.stop();
-      }
-    });
+          (status, body) = await _postRaw(
+            server.baseUri,
+            'api/notify/device-token',
+            '{"token":"tok_1","events":[]}',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'notify_unconfigured'});
+        } finally {
+          await server.stop();
+        }
+      },
+    );
   });
 }
 

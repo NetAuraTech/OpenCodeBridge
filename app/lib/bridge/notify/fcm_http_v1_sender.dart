@@ -42,8 +42,7 @@ class FcmHttpV1Sender implements FcmSender {
   static const String messagingScope =
       'https://www.googleapis.com/auth/firebase.messaging';
 
-  Uri get _endpoint =>
-      endpoint ?? Uri.https('fcm.googleapis.com');
+  Uri get _endpoint => endpoint ?? Uri.https('fcm.googleapis.com');
 
   /// Builds the sender over [account]'s service account, with the
   /// `googleapis_auth` auto-refresh client doing the manual token handling
@@ -52,10 +51,9 @@ class FcmHttpV1Sender implements FcmSender {
     FirebaseServiceAccount account,
   ) async {
     final credentials = ServiceAccountCredentials.fromJson(account.rawJson);
-    final client = await clientViaServiceAccount(
-      credentials,
-      [FcmHttpV1Sender.messagingScope],
-    );
+    final client = await clientViaServiceAccount(credentials, [
+      FcmHttpV1Sender.messagingScope,
+    ]);
     return FcmHttpV1Sender(projectId: account.projectId, client: client);
   }
 

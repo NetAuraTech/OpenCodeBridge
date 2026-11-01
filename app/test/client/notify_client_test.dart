@@ -31,30 +31,26 @@ void main() {
   tearDown(() async => server.close(force: true));
 
   group('NotifyClient.registerDevice', () {
-    test('POSTs the token and the enabled events to the device-token path',
-        () async {
-      await NotifyClient(base).registerDevice(
-        'tok_1',
-        {NotifyKind.turnEnded, NotifyKind.permissionAsked},
-      );
-      expect(
-        body,
-        {
+    test(
+      'POSTs the token and the enabled events to the device-token path',
+      () async {
+        await NotifyClient(base).registerDevice('tok_1', {
+          NotifyKind.turnEnded,
+          NotifyKind.permissionAsked,
+        });
+        expect(body, {
           'token': 'tok_1',
           'events': ['turnEnded', 'permissionAsked'],
-        },
-      );
-      expect(authHeader, isNull);
-    });
+        });
+        expect(authHeader, isNull);
+      },
+    );
 
     test('sends the Access Authorization header when provided', () async {
       await NotifyClient(
         base,
         auth: ({bool forceRefresh = false}) async => 'Bearer test-token',
-      ).registerDevice(
-        'tok_1',
-        {NotifyKind.dockerContainer},
-      );
+      ).registerDevice('tok_1', {NotifyKind.dockerContainer});
       expect(authHeader, 'Bearer test-token');
       expect(body!['events'], ['dockerContainer']);
     });
@@ -78,9 +74,8 @@ void main() {
 
       Object? error;
       try {
-        await NotifyClient(
-          Uri.parse('http://${server.address.host}:$port/'),
-        ).registerDevice('tok_1', {});
+        await NotifyClient(Uri.parse('http://${server.address.host}:$port/'))
+            .registerDevice('tok_1', {});
       } catch (e) {
         error = e;
       }

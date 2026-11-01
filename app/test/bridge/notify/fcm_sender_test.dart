@@ -39,14 +39,16 @@ const String kPrivateKey =
     "-----END PRIVATE KEY-----";
 
 FirebaseServiceAccount _account(String project) =>
-    FirebaseServiceAccount.fromJsonString(jsonEncode({
-      'type': 'service_account',
-      'project_id': project,
-      'private_key': kPrivateKey,
-      'client_email': 'svc@$project.iam.gserviceaccount.com',
-      'client_id': '1234567890',
-      'token_uri': 'https://oauth2.googleapis.com/token',
-    }))!;
+    FirebaseServiceAccount.fromJsonString(
+      jsonEncode({
+        'type': 'service_account',
+        'project_id': project,
+        'private_key': kPrivateKey,
+        'client_email': 'svc@$project.iam.gserviceaccount.com',
+        'client_id': '1234567890',
+        'token_uri': 'https://oauth2.googleapis.com/token',
+      }),
+    )!;
 
 /// The named app the bridge's sender lives under.
 const String _appName = 'opencodebridge-bridge';

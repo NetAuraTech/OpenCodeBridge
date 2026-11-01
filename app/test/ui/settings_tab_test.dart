@@ -247,7 +247,9 @@ void main() {
         find.byKey(const ValueKey('push-project-field')),
         'not a json',
       );
-      await tester.ensureVisible(find.byKey(const ValueKey('push-project-save')));
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('push-project-save')),
+      );
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('push-project-save')));
       await tester.pump();
@@ -272,7 +274,9 @@ void main() {
         find.byKey(const ValueKey('push-project-field')),
         kGoodProjectJson,
       );
-      await tester.ensureVisible(find.byKey(const ValueKey('push-project-save')));
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('push-project-save')),
+      );
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('push-project-save')));
       await tester.pump();
@@ -285,9 +289,7 @@ void main() {
       );
     });
 
-    testWidgets('a saved project shows its project id on load', (
-      tester,
-    ) async {
+    testWidgets('a saved project shows its project id on load', (tester) async {
       SharedPreferences.setMockInitialValues({
         'notify.firebaseProject': kGoodProjectJson,
       });
@@ -326,9 +328,7 @@ void main() {
       await home.delete(recursive: true);
     });
 
-    testWidgets('an unconfigured host shows not configured', (
-      tester,
-    ) async {
+    testWidgets('an unconfigured host shows not configured', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(
         tester,
@@ -336,15 +336,10 @@ void main() {
         serviceAccountPath: accountPath,
       );
 
-      expect(
-        find.text('Service account: not configured.'),
-        findsOneWidget,
-      );
+      expect(find.text('Service account: not configured.'), findsOneWidget);
     });
 
-    testWidgets('a valid paste installs the file and commits', (
-      tester,
-    ) async {
+    testWidgets('a valid paste installs the file and commits', (tester) async {
       SharedPreferences.setMockInitialValues({});
       var commits = 0;
       await pumpSettings(
@@ -370,15 +365,16 @@ void main() {
       expect(file.readAsStringSync(), '${kAccountJson.trim()}\n');
       expect(commits, 1);
       expect(
-        find.text('Service account: svc@opencodebridge-test.iam.gserviceaccount.com.'),
+        find.text(
+          'Service account: svc@opencodebridge-test.iam.gserviceaccount.com.',
+        ),
         findsOneWidget,
       );
       // The field clears after a save (the key stays in the file).
       expect(
-        (tester.widget(find.byKey(const ValueKey('service-account-field')))
-                as TextField)
-            .controller
-            ?.text,
+        (tester.widget(
+          find.byKey(const ValueKey('service-account-field')),
+        ) as TextField).controller?.text,
         '',
       );
     });
@@ -414,9 +410,7 @@ void main() {
       expect(commits, 0);
     });
 
-    testWidgets('an installed account shows its email on load', (
-      tester,
-    ) async {
+    testWidgets('an installed account shows its email on load', (tester) async {
       SharedPreferences.setMockInitialValues({});
       FirebaseServiceAccount.install(kAccountJson, path: accountPath);
       await pumpSettings(
@@ -426,14 +420,14 @@ void main() {
       );
 
       expect(
-        find.text('Service account: svc@opencodebridge-test.iam.gserviceaccount.com.'),
+        find.text(
+          'Service account: svc@opencodebridge-test.iam.gserviceaccount.com.',
+        ),
         findsOneWidget,
       );
     });
 
-    testWidgets('client mode shows no service account section', (
-      tester,
-    ) async {
+    testWidgets('client mode shows no service account section', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, mode: AppMode.client);
 

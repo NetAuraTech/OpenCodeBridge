@@ -104,10 +104,10 @@ class NotificationService {
     final token = _token;
     if (token == null) return;
     try {
-      await NotifyClient(_bridgeBase, auth: _auth).registerDevice(
-        token,
-        _enabledKinds(),
-      );
+      await NotifyClient(
+        _bridgeBase,
+        auth: _auth,
+      ).registerDevice(token, _enabledKinds());
     } catch (_) {
       // The bridge is unreachable, or push is unconfigured there (503):
       // the next toggle change re-registers.

@@ -28,14 +28,13 @@ void main() {
     await dispatcher.close();
   });
 
-  String opencode(String type, {String? session = 'ses_1'}) =>
-      jsonEncode({
-        'id': 'evt_1',
-        'type': type,
-        'data': <String, Object?>{},
-        if (session != null)
-          'durable': {'aggregateID': session, 'seq': 1, 'version': 1},
-      });
+  String opencode(String type, {String? session = 'ses_1'}) => jsonEncode({
+    'id': 'evt_1',
+    'type': type,
+    'data': <String, Object?>{},
+    if (session != null)
+      'durable': {'aggregateID': session, 'seq': 1, 'version': 1},
+  });
 
   test('permission.asked pushes permissionAsked to the session link', () async {
     await dispatcher.write(opencode('permission.asked'));
@@ -47,14 +46,15 @@ void main() {
     expect(sent.link, 'opencodebridge://session/ses_1');
   });
 
-  test(
-      'permission.asked carries its session in data.sessionID (the real '
+  test('permission.asked carries its session in data.sessionID (the real '
       'wire shape: no durable seq)', () async {
-    await dispatcher.write(jsonEncode({
-      'id': 'evt_2',
-      'type': 'permission.asked',
-      'data': {'sessionID': 'ses_live', 'action': 'shell'},
-    }));
+    await dispatcher.write(
+      jsonEncode({
+        'id': 'evt_2',
+        'type': 'permission.asked',
+        'data': {'sessionID': 'ses_live', 'action': 'shell'},
+      }),
+    );
     expect(sender.sent, hasLength(1));
     final sent = sender.sent.single;
     expect(sent.title, 'Permission requested');
@@ -66,29 +66,29 @@ void main() {
     await dispatcher.write(opencode('session.execution.succeeded'));
     await dispatcher.write(opencode('session.execution.failed'));
     await dispatcher.write(opencode('session.execution.interrupted'));
+    expect(sender.sent.map((s) => s.title), [
+      'Turn finished',
+      'Turn failed',
+      'Turn interrupted',
+    ]);
     expect(
-      sender.sent.map((s) => s.title),
-      ['Turn finished', 'Turn failed', 'Turn interrupted'],
-    );
-    expect(
-      sender.sent.every(
-        (s) => s.link == 'opencodebridge://session/ses_1',
-      ),
+      sender.sent.every((s) => s.link == 'opencodebridge://session/ses_1'),
       isTrue,
     );
   });
 
-  test('an opencode event with no session id anywhere is not a push',
-      () async {
+  test('an opencode event with no session id anywhere is not a push', () async {
     await dispatcher.write(opencode('permission.asked', session: null));
     expect(sender.sent, isEmpty);
   });
 
   test('docker.container.stopped pushes the container link', () async {
-    await dispatcher.write(jsonEncode({
-      'type': 'docker.container.stopped',
-      'data': {'name': 'postgres'},
-    }));
+    await dispatcher.write(
+      jsonEncode({
+        'type': 'docker.container.stopped',
+        'data': {'name': 'postgres'},
+      }),
+    );
     expect(sender.sent, hasLength(1));
     final sent = sender.sent.single;
     expect(sent.title, 'Container stopped');
@@ -97,10 +97,12 @@ void main() {
   });
 
   test('docker.container.crashed pushes the exit code in the body', () async {
-    await dispatcher.write(jsonEncode({
-      'type': 'docker.container.crashed',
-      'data': {'name': 'postgres', 'exitCode': 137},
-    }));
+    await dispatcher.write(
+      jsonEncode({
+        'type': 'docker.container.crashed',
+        'data': {'name': 'postgres', 'exitCode': 137},
+      }),
+    );
     final sent = sender.sent.single;
     expect(sent.title, 'Container crashed');
     expect(sent.body, 'postgres (exit 137)');
@@ -108,10 +110,12 @@ void main() {
   });
 
   test('a docker event without a container name is not a push', () async {
-    await dispatcher.write(jsonEncode({
-      'type': 'docker.container.stopped',
-      'data': <String, Object?>{},
-    }));
+    await dispatcher.write(
+      jsonEncode({
+        'type': 'docker.container.stopped',
+        'data': <String, Object?>{},
+      }),
+    );
     expect(sender.sent, isEmpty);
   });
 
@@ -122,8 +126,7 @@ void main() {
     expect(sender.sent, isEmpty);
   });
 
-  test(
-      'the body falls back to the session id when the labeler '
+  test('the body falls back to the session id when the labeler '
       'is absent or fails', () async {
     final bareSender = _FakeSender();
     final bareService = NotifyService(sender: bareSender);
@@ -147,10 +150,12 @@ void main() {
     final upstream = _FakeUpstream();
     final hub = EventHub(service: upstream);
     hub.add(dispatcher);
-    upstream.add(OpencodeEvent(
-      raw: opencode('session.execution.succeeded'),
-      type: 'session.execution.succeeded',
-    ));
+    upstream.add(
+      OpencodeEvent(
+        raw: opencode('session.execution.succeeded'),
+        type: 'session.execution.succeeded',
+      ),
+    );
     await _until(() => sender.sent.length == 1);
     expect(sender.sent.single.title, 'Turn finished');
     expect(sender.sent.single.link, 'opencodebridge://session/ses_1');

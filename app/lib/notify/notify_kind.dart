@@ -24,8 +24,7 @@ enum NotifyKind {
     final kinds = <String, NotifyKind>{};
     for (final entry in events) {
       if (entry is! String) return null;
-      final kind =
-          NotifyKind.values.where((k) => k.wire == entry).firstOrNull;
+      final kind = NotifyKind.values.where((k) => k.wire == entry).firstOrNull;
       if (kind == null) return null;
       kinds[kind.wire] = kind;
     }

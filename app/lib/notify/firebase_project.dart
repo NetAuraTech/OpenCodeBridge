@@ -43,7 +43,8 @@ class FirebaseProject {
       for (final entry in clients) {
         if (entry is Map<String, Object?> &&
             entry['client_info'] is Map<String, Object?> &&
-            (entry['client_info'] as Map<String, Object?>)['android_client_info']
+            (entry['client_info']
+                    as Map<String, Object?>)['android_client_info']
                 is Map<String, Object?>) {
           client = entry;
           break;

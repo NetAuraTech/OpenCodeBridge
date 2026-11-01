@@ -37,10 +37,7 @@ class _Event {
 /// lifetime; the per-kind toggle filtering happens in the [NotifyService],
 /// so a device with every toggle off simply receives nothing.
 class PushDispatcher implements EventConnection {
-  PushDispatcher(
-    this._service, {
-    this.sessionLabel,
-  });
+  PushDispatcher(this._service, {this.sessionLabel});
 
   final NotifyService _service;
 
@@ -67,8 +64,8 @@ class PushDispatcher implements EventConnection {
       case 'session.execution.interrupted':
         await _opencode(event);
       default:
-        // The stream also carries every other opencode event (text
-        // deltas, usage, ...): not a push event.
+      // The stream also carries every other opencode event (text
+      // deltas, usage, ...): not a push event.
     }
   }
 
@@ -86,10 +83,9 @@ class PushDispatcher implements EventConnection {
       'session.execution.failed' => 'Turn failed',
       _ => 'Turn interrupted',
     };
-    final kind =
-        event.type == 'permission.asked'
-            ? NotifyKind.permissionAsked
-            : NotifyKind.turnEnded;
+    final kind = event.type == 'permission.asked'
+        ? NotifyKind.permissionAsked
+        : NotifyKind.turnEnded;
     await _service.publish(
       kind,
       title: title,
@@ -142,7 +138,9 @@ class PushDispatcher implements EventConnection {
     final type = decoded['type'];
     if (type is! String) return null;
     final data = decoded['data'];
-    final dataMap = data is Map<String, Object?> ? data : const <String, Object?>{};
+    final dataMap = data is Map<String, Object?>
+        ? data
+        : const <String, Object?>{};
     // The session id: the durable seq when the event carries one, otherwise
     // the `data.sessionID` that session-scoped opencode events include
     // (`permission.asked` carries no durable seq, so this is its only

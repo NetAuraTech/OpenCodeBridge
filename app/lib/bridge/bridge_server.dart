@@ -257,10 +257,12 @@ class BridgeServer {
     if (notify != null) {
       notifyService = notify;
     } else {
-      (notifyService, pushDispatcher) =
-          await BridgeServer._defaultNotify(backend, eventHub,
-              path: notifyCredential,
-              senderFactory: notifySenderFactory);
+      (notifyService, pushDispatcher) = await BridgeServer._defaultNotify(
+        backend,
+        eventHub,
+        path: notifyCredential,
+        senderFactory: notifySenderFactory,
+      );
     }
     final tunnelSupervisor = tunnel;
     final tunnelSetupService =
@@ -388,9 +390,12 @@ class BridgeServer {
       await dispatcher.close();
     }
     await _notify?.close();
-    final (service, newDispatcher) =
-        await BridgeServer._defaultNotify(_sessions, _events,
-            path: path, senderFactory: senderFactory);
+    final (service, newDispatcher) = await BridgeServer._defaultNotify(
+      _sessions,
+      _events,
+      path: path,
+      senderFactory: senderFactory,
+    );
     _notify = service;
     _pushDispatcher = newDispatcher;
   }

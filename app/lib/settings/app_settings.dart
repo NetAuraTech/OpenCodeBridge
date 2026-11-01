@@ -66,8 +66,7 @@ class AppSettings {
 
   /// The Firebase project's `google-services.json` (issue #24, pasted in
   /// Settings): the FCM token's setup step. `''` when not set yet.
-  String get firebaseProjectJson =>
-      _prefs.getString(_keyFirebaseProject) ?? '';
+  String get firebaseProjectJson => _prefs.getString(_keyFirebaseProject) ?? '';
 
   set firebaseProjectJson(String json) {
     if (json.trim().isEmpty) {

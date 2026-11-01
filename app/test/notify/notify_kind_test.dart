@@ -5,9 +5,11 @@ void main() {
   group('NotifyKind.parseEvents', () {
     test('parses the wire values into the enabled kinds', () {
       expect(
-        NotifyKind.parseEvents(
-          ['permissionAsked', 'turnEnded', 'dockerContainer'],
-        ),
+        NotifyKind.parseEvents([
+          'permissionAsked',
+          'turnEnded',
+          'dockerContainer',
+        ]),
         {
           NotifyKind.permissionAsked,
           NotifyKind.turnEnded,
@@ -21,10 +23,9 @@ void main() {
     });
 
     test('duplicates collapse to one kind', () {
-      expect(
-        NotifyKind.parseEvents(['turnEnded', 'turnEnded']),
-        {NotifyKind.turnEnded},
-      );
+      expect(NotifyKind.parseEvents(['turnEnded', 'turnEnded']), {
+        NotifyKind.turnEnded,
+      });
     });
 
     test('a non-list is malformed', () {

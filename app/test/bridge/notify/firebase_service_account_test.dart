@@ -5,15 +5,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
 
 String _raw([void Function(Map<String, Object?>)? mutate]) {
-  final map = jsonDecode(jsonEncode({
-    'type': 'service_account',
-    'project_id': 'opencodebridge-test',
-    'private_key_id': 'key-1',
-    'private_key': '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n',
-    'client_email': 'svc@opencodebridge-test.iam.gserviceaccount.com',
-    'client_id': '123',
-    'token_uri': 'https://oauth2.googleapis.com/token',
-  })) as Map<String, Object?>;
+  final map = jsonDecode(
+    jsonEncode({
+      'type': 'service_account',
+      'project_id': 'opencodebridge-test',
+      'private_key_id': 'key-1',
+      'private_key':
+          '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n',
+      'client_email': 'svc@opencodebridge-test.iam.gserviceaccount.com',
+      'client_id': '123',
+      'token_uri': 'https://oauth2.googleapis.com/token',
+    }),
+  ) as Map<String, Object?>;
   mutate?.call(map);
   return jsonEncode(map);
 }
@@ -25,10 +28,7 @@ void main() {
       final account = FirebaseServiceAccount.fromJsonString(raw);
       expect(account, isNotNull);
       expect(account!.projectId, 'opencodebridge-test');
-      expect(
-        account.email,
-        'svc@opencodebridge-test.iam.gserviceaccount.com',
-      );
+      expect(account.email, 'svc@opencodebridge-test.iam.gserviceaccount.com');
       expect(
         account.privateKey,
         '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n',
@@ -42,9 +42,11 @@ void main() {
 
     test('a missing required field is not a service account', () {
       for (final key in ['project_id', 'client_email', 'private_key']) {
-        final account = FirebaseServiceAccount.fromJsonString(_raw((map) {
-          map.remove(key);
-        }));
+        final account = FirebaseServiceAccount.fromJsonString(
+          _raw((map) {
+            map.remove(key);
+          }),
+        );
         expect(account, isNull, reason: key);
       }
     });
@@ -56,8 +58,7 @@ void main() {
   });
 
   group('FirebaseServiceAccount.resolvePath', () {
-    test('the explicit path wins, then the environment, then the default',
-        () {
+    test('the explicit path wins, then the environment, then the default', () {
       expect(
         FirebaseServiceAccount.resolvePath(
           explicitPath: '/explicit.json',
@@ -100,36 +101,36 @@ void main() {
       }
     });
 
-    test('a non-service-account JSON is an ArgumentError and writes nothing',
-        () async {
-      final dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-sa-install',
-      );
-      try {
-        final file = File('${dir.path}/service-account.json');
-        expect(
-          () => FirebaseServiceAccount.install('not json', path: file.path),
-          throwsArgumentError,
+    test(
+      'a non-service-account JSON is an ArgumentError and writes nothing',
+      () async {
+        final dir = await Directory.systemTemp.createTemp(
+          'opencodebridge-sa-install',
         );
-        expect(
-          () => FirebaseServiceAccount.install(
-            _raw((map) => map.remove('private_key')),
-            path: file.path,
-          ),
-          throwsArgumentError,
-        );
-        expect(file.existsSync(), isFalse);
-      } finally {
-        await dir.delete(recursive: true);
-      }
-    });
+        try {
+          final file = File('${dir.path}/service-account.json');
+          expect(
+            () => FirebaseServiceAccount.install('not json', path: file.path),
+            throwsArgumentError,
+          );
+          expect(
+            () => FirebaseServiceAccount.install(
+              _raw((map) => map.remove('private_key')),
+              path: file.path,
+            ),
+            throwsArgumentError,
+          );
+          expect(file.existsSync(), isFalse);
+        } finally {
+          await dir.delete(recursive: true);
+        }
+      },
+    );
   });
 
   group('FirebaseServiceAccount.tryLoad', () {
     test('loads a valid file and degrades to null', () async {
-      final dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-sa',
-      );
+      final dir = await Directory.systemTemp.createTemp('opencodebridge-sa');
       try {
         final file = File('${dir.path}/service-account.json');
         expect(FirebaseServiceAccount.tryLoad(path: file.path), isNull);

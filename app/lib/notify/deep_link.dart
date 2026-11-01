@@ -55,6 +55,5 @@ class DeepLink {
   int get hashCode => Object.hash(target, id);
 
   @override
-  String toString() =>
-      'DeepLink($target: $id)';
+  String toString() => 'DeepLink($target: $id)';
 }

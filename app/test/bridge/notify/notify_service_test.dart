@@ -28,10 +28,10 @@ void main() {
 
   test('publish reaches only the devices that have the kind enabled', () async {
     service.registerDevice('tok_a', {NotifyKind.turnEnded});
-    service.registerDevice(
-      'tok_b',
-      {NotifyKind.permissionAsked, NotifyKind.turnEnded},
-    );
+    service.registerDevice('tok_b', {
+      NotifyKind.permissionAsked,
+      NotifyKind.turnEnded,
+    });
     service.registerDevice('tok_c', {});
 
     final sent = await service.publish(
