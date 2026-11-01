@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../model/command.dart';
 import '../../model/message.dart';
 import '../../model/permission.dart';
 import '../../model/session_detail.dart';
@@ -362,6 +363,407 @@ class OpencodeHttpService implements OpencodeService {
       ),
       jsonEncode({'decision': reply.wire}),
     );
+  }
+
+  // The structured view's `/` command menu (issue #46): the service-backed
+  // commands, each a thin mapping over one shared-service endpoint.
+
+  /// The project's custom commands (the service's `GET /api/command`).
+  @override
+  Future<List<OpencodeCommand>> listCommands() async {
+    final body = await _get(_base.replace(path: '/api/command'));
+    return _listItems(body, OpencodeCommand.fromJson);
+  }
+
+  /// Run one of the project's custom commands (the service's
+  /// `POST /api/session/{id}/command`): [name] is the command name (no
+  /// leading slash) and [text] the text typed after the command name.
+  /// Runs with `delivery: steer`, so it queues mid-turn like a prompt.
+  @override
+  Future<void> runCommand(String id, String name, String text) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/command'),
+      jsonEncode({'name': name, 'text': text, 'delivery': 'steer'}),
+    );
+  }
+
+  /// The model registry (the service's `GET /api/model`).
+  @override
+  Future<List<ModelOption>> listModels() async {
+    final body = await _get(_base.replace(path: '/api/model'));
+    return _listItems(body, ModelOption.fromJson);
+  }
+
+  /// The session's current model (its detail's `model` ref), or `null` when
+  /// the service reports none yet.
+  @override
+  Future<ModelRef?> currentModel(String id) async {
+    final session = await _sessionData(id);
+    final model = session['model'];
+    return model is Map<String, Object?> ? ModelRef.fromJson(model) : null;
+  }
+
+  /// Set the session's model (the service's `POST /api/session/{id}/model`).
+  @override
+  Future<void> setModel(String id, ModelRef model) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/model'),
+      jsonEncode({'model': model.toJson()}),
+    );
+  }
+
+  /// The agent registry (the service's `GET /api/agent`).
+  @override
+  Future<List<AgentOption>> listAgents() async {
+    final body = await _get(_base.replace(path: '/api/agent'));
+    return _listItems(body, AgentOption.fromJson);
+  }
+
+  /// Set the session's agent (the service's `POST /api/session/{id}/agent`).
+  @override
+  Future<void> setAgent(String id, String agentId) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/agent'),
+      jsonEncode({'agent': agentId}),
+    );
+  }
+
+  /// The skill registry (the service's `GET /api/skill`).
+  @override
+  Future<List<SkillOption>> listSkills() async {
+    final body = await _get(_base.replace(path: '/api/skill'));
+    return _listItems(body, SkillOption.fromJson);
+  }
+
+  /// Activate a skill in the session (the service's
+  /// `POST /api/experimental/session/{id}/skill`).
+  @override
+  Future<void> activateSkill(String id, String skillId) async {
+    await _post(
+      _base.replace(
+        path: '/api/experimental/session/${Uri.encodeComponent(id)}/skill',
+      ),
+      jsonEncode({'id': skillId}),
+    );
+  }
+
+  /// Compact the session's context (the service's
+  /// `POST /api/session/{id}/compact`).
+  @override
+  Future<void> compact(String id) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/compact'),
+      jsonEncode({}),
+    );
+  }
+
+  /// Undo the previous message: stage a revert at the session's last user
+  /// message (the service's `POST /api/session/{id}/revert/stage`). A no-op
+  /// when the session has no user message yet.
+  @override
+  Future<void> undo(String id) async {
+    String? lastUser;
+    for (final message in await getMessages(id)) {
+      if (message.role == 'user' && message.id != null) lastUser = message.id;
+    }
+    if (lastUser == null) return;
+    await _post(
+      _base.replace(
+        path: '/api/session/${Uri.encodeComponent(id)}/revert/stage',
+      ),
+      jsonEncode({'messageID': lastUser}),
+    );
+  }
+
+  /// Redo: discard the staged revert (the service's
+  /// `DELETE /api/session/{id}/revert`).
+  @override
+  Future<void> redo(String id) async {
+    await _deleteVoid(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/revert'),
+    );
+  }
+
+  /// Fork the session (the service's `POST /api/session/{id}/fork`),
+  /// returning the new session's id.
+  @override
+  Future<String> fork(String id) async {
+    final body = await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/fork'),
+      jsonEncode({}),
+    );
+    final decoded = jsonDecode(body);
+    final data = decoded is Map<String, Object?> ? decoded['data'] : null;
+    final map = data is Map<String, Object?> ? data : const <String, Object?>{};
+    return map['id'] is String ? map['id'] as String : '';
+  }
+
+  /// Rename the session (the service's `PATCH /api/session/{id}` with a
+  /// `title`).
+  @override
+  Future<void> rename(String id, String title) async {
+    await _patch(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}'),
+      jsonEncode({'title': title}),
+    );
+  }
+
+  /// The session's transcript (the service's
+  /// `GET /api/experimental/session/{id}/export`), as decoded JSON.
+  @override
+  Future<String> exportSession(String id) async {
+    return _payloadString(
+      _base.replace(
+        path: '/api/experimental/session/${Uri.encodeComponent(id)}/export',
+      ),
+    );
+  }
+
+  /// Change the session's working directory (the service's
+  /// `POST /api/session/{id}/move`).
+  @override
+  Future<void> move(String id, String directory) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/move'),
+      jsonEncode({'directory': directory}),
+    );
+  }
+
+  /// Ask a one-shot side question (the service's
+  /// `POST /api/session/{id}/generate`), returning the generated text.
+  @override
+  Future<String> generate(String id, String prompt) async {
+    final body = await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/generate'),
+      jsonEncode({'prompt': prompt}),
+    );
+    final decoded = jsonDecode(body);
+    final data = decoded is Map<String, Object?> ? decoded['data'] : null;
+    return data is Map<String, Object?> && data['text'] is String
+        ? data['text'] as String
+        : '';
+  }
+
+  /// The session's file diffs (the service's `GET /api/session/{id}/diff`),
+  /// as decoded JSON.
+  @override
+  Future<String> diff(String id) async {
+    return _payloadString(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/diff'),
+    );
+  }
+
+  /// The session's usage statistics (the service's
+  /// `GET /api/experimental/session/stats`), as decoded JSON.
+  @override
+  Future<String> stats(String id) async {
+    return _payloadString(
+      _base.replace(
+        path: '/api/experimental/session/stats',
+        queryParameters: {'sessionID': id},
+      ),
+    );
+  }
+
+  /// Open a terminal for the session (the service's
+  /// `POST /api/experimental/session/{id}/terminal`), as decoded JSON. The
+  /// body is the TUI's persistent-pty create (`args`, `cwd` the session's
+  /// working directory, `title`, `env`).
+  @override
+  Future<String> newTerminal(String id) async {
+    final session = await _sessionData(id);
+    final location = session['location'];
+    final cwd =
+        location is Map<String, Object?> && location['directory'] is String
+        ? location['directory'] as String
+        : '';
+    final body = await _post(
+      _base.replace(
+        path: '/api/experimental/session/${Uri.encodeComponent(id)}/terminal',
+      ),
+      jsonEncode({
+        'sessionID': id,
+        'args': const <Object?>[],
+        'cwd': cwd,
+        'title': 'Terminal',
+        'env': const <String, Object?>{},
+      }),
+    );
+    return _unwrapData(body);
+  }
+
+  /// The session's data from the service (`GET /api/session/{id}`), the
+  /// `{location, data}` envelope unwrapped; `null` fields stay absent.
+  Future<Map<String, Object?>> _sessionData(String id) async {
+    final body = await _get(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}'),
+    );
+    final decoded = jsonDecode(body);
+    final data = decoded is Map<String, Object?> ? decoded['data'] : null;
+    return data is Map<String, Object?> ? data : const <String, Object?>{};
+  }
+
+  /// The open session's project's worktrees (the service's
+  /// `GET /api/worktree?projectID=…`), as decoded JSON. The project id is
+  /// resolved from the session on the service.
+  @override
+  Future<String> worktrees(String sessionId) async {
+    final session = await _sessionData(sessionId);
+    final projectId = session['projectID'] is String
+        ? session['projectID'] as String
+        : '';
+    if (projectId.isEmpty) return '[]';
+    return _payloadString(
+      _base.replace(
+        path: '/api/worktree',
+        queryParameters: {'projectID': projectId},
+      ),
+    );
+  }
+
+  /// The account's usage limits (the service's
+  /// `GET /api/experimental/usage/limits`), as decoded JSON.
+  @override
+  Future<String> usage() async {
+    return _payloadString(
+      _base.replace(path: '/api/experimental/usage/limits'),
+    );
+  }
+
+  /// The MCP servers (the service's `GET /api/mcp`), as decoded JSON.
+  @override
+  Future<String> mcps() async {
+    return _payloadString(_base.replace(path: '/api/mcp'));
+  }
+
+  /// The integrations (the service's `GET /api/integration`), as decoded JSON.
+  @override
+  Future<String> integrations() async {
+    return _payloadString(_base.replace(path: '/api/integration'));
+  }
+
+  /// Connect an integration via OAuth (the service's
+  /// `POST /api/integration/{id}/connect/oauth`), as decoded JSON.
+  @override
+  Future<String> connectIntegration(
+    String integrationId,
+    String methodId,
+  ) async {
+    final body = await _post(
+      _base.replace(
+        path:
+            '/api/integration/${Uri.encodeComponent(integrationId)}'
+            '/connect/oauth',
+      ),
+      jsonEncode({'methodID': methodId}),
+    );
+    return _unwrapData(body);
+  }
+
+  /// The service's info (the service's `GET /api/info`), as decoded JSON.
+  @override
+  Future<String> status() async {
+    return _payloadString(_base.replace(path: '/api/info'));
+  }
+
+  /// Pair a device (the service's `POST /api/pair`), as decoded JSON.
+  @override
+  Future<String> pair() async {
+    final body = await _post(_base.replace(path: '/api/pair'), jsonEncode({}));
+    return _unwrapData(body);
+  }
+
+  /// Reload the service's configuration (the service's
+  /// `POST /api/location/reload`).
+  @override
+  Future<void> reload() async {
+    await _post(_base.replace(path: '/api/location/reload'), jsonEncode({}));
+  }
+
+  /// The plugins (the service's `GET /api/plugin`), as decoded JSON.
+  @override
+  Future<String> plugins() async {
+    return _payloadString(_base.replace(path: '/api/plugin'));
+  }
+
+  /// A bare `DELETE` that accepts any 2xx (the command menu's `redo`):
+  /// non-2xx -> [OpencodeServiceError]; a transport failure -> status 0.
+  Future<void> _deleteVoid(Uri uri) async {
+    final client = HttpClient();
+    try {
+      final request = await client.deleteUrl(uri);
+      request.headers.set(HttpHeaders.authorizationHeader, _auth);
+      final response = await request.close();
+      await response.drain<void>();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw OpencodeServiceError(response.statusCode, 'not accepted');
+      }
+    } on OpencodeServiceError {
+      rethrow;
+    } catch (error) {
+      throw OpencodeServiceError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// A `PATCH` to [uri] with the service auth and a JSON [body], returning the
+  /// raw response body (the command menu's `rename`).
+  Future<String> _patch(Uri uri, String body) async {
+    final client = HttpClient();
+    try {
+      final request = await client.openUrl('PATCH', uri);
+      request.headers.set(HttpHeaders.authorizationHeader, _auth);
+      request.headers.contentType = ContentType.json;
+      request.write(body);
+      final response = await request.close();
+      final responseBody = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw OpencodeServiceError(response.statusCode, responseBody);
+      }
+      return responseBody;
+    } on OpencodeServiceError {
+      rethrow;
+    } catch (error) {
+      throw OpencodeServiceError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// GET [uri] and return its payload as a JSON string for the view to display:
+  /// the service's `{location, data}` envelope is unwrapped to its `data`
+  /// (re-encoded), a bare list/object passes through as-is.
+  Future<String> _payloadString(Uri uri) async {
+    return _unwrapData(await _get(uri));
+  }
+
+  /// Unwrap the service's `{location, data}` envelope to its `data` and re-encode
+  /// it; a bare list/object (or a body with no `data`) passes through.
+  static String _unwrapData(String body) {
+    final decoded = jsonDecode(body);
+    if (decoded is Map<String, Object?> && decoded.containsKey('data')) {
+      return jsonEncode(decoded['data']);
+    }
+    return body;
+  }
+
+  /// The items of a service list response (its `data` envelope, or a bare
+  /// list), mapped through [from].
+  static List<T> _listItems<T>(String body, T Function(Object? json) from) {
+    final decoded = jsonDecode(body);
+    final list = _dataList(decoded);
+    return [
+      for (final item in list)
+        if (item is Map<String, Object?>) from(item),
+    ];
+  }
+
+  static List<Object?> _dataList(Object? decoded) {
+    final map = decoded is Map<String, Object?> ? decoded : null;
+    final data = map?['data'];
+    if (data is List) return data;
+    return decoded is List ? decoded : const <Object?>[];
   }
 
   /// The service's `TokenUsage.Info` flattens `cache.{read,write}` to the

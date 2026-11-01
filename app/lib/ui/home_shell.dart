@@ -175,6 +175,11 @@ class _HomeShellState extends State<HomeShell> {
           onDeepLinkSessionConsumed: () {
             _sessionTarget = null;
           },
+          // The structured view's `/settings` command (issue #46): the view
+          // closes itself, and the shell lands on the Settings tab.
+          onOpenSettings: () {
+            if (mounted) setState(() => _tab = 2);
+          },
         ),
         DockerTab(
           apiBase: _apiBase,

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/command.dart';
 import '../model/compose_project.dart';
 import '../model/container.dart';
 import '../model/permission.dart';
@@ -117,6 +118,39 @@ class BridgeServer {
   /// Cloudflare's consent page and stores the session in the user's own
   /// `~/.cloudflared/`.
   static const String tunnelLoginPath = '/api/tunnel/login';
+
+  // The structured view's `/` command menu, global commands (issue #46).
+  // Each is a thin pass-through of a shared-service endpoint; the service is
+  // the single source of truth, so the effect is reflected live in any
+  // attached TUI.
+
+  /// The account's usage limits (the service's
+  /// `GET /api/experimental/usage/limits`).
+  static const String usagePath = '/api/usage';
+
+  /// The MCP servers (the service's `GET /api/mcp`).
+  static const String mcpsPath = '/api/mcp';
+
+  /// The integrations (the service's `GET /api/integration`); the OAuth
+  /// connect is `POST /api/integrations/{id}/connect`.
+  static const String integrationsPath = '/api/integrations';
+
+  /// The service's info (the service's `GET /api/info`).
+  static const String statusPath = '/api/status';
+
+  /// Pair a device (the service's `POST /api/pair`).
+  static const String pairPath = '/api/pair';
+
+  /// Reload the service's configuration (the service's
+  /// `POST /api/location/reload`).
+  static const String reloadPath = '/api/reload';
+
+  /// The worktrees (the service's `GET /api/worktree?projectID=…`, the
+  /// project resolved from the `sessionID` query on the service).
+  static const String worktreesPath = '/api/worktrees';
+
+  /// The plugins (the service's `GET /api/plugin`).
+  static const String pluginsPath = '/api/plugins';
 
   final HttpServer _server;
 
@@ -817,6 +851,68 @@ class BridgeServer {
         await BridgeServer._tunnelLogin(request, tunnel, tunnelSetup);
         return;
       }
+      // The structured view's `/` command menu, global commands (issue
+      // #46), checked before the session matchers (a bare list path would
+      // otherwise read as a session id to them).
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.usagePath) {
+        await BridgeServer._commandPayload(request, sessions, (s) => s.usage());
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.mcpsPath) {
+        await BridgeServer._commandPayload(request, sessions, (s) => s.mcps());
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.integrationsPath) {
+        await BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.integrations(),
+        );
+        return;
+      }
+      if (request.method == 'POST') {
+        final connect = BridgeServer._integrationConnectIn(request.uri.path);
+        if (connect != null) {
+          await BridgeServer._commandConnect(request, connect, sessions);
+          return;
+        }
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.statusPath) {
+        await BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.status(),
+        );
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.pairPath) {
+        await BridgeServer._commandPayload(request, sessions, (s) => s.pair());
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.reloadPath) {
+        await BridgeServer._commandReload(request, sessions);
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.worktreesPath) {
+        await BridgeServer._commandWorktrees(request, sessions);
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.pluginsPath) {
+        await BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.plugins(),
+        );
+        return;
+      }
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.sessionsPath) {
         await BridgeServer._createSession(request, sessions, windows);
@@ -880,6 +976,20 @@ class BridgeServer {
           );
           return;
         }
+      }
+      // The structured view's `/` command menu, per-session commands (issue
+      // #46), checked after the endpoint 5–9 matchers (which own
+      // messages/permissions/window) and the single-segment detail/delete
+      // matcher, so their subpaths win.
+      final command = BridgeServer._sessionCommandIn(request.uri.path);
+      if (command != null) {
+        await BridgeServer._handleCommand(
+          request,
+          command.$1,
+          command.$2,
+          sessions,
+        );
+        return;
       }
       response.statusCode = HttpStatus.notFound;
       response.write(jsonEncode({'error': 'not_found'}));
@@ -1214,6 +1324,351 @@ class BridgeServer {
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
     }
+    await response.close();
+  }
+
+  /// The `/` command menu's global commands (issue #46): a service endpoint
+  /// that returns its decoded JSON as a string, which the bridge writes as a
+  /// JSON string (the client decodes it back to the string and displays or
+  /// re-parses it). Unknown session is n/a; a service failure is a 502.
+  static Future<void> _commandPayload(
+    HttpRequest request,
+    SessionsBackend? sessions,
+    Future<String> Function(SessionsBackend) call,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final data = await call(sessions);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode(data));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The `/` command menu's `reload` (issue #46): the service's
+  /// `POST /api/location/reload`.
+  static Future<void> _commandReload(
+    HttpRequest request,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      await sessions.reload();
+      response.statusCode = HttpStatus.noContent;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The (integration id) in a connect path, or `null` when [path] is not
+  /// `api/integrations/{id}/connect` (the `/` command menu's `/connect`).
+  static String? _integrationConnectIn(String path) {
+    const prefix = '/api/integrations/';
+    const suffix = '/connect';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The `/` command menu's `/connect` (issue #46): start an integration's
+  /// OAuth flow. The body is `{"methodID": "…"}` (the integration's method,
+  /// from the service's integration list); anything else is a 400. The
+  /// response is the service's decoded JSON (the flow's URL, when the
+  /// service hands one out).
+  static Future<void> _commandConnect(
+    HttpRequest request,
+    String integrationId,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final methodId = BridgeServer._stringField(
+      await BridgeServer._jsonBody(request),
+      'methodID',
+    );
+    if (methodId == null || methodId.isEmpty) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      final data = await sessions.connectIntegration(integrationId, methodId);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode(data));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The `/` command menu's `/worktrees` (issue #46): the open session's
+  /// project's worktrees; the service resolves the project from the
+  /// `sessionID` query. A missing id is a 400; a service failure is a 502.
+  static Future<void> _commandWorktrees(
+    HttpRequest request,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final sessionId = request.uri.queryParameters['sessionID'];
+    if (sessionId == null || sessionId.isEmpty) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_request'}));
+      await response.close();
+      return;
+    }
+    try {
+      final data = await sessions.worktrees(sessionId);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode(data));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The (session id, subpath) in a command-menu path (issue #46), or
+  /// `null` when [path] is not `api/sessions/{id}/…` with a non-empty
+  /// subpath (so it falls through to the 404).
+  static (String, String)? _sessionCommandIn(String path) {
+    const prefix = '/api/sessions/';
+    if (!path.startsWith(prefix)) return null;
+    final rest = path.substring(prefix.length);
+    final slash = rest.indexOf('/');
+    if (slash <= 0) return null;
+    final id = rest.substring(0, slash);
+    final sub = rest.substring(slash + 1);
+    if (sub.isEmpty || sub.contains('//')) return null;
+    return (Uri.decodeComponent(id), sub);
+  }
+
+  /// The structured view's `/` command menu, per-session commands (issue
+  /// #46): thin pass-throughs of the shared-service command endpoints. The
+  /// service is the single source of truth, so the effect is reflected live
+  /// in any attached TUI. Unknown session is a 404; a service failure is a
+  /// 502 (the [_serviceError] mapping).
+  static Future<void> _handleCommand(
+    HttpRequest request,
+    String id,
+    String sub,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final method = request.method;
+    final parts = sub.split('/');
+    Map<String, Object?>? body;
+    if (method != 'GET') {
+      body = await BridgeServer._jsonBody(request);
+    }
+    try {
+      switch ((method, parts)) {
+        case ('GET', ['commands']):
+          final commands = await sessions.listCommands();
+          await BridgeServer._jsonOk(
+            response,
+            jsonEncode([for (final c in commands) c.toJson()]),
+          );
+          return;
+        case ('POST', ['commands', final name]):
+          await sessions.runCommand(
+            id,
+            name,
+            BridgeServer._stringField(body, 'text') ?? '',
+          );
+          await BridgeServer._jsonAccepted(response);
+          return;
+        case ('GET', ['models']):
+          final models = await sessions.listModels();
+          await BridgeServer._jsonOk(
+            response,
+            jsonEncode([for (final m in models) m.toJson()]),
+          );
+          return;
+        case ('GET', ['model']):
+          final model = await sessions.currentModel(id);
+          await BridgeServer._jsonOk(
+            response,
+            jsonEncode({'model': model?.toJson()}),
+          );
+          return;
+        case ('POST', ['models']):
+          final model = BridgeServer._modelRef(body);
+          if (model == null) {
+            await BridgeServer._invalidBody(response);
+            return;
+          }
+          await sessions.setModel(id, model);
+          await BridgeServer._noContent(response);
+          return;
+        case ('GET', ['agents']):
+          final agents = await sessions.listAgents();
+          await BridgeServer._jsonOk(
+            response,
+            jsonEncode([for (final a in agents) a.toJson()]),
+          );
+          return;
+        case ('POST', ['agents']):
+          final agent = BridgeServer._stringField(body, 'agent');
+          if (agent == null || agent.isEmpty) {
+            await BridgeServer._invalidBody(response);
+            return;
+          }
+          await sessions.setAgent(id, agent);
+          await BridgeServer._noContent(response);
+          return;
+        case ('GET', ['skills']):
+          final skills = await sessions.listSkills();
+          await BridgeServer._jsonOk(
+            response,
+            jsonEncode([for (final s in skills) s.toJson()]),
+          );
+          return;
+        case ('POST', ['skills', final skillId]):
+          await sessions.activateSkill(id, skillId);
+          await BridgeServer._noContent(response);
+          return;
+        case ('POST', ['compact']):
+          await sessions.compact(id);
+          await BridgeServer._noContent(response);
+          return;
+        case ('POST', ['undo']):
+          await sessions.undo(id);
+          await BridgeServer._noContent(response);
+          return;
+        case ('POST', ['redo']):
+          await sessions.redo(id);
+          await BridgeServer._noContent(response);
+          return;
+        case ('POST', ['fork']):
+          final forked = await sessions.fork(id);
+          await BridgeServer._jsonOk(response, jsonEncode({'id': forked}));
+          return;
+        case ('POST', ['rename']):
+          final title = BridgeServer._stringField(body, 'title');
+          if (title == null || title.trim().isEmpty) {
+            await BridgeServer._invalidBody(response);
+            return;
+          }
+          await sessions.rename(id, title);
+          await BridgeServer._noContent(response);
+          return;
+        case ('GET', ['export']):
+          final data = await sessions.exportSession(id);
+          await BridgeServer._jsonOk(response, jsonEncode(data));
+          return;
+        case ('POST', ['move']):
+          final directory = BridgeServer._stringField(body, 'directory');
+          if (directory == null || directory.trim().isEmpty) {
+            await BridgeServer._invalidBody(response);
+            return;
+          }
+          await sessions.move(id, directory);
+          await BridgeServer._noContent(response);
+          return;
+        case ('POST', ['btw']):
+          final prompt = BridgeServer._stringField(body, 'prompt');
+          if (prompt == null || prompt.trim().isEmpty) {
+            await BridgeServer._invalidBody(response);
+            return;
+          }
+          final answer = await sessions.generate(id, prompt);
+          await BridgeServer._jsonOk(response, jsonEncode({'text': answer}));
+          return;
+        case ('GET', ['diff']):
+          final data = await sessions.diff(id);
+          await BridgeServer._jsonOk(response, jsonEncode(data));
+          return;
+        case ('GET', ['stats']):
+          final data = await sessions.stats(id);
+          await BridgeServer._jsonOk(response, jsonEncode(data));
+          return;
+        case ('POST', ['terminal']):
+          final data = await sessions.newTerminal(id);
+          await BridgeServer._jsonOk(response, jsonEncode(data));
+          return;
+        default:
+          await BridgeServer._notFound(response);
+      }
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+      await response.close();
+    }
+  }
+
+  /// The request's JSON object body, or `null` when it is absent or not a
+  /// JSON object (a body-less command is fine on the body-less endpoints).
+  static Future<Map<String, Object?>?> _jsonBody(HttpRequest request) async {
+    try {
+      final raw = await utf8.decodeStream(request);
+      if (raw.trim().isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, Object?> ? decoded : null;
+    } catch (_) {
+      return null; // A non-JSON body is not a body.
+    }
+  }
+
+  /// A string field of a command body, or `null` when absent or not a string.
+  static String? _stringField(Map<String, Object?>? body, String key) {
+    final value = body?[key];
+    return value is String ? value : null;
+  }
+
+  /// The `model` field of a set-model body as the service's `Model.Ref`, or
+  /// `null` when the body carries none.
+  static ModelRef? _modelRef(Map<String, Object?>? body) {
+    final model = body?['model'];
+    return model is Map<String, Object?> ? ModelRef.fromJson(model) : null;
+  }
+
+  static Future<void> _jsonOk(HttpResponse response, String json) async {
+    response.statusCode = HttpStatus.ok;
+    response.write(json);
+    await response.close();
+  }
+
+  static Future<void> _jsonAccepted(HttpResponse response) async {
+    response.statusCode = HttpStatus.accepted;
+    await response.close();
+  }
+
+  static Future<void> _noContent(HttpResponse response) async {
+    response.statusCode = HttpStatus.noContent;
+    await response.close();
+  }
+
+  static Future<void> _invalidBody(HttpResponse response) async {
+    response.statusCode = HttpStatus.badRequest;
+    response.write(jsonEncode({'error': 'invalid_body'}));
+    await response.close();
+  }
+
+  static Future<void> _notFound(HttpResponse response) async {
+    response.statusCode = HttpStatus.notFound;
+    response.write(jsonEncode({'error': 'not_found'}));
     await response.close();
   }
 

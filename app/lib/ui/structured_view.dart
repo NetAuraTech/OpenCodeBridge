@@ -1,16 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
+import '../app_info.dart';
 import '../client/events_client.dart';
 import '../client/sessions_client.dart';
+import '../model/command.dart';
 import '../model/message.dart';
 import '../model/permission.dart';
 import '../model/session_detail.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
+import 'slash_commands.dart';
 
 /// The structured view of one session (spec §6: *External* → structured
 /// view): the message history with the tools in flight, the live cost bar,
@@ -33,6 +38,8 @@ class StructuredSessionScreen extends StatefulWidget {
     required this.client,
     this.events,
     this.gaps,
+    this.onNewSession,
+    this.onOpenSettings,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -53,6 +60,14 @@ class StructuredSessionScreen extends StatefulWidget {
   /// gap means events were missed (typically across a reconnect), so the
   /// view re-fetches its state and the final content is always complete.
   final Stream<SessionGap>? gaps;
+
+  /// The `/` menu's navigation commands (`/new`, `/sessions`, `/open`,
+  /// `/settings`, `/clear`): the screen closes and the app runs the flow.
+  /// `null` leaves the command in the menu but a no-op (the menu still opens).
+  final FutureOr<void> Function()? onNewSession;
+
+  /// `/settings`: open the app's Settings tab.
+  final FutureOr<void> Function()? onOpenSettings;
 
   @override
   State<StructuredSessionScreen> createState() =>
@@ -164,9 +179,26 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
   final TextEditingController _prompt = TextEditingController();
 
+  /// The title shown in the app bar: the route's title at first, replaced by
+  /// `/rename` while the view stays open.
+  String _title = '';
+
+  /// The `/` menu's rows (issue #46): the static catalog until the project's
+  /// custom commands land (fetched when the menu first opens).
+  List<SlashCommand> _commands = SlashCommands.catalog;
+
+  /// The project's custom commands have been requested already (the menu
+  /// keeps showing the static catalog when the fetch fails).
+  bool _commandsFetched = false;
+
+  /// True while a `/` command runs (the prompt bar is disabled so a command
+  /// cannot be double-run).
+  bool _commandBusy = false;
+
   @override
   void initState() {
     super.initState();
+    _title = widget.title;
     _scroll.addListener(_onScroll);
     _loadInitial();
     final stream = widget.events;
@@ -891,6 +923,488 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
+  /// The `/` menu is open (issue #46): fetch the project's custom commands
+  /// (the service's `GET /api/command`) once and merge them into the menu.
+  /// A failed fetch keeps the static catalog on screen.
+  void _onMenuOpened() {
+    if (_commandsFetched) return;
+    _commandsFetched = true;
+    widget.client
+        .listCommands(widget.sessionId)
+        .then((commands) {
+          if (mounted) {
+            setState(() => _commands = SlashCommands.withCustom(commands));
+          }
+        })
+        .catchError((Object _) {});
+  }
+
+  /// Runs the row the user picked from the `/` menu (issue #46). The bar
+  /// clears the field before calling; the command dispatches by family —
+  /// custom commands are sent to the open session (the service queues them
+  /// with `delivery: steer` mid-turn), service commands hit the bridge's
+  /// command endpoints, local commands run their in-app equivalent.
+  Future<void> _runCommand(SlashCommand command, String argument) async {
+    if (_commandBusy) return;
+    setState(() => _commandBusy = true);
+    try {
+      await _dispatchCommand(command, argument);
+    } finally {
+      if (mounted) setState(() => _commandBusy = false);
+    }
+  }
+
+  Future<void> _dispatchCommand(SlashCommand command, String argument) async {
+    switch (command.family) {
+      case CommandFamily.custom:
+        await _runCustom(command, argument);
+      case CommandFamily.service:
+        await _runService(command.name, argument);
+      case CommandFamily.local:
+        await _runLocal(command.name);
+    }
+  }
+
+  /// A project custom command (issue #46): its name plus the typed argument
+  /// go to the open session's `command` endpoint.
+  Future<void> _runCustom(SlashCommand command, String argument) async {
+    try {
+      await widget.client.runCommand(widget.sessionId, command.name, argument);
+      if (mounted) _snackBar('Sent /${command.name} to the session.');
+    } on SessionsClientError catch (e) {
+      if (mounted) {
+        _snackBar('Could not run /${command.name} (${_describe(e)}).');
+      }
+    } catch (_) {
+      if (mounted) _snackBar('Could not run /${command.name}.');
+    }
+  }
+
+  /// A service command (issue #46): the bridge's command endpoints. The
+  /// session commands that change the session (model, agent, variant,
+  /// directory) normalize afterwards, so the view (and the service's TUIs,
+  /// the single source of truth) show the new state.
+  Future<void> _runService(String name, String argument) async {
+    final id = widget.sessionId;
+    final client = widget.client;
+    try {
+      switch (name) {
+        case 'models':
+          final models = await client.listModels(id);
+          final picked = await _pick(
+            'Switch model',
+            models,
+            (m) => m.name,
+            (m) => m.providerId,
+          );
+          if (picked == null) return;
+          await client.setModel(
+            id,
+            ModelRef(id: picked.id, providerId: picked.providerId),
+          );
+          if (!mounted) return;
+          _snackBar('Model set to ${picked.name}.');
+          _normalize();
+          return;
+        case 'agents':
+          final agents = await client.listAgents(id);
+          final picked = await _pick(
+            'Switch agent',
+            agents,
+            (a) => a.name,
+            (a) => a.description,
+          );
+          if (picked == null) return;
+          await client.setAgent(id, picked.id);
+          if (!mounted) return;
+          _snackBar('Agent set to ${picked.name}.');
+          return;
+        case 'variants':
+          final current = await client.currentModel(id);
+          ModelOption? model;
+          if (current != null) {
+            for (final m in await client.listModels(id)) {
+              if (m.id == current.id && m.providerId == current.providerId) {
+                model = m;
+                break;
+              }
+            }
+          }
+          if (model == null || model.variants.isEmpty) {
+            if (!mounted) return;
+            _snackBar('No variants available.');
+            return;
+          }
+          final variants = model.variants;
+          final variant = await _pick<String>(
+            'Switch variant',
+            variants,
+            (v) => current?.variant == v ? '$v (current)' : v,
+            null,
+          );
+          if (variant == null) return;
+          await client.setModel(
+            id,
+            ModelRef(
+              id: model.id,
+              providerId: model.providerId,
+              variant: variant,
+            ),
+          );
+          if (!mounted) return;
+          _snackBar('Variant set to $variant.');
+          _normalize();
+          return;
+        case 'compact':
+          await client.compact(id);
+          _normalize();
+          return;
+        case 'undo':
+          await client.undo(id);
+          _normalize();
+          return;
+        case 'redo':
+          await client.redo(id);
+          _normalize();
+          return;
+        case 'fork':
+          final forked = await client.fork(id);
+          if (!mounted) return;
+          _snackBar('Forked the session as $forked.');
+          return;
+        case 'rename':
+          await client.rename(id, argument);
+          if (!mounted) return;
+          setState(() => _title = argument);
+          _snackBar('Renamed the session.');
+          return;
+        case 'cd':
+          await client.move(id, argument);
+          if (!mounted) return;
+          _snackBar('Working directory: $argument.');
+          _normalize();
+          return;
+        case 'skills':
+          final skills = await client.listSkills(id);
+          final picked = await _pick(
+            'Activate a skill',
+            skills,
+            (s) => s.name,
+            (s) => s.description,
+          );
+          if (picked == null) return;
+          await client.activateSkill(id, picked.id);
+          if (!mounted) return;
+          _snackBar('Skill activated: ${picked.name}.');
+          return;
+        case 'btw':
+          final answer = await client.btw(id, argument);
+          if (!mounted) return;
+          _dialog('Side answer', answer);
+          return;
+        case 'export':
+          await _payloadDialog('Export', () => client.exportSession(id));
+          return;
+        case 'diff':
+          await _payloadDialog('Diff', () => client.diff(id));
+          return;
+        case 'stats':
+          await _payloadDialog('Usage statistics', () => client.stats(id));
+          return;
+        case 'terminal':
+          await _payloadDialog('Terminal', () => client.newTerminal(id));
+          return;
+        case 'worktrees':
+          await _payloadDialog('Worktrees', () => client.worktrees(id));
+          return;
+        // The menu's navigation commands: the app's existing "new session"
+        // flow (the screen closes and the flow runs behind it).
+        case 'sessions':
+        case 'new':
+        case 'open':
+          await _goNewSession();
+          return;
+        case 'usage':
+          await _payloadDialog('Usage', client.usage);
+          return;
+        case 'mcps':
+          await _payloadDialog('MCP servers', client.mcps);
+          return;
+        case 'connect':
+          await _connectFlow();
+          return;
+        case 'status':
+          await _payloadDialog('Status', client.status);
+          return;
+        case 'pair':
+          await _payloadDialog('Pairing code', client.pair);
+          return;
+        case 'reload':
+          await client.reload();
+          if (!mounted) return;
+          _snackBar('Reloaded the configuration.');
+          return;
+        case 'plugins':
+          await _payloadDialog('Plugins', client.plugins);
+          return;
+      }
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not run /$name (${_describe(e)}).');
+    } catch (_) {
+      if (mounted) _snackBar('Could not run /$name.');
+    }
+  }
+
+  /// The menu's navigation commands (`/new`, `/sessions`, `/open`, and the
+  /// local `/clear`): this view closes and the app's existing "new session"
+  /// flow runs behind it, or a note when the screen has no navigation wired.
+  Future<void> _goNewSession() async {
+    final onNewSession = widget.onNewSession;
+    if (onNewSession == null) {
+      if (!mounted) return;
+      _snackBar('Not available from this screen.');
+      return;
+    }
+    // Close this view first, then run the flow on the tab behind it.
+    Navigator.of(context).pop();
+    await onNewSession();
+  }
+
+  /// `/connect` (issue #46): the service's integrations that carry an OAuth
+  /// method, a pick, then the flow's URL the service hands out.
+  Future<void> _connectFlow() async {
+    final client = widget.client;
+    final payload = await client.integrations();
+    final decoded = jsonDecode(payload);
+    final items = decoded is List<Object?> ? decoded : const <Object?>[];
+    final options = <(String, String, String, String)>[];
+    for (final item in items) {
+      if (item is! Map<String, Object?>) continue;
+      final integrationId = item['id'] is String ? item['id'] as String : '';
+      final integrationName = item['name'] is String
+          ? item['name'] as String
+          : integrationId;
+      final methods = item['methods'];
+      for (final method
+          in methods is List<Object?> ? methods : const <Object?>[]) {
+        if (method is! Map<String, Object?> || method['type'] != 'oauth') {
+          continue;
+        }
+        final methodId = method['id'] is String ? method['id'] as String : '';
+        if (methodId.isEmpty) continue;
+        options.add((
+          integrationId,
+          integrationName,
+          methodId,
+          method['label'] is String
+              ? method['label'] as String
+              : integrationName,
+        ));
+      }
+    }
+    if (options.isEmpty) {
+      if (!mounted) return;
+      _snackBar('No connectable integration.');
+      return;
+    }
+    final picked = await _pick(
+      'Connect an integration',
+      options,
+      (o) => o.$2,
+      (o) => o.$4,
+    );
+    if (picked == null) return;
+    final result = await client.connectIntegration(picked.$1, picked.$3);
+    if (!mounted) return;
+    _dialog('Connect', result);
+  }
+
+  /// The menu's local commands (issue #46): their in-app equivalents; they
+  /// touch no shared-service state.
+  Future<void> _runLocal(String name) async {
+    switch (name) {
+      case 'clear':
+        await _goNewSession();
+        return;
+      case 'timeline':
+        if (!_scroll.hasClients) return;
+        _stick = false;
+        _scroll.position.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        return;
+      case 'copy':
+        String? text;
+        for (var i = _messages.length - 1; i >= 0; i--) {
+          final message = _messages[i];
+          if (message.role == 'assistant' &&
+              (message.text ?? '').trim().isNotEmpty) {
+            text = message.text;
+            break;
+          }
+        }
+        if (text == null) {
+          if (!mounted) return;
+          _snackBar('No assistant message to copy.');
+          return;
+        }
+        await Clipboard.setData(ClipboardData(text: text));
+        if (!mounted) return;
+        _snackBar('Copied the last assistant message.');
+        return;
+      case 'help':
+        if (!mounted) return;
+        final lines = [
+          for (final command in _commands)
+            '/${command.name}'
+                '${command.aliases.isEmpty ? '' : ' (also ${command.aliases.join(', ')})'}'
+                ' — ${command.subtitle}',
+        ];
+        _dialog('Commands', lines.join('\n'));
+        return;
+      case 'settings':
+        final onOpenSettings = widget.onOpenSettings;
+        if (onOpenSettings == null) {
+          if (!mounted) return;
+          _snackBar('Settings is not available from this screen.');
+          return;
+        }
+        // Close this view, then let the shell land on the Settings tab.
+        Navigator.of(context).pop();
+        await onOpenSettings();
+        return;
+      case 'debug':
+        String service = 'unreachable';
+        try {
+          final payload = await widget.client.status();
+          try {
+            final decoded = jsonDecode(payload);
+            service =
+                decoded is Map<String, Object?> || decoded is List<Object?>
+                ? const JsonEncoder.withIndent('  ').convert(decoded)
+                : payload;
+          } catch (_) {
+            service = payload;
+          }
+        } on SessionsClientError {
+          service = 'unreachable';
+        } catch (_) {
+          service = 'unavailable';
+        }
+        if (!mounted) return;
+        _dialog(
+          'Debug',
+          'App: OpenCode Bridge $kAppVersion\n'
+              'OS: ${Platform.operatingSystem}\n\n'
+              'Service:\n$service',
+        );
+        return;
+      case 'exit':
+        exit(0);
+    }
+  }
+
+  /// A bridge failure in one line, for a snackbar.
+  String _describe(SessionsClientError e) =>
+      e.statusCode == 0 ? 'unreachable' : 'status ${e.statusCode}';
+
+  /// A plain dialog: a title over the (selectable) [text], scrollable.
+  void _dialog(String title, String text, {bool mono = false}) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 420),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: mono
+                  ? const TextStyle(fontFamily: 'monospace', fontSize: 12)
+                  : null,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The menu's "info" commands (export, diff, stats, terminal, worktrees,
+  /// usage, mcps, plugins, status, pair): fetch the service's payload (its
+  /// decoded JSON, as a string) and show it pretty-printed.
+  Future<void> _payloadDialog(
+    String title,
+    Future<String> Function() load,
+  ) async {
+    String payload;
+    try {
+      payload = await load();
+    } on SessionsClientError catch (e) {
+      if (!mounted) return;
+      _snackBar('Could not load (${_describe(e)}).');
+      return;
+    } catch (_) {
+      if (!mounted) return;
+      _snackBar('Could not load.');
+      return;
+    }
+    if (!mounted) return;
+    String text = payload;
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map<String, Object?> || decoded is List<Object?>) {
+        text = const JsonEncoder.withIndent('  ').convert(decoded);
+      }
+    } catch (_) {
+      // A non-JSON payload is shown raw.
+    }
+    _dialog(title, text, mono: true);
+  }
+
+  /// The menu's pickers (models, agents, variants, skills, connect): a
+  /// dialog listing [items]; resolves the picked item, or `null` when the
+  /// user cancels (or there is nothing to pick).
+  Future<T?> _pick<T extends Object>(
+    String title,
+    List<T> items,
+    String Function(T item) label,
+    String? Function(T item)? hint,
+  ) async {
+    if (!mounted || items.isEmpty) return null;
+    return showDialog<T>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 420),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final item in items)
+                  Builder(
+                    builder: (itemContext) {
+                      final sub = hint?.call(item);
+                      return ListTile(
+                        dense: true,
+                        title: Text(label(item)),
+                        subtitle: (sub == null || sub.isEmpty)
+                            ? null
+                            : Text(sub),
+                        onTap: () => Navigator.of(itemContext).pop(item),
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   void _snackBar(String message) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -900,7 +1414,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(title: Text(_title)),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
@@ -986,8 +1500,11 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                 ),
                 _PromptBar(
                   controller: _prompt,
-                  busy: _promptBusy,
+                  busy: _promptBusy || _commandBusy,
                   onSend: _sendPrompt,
+                  commands: _commands,
+                  onCommand: _runCommand,
+                  onMenuOpened: _onMenuOpened,
                 ),
               ],
             ),
@@ -1588,50 +2105,267 @@ class _ToolCard extends StatelessWidget {
 /// The prompt input (endpoint 7), enabled at any time: the field is never
 /// disabled and the send button is only busy while a send is in flight.
 /// A mid-turn prompt is queued by the service (`delivery: steer`).
-class _PromptBar extends StatelessWidget {
+///
+/// The `/` command menu (issue #46): typing `/` at the start of the input
+/// opens the command menu above the field, filtered live as the user types
+/// (matching command names and their aliases, exactly like the TUI). Enter
+/// runs the selected row; a command that takes an argument (`takesArg`)
+/// takes the text typed after the name and keeps the menu open until the
+/// argument is typed (the TUI behavior). A prefix that matches no command
+/// stays put on Enter — it is neither run nor sent.
+class _PromptBar extends StatefulWidget {
   const _PromptBar({
     required this.controller,
     required this.busy,
     required this.onSend,
+    required this.commands,
+    required this.onCommand,
+    required this.onMenuOpened,
   });
 
   final TextEditingController controller;
+
   final bool busy;
+
   final Future<void> Function() onSend;
+
+  /// The full command menu (built-in + the project's custom commands), in
+  /// menu order; the bar filters it by the typed command token.
+  final List<SlashCommand> commands;
+
+  /// Runs [command] with [argument] (the text typed after the command name,
+  /// trimmed). The bar clears the field before calling it.
+  final Future<void> Function(SlashCommand command, String argument) onCommand;
+
+  /// The menu is open; the screen may need to fetch the project's custom
+  /// commands.
+  final VoidCallback onMenuOpened;
+
+  @override
+  State<_PromptBar> createState() => _PromptBarState();
+}
+
+class _PromptBarState extends State<_PromptBar> {
+  /// The menu is open while the input starts with `/` (the TUI trigger).
+  bool get _menuOpen => widget.controller.text.startsWith('/');
+
+  /// The filtered menu rows: the [widget.commands] matching the typed
+  /// command token (name or alias prefix).
+  List<SlashCommand> _matches = const [];
+
+  /// The selected row in [_matches] (`-1` when there is no match).
+  int _selected = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_syncMenu);
+  }
+
+  @override
+  void didUpdateWidget(covariant _PromptBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The custom commands landed while the menu is open: re-filter.
+    if (oldWidget.commands != widget.commands && _menuOpen) _syncMenu();
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_syncMenu);
+    super.dispose();
+  }
+
+  /// Re-filters the menu from the field's text. The command token is the
+  /// text after the leading slash up to the first space (the TUI's live
+  /// filter); everything after the space is the command's argument.
+  void _syncMenu() {
+    final text = widget.controller.text;
+    var matches = const <SlashCommand>[];
+    if (text.startsWith('/')) {
+      final space = text.indexOf(' ');
+      final token = space >= 0 ? text.substring(1, space) : text.substring(1);
+      matches = [
+        for (final c in widget.commands)
+          if (c.matches(token)) c,
+      ];
+    }
+    setState(() {
+      _matches = matches;
+      // A re-typed prefix re-selects the top row (the TUI does the same).
+      _selected = matches.isEmpty ? -1 : 0;
+    });
+    if (_menuOpen) widget.onMenuOpened();
+  }
+
+  /// Runs the tapped (or submitted) row: clears the field and hands the
+  /// command plus its typed argument to the screen. A `takesArg` command
+  /// with no argument yet keeps the menu open and waits for the argument.
+  void _activate(SlashCommand command) {
+    final text = widget.controller.text;
+    final space = text.indexOf(' ');
+    final argument = (space >= 0 ? text.substring(space) : '').trim();
+    if (command.takesArg && argument.isEmpty) return;
+    widget.controller.clear();
+    widget.onCommand(command, argument);
+  }
+
+  /// Enter in the field: the menu open runs the selected row (a prefix that
+  /// matches nothing stays put); otherwise it sends the prompt.
+  void _onSubmitted() {
+    if (_menuOpen) {
+      if (_selected >= 0 && _selected < _matches.length) {
+        _activate(_matches[_selected]);
+      }
+      return;
+    }
+    widget.onSend();
+  }
+
+  /// The arrow keys move the menu selection (the TUI parity); Esc closes
+  /// the menu by clearing the field.
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent) {
+      final key = event.logicalKey;
+      if (_matches.isNotEmpty && _selected >= 0) {
+        if (key == LogicalKeyboardKey.arrowDown) {
+          setState(() {
+            _selected = _selected + 1 < _matches.length
+                ? _selected + 1
+                : _selected;
+          });
+        } else if (key == LogicalKeyboardKey.arrowUp) {
+          setState(() => _selected = _selected - 1 >= 0 ? _selected - 1 : 0);
+        }
+      }
+      if (key == LogicalKeyboardKey.escape) {
+        widget.controller.clear();
+      }
+    }
+    return KeyEventResult.ignored;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      key: const ValueKey('structured-prompt'),
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              key: const ValueKey('structured-prompt-input'),
-              controller: controller,
-              enabled: true,
-              decoration: const InputDecoration(
-                hintText: 'Send a message…',
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: (_) => onSend(),
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_menuOpen)
+          _matches.isEmpty
+              ? const Padding(
+                  padding: EdgeInsets.fromLTRB(24, 8, 24, 0),
+                  child: Text('No matching command'),
+                )
+              : ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  child: ListView.builder(
+                    key: const ValueKey('structured-command-menu'),
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    itemCount: _matches.length,
+                    itemBuilder: (context, index) {
+                      final command = _matches[index];
+                      final selected = index == _selected;
+                      return Material(
+                        color: selected
+                            ? scheme.secondaryContainer
+                            : Colors.transparent,
+                        child: InkWell(
+                          key: ValueKey(
+                            'structured-command-row-${command.name}',
+                          ),
+                          onTap: () => _activate(command),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 8,
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      '/${command.name}',
+                                      style: TextStyle(
+                                        fontWeight: selected
+                                            ? FontWeight.bold
+                                            : FontWeight.w600,
+                                      ),
+                                    ),
+                                    if (command.takesArg &&
+                                        command.argHint != null)
+                                      Text(
+                                        ' ${command.argHint}',
+                                        style: TextStyle(
+                                          color: scheme.outline,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    const Spacer(),
+                                    if (command.family == CommandFamily.custom)
+                                      Text(
+                                        'custom',
+                                        style: const TextStyle(fontSize: 11),
+                                      ),
+                                  ],
+                                ),
+                                if (command.subtitle != command.name)
+                                  Text(
+                                    command.subtitle,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: scheme.outline,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+        Padding(
+          key: const ValueKey('structured-prompt'),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Focus(
+            onKeyEvent: _onKeyEvent,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey('structured-prompt-input'),
+                    controller: widget.controller,
+                    enabled: true,
+                    autocorrect: false,
+                    decoration: const InputDecoration(
+                      hintText: 'Send a message… ( / for commands )',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _onSubmitted(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  key: const ValueKey('structured-prompt-send'),
+                  onPressed: widget.busy ? null : widget.onSend,
+                  child: widget.busy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Send'),
+                ),
+              ],
             ),
           ),
-          const SizedBox(width: 8),
-          FilledButton(
-            key: const ValueKey('structured-prompt-send'),
-            onPressed: busy ? null : onSend,
-            child: busy
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('Send'),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

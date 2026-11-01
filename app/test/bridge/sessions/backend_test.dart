@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/bridge/sessions/session_store.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session.dart';
@@ -96,6 +97,157 @@ class FakeOpencodeService implements OpencodeService {
   ) async {
     replies.add((id, requestID, reply));
   }
+
+  // The structured view's `/` command menu (issue #46): recorded
+  // pass-throughs.
+
+  final List<OpencodeCommand> commands = const [
+    OpencodeCommand(name: 'deploy', description: 'ship it'),
+  ];
+  final List<ModelOption> models = const [
+    ModelOption(
+      id: 'm1',
+      providerId: 'prov',
+      name: 'Model One',
+      variants: ['high'],
+    ),
+  ];
+  final List<AgentOption> agents = const [
+    AgentOption(id: 'a1', name: 'Agent One', description: 'does things'),
+  ];
+  final List<SkillOption> skills = const [
+    SkillOption(id: 'sk1', name: 'Skill One', description: 'a skill'),
+  ];
+  final List<(String, String, String)> commandsRun = [];
+  final List<(String, ModelRef)> modelsSet = [];
+  final List<(String, String)> agentsSet = [];
+  final List<(String, String)> skillsActivated = [];
+  final List<String> compacted = [];
+  final List<String> undos = [];
+  final List<String> redos = [];
+  final List<String> forks = [];
+  final List<(String, String)> renames = [];
+  final List<(String, String)> moves = [];
+  final List<(String, String)> generations = [];
+  final List<String> worktreesFor = [];
+
+  @override
+  Future<List<OpencodeCommand>> listCommands() async => commands;
+
+  @override
+  Future<void> runCommand(String id, String name, String text) async {
+    commandsRun.add((id, name, text));
+  }
+
+  @override
+  Future<List<ModelOption>> listModels() async => models;
+
+  @override
+  Future<ModelRef?> currentModel(String id) async =>
+      const ModelRef(id: 'm1', providerId: 'prov');
+
+  @override
+  Future<void> setModel(String id, ModelRef model) async {
+    modelsSet.add((id, model));
+  }
+
+  @override
+  Future<List<AgentOption>> listAgents() async => agents;
+
+  @override
+  Future<void> setAgent(String id, String agentId) async {
+    agentsSet.add((id, agentId));
+  }
+
+  @override
+  Future<List<SkillOption>> listSkills() async => skills;
+
+  @override
+  Future<void> activateSkill(String id, String skillId) async {
+    skillsActivated.add((id, skillId));
+  }
+
+  @override
+  Future<void> compact(String id) async {
+    compacted.add(id);
+  }
+
+  @override
+  Future<void> undo(String id) async {
+    undos.add(id);
+  }
+
+  @override
+  Future<void> redo(String id) async {
+    redos.add(id);
+  }
+
+  @override
+  Future<String> fork(String id) async {
+    forks.add(id);
+    return 'ses_forked';
+  }
+
+  @override
+  Future<void> rename(String id, String title) async {
+    renames.add((id, title));
+  }
+
+  @override
+  Future<String> exportSession(String id) async => '{"info":"export"}';
+
+  @override
+  Future<void> move(String id, String directory) async {
+    moves.add((id, directory));
+  }
+
+  @override
+  Future<String> generate(String id, String prompt) async {
+    generations.add((id, prompt));
+    return 'answer to $prompt';
+  }
+
+  @override
+  Future<String> diff(String id) async => '{"diff":true}';
+
+  @override
+  Future<String> stats(String id) async => '{"stats":true}';
+
+  @override
+  Future<String> newTerminal(String id) async => '{"terminal":true}';
+
+  @override
+  Future<String> worktrees(String projectId) async {
+    worktreesFor.add(projectId);
+    return '{"worktrees":true}';
+  }
+
+  @override
+  Future<String> usage() async => '{"usage":true}';
+
+  @override
+  Future<String> mcps() async => '{"mcps":true}';
+
+  @override
+  Future<String> integrations() async => '{"integrations":true}';
+
+  @override
+  Future<String> connectIntegration(
+    String integrationId,
+    String methodId,
+  ) async => '{"connect":true}';
+
+  @override
+  Future<String> status() async => '{"status":true}';
+
+  @override
+  Future<String> pair() async => '{"pair":true}';
+
+  @override
+  Future<void> reload() async {}
+
+  @override
+  Future<String> plugins() async => '{"plugins":true}';
 }
 
 const s1 = OpencodeSession(
@@ -417,5 +569,77 @@ void main() {
         ]);
       },
     );
+  });
+
+  group('SessionsBackend `/` command menu (issue #46)', () {
+    late SessionsBackend backend;
+    late FakeOpencodeService service;
+
+    setUp(() async {
+      final store = await SessionStore.load(dir: dir);
+      service = FakeOpencodeService();
+      backend = SessionsBackend(service: service, store: store);
+    });
+
+    test('the registries pass through to the service', () async {
+      expect(await backend.listCommands(), service.commands);
+      expect(await backend.listModels(), service.models);
+      expect(
+        await backend.currentModel('ses_1'),
+        const ModelRef(id: 'm1', providerId: 'prov'),
+      );
+      expect(await backend.listAgents(), service.agents);
+      expect(await backend.listSkills(), service.skills);
+    });
+
+    test(
+      'the session commands record the session and their argument',
+      () async {
+        const model = ModelRef(id: 'm2', providerId: 'prov2', variant: 'high');
+        await backend.runCommand('ses_1', 'deploy', 'prod');
+        await backend.setModel('ses_1', model);
+        await backend.setAgent('ses_1', 'a2');
+        await backend.activateSkill('ses_1', 'sk2');
+        await backend.compact('ses_1');
+        await backend.undo('ses_1');
+        await backend.redo('ses_1');
+        expect(await backend.fork('ses_1'), 'ses_forked');
+        await backend.rename('ses_1', 'new title');
+        await backend.move('ses_1', '/elsewhere');
+        expect(await backend.generate('ses_1', 'why?'), 'answer to why?');
+
+        expect(service.commandsRun, const [('ses_1', 'deploy', 'prod')]);
+        expect(service.modelsSet, const [('ses_1', model)]);
+        expect(service.agentsSet, const [('ses_1', 'a2')]);
+        expect(service.skillsActivated, const [('ses_1', 'sk2')]);
+        expect(service.compacted, ['ses_1']);
+        expect(service.undos, ['ses_1']);
+        expect(service.redos, ['ses_1']);
+        expect(service.forks, ['ses_1']);
+        expect(service.renames, const [('ses_1', 'new title')]);
+        expect(service.moves, const [('ses_1', '/elsewhere')]);
+        expect(service.generations, const [('ses_1', 'why?')]);
+      },
+    );
+
+    test('the payload commands pass the service JSON through', () async {
+      expect(await backend.exportSession('ses_1'), '{"info":"export"}');
+      expect(await backend.diff('ses_1'), '{"diff":true}');
+      expect(await backend.stats('ses_1'), '{"stats":true}');
+      expect(await backend.newTerminal('ses_1'), '{"terminal":true}');
+      expect(await backend.worktrees('ses_1'), '{"worktrees":true}');
+      expect(await backend.usage(), '{"usage":true}');
+      expect(await backend.mcps(), '{"mcps":true}');
+      expect(await backend.integrations(), '{"integrations":true}');
+      expect(
+        await backend.connectIntegration('gitlab', 'oauth1'),
+        '{"connect":true}',
+      );
+      expect(await backend.status(), '{"status":true}');
+      expect(await backend.pair(), '{"pair":true}');
+      await backend.plugins();
+      await backend.reload();
+      expect(service.worktreesFor, ['ses_1']);
+    });
   });
 }

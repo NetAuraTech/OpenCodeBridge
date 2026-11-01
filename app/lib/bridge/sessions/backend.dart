@@ -1,3 +1,4 @@
+import '../../model/command.dart';
 import '../../model/message.dart';
 import '../../model/permission.dart';
 import '../../model/session.dart';
@@ -114,6 +115,74 @@ class SessionsBackend {
     String requestID,
     PermissionReply reply,
   ) => service.replyPermission(id, requestID, reply);
+
+  // The structured view's `/` command menu (issue #46): the service-backed
+  // commands, pure pass-throughs to the service seam (no persistence or live
+  // fact involved, like endpoints 5–9).
+
+  Future<List<OpencodeCommand>> listCommands() => service.listCommands();
+
+  Future<void> runCommand(String id, String name, String text) =>
+      service.runCommand(id, name, text);
+
+  Future<List<ModelOption>> listModels() => service.listModels();
+
+  Future<ModelRef?> currentModel(String id) => service.currentModel(id);
+
+  Future<void> setModel(String id, ModelRef model) =>
+      service.setModel(id, model);
+
+  Future<List<AgentOption>> listAgents() => service.listAgents();
+
+  Future<void> setAgent(String id, String agentId) =>
+      service.setAgent(id, agentId);
+
+  Future<List<SkillOption>> listSkills() => service.listSkills();
+
+  Future<void> activateSkill(String id, String skillId) =>
+      service.activateSkill(id, skillId);
+
+  Future<void> compact(String id) => service.compact(id);
+
+  Future<void> undo(String id) => service.undo(id);
+
+  Future<void> redo(String id) => service.redo(id);
+
+  Future<String> fork(String id) => service.fork(id);
+
+  Future<void> rename(String id, String title) => service.rename(id, title);
+
+  Future<String> exportSession(String id) => service.exportSession(id);
+
+  Future<void> move(String id, String directory) => service.move(id, directory);
+
+  Future<String> generate(String id, String prompt) =>
+      service.generate(id, prompt);
+
+  Future<String> diff(String id) => service.diff(id);
+
+  Future<String> stats(String id) => service.stats(id);
+
+  Future<String> newTerminal(String id) => service.newTerminal(id);
+
+  Future<String> worktrees(String sessionId) => service.worktrees(sessionId);
+
+  Future<String> usage() => service.usage();
+
+  Future<String> mcps() => service.mcps();
+
+  Future<String> integrations() => service.integrations();
+
+  Future<String> connectIntegration(String integrationId, String methodId) =>
+      service.connectIntegration(integrationId, methodId);
+
+  Future<String> status() => service.status();
+
+  Future<String> pair() => service.pair();
+
+  Future<void> reload() => service.reload();
+
+  Future<String> plugins() => service.plugins();
 
   /// One home-list row, from the service's session plus the persistence and
   /// live facts (spec §6 classification).

@@ -13,6 +13,7 @@ import 'package:opencodebridge/bridge/terminal/terminal_backend.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_frames.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_models.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window_token.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session_detail.dart';
@@ -352,4 +353,78 @@ class _NoopSessions implements OpencodeService {
     String requestID,
     PermissionReply reply,
   ) async {}
+  @override
+  Future<List<OpencodeCommand>> listCommands() async => const [];
+  @override
+  Future<void> runCommand(String id, String name, String text) async {}
+  @override
+  Future<List<ModelOption>> listModels() async => const [];
+  @override
+  Future<ModelRef?> currentModel(String id) async => null;
+  @override
+  Future<void> setModel(String id, ModelRef model) async {}
+  @override
+  Future<List<AgentOption>> listAgents() async => const [];
+  @override
+  Future<void> setAgent(String id, String agentId) async {}
+  @override
+  Future<List<SkillOption>> listSkills() async => const [];
+  @override
+  Future<void> activateSkill(String id, String skillId) async {}
+  @override
+  Future<void> compact(String id) async {}
+  @override
+  Future<void> undo(String id) async {}
+  @override
+  Future<void> redo(String id) async {}
+  @override
+  Future<String> fork(String id) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<void> rename(String id, String title) async {}
+  @override
+  Future<String> exportSession(String id) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<void> move(String id, String directory) async {}
+  @override
+  Future<String> generate(String id, String prompt) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> diff(String id) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> stats(String id) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> newTerminal(String id) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> worktrees(String projectId) async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> usage() async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> mcps() async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> integrations() async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> connectIntegration(
+    String integrationId,
+    String methodId,
+  ) async => throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> status() async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<String> pair() async =>
+      throw const OpencodeServiceError(500, 'not scripted');
+  @override
+  Future<void> reload() async {}
+  @override
+  Future<String> plugins() async =>
+      throw const OpencodeServiceError(500, 'not scripted');
 }

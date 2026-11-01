@@ -1,9 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session_detail.dart';
@@ -56,7 +58,66 @@ class _FakeClient extends SessionsClient {
     this.messageLists = const [],
     this.permissionLists = const [],
     this.promptError,
+    this.commands = const [],
+    this.models = const [],
+    this.runCommandError,
   }) : super(Uri.parse('http://bridge.test/'));
+
+  /// The project's custom commands (`listCommands`), for the `/` menu.
+  final List<OpencodeCommand> commands;
+
+  /// The model registry (`listModels`), for the `/models` picker.
+  final List<ModelOption> models;
+
+  /// Thrown from `runCommand` when set.
+  Object? runCommandError;
+
+  final List<(String, String, String)> commandsRun = [];
+
+  final List<(String, String)> renames = [];
+
+  final List<ModelRef> setModels = [];
+
+  int compacts = 0;
+  int mcpsCalls = 0;
+  int commandCalls = 0;
+
+  @override
+  Future<List<OpencodeCommand>> listCommands(String id) async {
+    commandCalls++;
+    return commands;
+  }
+
+  @override
+  Future<void> runCommand(String id, String name, String text) async {
+    final error = runCommandError;
+    if (error is Object) throw error;
+    commandsRun.add((id, name, text));
+  }
+
+  @override
+  Future<void> rename(String id, String title) async {
+    renames.add((id, title));
+  }
+
+  @override
+  Future<void> compact(String id) async {
+    compacts++;
+  }
+
+  @override
+  Future<String> mcps() async {
+    mcpsCalls++;
+    return '{"servers":[]}';
+  }
+
+  @override
+  Future<List<ModelOption>> listModels(String id) async => models;
+
+  @override
+  Future<void> setModel(String id, ModelRef model) async {
+    setModels.add(model);
+  }
 
   /// Per-call details: the n-th call returns the n-th detail, the last
   /// detail repeats.
@@ -167,6 +228,25 @@ BridgeEvent _event(
       ? null
       : Durable(aggregateID: aggregateID, seq: 1),
 );
+
+const _promptInput = ValueKey('structured-prompt-input');
+
+Finder _menuFinder() => find.byKey(const ValueKey('structured-command-menu'));
+
+Finder _commandRowFinder(String name) =>
+    find.byKey(ValueKey('structured-command-row-$name'));
+
+Future<void> _typePrompt(WidgetTester tester, String text) =>
+    tester.enterText(find.byKey(_promptInput), text);
+
+Future<void> _pressEnter(WidgetTester tester) async {
+  await tester.testTextInput.receiveAction(TextInputAction.done);
+  await tester.pump();
+  await tester.pump();
+}
+
+String _promptText(WidgetTester tester) =>
+    tester.widget<TextField>(find.byKey(_promptInput)).controller!.text;
 
 void main() {
   group('StructuredSessionScreen', () {
@@ -1003,6 +1083,262 @@ void main() {
       }
 
       expect(find.textContaining('message 0'), findsOneWidget);
+    });
+  });
+
+  group('StructuredSessionScreen `/` command menu (issue #46)', () {
+    testWidgets('typing / at the start opens the menu with the built-ins', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      expect(_menuFinder(), findsNothing);
+      await _typePrompt(tester, '/');
+      await tester.pump();
+
+      expect(_menuFinder(), findsOneWidget);
+      // The menu list is lazy (max 280px): assert the rows in view, the
+      // catalog's top.
+      expect(_commandRowFinder('models'), findsOneWidget);
+      expect(_commandRowFinder('agents'), findsOneWidget);
+      expect(_commandRowFinder('compact'), findsOneWidget);
+      expect(client.commandCalls, 1);
+
+      // A further keystroke does not re-fetch the project commands.
+      await _typePrompt(tester, '/mod');
+      await tester.pump();
+      expect(client.commandCalls, 1);
+    });
+
+    testWidgets('the menu live-filters by name and alias prefix', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/COMP');
+      await tester.pump();
+      expect(_commandRowFinder('compact'), findsOneWidget);
+      expect(_commandRowFinder('models'), findsNothing);
+
+      await _typePrompt(tester, '/eff');
+      await tester.pump();
+      expect(_commandRowFinder('variants'), findsOneWidget);
+      expect(_commandRowFinder('undo'), findsNothing);
+    });
+
+    testWidgets('a slash mid-text does not open the menu', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, 'use a/b');
+      await tester.pump();
+
+      expect(_menuFinder(), findsNothing);
+    });
+
+    testWidgets('a non-matching prefix shows the note and Enter stays put', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/zzz');
+      await tester.pump();
+      expect(find.text('No matching command'), findsOneWidget);
+
+      await _pressEnter(tester);
+
+      expect(client.prompts, isEmpty);
+      expect(_promptText(tester), '/zzz');
+    });
+
+    testWidgets(
+      'the project commands are fetched when the menu opens and merged in',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          commands: const [
+            OpencodeCommand(name: 'deploy', description: 'ship it'),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        await _typePrompt(tester, '/deploy');
+        await tester.pump();
+        await tester.pump();
+
+        expect(_commandRowFinder('deploy'), findsOneWidget);
+        expect(find.text('ship it'), findsOneWidget);
+        expect(find.text('custom'), findsOneWidget);
+      },
+    );
+
+    testWidgets('Enter runs the selected command and clears the field', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/compact');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.compacts, 1);
+      expect(_promptText(tester), isEmpty);
+    });
+
+    testWidgets('an argument command waits for its argument, then runs', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/rename');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.renames, isEmpty);
+      expect(_promptText(tester), '/rename');
+
+      await _typePrompt(tester, '/rename my title');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.renames, const [('ses_1', 'my title')]);
+      expect(find.text('my title'), findsOneWidget);
+    });
+
+    testWidgets('arrow keys move the selection; Enter runs the moved row', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/m');
+      await tester.pump();
+      expect(_commandRowFinder('models'), findsOneWidget);
+      expect(_commandRowFinder('mcps'), findsOneWidget);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.mcpsCalls, 1);
+      expect(_promptText(tester), isEmpty);
+      expect(find.text('MCP servers'), findsOneWidget);
+    });
+
+    testWidgets('Esc closes the menu by clearing the field', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/models');
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+
+      expect(_promptText(tester), isEmpty);
+      expect(_menuFinder(), findsNothing);
+    });
+
+    testWidgets('a custom command runs with the typed argument', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        commands: const [
+          OpencodeCommand(name: 'deploy', description: 'ship it'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/deploy prod');
+      await tester.pump();
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.commandsRun, const [('ses_1', 'deploy', 'prod')]);
+      expect(_promptText(tester), isEmpty);
+      expect(find.text('Sent /deploy to the session.'), findsOneWidget);
+    });
+
+    testWidgets('a failed custom command reports the error', (tester) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        commands: const [
+          OpencodeCommand(name: 'deploy', description: 'ship it'),
+        ],
+        runCommandError: const SessionsClientError(404, 'not found'),
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/deploy prod');
+      await tester.pump();
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.commandsRun, isEmpty);
+      expect(find.text('Could not run /deploy (status 404).'), findsOneWidget);
+    });
+
+    testWidgets('`/models` opens the picker; picking sets the model', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        models: const [
+          ModelOption(
+            id: 'mod1',
+            providerId: 'prov1',
+            name: 'Model One',
+            variants: [],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/models');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(find.text('Switch model'), findsOneWidget);
+      await tester.tap(find.text('Model One'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.setModels, const [
+        ModelRef(id: 'mod1', providerId: 'prov1'),
+      ]);
+      expect(find.text('Model set to Model One.'), findsOneWidget);
+    });
+
+    testWidgets('`/help` lists the commands', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/help');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(find.text('Commands'), findsOneWidget);
+      expect(find.textContaining('/rename'), findsOneWidget);
+    });
+
+    testWidgets('`/clear` without a navigation wired reports it', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '/clear');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(find.text('Not available from this screen.'), findsOneWidget);
     });
   });
 }

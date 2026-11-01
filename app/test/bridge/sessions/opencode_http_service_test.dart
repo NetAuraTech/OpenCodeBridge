@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_http_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session_detail.dart';
@@ -50,6 +51,7 @@ void main() {
   final detailInfo = {
     'id': 'ses_1',
     'title': 'one',
+    'projectID': 'p1',
     'cost': 1.5,
     'tokens': {
       'input': 100,
@@ -79,15 +81,36 @@ void main() {
     'model': {'id': 'unknown-model', 'providerID': 'prov2'},
   };
 
-  // The service's model registry (the `limit.context` context windows).
+  // The service's model registry (the `limit.context` context windows, and
+  // the model / variant picker's `name` + `variants`).
   final modelRegistry = [
     {
       'id': 'mod1',
       'modelID': 'mod1',
       'providerID': 'prov1',
+      'name': 'Model One',
       'limit': {'context': 123456},
+      'variants': [
+        {'id': 'v1'},
+        {'id': 'v2'},
+      ],
     },
   ];
+
+  // The detail of `ses_3`: no model, no projectID (the command menu's
+  // `currentModel` null and `worktrees` no-project paths).
+  final detailInfo3 = {
+    'id': 'ses_3',
+    'title': 'three',
+    'cost': 0,
+    'tokens': {
+      'input': 0,
+      'output': 0,
+      'reasoning': 0,
+      'cache': {'read': 0, 'write': 0},
+    },
+    'location': {'directory': '/three'},
+  };
 
   // The service's `Session.Message.Info` history for `ses_1` (endpoint 6).
   // The fake serves it newest-first in pages of at most 200 (the service's
@@ -209,6 +232,32 @@ void main() {
   final repliedRequestIDs = <String>[];
   final messageOffsets = <int>[];
 
+  // The command-menu (issue #46) registries and recorded request bodies.
+  final projectCommands = [
+    {'name': 'deploy', 'description': 'ship it'},
+    {'name': 'review'}, // no description: the client must default to ''.
+  ];
+  final agentRegistry = [
+    {'id': 'build', 'name': 'Build', 'description': 'the builder'},
+    {'id': 'plan'}, // no name/description: the client defaults to the id.
+  ];
+  final skillRegistry = [
+    {'id': 'orbs', 'name': 'Orbs', 'description': 'manage orbs'},
+  ];
+  final commandBodies = <Map<String, Object?>>[];
+  final setModelBodies = <Map<String, Object?>>[];
+  final setAgentBodies = <Map<String, Object?>>[];
+  final skillActivations = <Map<String, Object?>>[];
+  final revertStages = <Map<String, Object?>>[];
+  final moveBodies = <Map<String, Object?>>[];
+  final generateBodies = <Map<String, Object?>>[];
+  final connectBodies = <Map<String, Object?>>[];
+  final renameBodies = <Map<String, Object?>>[];
+  final terminalBodies = <Map<String, Object?>>[];
+  final deletedPaths = <String>[];
+  final statsQueries = <String?>[];
+  final worktreeQueries = <String?>[];
+
   late HttpServer server;
   late Uri base;
 
@@ -315,7 +364,162 @@ void main() {
       } else if (path == '/api/model') {
         resp.write(jsonEncode({'data': modelRegistry}));
       } else if (path.startsWith('/api/session/') && req.method == 'DELETE') {
+        deletedPaths.add(path);
         resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/command') {
+        resp.write(jsonEncode({'data': projectCommands}));
+      } else if (path == '/api/session/ses_1/command' && req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        commandBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.write(jsonEncode({'data': {}}));
+      } else if (path == '/api/session/ses_1/model' && req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        setModelBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/agent') {
+        resp.write(jsonEncode({'data': agentRegistry}));
+      } else if (path == '/api/session/ses_1/agent' && req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        setAgentBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/skill') {
+        resp.write(jsonEncode({'data': skillRegistry}));
+      } else if (path == '/api/experimental/session/ses_1/skill' &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        skillActivations.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1/compact' && req.method == 'POST') {
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1/revert/stage' &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        revertStages.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1/fork' && req.method == 'POST') {
+        resp.write(
+          jsonEncode({
+            'data': {'id': 'ses_forked'},
+          }),
+        );
+      } else if (path == '/api/session/ses_1' && req.method == 'PATCH') {
+        final body = await utf8.decodeStream(req);
+        renameBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1/move' && req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        moveBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/experimental/session/ses_1/export') {
+        resp.write(
+          jsonEncode({
+            'data': {'sessionID': 'ses_1', 'messages': []},
+          }),
+        );
+      } else if (path == '/api/session/ses_1/generate' &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        generateBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.write(
+          jsonEncode({
+            'data': {'text': 'a side answer'},
+          }),
+        );
+      } else if (path == '/api/session/ses_1/diff') {
+        resp.write(
+          jsonEncode({
+            'data': {'diffs': true},
+          }),
+        );
+      } else if (path == '/api/experimental/session/stats') {
+        statsQueries.add(req.uri.queryParameters['sessionID']);
+        resp.write(
+          jsonEncode({
+            'data': {'stats': true},
+          }),
+        );
+      } else if (path == '/api/experimental/session/ses_1/terminal' &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        terminalBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.write(
+          jsonEncode({
+            'data': {'pty': 7},
+          }),
+        );
+      } else if (path == '/api/worktree') {
+        worktreeQueries.add(req.uri.queryParameters['projectID']);
+        resp.write(
+          jsonEncode({
+            'data': {'worktrees': true},
+          }),
+        );
+      } else if (path == '/api/experimental/usage/limits') {
+        resp.write(
+          jsonEncode({
+            'data': {'limits': true},
+          }),
+        );
+      } else if (path == '/api/mcp') {
+        resp.write(
+          jsonEncode({
+            'data': [
+              {
+                'id': 'mcp1',
+                'state': {'status': 'connected'},
+              },
+            ],
+          }),
+        );
+      } else if (path == '/api/integration') {
+        resp.write(
+          jsonEncode({
+            'data': [
+              {
+                'id': 'gitlab',
+                'name': 'GitLab',
+                'methods': [
+                  {'type': 'oauth', 'id': 'oauth1', 'label': 'OAuth'},
+                ],
+              },
+            ],
+          }),
+        );
+      } else if (path == '/api/integration/gitlab/connect/oauth' &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        connectBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.write(
+          jsonEncode({
+            'data': {'url': 'http://auth'},
+          }),
+        );
+      } else if (path == '/api/info') {
+        // A bare info payload (no `data` envelope): the pass-through path.
+        resp.write(jsonEncode({'version': '2.1.4'}));
+      } else if (path == '/api/pair' && req.method == 'POST') {
+        resp.write(
+          jsonEncode({
+            'data': {'code': 'abc', 'expires_in': 300},
+          }),
+        );
+      } else if (path == '/api/location/reload' && req.method == 'POST') {
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/plugin') {
+        resp.write(
+          jsonEncode({
+            'data': [
+              {
+                'id': 'plug1',
+                'source': {'type': 'local'},
+              },
+            ],
+          }),
+        );
+      } else if (path == '/api/session/ses_3' && req.method == 'GET') {
+        resp.write(jsonEncode({'data': detailInfo3}));
+      } else if (path == '/api/session/ses_3/message' && req.method == 'GET') {
+        resp.write(jsonEncode({'data': []}));
       } else {
         resp.statusCode = HttpStatus.notFound;
       }
@@ -594,6 +798,299 @@ void main() {
       } finally {
         await dir.delete(recursive: true);
       }
+    });
+  });
+
+  group('OpencodeHttpService `/` command menu (issue #46)', () {
+    late OpencodeHttpService service;
+
+    setUp(() {
+      service = OpencodeHttpService(baseUrl: base, password: password);
+    });
+
+    test('listCommands parses the project commands (data envelope)', () async {
+      expect(await service.listCommands(), [
+        const OpencodeCommand(name: 'deploy', description: 'ship it'),
+        const OpencodeCommand(name: 'review', description: ''),
+      ]);
+    });
+
+    test('runCommand posts the name, text, and delivery steer', () async {
+      await service.runCommand('ses_1', 'deploy', 'prod');
+      expect(commandBodies, [
+        {'name': 'deploy', 'text': 'prod', 'delivery': 'steer'},
+      ]);
+    });
+
+    test('runCommand of an unknown session is a 404', () async {
+      await expectLater(
+        service.runCommand('ses_missing', 'deploy', 'prod'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
+    });
+
+    test(
+      'listModels parses the registry (modelID, providerID, name, variants)',
+      () async {
+        expect(await service.listModels(), [
+          const ModelOption(
+            id: 'mod1',
+            providerId: 'prov1',
+            name: 'Model One',
+            variants: ['v1', 'v2'],
+          ),
+        ]);
+      },
+    );
+
+    test('currentModel parses the session model ref', () async {
+      expect(
+        await service.currentModel('ses_1'),
+        const ModelRef(id: 'mod1', providerId: 'prov1'),
+      );
+    });
+
+    test('currentModel is null for a session without a model', () async {
+      expect(await service.currentModel('ses_3'), isNull);
+    });
+
+    test('currentModel of an unknown session is a 404', () async {
+      await expectLater(
+        service.currentModel('ses_missing'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
+    });
+
+    test('setModel posts the model ref (variant optional)', () async {
+      await service.setModel(
+        'ses_1',
+        const ModelRef(id: 'mod1', providerId: 'prov1', variant: 'v1'),
+      );
+      await service.setModel(
+        'ses_1',
+        const ModelRef(id: 'mod1', providerId: 'prov1'),
+      );
+      expect(setModelBodies, [
+        {
+          'model': {'id': 'mod1', 'providerID': 'prov1', 'variant': 'v1'},
+        },
+        {
+          'model': {'id': 'mod1', 'providerID': 'prov1'},
+        },
+      ]);
+    });
+
+    test('setModel of an unknown session is a 404', () async {
+      await expectLater(
+        service.setModel(
+          'ses_missing',
+          const ModelRef(id: 'mod1', providerId: 'prov1'),
+        ),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
+    });
+
+    test(
+      'listAgents parses the agent registry (name falls back to id)',
+      () async {
+        expect(await service.listAgents(), [
+          const AgentOption(
+            id: 'build',
+            name: 'Build',
+            description: 'the builder',
+          ),
+          const AgentOption(id: 'plan', name: 'plan', description: ''),
+        ]);
+      },
+    );
+
+    test('setAgent posts the agent id', () async {
+      await service.setAgent('ses_1', 'build');
+      expect(setAgentBodies, [
+        {'agent': 'build'},
+      ]);
+    });
+
+    test('listSkills parses the skill registry', () async {
+      expect(await service.listSkills(), [
+        const SkillOption(id: 'orbs', name: 'Orbs', description: 'manage orbs'),
+      ]);
+    });
+
+    test(
+      'activateSkill posts the skill id to the experimental endpoint',
+      () async {
+        await service.activateSkill('ses_1', 'orbs');
+        expect(skillActivations, [
+          {'id': 'orbs'},
+        ]);
+      },
+    );
+
+    test('compact posts the compact request and accepts 204', () async {
+      await service.compact('ses_1'); // no throw on 204
+    });
+
+    test('undo without a user message stages nothing', () async {
+      await service.undo('ses_3');
+      expect(revertStages, isEmpty);
+    });
+
+    test('undo stages a revert at the last user message', () async {
+      await service.undo('ses_1');
+      expect(revertStages, [
+        {'messageID': 'm1'},
+      ]);
+    });
+
+    test('redo discards the staged revert with a DELETE', () async {
+      await service.redo('ses_1');
+      expect(deletedPaths.last, '/api/session/ses_1/revert');
+    });
+
+    test('fork returns the forked session id', () async {
+      expect(await service.fork('ses_1'), 'ses_forked');
+    });
+
+    test('rename patches the session title', () async {
+      await service.rename('ses_1', 'the new title');
+      expect(renameBodies, [
+        {'title': 'the new title'},
+      ]);
+    });
+
+    test('move posts the new directory', () async {
+      await service.move('ses_1', '/new/dir');
+      expect(moveBodies, [
+        {'directory': '/new/dir'},
+      ]);
+    });
+
+    test('exportSession returns the unwrapped transcript payload', () async {
+      expect(jsonDecode(await service.exportSession('ses_1')), {
+        'sessionID': 'ses_1',
+        'messages': [],
+      });
+    });
+
+    test('generate posts the prompt and returns the side answer', () async {
+      expect(
+        await service.generate('ses_1', 'a side question'),
+        'a side answer',
+      );
+      expect(generateBodies, [
+        {'prompt': 'a side question'},
+      ]);
+    });
+
+    test('diff returns the unwrapped diffs payload', () async {
+      expect(jsonDecode(await service.diff('ses_1')), {'diffs': true});
+    });
+
+    test('stats sends the sessionID query and returns the payload', () async {
+      expect(jsonDecode(await service.stats('ses_1')), {'stats': true});
+      expect(statsQueries, ['ses_1']);
+    });
+
+    test('newTerminal posts the persistent-pty create body and returns the payload', () async {
+      expect(jsonDecode(await service.newTerminal('ses_1')), {'pty': 7});
+      expect(terminalBodies, [
+        {
+          'sessionID': 'ses_1',
+          'args': const <Object?>[],
+          'cwd': '/one',
+          'title': 'Terminal',
+          'env': const <String, Object?>{},
+        },
+      ]);
+    });
+
+    test('worktrees resolves the project from the session', () async {
+      expect(jsonDecode(await service.worktrees('ses_1')), {'worktrees': true});
+      // A session without a project id short-circuits to an empty list
+      // without hitting the worktree endpoint.
+      expect(await service.worktrees('ses_3'), '[]');
+      expect(worktreeQueries, ['p1']);
+    });
+
+    test('usage returns the unwrapped limits payload', () async {
+      expect(jsonDecode(await service.usage()), {'limits': true});
+    });
+
+    test('mcps returns the unwrapped MCP payload', () async {
+      expect(jsonDecode(await service.mcps()), [
+        {
+          'id': 'mcp1',
+          'state': {'status': 'connected'},
+        },
+      ]);
+    });
+
+    test('integrations returns the unwrapped integrations payload', () async {
+      expect(jsonDecode(await service.integrations()), [
+        {
+          'id': 'gitlab',
+          'name': 'GitLab',
+          'methods': [
+            {'type': 'oauth', 'id': 'oauth1', 'label': 'OAuth'},
+          ],
+        },
+      ]);
+    });
+
+    test(
+      'connectIntegration posts the methodID and returns the flow payload',
+      () async {
+        expect(
+          await service.connectIntegration('gitlab', 'oauth1'),
+          '{"url":"http://auth"}',
+        );
+        expect(connectBodies, [
+          {'methodID': 'oauth1'},
+        ]);
+      },
+    );
+
+    test('status returns the bare info payload', () async {
+      expect(jsonDecode(await service.status()), {'version': '2.1.4'});
+    });
+
+    test('pair returns the pairing payload', () async {
+      expect(jsonDecode(await service.pair()), {
+        'code': 'abc',
+        'expires_in': 300,
+      });
+    });
+
+    test('reload posts the location reload and accepts 204', () async {
+      await service.reload();
+    });
+
+    test('plugins returns the unwrapped plugins payload', () async {
+      expect(jsonDecode(await service.plugins()), [
+        {
+          'id': 'plug1',
+          'source': {'type': 'local'},
+        },
+      ]);
     });
   });
 }
