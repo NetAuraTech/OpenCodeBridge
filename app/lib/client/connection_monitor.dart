@@ -52,6 +52,16 @@ class ConnectionMonitor extends ChangeNotifier {
     _tick();
   }
 
+  /// Runs the health probe immediately (issue #41, app lifecycle): on
+  /// returning to the foreground, the indicator refreshes without waiting
+  /// for the next tick. A no-op while not connected to a target.
+  Future<void> reprobe() {
+    final targetProvider = _target;
+    if (targetProvider == null) return Future<void>.value();
+    _setState(LinkState.connecting);
+    return _tick();
+  }
+
   /// Stops polling and reports disconnected.
   void disconnect() {
     _timer?.cancel();

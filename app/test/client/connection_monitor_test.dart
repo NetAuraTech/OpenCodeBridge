@@ -80,6 +80,63 @@ void main() {
       monitor.dispose();
     });
 
+    test('reprobe probes immediately, showing connecting in between', () async {
+      var firstProbe = true;
+      final gate = Completer<void>();
+      final monitor = ConnectionMonitor(
+        probe: (Uri uri) async {
+          if (firstProbe) {
+            firstProbe = false;
+            return true;
+          }
+          await gate.future;
+          return true;
+        },
+      );
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
+      await monitor.whenState(LinkState.connected);
+
+      final probe = monitor.reprobe();
+      expect(monitor.state, LinkState.connecting);
+      gate.complete();
+      await probe;
+      expect(monitor.state, LinkState.connected);
+      monitor.dispose();
+    });
+
+    test('reprobe reports the probe result', () async {
+      var up = true;
+      var probes = 0;
+      final monitor = ConnectionMonitor(
+        probe: (Uri uri) async {
+          probes++;
+          return up;
+        },
+      );
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
+      await monitor.whenState(LinkState.connected);
+
+      up = false;
+      await monitor.reprobe();
+      expect(probes, 2, reason: 'reprobe() probes now, not on the next tick');
+      expect(monitor.state, LinkState.disconnected);
+      monitor.dispose();
+    });
+
+    test('reprobe is a no-op while not connected to a target', () async {
+      var probes = 0;
+      final monitor = ConnectionMonitor(
+        probe: (Uri uri) async {
+          probes++;
+          return true;
+        },
+      );
+      await monitor.reprobe();
+      expect(probes, 0);
+      expect(monitor.state, LinkState.connecting);
+      monitor.dispose();
+    });
+
     test('default probe: live bridge up, then down', () async {
       final server = await BridgeServer.start(port: 0);
       final monitor = ConnectionMonitor();

@@ -3,8 +3,10 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 
 import 'curl_form_post.dart';
+import 'platform_form_post.dart';
 
 /// The Cloudflare Access application's OAuth metadata (issue #23, step 1:
 /// RFC 8414/9728 discovery at `/.well-known/oauth-authorization-server`
@@ -286,8 +288,10 @@ class AccessOAuthClient {
   /// Dart SDK's TLS fingerprint (the byte-identical form answers 200 from
   /// curl and 500 from HttpClient; issue #23 field test, Ray
   /// a534fa469e03f52a). Discovery and registration are unaffected and keep
-  /// the Dart client. Without curl, the Dart client stands in — it answers
-  /// as soon as Cloudflare fixes the endpoint (then this workaround can go).
+  /// the Dart client. Without curl (always on Android, where the grant
+  /// rides the platform HTTP stack instead — issue #41) the Dart client
+  /// stands in — it answers as soon as Cloudflare fixes the endpoint (then
+  /// this workaround can go).
   Future<Map<String, Object?>> _tokenEndpointJson(
     Uri url,
     Map<String, String> form,
@@ -299,7 +303,23 @@ class AccessOAuthClient {
       );
       return _decodeResponse(status, rawBody);
     } on ProcessException {
-      // No curl on the PATH (rare on a desktop): the Dart client.
+      // No curl on the PATH (always on Android, rare on a desktop).
+      if (Platform.isAndroid) {
+        // Android has no curl: the platform HTTP stack carries the grant
+        // (issue #41).
+        try {
+          final (status, rawBody) = await PlatformFormPost.post(
+            url,
+            Uri(queryParameters: form).query,
+          );
+          return _decodeResponse(status, rawBody);
+        } on MissingPluginException {
+          // No platform handler registered: the Dart client.
+        } on PlatformException catch (error) {
+          throw OAuthError('network', error.message ?? 'platform POST failed');
+        }
+      }
+      // Not Android, or no platform handler: the Dart client.
       return _httpJson('POST', url, form: form);
     } on CurlPostFailure catch (error) {
       throw OAuthError('network', error.message);

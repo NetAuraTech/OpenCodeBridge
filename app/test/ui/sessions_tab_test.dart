@@ -7,6 +7,8 @@ import 'package:opencodebridge/bridge/terminal/opencode_terminal_service.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_backend.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_models.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window_token.dart';
+import 'package:opencodebridge/access/access_session.dart';
+import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/message.dart';
@@ -16,6 +18,7 @@ import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
 import 'package:opencodebridge/ui/structured_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
 const _one = Session(
@@ -188,6 +191,14 @@ class _FakeEventsSource implements EventSource {
     await _controller.close();
     await _gaps.close();
   }
+
+  /// How often the tab forced a fresh connection (issue #41, foreground).
+  var reconnectCalls = 0;
+
+  @override
+  Future<void> reconnect() async {
+    reconnectCalls++;
+  }
 }
 
 /// A [TerminalBackend] over a fake terminal service with one running PTY,
@@ -203,6 +214,8 @@ Future<_FakeSessionsClient> _pumpTab(
   List<Session> rows = const [],
   List<Project> projects = const [],
   TerminalBackend? terminals,
+  _FakeEventsSource? events,
+  AccessSession? access,
 }) async {
   final client = _FakeSessionsClient(
     rows: List<Session>.of(rows),
@@ -215,7 +228,8 @@ Future<_FakeSessionsClient> _pumpTab(
           apiBase: Uri.parse('http://bridge.test/'),
           client: client,
           terminals: terminals,
-          events: _FakeEventsSource(),
+          events: events ?? _FakeEventsSource(),
+          access: access,
         ),
       ),
     ),
@@ -641,6 +655,66 @@ void main() {
           find.text('No bridge configured. Set the tunnel URL in Settings.'),
           findsOneWidget,
         );
+      });
+    });
+
+    group('foreground return (issue #41)', () {
+      testWidgets('resumed re-connects events and re-fetches the list', (
+        tester,
+      ) async {
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(tester, rows: [_one], events: events);
+        expect(client.listCalls, 1);
+        expect(events.reconnectCalls, 0);
+
+        // Android suspends the app and brings it back to the foreground.
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pump();
+
+        expect(events.reconnectCalls, 1);
+        expect(client.listCalls, 2);
+      });
+    });
+
+    group('access login completion (issue #41)', () {
+      testWidgets('the login finishing re-fetches the list and the events', (
+        tester,
+      ) async {
+        SharedPreferences.setMockInitialValues({});
+        final store = await AccessTokenStore.load();
+        final access = AccessSession(
+          tunnelBase: () => Uri.parse('https://tunnel.test/'),
+          store: store,
+        );
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(
+          tester,
+          rows: [_one],
+          events: events,
+          access: access,
+        );
+        expect(client.listCalls, 1);
+
+        // The browser bounce brought the app to the foreground before the
+        // token exchange finished (the resumed re-fetch saw a 401); the
+        // login completes now: the tab goes out again with the token.
+        store.save(
+          'tunnel.test',
+          AccessLoginRecord(
+            clientId: 'c1',
+            accessToken: 'tok',
+            refreshToken: 'rtok',
+            accessTokenExpiresAt: DateTime.now().add(const Duration(hours: 1)),
+          ),
+        );
+        await access.restore();
+        await tester.pump();
+
+        expect(client.listCalls, 2);
+        expect(events.reconnectCalls, 1);
       });
     });
   });

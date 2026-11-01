@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../access/access_session.dart';
 import '../client/authenticated_http.dart';
 import '../client/docker_client.dart';
 import '../client/events_client.dart';
@@ -20,6 +21,7 @@ class DockerTab extends StatefulWidget {
     this.client,
     this.events,
     this.auth,
+    this.access,
   });
 
   /// Where the bridge's docker API lives. `null` when this client has no
@@ -34,16 +36,23 @@ class DockerTab extends StatefulWidget {
   /// server mode.
   final AuthHeaderProvider? auth;
 
+  /// The tunnel's Access login (issue #23, client mode); `null` in server
+  /// mode. The tab re-fetches when the login completes: the browser bounce
+  /// brings the app to the foreground before the token exchange finishes, so
+  /// the foreground re-fetch hits a `401` and the finishing login is what
+  /// carries the token (issue #41).
+  final AccessSession? access;
+
   /// The source of the bridge's unified event stream (spec §8) the tab and
   /// its detail listen to. Defaults to a real [EventsClient] at [apiBase]
   /// (owned and disconnected by the tab); tests inject a scripted source.
   final EventSource? events;
 
   @override
-  State<DockerTab> createState() => _DockerTabState();
+  State<DockerTab> createState() => DockerTabState();
 }
 
-class _DockerTabState extends State<DockerTab> {
+class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
   DockerClient? _client;
 
   /// The event stream source (spec §8) the tab listens to, `null` when there
@@ -78,10 +87,12 @@ class _DockerTabState extends State<DockerTab> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final base = widget.apiBase;
     if (base != null) {
       _client = widget.client ?? DockerClient(base, auth: widget.auth);
       _setupEvents(base);
+      widget.access?.addListener(_onAccessState);
       _load();
       _loadCompose();
     } else {
@@ -91,8 +102,38 @@ class _DockerTabState extends State<DockerTab> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed || _client == null) return;
+    // Android suspends the app (issue #41): on returning to the foreground,
+    // go out again, so container state that changed while backgrounded
+    // shows up on return.
+    _reloadWithToken();
+  }
+
+  void _onAccessState(AccessLoginState state) {
+    if (state != AccessLoginState.loggedIn) return;
+    // The login finished (issue #41): the browser bounce brought the app to
+    // the foreground before the token exchange finished, so the foreground
+    // re-fetch saw a `401`; now the token is in hand.
+    _reloadWithToken();
+  }
+
+  /// Re-connects the event stream with the current Access token and
+  /// re-fetches both views.
+  void _reloadWithToken() {
+    final events = _events;
+    if (events != null) unawaited(events.reconnect());
+    unawaited(_refreshAll());
+  }
+
+  @override
   void didUpdateWidget(covariant DockerTab oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.access != oldWidget.access) {
+      oldWidget.access?.removeListener(_onAccessState);
+      widget.access?.addListener(_onAccessState);
+    }
     if (widget.apiBase != oldWidget.apiBase && widget.apiBase != null) {
       _client =
           widget.client ?? DockerClient(widget.apiBase!, auth: widget.auth);
@@ -104,6 +145,8 @@ class _DockerTabState extends State<DockerTab> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.access?.removeListener(_onAccessState);
     _teardownEvents();
     super.dispose();
   }

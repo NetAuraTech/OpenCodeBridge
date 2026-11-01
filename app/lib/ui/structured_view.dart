@@ -133,6 +133,11 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// (re-engage by scrolling back to the bottom).
   bool _stick = true;
 
+  /// Whether the viewport sits at the bottom of the history (within the
+  /// stick threshold): shows the jump-to-end button while the user has
+  /// scrolled up.
+  bool _atBottom = true;
+
   final ScrollController _scroll = ScrollController();
 
   StreamSubscription<BridgeEvent>? _events;
@@ -187,22 +192,42 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final position = _scroll.position;
-    _stick = position.pixels >= position.maxScrollExtent - 8;
-  }
-
-  /// Keeps the history at the bottom for the next frame when [_stick] holds
-  /// (the content just grew by a streamed delta).
-  void _followBottomNextFrame() {
-    if (!mounted) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _followBottom());
-  }
-
-  void _followBottom() {
-    if (!mounted || !_stick || !_scroll.hasClients) return;
-    final position = _scroll.position;
-    if (position.pixels < position.maxScrollExtent) {
-      position.jumpTo(position.maxScrollExtent);
+    // The newest message is the list's anchor (offset 0): "at the end" is
+    // the viewport sitting at the anchor (within the stick threshold).
+    final atBottom = position.pixels <= 8;
+    _stick = atBottom;
+    if (atBottom != _atBottom) {
+      _atBottom = atBottom;
+      if (mounted) setState(() {});
     }
+  }
+
+  /// After content grows at the newest end (the list's anchor at offset 0),
+  /// keeps a scrolled-up reader's view stable: the growth shifts every other
+  /// message up by the grown amount, so the reader's scroll follows by the
+  /// same. A following reader needs nothing — the anchor is pinned at offset
+  /// 0, so the newest line stays at the bottom of the viewport for free.
+  void _compensateGrow(double oldScroll, double oldMax) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      if (_stick) return; // the reader returned to the anchor meanwhile.
+      final position = _scroll.position;
+      final delta = position.maxScrollExtent - oldMax;
+      if (delta > 0) position.jumpTo(oldScroll + delta);
+    });
+  }
+
+  /// The jump-to-end button: animates back to the anchor (the newest message)
+  /// and re-engages the bottom-follow. The anchor is offset 0, so the
+  /// animation lands exactly — no settle pass is needed.
+  void _jumpToEnd() {
+    if (!_scroll.hasClients) return;
+    _stick = true;
+    _scroll.position.animateTo(
+      0.0,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
   }
 
   /// The initial state: detail (costs), history (tools in flight), and the
@@ -229,8 +254,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _seedLiveMessages();
         _seedContextUsed();
       });
+      // The newest message is the list's anchor (offset 0), so the open
+      // lands on it for free — no settle, no crawl.
       _stick = true;
-      _followBottomNextFrame();
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       setState(() {
@@ -473,6 +499,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _pendingReasoning.clear();
       return;
     }
+    final oldScroll = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+    final oldMax = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
     setState(() {
       for (final entry in _pendingDeltas.entries) {
         final index = _liveMessages[entry.key];
@@ -501,7 +529,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _pendingDeltas.clear();
       _pendingReasoning.clear();
     });
-    _followBottomNextFrame();
+    _compensateGrow(oldScroll, oldMax);
   }
 
   /// The session's compaction marker: the history's last compaction item
@@ -784,7 +812,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _seedLiveMessages();
         _seedContextUsed();
       });
-      _followBottomNextFrame();
+      // A following reader sits on the anchor (offset 0), which is the new
+      // newest message — nothing to re-settle.
     } on SessionsClientError {
       // Transient (e.g. the service restarted): the next boundary
       // re-fetches.
@@ -818,10 +847,14 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       await widget.client.prompt(widget.sessionId, text);
       _prompt.clear();
       if (!mounted) return;
+      final oldScroll = _scroll.hasClients ? _scroll.position.pixels : 0.0;
+      final oldMax = _scroll.hasClients
+          ? _scroll.position.maxScrollExtent
+          : 0.0;
       setState(() {
         _messages = [..._messages, SessionMessage(role: 'user', text: text)];
       });
-      _followBottomNextFrame();
+      _compensateGrow(oldScroll, oldMax);
     } on SessionsClientError catch (e) {
       if (mounted) {
         _snackBar(
@@ -892,31 +925,63 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   decode: _decode,
                 ),
                 Expanded(
-                  // Lazy: only the visible messages build and lay out. A
-                  // non-lazy list re-laid out the whole history on every
-                  // streamed flush — the slow frame that starved the event
-                  // loop (and, with it, the relay) during a long session.
-                  child: ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                    itemCount: _messages.isEmpty ? 1 : _messages.length,
-                    itemBuilder: (context, index) {
-                      if (_messages.isEmpty) {
-                        return const _CenteredMessage(text: 'No messages yet.');
-                      }
-                      final message = _messages[index];
-                      if (message.role == 'compaction') {
-                        return _CompactionPane(
-                          message: message,
-                          inFlight: _compacting && index == _compactionIndex,
-                        );
-                      }
-                      final inFlight =
-                          _turnActive &&
-                          message.id != null &&
-                          _liveMessages.containsKey(message.id);
-                      return _MessagePane(message: message, inFlight: inFlight);
-                    },
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        // Lazy, reversed chat list: the newest message is the
+                        // anchor (offset 0, the bottom of the screen), so the
+                        // open lands on the newest for free — no settle, no
+                        // crawl. Only the visible messages build and lay out;
+                        // the earlier ones are pulled in as the user scrolls
+                        // up through the history.
+                        child: ListView.builder(
+                          controller: _scroll,
+                          reverse: true,
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                          itemCount: _messages.isEmpty ? 1 : _messages.length,
+                          itemBuilder: (context, index) {
+                            if (_messages.isEmpty) {
+                              return const _CenteredMessage(
+                                text: 'No messages yet.',
+                              );
+                            }
+                            // The list is reversed (newest at the anchor), so
+                            // map the list index back to the chronological
+                            // history index.
+                            final i = _messages.length - 1 - index;
+                            final message = _messages[i];
+                            if (message.role == 'compaction') {
+                              return _CompactionPane(
+                                message: message,
+                                inFlight: _compacting && i == _compactionIndex,
+                              );
+                            }
+                            final inFlight =
+                                _turnActive &&
+                                message.id != null &&
+                                _liveMessages.containsKey(message.id);
+                            return _MessagePane(
+                              message: message,
+                              inFlight: inFlight,
+                            );
+                          },
+                        ),
+                      ),
+                      // The user scrolled up (or the initial settle hasn't
+                      // reached the end yet): float the jump-to-end button
+                      // over the list, just above the prompt bar.
+                      if (!_atBottom)
+                        Positioned(
+                          right: 12,
+                          bottom: 12,
+                          child: FloatingActionButton.small(
+                            key: const ValueKey('structured-jump-to-end'),
+                            tooltip: 'Go to the end',
+                            onPressed: _jumpToEnd,
+                            child: const Icon(Icons.vertical_align_bottom),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
                 _PromptBar(
@@ -980,28 +1045,28 @@ class _CostBar extends StatelessWidget {
       ),
       child: Column(
         children: [
-          Row(
+          // A Wrap (issue #41): the chips take their natural width, so at
+          // phone width the bar wraps to a second line instead of
+          // overflowing; at desktop width it lays out on one line, as before.
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
             children: [
-              Expanded(
-                child: Text(
-                  'Cost \$${detail.cost.toStringAsFixed(4)}',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
+              Text(
+                'Cost \$${detail.cost.toStringAsFixed(4)}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               if (tokenText != null)
-                Flexible(
-                  child: Text(
-                    tokenText,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.outline,
-                    ),
+                Text(
+                  tokenText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.outline,
                   ),
                 ),
-              if (used != null) ...[
-                const SizedBox(width: 8),
+              if (used != null)
                 Container(
                   key: const ValueKey('structured-context'),
                   padding: const EdgeInsets.symmetric(
@@ -1021,9 +1086,7 @@ class _CostBar extends StatelessWidget {
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
-              ],
-              if (detail.outcome != null) ...[
-                const SizedBox(width: 8),
+              if (detail.outcome != null)
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 6,
@@ -1040,9 +1103,7 @@ class _CostBar extends StatelessWidget {
                     style: const TextStyle(fontSize: 12),
                   ),
                 ),
-              ],
-              if (speed != null) ...[
-                const SizedBox(width: 8),
+              if (speed != null)
                 Container(
                   key: const ValueKey('structured-speed'),
                   padding: const EdgeInsets.symmetric(
@@ -1060,7 +1121,6 @@ class _CostBar extends StatelessWidget {
                     style: TextStyle(fontSize: 12, color: speedColor),
                   ),
                 ),
-              ],
             ],
           ),
           if (fraction != null)

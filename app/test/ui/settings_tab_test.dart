@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/access/access_session.dart';
+import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/app_info.dart';
 import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/client/tunnel_client.dart';
@@ -92,8 +94,11 @@ void main() {
     AppMode mode = AppMode.client,
     Uri? localBridgeUri,
     FakeTunnelClient? tunnelClient,
+    AccessSession? access,
+    String? tunnelUrl,
   }) async {
     final settings = await AppSettings.load();
+    if (tunnelUrl != null) settings.tunnelUrl = tunnelUrl;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -102,6 +107,7 @@ void main() {
             mode: mode,
             localBridgeUri: localBridgeUri,
             tunnelClient: tunnelClient ?? FakeTunnelClient(),
+            access: access,
           ),
         ),
       ),
@@ -280,6 +286,48 @@ void main() {
 
       expect(find.text('No bridge configured.'), findsOneWidget);
       expect(tunnel.actions, isEmpty);
+    });
+
+    testWidgets('the login finishing re-fetches the tunnel status', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final tunnel = FakeTunnelClient()
+        ..reportError = const TunnelClientError(401, 'unauthorized');
+      final store = await AccessTokenStore.load();
+      final access = AccessSession(
+        tunnelBase: () => Uri.parse('https://tunnel.test/'),
+        store: store,
+      );
+      await pumpSettings(
+        tester,
+        mode: AppMode.client,
+        tunnelClient: tunnel,
+        tunnelUrl: 'https://tunnel.test/',
+        access: access,
+      );
+
+      // Before the token exists, the status is a 401 with a retry.
+      expect(find.byKey(const ValueKey('tunnel-retry')), findsOneWidget);
+
+      // The browser bounce brought the app to the foreground before the
+      // token exchange finished; the login completes now: the status
+      // re-fetches with the token.
+      tunnel.reportError = null;
+      tunnel.reportValue = _kUpReport;
+      store.save(
+        'tunnel.test',
+        AccessLoginRecord(
+          clientId: 'c1',
+          accessToken: 'tok',
+          refreshToken: 'rtok',
+          accessTokenExpiresAt: DateTime.now().add(const Duration(hours: 1)),
+        ),
+      );
+      await access.restore();
+      await tester.pump();
+
+      expect(find.text('Tunnel up'), findsOneWidget);
     });
   });
 

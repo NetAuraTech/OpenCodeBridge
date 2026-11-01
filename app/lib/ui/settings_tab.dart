@@ -113,6 +113,7 @@ class _SettingsTabState extends State<SettingsTab> {
         client: widget.tunnelClient,
         serverMode: widget.mode == AppMode.server,
         auth: widget.auth,
+        access: widget.access,
       ),
       const SizedBox(height: 8),
       const _SectionLabel('Notifications'),
@@ -156,6 +157,7 @@ class _TunnelSection extends StatefulWidget {
     this.client,
     required this.serverMode,
     this.auth,
+    this.access,
   });
 
   /// Where the bridge's tunnel API lives; `null` when this client has no
@@ -168,6 +170,13 @@ class _TunnelSection extends StatefulWidget {
 
   /// The Access login's header provider (issue #23, client mode).
   final AuthHeaderProvider? auth;
+
+  /// The tunnel's Access login (issue #23, client mode); `null` in server
+  /// mode. The status re-fetches when the login completes: the browser
+  /// bounce brought the app to the foreground before the token exchange
+  /// finished, so the status fetched before the token saw a `401`
+  /// (issue #41).
+  final AccessSession? access;
 
   /// Server mode: offers the assisted-setup wizard (issue #34), a
   /// server-mode feature (client mode only connects to the hostname).
@@ -200,12 +209,29 @@ class _TunnelSectionState extends State<_TunnelSection> {
   void initState() {
     super.initState();
     _init(widget.apiBase);
+    widget.access?.addListener(_onAccessState);
   }
 
   @override
   void didUpdateWidget(covariant _TunnelSection oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.access != oldWidget.access) {
+      oldWidget.access?.removeListener(_onAccessState);
+      widget.access?.addListener(_onAccessState);
+    }
     if (widget.apiBase != oldWidget.apiBase) _init(widget.apiBase);
+  }
+
+  @override
+  void dispose() {
+    widget.access?.removeListener(_onAccessState);
+    super.dispose();
+  }
+
+  /// The login finished (issue #41): the status fetched before the token
+  /// existed saw a `401`; the token is in hand, so fetch it again.
+  void _onAccessState(AccessLoginState state) {
+    if (state == AccessLoginState.loggedIn) _load();
   }
 
   void _init(Uri? base) {

@@ -313,6 +313,63 @@ void main() {
       }
     });
 
+    test(
+      'reconnect() opens a fresh connection and the seq map survives',
+      () async {
+        final client = EventsClient(base, reconnectDelay: _tick);
+        try {
+          // The live bridge holds every connection open. The connection opened
+          // by reconnect() (#2) delivers seq 3, skipping seq 2 — the event
+          // lost while the app was backgrounded.
+          framesFor = (n) => n == 1 ? [_payload(seq: 1)] : [_payload(seq: 3)];
+          holdFor = (n) => true;
+          final events = <BridgeEvent>[];
+          final gaps = <SessionGap>[];
+          final eventsSub = client.events.listen(events.add);
+          final gapsSub = client.gaps.listen(gaps.add);
+          await client.connect();
+          await _until(() => events.length == 1);
+          expect(connections, 1);
+
+          await client.reconnect();
+          await _until(
+            () => connections >= 2 && events.length == 2,
+            message: 'expected a fresh connection that keeps receiving',
+          );
+
+          expect(events.map((e) => e.durable?.seq), [
+            1,
+            3,
+          ], reason: 'the fresh connection keeps receiving');
+          // seq 2 was missed across the drop, yet the gap is still reported:
+          // the per-session seq map survived the reconnect.
+          await _until(() => gaps.length == 1);
+          expect(_gapTuples(gaps), [('ses_x', 1, 3)]);
+          await eventsSub.cancel();
+          await gapsSub.cancel();
+        } finally {
+          await client.disconnect();
+        }
+      },
+    );
+
+    test('reconnect() while stopped simply connects', () async {
+      final client = EventsClient(base, reconnectDelay: _tick);
+      try {
+        framesFor = (n) => [_payload(seq: 1)];
+        holdFor = (n) => true;
+        final events = <BridgeEvent>[];
+        final eventsSub = client.events.listen(events.add);
+
+        await client.reconnect();
+        await _until(() => events.length == 1);
+        expect(events.first.durable?.seq, 1);
+        await eventsSub.cancel();
+      } finally {
+        await client.disconnect();
+      }
+    });
+
     test('disconnect() stops receiving and does not reconnect', () async {
       final client = EventsClient(base, reconnectDelay: _tick);
       try {

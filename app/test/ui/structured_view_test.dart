@@ -34,6 +34,20 @@ const _detailCtx = SessionDetail(
   contextLimit: 100,
 );
 
+/// A long, uneven history (a short first half, a long second half): enough
+/// to be far longer than the viewport, so the anchor (the newest message)
+/// is well clear of the oldest, and the lazy list only builds the tail that
+/// is actually on screen.
+final List<SessionMessage> _longHistory = List.generate(
+  400,
+  (i) => SessionMessage(
+    role: i.isEven ? 'user' : 'assistant',
+    text: i < 200
+        ? 'message $i'
+        : 'message $i ${List.filled(12, 'lorem ipsum dolor sit amet').join(' ')}',
+  ),
+);
+
 /// A scripted [SessionsClient] for the structured view tests.
 class _FakeClient extends SessionsClient {
   _FakeClient({
@@ -917,6 +931,78 @@ void main() {
       expect(decoration, isNotNull);
       final border = decoration!.border as Border;
       expect(border.left, isA<BorderSide>());
+    });
+
+    testWidgets(
+      'opening a long conversation lands on the last message immediately',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: _longHistory,
+        );
+        await _pump(tester, client: client);
+        // A few frames in — not a settle — the newest message is already on
+        // screen: it is the list's anchor (offset 0), so the open lands on it
+        // for free, with no crawl down to the bottom.
+        await tester.pump();
+        await tester.pump();
+        expect(find.textContaining('message 399 '), findsOneWidget);
+        // The oldest message is far up the history, out of the viewport.
+        expect(find.textContaining('message 0'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a jump-to-end button appears when scrolled up and returns to the end',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: _longHistory,
+        );
+        await _pump(tester, client: client);
+        await tester.pumpAndSettle();
+
+        final button = find.byKey(const ValueKey('structured-jump-to-end'));
+        expect(button, findsNothing);
+        expect(find.textContaining('message 399 '), findsOneWidget);
+
+        await tester.drag(find.byType(ListView), const Offset(0, 600));
+        await tester.pump();
+        expect(button, findsOneWidget);
+
+        await tester.tap(button);
+        await tester.pumpAndSettle();
+        expect(button, findsNothing);
+        expect(find.textContaining('message 399 '), findsOneWidget);
+      },
+    );
+
+    testWidgets('scrolling up pulls the earlier messages into view', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: _longHistory,
+      );
+      await _pump(tester, client: client);
+      await tester.pump();
+
+      // At the anchor, the newest is on screen; the earliest is far away.
+      expect(find.textContaining('message 399 '), findsOneWidget);
+      expect(find.textContaining('message 0'), findsNothing);
+
+      // Scroll up (read older) until the earliest message is pulled in: the
+      // lazy list builds the earlier messages as the viewport advances.
+      for (
+        var i = 0;
+        i < 80 && find.textContaining('message 0').evaluate().isEmpty;
+        i++
+      ) {
+        await tester.drag(find.byType(ListView), const Offset(0, 1000));
+        await tester.pumpAndSettle();
+      }
+
+      expect(find.textContaining('message 0'), findsOneWidget);
     });
   });
 }
