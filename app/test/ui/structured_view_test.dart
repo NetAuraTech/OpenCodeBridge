@@ -44,8 +44,7 @@ final List<SessionMessage> _longHistory = List.generate(
     role: i.isEven ? 'user' : 'assistant',
     text: i < 200
         ? 'message $i'
-        : 'message $i ' +
-              List.filled(12, 'lorem ipsum dolor sit amet').join(' '),
+        : 'message $i ${List.filled(12, 'lorem ipsum dolor sit amet').join(' ')}',
   ),
 );
 

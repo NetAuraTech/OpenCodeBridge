@@ -848,7 +848,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _prompt.clear();
       if (!mounted) return;
       final oldScroll = _scroll.hasClients ? _scroll.position.pixels : 0.0;
-      final oldMax = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
+      final oldMax = _scroll.hasClients
+          ? _scroll.position.maxScrollExtent
+          : 0.0;
       setState(() {
         _messages = [..._messages, SessionMessage(role: 'user', text: text)];
       });
