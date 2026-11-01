@@ -168,7 +168,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
     final target = widget.deepLinkSession;
     if (target != null && target != oldWidget.deepLinkSession) {
-      _openDeepLink(target);
+      // The target arrives as a widget update, which runs during the build
+      // phase: open it after the frame so the [Navigator.push] below never
+      // happens mid-build (a push mid-build corrupts the navigator's
+      // history, leaving the view with no route back to the list).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _openDeepLink(target);
+      });
     }
   }
 
