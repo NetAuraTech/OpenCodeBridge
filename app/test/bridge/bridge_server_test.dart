@@ -9,6 +9,9 @@ import 'package:opencodebridge/bridge/events/bridge_event.dart';
 import 'package:opencodebridge/bridge/events/event_hub.dart';
 import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
 import 'package:opencodebridge/bridge/health.dart';
+import 'package:opencodebridge/bridge/notify/fcm_sender.dart';
+import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
+import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
@@ -18,6 +21,7 @@ import 'package:opencodebridge/bridge/terminal/window_manager.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session_detail.dart';
+import 'package:opencodebridge/notify/notify_kind.dart';
 
 void main() {
   group('BridgeServer', () {
@@ -1500,6 +1504,123 @@ void main() {
       },
     );
   });
+
+  group('BridgeServer push registration (issue #24)', () {
+    late BridgeServer server;
+    late Uri base;
+    late Directory dir;
+    late NotifyService notify;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-srv-notify',
+      );
+      notify = NotifyService(sender: _NotifyFakeSender());
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: _FakeService(),
+          store: await SessionStore.load(dir: dir),
+        ),
+        notify: notify,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('a valid registration is 200 and lands in the service', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["permissionAsked","turnEnded"]}',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), <String, Object?>{});
+      expect(notify.deviceCount, 1);
+      expect(notify.enabledKinds('tok_1'), {
+        NotifyKind.permissionAsked,
+        NotifyKind.turnEnded,
+      });
+    });
+
+    test('an empty events list registers the token with no push enabled',
+        () async {
+      final (status, _) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_2","events":[]}',
+      );
+      expect(status, 200);
+      expect(notify.enabledKinds('tok_2'), isEmpty);
+    });
+
+    test('a re-registration with the same token replaces its events',
+        () async {
+      await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["turnEnded"]}',
+      );
+      await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":[]}',
+      );
+      expect(notify.deviceCount, 1);
+      expect(notify.enabledKinds('tok_1'), isEmpty);
+    });
+
+    test('a malformed body is 400 and registers nothing', () async {
+      for (final body in const [
+        'not json',
+        '{}',
+        '{"token":"","events":[]}',
+        '{"token":"tok","events":["nope"]}',
+        '{"token":"tok","events":"turnEnded"}',
+      ]) {
+        final (status, response) = await _postRaw(
+          base,
+          'api/notify/device-token',
+          body,
+        );
+        expect(status, 400, reason: body);
+        expect(jsonDecode(response), {'error': 'invalid_body'});
+      }
+      expect(notify.deviceCount, 0);
+    });
+
+    test('without a service account the endpoint is 503 notify_unconfigured',
+        () async {
+      if (FirebaseServiceAccount.tryLoad() != null) {
+        markTestSkipped(
+          'this machine has a service account; the 503 path only '
+          'applies without one',
+        );
+      }
+      final unconfigured = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: _FakeService(),
+          store: await SessionStore.load(dir: dir),
+        ),
+      );
+      try {
+        final (status, body) = await _postRaw(
+          unconfigured.baseUri,
+          'api/notify/device-token',
+          '{"token":"tok_1","events":[]}',
+        );
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'notify_unconfigured'});
+      } finally {
+        await unconfigured.stop();
+      }
+    });
+  });
 }
 
 /// A scripted service for the sessions-endpoint tests.
@@ -1945,4 +2066,18 @@ Future<void> _until(
     }
     await Future<void>.delayed(const Duration(milliseconds: 5));
   }
+}
+
+/// A recording FCM transport for the push registration tests (the endpoint
+/// under test only registers the device; nothing is sent).
+class _NotifyFakeSender extends FcmSender {
+  final sent = <String>[];
+
+  @override
+  Future<void> send({
+    required String token,
+    required String title,
+    required String body,
+    required String link,
+  }) async => sent.add(token);
 }

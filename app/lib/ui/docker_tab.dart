@@ -22,6 +22,8 @@ class DockerTab extends StatefulWidget {
     this.events,
     this.auth,
     this.access,
+    this.deepLinkContainer,
+    this.onDeepLinkContainerConsumed,
   });
 
   /// Where the bridge's docker API lives. `null` when this client has no
@@ -47,6 +49,14 @@ class DockerTab extends StatefulWidget {
   /// its detail listen to. Defaults to a real [EventsClient] at [apiBase]
   /// (owned and disconnected by the tab); tests inject a scripted source.
   final EventSource? events;
+
+  /// The one-shot deep link (issue #24): the container to open in its detail
+  /// when a tapped notification targets it; `null` when there is nothing to
+  /// open. The tab consumes it through [onDeepLinkContainerConsumed] (which
+  /// the caller uses to clear the target, so a later identical link is a new
+  /// event).
+  final String? deepLinkContainer;
+  final VoidCallback? onDeepLinkContainerConsumed;
 
   @override
   State<DockerTab> createState() => DockerTabState();
@@ -83,6 +93,11 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
 
   /// True while a compose load is in flight.
   bool _composeLoading = true;
+
+  /// The deep-link container awaiting a loaded list (issue #24): set when
+  /// the target arrives before the rows; a failed load leaves it for the
+  /// next successful one.
+  String? _deepLinkPending;
 
   @override
   void initState() {
@@ -141,6 +156,30 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
       _load();
       _loadCompose();
     }
+    final target = widget.deepLinkContainer;
+    if (target != null && target != oldWidget.deepLinkContainer) {
+      _openDeepLink(target);
+    }
+  }
+
+  /// A tapped notification targeted a container (issue #24): open its
+  /// detail. Consumed immediately (the caller clears the target); when the
+  /// list has not loaded yet, the target waits for it in [_deepLinkPending].
+  void _openDeepLink(String name) {
+    widget.onDeepLinkContainerConsumed?.call();
+    final rows = _rows;
+    if (rows == null) {
+      _deepLinkPending = name;
+      return;
+    }
+    _openDeepLinkRow(name, rows);
+  }
+
+  void _openDeepLinkRow(String name, List<DockerContainer> rows) {
+    _deepLinkPending = null;
+    final row = rows.where((container) => container.name == name).firstOrNull;
+    if (row == null) return; // The container is gone (removed in the meantime).
+    unawaited(_openDetail(row));
   }
 
   @override
@@ -200,10 +239,12 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
     try {
       final rows = await client.list();
       if (!mounted) return;
+      final pending = _deepLinkPending;
       setState(() {
         _rows = rows;
         _loading = false;
       });
+      if (pending != null) _openDeepLinkRow(pending, rows);
     } on DockerClientError catch (e) {
       if (!mounted) return;
       setState(() {

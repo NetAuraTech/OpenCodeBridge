@@ -96,6 +96,8 @@ void main() {
     FakeTunnelClient? tunnelClient,
     AccessSession? access,
     String? tunnelUrl,
+    VoidCallback? onNotifyToggled,
+    VoidCallback? onPushProjectCommitted,
   }) async {
     final settings = await AppSettings.load();
     if (tunnelUrl != null) settings.tunnelUrl = tunnelUrl;
@@ -108,6 +110,8 @@ void main() {
             localBridgeUri: localBridgeUri,
             tunnelClient: tunnelClient ?? FakeTunnelClient(),
             access: access,
+            onNotifyToggled: onNotifyToggled,
+            onPushProjectCommitted: onPushProjectCommitted,
           ),
         ),
       ),
@@ -123,7 +127,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final settings = await pumpSettings(tester, mode: AppMode.client);
 
-      final field = find.byType(TextField);
+      final field = find.byKey(const ValueKey('tunnel-url-field'));
       expect(field, findsOneWidget);
 
       await tester.enterText(field, 'https://bridge.example.com');
@@ -141,7 +145,7 @@ void main() {
       final uri = Uri.parse('http://127.0.0.1:48201/');
       await pumpSettings(tester, mode: AppMode.server, localBridgeUri: uri);
 
-      expect(find.byType(TextField), findsNothing);
+      expect(find.byKey(const ValueKey('tunnel-url-field')), findsNothing);
       expect(find.textContaining('http://127.0.0.1:48201/'), findsOneWidget);
     });
 
@@ -162,7 +166,130 @@ void main() {
     testWidgets('shows the app version', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, mode: AppMode.client);
+
+      // About sits below the fold (the push setup grew the tab): scroll to it.
+      await tester.dragUntilVisible(
+        find.textContaining(kAppVersion),
+        find.byType(ListView),
+        const Offset(0, -200),
+      );
       expect(find.textContaining(kAppVersion), findsOneWidget);
+    });
+  });
+
+  group('SettingsTab push (issue #24)', () {
+    const String kGoodProjectJson = '''
+        {
+          "project_info": {
+            "project_number": "123456789012",
+            "project_id": "opencodebridge-test",
+            "storage_bucket": "opencodebridge-test.appspot.com"
+          },
+          "client": [
+            {
+              "client_info": {
+                "mobilesdk_app_id": "1:123456789012:android:abcdef123456",
+                "android_client_info": {
+                  "package_name": "com.example.opencodebridge"
+                }
+              },
+              "oauth_client": [
+                {
+                  "client_id": "123456789012-xyz.apps.googleusercontent.com",
+                  "client_type": 3
+                }
+              ],
+              "api_key": [
+                {
+                  "current_key": "AIzaSyA-test-key"
+                }
+              ]
+            }
+          ]
+        }
+        ''';
+
+    testWidgets('a toggle change re-registers (onNotifyToggled)', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var toggles = 0;
+      final settings = await pumpSettings(
+        tester,
+        onNotifyToggled: () => toggles++,
+      );
+
+      await tester.tap(find.byKey(const ValueKey('notify-turn-ended')));
+      await tester.pump();
+
+      expect(settings.notifyTurnEnded, isTrue);
+      expect(toggles, 1);
+    });
+
+    testWidgets('an invalid paste shows the problem and saves nothing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      final settings = await pumpSettings(
+        tester,
+        onPushProjectCommitted: () => commits++,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('push-project-field')),
+        'not a json',
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('push-project-save')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('push-project-save')));
+      await tester.pump();
+
+      expect(
+        find.text('That is not a valid google-services.json.'),
+        findsOneWidget,
+      );
+      expect(settings.firebaseProjectJson, '');
+      expect(commits, 0);
+    });
+
+    testWidgets('a valid paste saves the project and commits', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      var commits = 0;
+      final settings = await pumpSettings(
+        tester,
+        onPushProjectCommitted: () => commits++,
+      );
+
+      await tester.enterText(
+        find.byKey(const ValueKey('push-project-field')),
+        kGoodProjectJson,
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('push-project-save')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('push-project-save')));
+      await tester.pump();
+
+      expect(settings.firebaseProjectJson, kGoodProjectJson.trim());
+      expect(commits, 1);
+      expect(
+        find.text('Firebase project: opencodebridge-test.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a saved project shows its project id on load', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({
+        'notify.firebaseProject': kGoodProjectJson,
+      });
+      await pumpSettings(tester);
+
+      expect(
+        find.text('Firebase project: opencodebridge-test.'),
+        findsOneWidget,
+      );
     });
   });
 

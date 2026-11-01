@@ -3,6 +3,9 @@
          release) talks to the bridge over the tunnel's HTTPS. The tunnel is
          TLS, so no cleartext exception is needed. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Push (issue #24): the Android 13+ (API 33+) notification permission
+         the app requests before collecting its FCM token. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="OpenCodeBridge"
         android:name="${applicationName}"

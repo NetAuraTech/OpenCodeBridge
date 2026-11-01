@@ -32,6 +32,8 @@ class SessionsTab extends StatefulWidget {
     this.events,
     this.auth,
     this.access,
+    this.deepLinkSession,
+    this.onDeepLinkSessionConsumed,
   });
 
   /// The tunnel's Access login (issue #23, client mode); `null` in server
@@ -62,6 +64,14 @@ class SessionsTab extends StatefulWidget {
   /// views listen to. Defaults to a real [EventsClient] at [apiBase] (owned
   /// and disconnected by the tab); tests inject a scripted source.
   final EventSource? events;
+
+  /// The one-shot deep link (issue #24): the session to open in the
+  /// structured view when a tapped notification targets it; `null` when
+  /// there is nothing to open. The tab consumes it through
+  /// [onDeepLinkSessionConsumed] (which the caller uses to clear the
+  /// target, so a later identical link is a new event).
+  final String? deepLinkSession;
+  final VoidCallback? onDeepLinkSessionConsumed;
 
   @override
   State<SessionsTab> createState() => SessionsTabState();
@@ -96,6 +106,11 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// True while a session create (the new-session flow, after the project
   /// is picked) is in flight.
   bool _newSessionBusy = false;
+
+  /// The deep-link session awaiting a loaded list (issue #24): set when the
+  /// target arrives before the rows; a failed load leaves it for the next
+  /// successful one.
+  String? _deepLinkPending;
 
   @override
   void initState() {
@@ -151,6 +166,31 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _setupEvents(widget.apiBase!);
       _load();
     }
+    final target = widget.deepLinkSession;
+    if (target != null && target != oldWidget.deepLinkSession) {
+      _openDeepLink(target);
+    }
+  }
+
+  /// A tapped notification targeted a session (issue #24): open it in the
+  /// structured view, whose banner shows the pending permission. Consumed
+  /// immediately (the caller clears the target); when the list has not
+  /// loaded yet, the target waits for it in [_deepLinkPending].
+  void _openDeepLink(String id) {
+    widget.onDeepLinkSessionConsumed?.call();
+    final rows = _rows;
+    if (rows == null) {
+      _deepLinkPending = id;
+      return;
+    }
+    _openDeepLinkRow(id, rows);
+  }
+
+  void _openDeepLinkRow(String id, List<Session> rows) {
+    _deepLinkPending = null;
+    final row = rows.where((session) => session.id == id).firstOrNull;
+    if (row == null) return; // The session is gone (deleted in the meantime).
+    unawaited(_openStructured(row));
   }
 
   @override
@@ -196,10 +236,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     try {
       final rows = await client.list();
       if (!mounted) return;
+      final pending = _deepLinkPending;
       setState(() {
         _rows = rows;
         _loading = false;
       });
+      if (pending != null) _openDeepLinkRow(pending, rows);
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       setState(() {

@@ -11,6 +11,12 @@ import '../model/tunnel_setup.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
+import 'notify/fcm_http_v1_sender.dart';
+import 'notify/fcm_sender.dart';
+import 'notify/firebase_service_account.dart';
+import '../notify/notify_kind.dart';
+import 'notify/notify_service.dart';
+import 'notify/push_dispatcher.dart';
 import 'events/llama_speed_feed.dart';
 import 'events/opencode_http_event_service.dart';
 import 'health.dart';
@@ -49,6 +55,7 @@ class BridgeServer {
     this._speed,
     this._docker,
     this._tunnel,
+    this._notify,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -69,6 +76,10 @@ class BridgeServer {
 
   /// The unified event stream (spec section 8, endpoint 14): SSE.
   static const String eventsPath = '/api/events';
+
+  /// The push registration (issue #24): the app's FCM device token plus the
+  /// events its Settings toggles have enabled.
+  static const String deviceTokenPath = '/api/notify/device-token';
 
   /// The container list (issue #21); the per-container action and logs
   /// endpoints hang off it by name.
@@ -132,6 +143,12 @@ class BridgeServer {
   /// `not_configured`.
   final TunnelSupervisor? _tunnel;
 
+  /// The push dispatch (issue #24); `null` when this machine has no
+  /// Firebase service account (the setup step not done) or no shared
+  /// opencode service, in which case the device-token endpoint reports
+  /// `notify_unconfigured`.
+  final NotifyService? _notify;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -167,6 +184,12 @@ class BridgeServer {
   /// [dockerLogKeepAlive] paces the keep-alive comment on a followed
   /// container's log stream (20s, as on the events stream); the keep-alive
   /// write is what surfaces a client disconnect, so tests shorten it.
+  /// [notify], when provided, serves the push registration endpoint
+  /// (issue #24, tests); the default builds the [NotifyService] from the
+  /// Firebase service account (the setup step) and taps the three push
+  /// events off the event hub, or stays `null` (no service account, or no
+  /// shared opencode service) in which case the endpoint reports
+  /// `notify_unconfigured`.
   ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
@@ -183,6 +206,7 @@ class BridgeServer {
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor)? tunnelSetup,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
+    NotifyService? notify,
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
@@ -199,6 +223,8 @@ class BridgeServer {
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
+    final notifyService =
+        notify ?? await BridgeServer._defaultNotify(backend, eventHub);
     final tunnelSupervisor = tunnel;
     final tunnelSetupService =
         tunnelSetup ??
@@ -231,6 +257,7 @@ class BridgeServer {
         tunnelSupervisor,
         tunnelSetupService,
         dockerLogKeepAlive,
+        notifyService,
       );
     });
     return BridgeServer._(
@@ -241,7 +268,46 @@ class BridgeServer {
       speed,
       dockerBackend,
       tunnelSupervisor,
+      notifyService,
     );
+  }
+
+  /// The default notify service (issue #24): the Firebase service account
+  /// from the app-owned config (or `GOOGLE_APPLICATION_CREDENTIALS`), the
+  /// Admin-SDK sender (the raw FCM HTTP v1 API stays the fallback,
+  /// selected with `OPENCODEBRIDGE_FCM_TRANSPORT=http`), and the three push
+  /// events tapped off the event hub. `null` when this machine has no
+  /// service account (the setup step not done) or no shared opencode
+  /// service, in which case the device-token endpoint reports
+  /// `notify_unconfigured`.
+  static Future<NotifyService?> _defaultNotify(
+    SessionsBackend? backend,
+    EventHub? hub,
+  ) async {
+    final account = FirebaseServiceAccount.tryLoad();
+    if (account == null) return null;
+    final transport = Platform.environment['OPENCODEBRIDGE_FCM_TRANSPORT'];
+    final sender = transport == 'http'
+        ? await FcmHttpV1Sender.forServiceAccount(account)
+        : FirebaseAdminFcmSender.forServiceAccount(account);
+    final service = NotifyService(sender: sender);
+    Future<String> label(String id) async {
+      if (backend == null) return id;
+      try {
+        final rows = await backend.list();
+        for (final row in rows) {
+          if (row.id == id) return row.title.isEmpty ? id : row.title;
+        }
+      } catch (_) {
+        // The service is unreachable: the id is the body fallback.
+      }
+      return id;
+    }
+
+    // The hub fans the push events out like any other downstream; with no
+    // hub there is no event stream and no push to send.
+    hub?.add(PushDispatcher(service, sessionLabel: label));
+    return service;
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -264,6 +330,7 @@ class BridgeServer {
     await _speed?.close();
     await _docker?.close();
     await _tunnel?.stop();
+    await _notify?.close();
   }
 
   /// The default sessions backend: the real shared opencode service plus the
@@ -551,6 +618,7 @@ class BridgeServer {
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor) tunnelSetup,
     Duration dockerLogKeepAlive,
+    NotifyService? notify,
   ) async {
     final response = request.response;
     response.headers.contentType = ContentType.json;
@@ -558,6 +626,14 @@ class BridgeServer {
       if (request.method == 'GET' &&
           request.uri.path == BridgeServer.eventsPath) {
         await BridgeServer._handleEvents(request, events);
+        return;
+      }
+      // The push registration (issue #24), checked before the session
+      // matchers (a bare list path would otherwise read as a session id
+      // to them).
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.deviceTokenPath) {
+        await BridgeServer._deviceToken(request, notify);
         return;
       }
       if (request.method == 'GET' &&
@@ -750,6 +826,46 @@ class BridgeServer {
     response.bufferOutput = false;
     response.statusCode = HttpStatus.ok;
     events.add(HttpEventConnection(response));
+  }
+
+  /// The push registration (issue #24): the app's FCM device token plus the
+  /// events its Settings toggles have enabled,
+  /// `{"token": "…", "events": ["permissionAsked", …]}`. Anything else is a
+  /// 400; a bridge without a notify service (the setup step not done) is a
+  /// 503.
+  static Future<void> _deviceToken(
+    HttpRequest request,
+    NotifyService? notify,
+  ) async {
+    final response = request.response;
+    if (notify == null) {
+      response.statusCode = HttpStatus.serviceUnavailable;
+      response.write(jsonEncode({'error': 'notify_unconfigured'}));
+      await response.close();
+      return;
+    }
+    Object? token;
+    Set<NotifyKind>? events;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, Object?>) {
+        token = decoded['token'];
+        events = NotifyKind.parseEvents(decoded['events']);
+      }
+    } catch (_) {
+      // A malformed body (or a torn connection) is a 400.
+    }
+    if (token is! String || token.isEmpty || events == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    notify.registerDevice(token, events);
+    response.statusCode = HttpStatus.ok;
+    response.write(jsonEncode({}));
+    await response.close();
   }
 
   /// The single session id in a `DELETE` path, or `null` when the path is
