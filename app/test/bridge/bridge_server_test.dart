@@ -1412,8 +1412,8 @@ void main() {
       }
     });
 
-    test('POST /api/sessions creates the session, persists the id, opens the '
-        'window, and returns it live', () async {
+    test('POST /api/sessions creates the session on the service, persists '
+        'the id, and returns it', () async {
       final (status, body) = await _postRaw(
         base,
         'api/sessions',
@@ -1428,10 +1428,11 @@ void main() {
         'created': 400,
         'location': '/created',
         'active': false,
-        'classification': 'app-launched-live',
+        'classification': 'app-launched-closed',
       });
-      expect(launches, 1);
-      expect(backend.liveSessionIds, contains('ses_created'));
+      // The create opens no terminal window.
+      expect(launches, 0);
+      expect(backend.liveSessionIds, isEmpty);
       // The persistence "add id" write happened at launch.
       expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
     });
@@ -1471,8 +1472,8 @@ void main() {
       expect(store.ids(), isEmpty);
     });
 
-    test('POST /api/sessions is 500 window_unavailable and leaves the session '
-        'persisted and closed', () async {
+    test('POST /api/sessions succeeds when no terminal window can be '
+        'spawned', () async {
       final spawnless = TerminalWindowManager(
         liveSessionIds: backend.liveSessionIds,
         spawner: TerminalWindowSpawner(emulators: (String name) => null),
@@ -1490,108 +1491,37 @@ void main() {
           'api/sessions',
           jsonEncode({'project': 'p1'}),
         );
-        expect(status, 500);
-        expect(jsonDecode(body), {'error': 'window_unavailable'});
+        expect(status, 201);
+        expect(
+          (jsonDecode(body) as Map<String, Object?>)['classification'],
+          'app-launched-closed',
+        );
       } finally {
         await other.stop();
       }
-      // The session still exists: persisted and closed — it can be reopened.
-      expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
+      expect(launches, 0);
       expect(backend.liveSessionIds, isEmpty);
+      expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
     });
 
-    test('POST /api/sessions/{id}/window reopens a closed app-launched '
-        'session', () async {
-      store.add('ses_two');
-      await store.save();
-
-      final (status, body) = await _postRaw(
-        base,
-        'api/sessions/ses_two/window',
-        '',
-      );
-
-      expect(status, 204);
-      expect(body, isEmpty);
-      expect(launches, 1);
-      expect(backend.liveSessionIds, contains('ses_two'));
-      expect(windows.isLive('ses_two'), isTrue);
-    });
-
-    test('POST /api/sessions/{id}/window is 404 for a session that was not '
-        'app-launched', () async {
-      final (status, body) = await _postRaw(
-        base,
-        'api/sessions/ses_one/window',
-        '',
-      );
-      expect(status, 404);
-      expect(jsonDecode(body), {'error': 'not_found'});
-      expect(launches, 0);
-    });
-
-    test('POST /api/sessions/{id}/window is 404 for a session gone from the '
-        'service', () async {
-      store.add('ses_two');
-      await store.save();
-      service.removedFromService.add('ses_two');
-
-      final (status, body) = await _postRaw(
-        base,
-        'api/sessions/ses_two/window',
-        '',
-      );
-      expect(status, 404);
-      expect(jsonDecode(body), {'error': 'not_found'});
-      expect(launches, 0);
-    });
-
-    test(
-      'POST /api/sessions/{id}/window is 502 when the service is down',
+    test('POST /api/sessions/{id}/window is gone (404) and opens nothing',
       () async {
         store.add('ses_two');
         await store.save();
-        service.failList = true;
 
-        final (status, body) = await _postRaw(
-          base,
-          'api/sessions/ses_two/window',
-          '',
-        );
-        expect(status, 502);
-        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+        for (final id in ['ses_one', 'ses_two']) {
+          final (status, body) = await _postRaw(
+            base,
+            'api/sessions/$id/window',
+            '',
+          );
+          expect(status, 404, reason: id);
+          expect(jsonDecode(body), {'error': 'not_found'});
+        }
         expect(launches, 0);
+        expect(backend.liveSessionIds, isEmpty);
       },
     );
-
-    test('POST /api/sessions/{id}/window is 500 window_unavailable when the '
-        'window cannot be spawned', () async {
-      store.add('ses_two');
-      await store.save();
-      final spawnless = TerminalWindowManager(
-        liveSessionIds: backend.liveSessionIds,
-        spawner: TerminalWindowSpawner(emulators: (String name) => null),
-        terminalBinary: app.path,
-        windowToken: () => 'tok_1',
-      );
-      final other = await BridgeServer.start(
-        port: 0,
-        sessions: backend,
-        windows: spawnless,
-      );
-      try {
-        final (status, body) = await _postRaw(
-          other.baseUri,
-          'api/sessions/ses_two/window',
-          '',
-        );
-        expect(status, 500);
-        expect(jsonDecode(body), {'error': 'window_unavailable'});
-      } finally {
-        await other.stop();
-      }
-      expect(backend.liveSessionIds, isEmpty);
-    });
 
     test('a window the user closes unflips live, emits terminal.closed, and '
         'writes no persistence', () async {
@@ -1615,8 +1545,8 @@ void main() {
       expect((await SessionStore.load(dir: dir)).has('ses_one'), isTrue);
     });
 
-    test('DELETE on a live app-launched session closes the window first, '
-        'deletes, and emits session.closed', () async {
+    test('DELETE on an app-launched session deletes, emits session.closed, '
+        'and leaves its window open', () async {
       store.add('ses_one');
       await store.save();
       await windows.openFor('ses_one');
@@ -1635,12 +1565,14 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 100));
         expect(
           Process.runSync('kill', ['-0', '$pid']).exitCode,
-          isNot(0),
-          reason: 'the window must be closed before the delete answers',
+          0,
+          reason: 'the delete must no longer close the session window',
         );
         expect(service.deleted, ['ses_one']);
-        expect(backend.liveSessionIds, isEmpty);
-        expect(windowEvents, isEmpty);
+        expect(
+          (await SessionStore.load(dir: dir)).has('ses_one'),
+          isFalse,
+        );
         await _until(
           () => tap.dataPayloads.any((p) => p.contains('session.closed')),
           message: 'expected the session.closed frame',
