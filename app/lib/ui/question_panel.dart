@@ -442,7 +442,7 @@ class _QuestionBody extends StatelessWidget {
           ),
         if (question.custom)
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: const EdgeInsets.only(top: 4, bottom: 8),
             child: TextField(
               key: ValueKey('question-text-$formId-$index'),
               controller: controller,
