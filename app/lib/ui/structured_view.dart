@@ -355,6 +355,12 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     switch (event.type) {
       case 'session.execution.started':
         if (mounted) setState(() => _turnActive = true);
+        // The turn is about to run: re-fetch the service's authoritative
+        // state so a prompt sent from another client (whose user message the
+        // service persisted before the turn started) is visible here without
+        // a manual reload. The streamed in-flight content that arrives after
+        // this re-fetch keeps growing the message it lands in.
+        _normalize();
         break;
       case 'session.execution.succeeded':
       case 'session.execution.failed':
@@ -870,7 +876,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// Sends the prompt (endpoint 7), enabled at any time: the bridge forwards
   /// it with `delivery: steer` and the service queues it mid-turn. The user
   /// message is appended locally (the service's copy replaces it at the
-  /// turn-boundary normalize).
+  /// turn-boundary normalize) — unless the turn-start re-fetch already brought
+  /// in the service's copy, in which case the append is skipped so the prompt
+  /// is not shown twice.
   Future<void> _sendPrompt() async {
     final text = _prompt.text.trim();
     if (text.isEmpty || _promptBusy) return;
@@ -879,6 +887,17 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       await widget.client.prompt(widget.sessionId, text);
       _prompt.clear();
       if (!mounted) return;
+      // The turn-start re-fetch may have landed between the prompt POST
+      // resolving and here and already brought in the service's copy of this
+      // user message (the service persists it before the turn starts): the
+      // local append would then show the prompt twice. Turns run
+      // sequentially, so a user message with this exact text at the tail of
+      // the history is this prompt's, not a distinct earlier one.
+      final alreadyPresent =
+          _messages.isNotEmpty &&
+          _messages.last.role == 'user' &&
+          _messages.last.text == text;
+      if (alreadyPresent) return;
       final oldScroll = _scroll.hasClients ? _scroll.position.pixels : 0.0;
       final oldMax = _scroll.hasClients
           ? _scroll.position.maxScrollExtent
