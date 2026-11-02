@@ -779,6 +779,96 @@ void main() {
       expect(find.text('—'), findsNothing);
     });
 
+    testWidgets(
+      'a completed tool card shows a readable one-line summary (issue #63)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              id: 'm1',
+              role: 'assistant',
+              tools: [
+                ToolCall(
+                  id: 't1',
+                  name: 'shell',
+                  status: 'completed',
+                  input: {'command': 'ls -la'},
+                ),
+                ToolCall(
+                  id: 't2',
+                  name: 'read',
+                  status: 'completed',
+                  input: {'path': '/a/b.txt', 'offset': 10, 'limit': 50},
+                ),
+                ToolCall(
+                  id: 't3',
+                  name: 'grep',
+                  status: 'completed',
+                  input: {'pattern': 'TODO', 'path': 'lib'},
+                ),
+                ToolCall(
+                  id: 't4',
+                  name: 'execute',
+                  status: 'completed',
+                  input: {'code': 'print(1)'},
+                ),
+              ],
+            ),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        // Each tool's card settles on the readable line, not the raw input.
+        expect(find.text('shell · completed'), findsOneWidget);
+        expect(find.text('read · completed'), findsOneWidget);
+        expect(find.text('grep · completed'), findsOneWidget);
+        expect(find.text('execute · completed'), findsOneWidget);
+        expect(find.text('ls -la'), findsOneWidget);
+        expect(find.text('/a/b.txt (offset 10, limit 50)'), findsOneWidget);
+        expect(find.text('TODO in lib'), findsOneWidget);
+        expect(find.text('print(1)'), findsOneWidget);
+        // The raw JSON input is not rendered.
+        expect(find.textContaining('"command"'), findsNothing);
+        expect(find.textContaining('"path"'), findsNothing);
+        expect(find.textContaining('"pattern"'), findsNothing);
+        expect(find.textContaining('"code"'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'read and grep show their bare path or pattern when the input carries no offset, limit, or path (issue #63)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              id: 'm1',
+              role: 'assistant',
+              tools: [
+                ToolCall(
+                  id: 't1',
+                  name: 'read',
+                  status: 'completed',
+                  input: {'path': '/a/b.txt'},
+                ),
+                ToolCall(
+                  id: 't2',
+                  name: 'grep',
+                  status: 'completed',
+                  input: {'pattern': 'TODO'},
+                ),
+              ],
+            ),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        expect(find.text('/a/b.txt'), findsOneWidget);
+        expect(find.text('TODO'), findsOneWidget);
+      },
+    );
+
     testWidgets('sends the prompt, posts only the text, and clears the input', (
       tester,
     ) async {
@@ -1304,7 +1394,10 @@ void main() {
       await tester.pump();
 
       expect(find.text('shell · running'), findsOneWidget);
-      expect(find.text('{"command":"ls"}'), findsOneWidget);
+      // The input is decoded to a map, so the card settles on the readable
+      // line (issue #63), not the raw JSON.
+      expect(find.text('ls'), findsOneWidget);
+      expect(find.textContaining('"command"'), findsNothing);
 
       events.add(
         _event(
@@ -2251,6 +2344,43 @@ void main() {
       expect(
         Theme.of(tester.element(find.text('external session'))).brightness,
         Brightness.dark,
+      );
+    });
+
+    testWidgets('a dark-mode blockquote keeps a readable box', (tester) async {
+      // The markdown default boxes quotes in a fixed light color — in dark
+      // mode the TUI's light quote color is unreadable on it: the box takes
+      // the theme's surface instead, like the code blocks.
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'assistant', text: 'done\n\n> Note: the note.'),
+        ],
+      );
+      final events = StreamController<BridgeEvent>.broadcast();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: StructuredSessionScreen(
+            sessionId: 'ses_1',
+            title: 'external session',
+            client: client,
+            events: events.stream,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final box = tester.widget<DecoratedBox>(
+        find.ancestor(
+          of: find.textContaining('the note.'),
+          matching: find.byType(DecoratedBox),
+        ),
+      );
+      expect(
+        (box.decoration as BoxDecoration).color,
+        ThemeData.dark().colorScheme.surfaceContainerHighest,
       );
     });
   });
