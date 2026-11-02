@@ -185,7 +185,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('Could not create the folder'),
+        find.textContaining('A folder named "again" already exists there.'),
         findsOneWidget,
       );
       expect(fs.createdDirectories, isEmpty);

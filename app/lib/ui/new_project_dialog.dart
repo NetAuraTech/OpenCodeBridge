@@ -150,8 +150,11 @@ class _NewProjectDialogState extends State<NewProjectDialog> {
     } on FsClientError catch (e) {
       if (!mounted) return;
       _snackBar(
-        'Could not create the folder '
-        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+        e.statusCode == 409
+            ? 'A folder named '
+                  '"${_folderName.text.trim()}" already exists there.'
+            : 'Could not create the folder '
+                  '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
       );
     } catch (_) {
       if (!mounted) return;
