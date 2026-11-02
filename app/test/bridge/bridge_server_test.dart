@@ -1868,9 +1868,7 @@ void main() {
       notify = NotifyService(sender: _NotifyFakeSender());
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(
-          service: _FakeService(),
-        ),
+        sessions: SessionsBackend(service: _FakeService()),
         notify: notify,
       );
       base = server.baseUri;
@@ -1951,9 +1949,7 @@ void main() {
         // its own).
         final unconfigured = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(
-            service: _FakeService(),
-          ),
+          sessions: SessionsBackend(service: _FakeService()),
           notifyCredential: '${dir.path}/no-such-account.json',
         );
         try {
@@ -2038,9 +2034,7 @@ void main() {
       () async {
         final server = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(
-            service: _FakeService(),
-          ),
+          sessions: SessionsBackend(service: _FakeService()),
           notifyCredential: accountPath,
           notifySenderFactory: fakeSender,
         );
@@ -2077,9 +2071,7 @@ void main() {
         FirebaseServiceAccount.install(kAccountJson, path: accountPath);
         final server = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(
-            service: _FakeService(),
-          ),
+          sessions: SessionsBackend(service: _FakeService()),
           notifyCredential: accountPath,
           notifySenderFactory: fakeSender,
         );

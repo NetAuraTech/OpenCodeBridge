@@ -89,14 +89,8 @@ class Session {
       other.active == active;
 
   @override
-  int get hashCode => Object.hash(
-    id,
-    title,
-    project,
-    created,
-    location,
-    active,
-  );
+  int get hashCode =>
+      Object.hash(id, title, project, created, location, active);
 
   @override
   String toString() =>
