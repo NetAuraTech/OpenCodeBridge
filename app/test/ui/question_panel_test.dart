@@ -96,8 +96,17 @@ void main() {
       expect(find.byKey(const ValueKey('question-row-form_solo')),
         findsOneWidget,
       );
-      // One question: the body renders directly, no tabs.
+      // One question: the body renders directly, no tabs, no Next — the
+      // form submits straight away.
       expect(find.byKey(const ValueKey('question-tab-0')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('question-next-form_solo')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('question-submit-form_solo')),
+        findsOneWidget,
+      );
       expect(find.text('Should I ship it?'), findsWidgets);
       expect(
         find.byKey(const ValueKey('question-option-form_solo-0-0')),
@@ -154,6 +163,13 @@ void main() {
         find.byKey(const ValueKey('question-option-form_q-0-0')),
       );
       await tester.pump();
+      // A multi-question form has no Submit until the recap: Next walks
+      // question to question, then the recap.
+      expect(find.byKey(const ValueKey('question-submit-form_q')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
       await tester.pump();
 
@@ -187,6 +203,10 @@ void main() {
         'ship, but quietly',
       );
       await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
       await tester.pump();
 
@@ -204,7 +224,7 @@ void main() {
           submissions: submissions,
         );
 
-        await tester.tap(find.byKey(const ValueKey('question-tab-1')));
+        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
         await tester.pump();
         await tester.tap(
           find.byKey(const ValueKey('question-option-form_q-1-0')),
@@ -218,6 +238,8 @@ void main() {
           find.byKey(const ValueKey('question-text-form_q-1')),
           'extra',
         );
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
         await tester.pump();
         await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
         await tester.pump();
@@ -242,12 +264,14 @@ void main() {
         submissions: submissions,
       );
 
-      await tester.tap(find.byKey(const ValueKey('question-tab-1')));
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
       await tester.pump();
       final optionA = find.byKey(const ValueKey('question-option-form_q-1-0'));
       await tester.tap(optionA);
       await tester.pump();
       await tester.tap(optionA);
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
       await tester.pump();
@@ -257,6 +281,91 @@ void main() {
         const <String>[],
       ]);
     });
+
+    testWidgets(
+      'walks the questions with Next/Back and submits from the recap',
+      (tester) async {
+        final submissions = <(QuestionForm, List<List<String>>)>[];
+        await _pumpPanel(
+          tester,
+          pending: const [_form],
+          submissions: submissions,
+        );
+
+        // The multi-question form has no Submit until the recap.
+        expect(find.byKey(const ValueKey('question-submit-form_q')),
+          findsNothing,
+        );
+
+        await tester.tap(
+          find.byKey(const ValueKey('question-option-form_q-0-0')),
+        );
+        await tester.pump();
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('question-option-form_q-0-0')),
+            matching: find.byIcon(Icons.radio_button_checked),
+          ),
+          findsOneWidget,
+        );
+
+        // Next reveals the second question; Back returns to the first with
+        // its selection kept.
+        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+        await tester.pump();
+        expect(find.text('Which areas do you want?'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('question-option-form_q-1-0')),
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('question-back-form_q')));
+        await tester.pump();
+        expect(find.text('Should I ship it?'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('question-option-form_q-0-0')),
+            matching: find.byIcon(Icons.radio_button_checked),
+          ),
+          findsOneWidget,
+        );
+
+        // Next, next: the recap lists both answers, no question body.
+        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+        await tester.pump();
+        expect(find.text('Which areas do you want?'), findsNothing);
+        expect(find.text('Should I ship it?'), findsNothing);
+        expect(find.text('Yes'), findsOneWidget);
+        expect(find.text('A'), findsOneWidget);
+
+        // Tapping a recap row returns to its question, still selected.
+        await tester.tap(find.byKey(const ValueKey('question-recap-form_q-1')));
+        await tester.pump();
+        expect(find.text('Which areas do you want?'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('question-option-form_q-1-0')),
+            matching: find.byIcon(Icons.radio_button_checked),
+          ),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
+        await tester.pump();
+
+        expect(submissions, hasLength(1));
+        _expectAnswers(
+          submissions.single.$2,
+          [
+            ['Yes'],
+            ['A'],
+          ],
+        );
+      },
+    );
 
     testWidgets('dismiss sends the form to onDismiss', (tester) async {
       final dismissed = <QuestionForm>[];
@@ -279,6 +388,10 @@ void main() {
 
       expect(
         find.byKey(const ValueKey('question-submit-form_q')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('question-next-form_q')),
         findsNothing,
       );
       expect(

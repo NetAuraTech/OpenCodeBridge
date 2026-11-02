@@ -9,6 +9,10 @@ import '../model/question.dart';
 /// option labels, or a typed free text) and hands them to [onSubmit] in the
 /// form's order.
 ///
+/// A multi-question form walks its questions one at a time (a tab per
+/// question, Next / Back between them) and ends on a recap of the answers
+/// before the Submit; a single-question form submits it directly.
+///
 /// Mirrors [PermissionBanner] (spec §6): rendered by the structured view with
 /// the pending list as the initial state, kept live by the `form.created` /
 /// `form.replied` / `form.cancelled` events.
@@ -85,8 +89,8 @@ class _QuestionFormCard extends StatefulWidget {
 
 class _QuestionFormCardState extends State<_QuestionFormCard> {
   /// The visible question when the form has more than one (a tab per
-  /// question, Android/touch friendly); `0` when the form is a single
-  /// question.
+  /// question, Android/touch friendly); `questions.length` is the recap
+  /// screen. `0` when the form is a single question.
   int _tab = 0;
 
   /// Per question, the selected option labels: a single selection for a
@@ -162,6 +166,30 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
     return answers;
   }
 
+  /// The recap screen, shown instead of the questions when a multi-question
+  /// form reaches its end: it lists every answer and carries the Submit.
+  bool get _recap => widget.form.questions.length > 1 &&
+      _tab == widget.form.questions.length;
+
+  /// The answer of question [i] as the recap displays it: the selected
+  /// option labels (option order) plus the free text, joined by a comma;
+  /// `null` when the question is left blank.
+  String? _recapAnswer(int i) {
+    final q = widget.form.questions[i];
+    final free = q.custom ? _controllers[i].text.trim() : '';
+    if (q.multiple) {
+      final parts = <String>[
+        for (final o in q.options)
+          if (_selections[i].contains(o.label)) o.label,
+      ];
+      if (q.custom && free.isNotEmpty) parts.add(free);
+      return parts.isEmpty ? null : parts.join(', ');
+    }
+    if (free.isNotEmpty) return free;
+    if (_selections[i].isNotEmpty) return _selections[i].first;
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -169,12 +197,13 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
     final title = widget.form.title.isNotEmpty
         ? widget.form.title
         : (questions.isNotEmpty ? questions.first.header : 'Question');
+    final multi = questions.length > 1;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (questions.length > 1) ...[
+          if (multi) ...[
             _TabStrip(
               labels: [
                 for (var i = 0; i < questions.length; i++)
@@ -182,11 +211,22 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
                       ? questions[i].header
                       : 'Question ${i + 1}',
               ],
-              selected: _tab,
+              selected: _recap ? -1 : _tab,
               enabled: !widget.busy,
               onSelect: (i) => setState(() => _tab = i),
             ),
             const SizedBox(height: 8),
+          ],
+          if (_recap)
+            _RecapColumn(
+              formId: widget.form.id,
+              questions: questions,
+              answers: [
+                for (var i = 0; i < questions.length; i++) _recapAnswer(i),
+              ],
+              onEdit: (i) => setState(() => _tab = i),
+            )
+          else
             _QuestionBody(
               question: questions[_tab],
               index: _tab,
@@ -195,16 +235,6 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
               controller: _controllers[_tab],
               enabled: !widget.busy,
               onSelect: (label) => _select(_tab, label),
-            ),
-          ] else if (questions.isNotEmpty)
-            _QuestionBody(
-              question: questions.first,
-              index: 0,
-              formId: widget.form.id,
-              selections: _selections.first,
-              controller: _controllers.first,
-              enabled: !widget.busy,
-              onSelect: (label) => _select(0, label),
             ),
           Row(
             children: [
@@ -231,11 +261,31 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
                   onPressed: widget.onDismiss,
                   child: const Text('Dismiss'),
                 ),
-                FilledButton(
-                  key: ValueKey('question-submit-${widget.form.id}'),
-                  onPressed: () => widget.onSubmit(_answers()),
-                  child: const Text('Submit'),
-                ),
+                if (multi) ...[
+                  if (_tab > 0)
+                    TextButton(
+                      key: ValueKey('question-back-${widget.form.id}'),
+                      onPressed: () => setState(() => _tab--),
+                      child: const Text('Back'),
+                    ),
+                  if (_recap)
+                    FilledButton(
+                      key: ValueKey('question-submit-${widget.form.id}'),
+                      onPressed: () => widget.onSubmit(_answers()),
+                      child: const Text('Submit'),
+                    )
+                  else
+                    FilledButton(
+                      key: ValueKey('question-next-${widget.form.id}'),
+                      onPressed: () => setState(() => _tab++),
+                      child: const Text('Next'),
+                    ),
+                ] else
+                  FilledButton(
+                    key: ValueKey('question-submit-${widget.form.id}'),
+                    onPressed: () => widget.onSubmit(_answers()),
+                    child: const Text('Submit'),
+                  ),
               ],
             ],
           ),
@@ -289,6 +339,59 @@ class _TabStrip extends StatelessWidget {
                       ? scheme.onPrimaryContainer
                       : scheme.onSurface,
                 ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _RecapColumn extends StatelessWidget {
+  const _RecapColumn({
+    required this.formId,
+    required this.questions,
+    required this.answers,
+    required this.onEdit,
+  });
+
+  final String formId;
+  final List<Question> questions;
+  final List<String?> answers;
+  final ValueChanged<int> onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Recap',
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        for (var i = 0; i < questions.length; i++)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: InkWell(
+              key: ValueKey('question-recap-$formId-$i'),
+              onTap: () => onEdit(i),
+              borderRadius: BorderRadius.circular(6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    questions[i].header.isNotEmpty
+                        ? questions[i].header
+                        : 'Question ${i + 1}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    answers[i] ?? '—',
+                    style: TextStyle(color: scheme.onSurfaceVariant),
+                  ),
+                ],
               ),
             ),
           ),
