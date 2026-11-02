@@ -262,6 +262,32 @@ void main() {
       expect(commits, 0);
     });
 
+    testWidgets('the push setup helper text wraps on a phone screen', (
+      tester,
+    ) async {
+      // A phone (1080x2340 @ 3.0): the helper line is wider than the field,
+      // so it must wrap on several lines rather than be truncated with an
+      // ellipsis (the SDK's default for a helperText wider than the field).
+      tester.view.physicalSize = const Size(1080, 2340);
+      tester.view.devicePixelRatio = 3.0;
+      addTearDown(tester.view.reset);
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester);
+
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('push-project-save')),
+      );
+      await tester.pump();
+
+      const helper =
+          'Paste the JSON from the Firebase Console (Android app); '
+          'it configures push on this device only.';
+      final oneLine = tester
+          .getSize(find.text('Firebase project: not configured.'))
+          .height;
+      expect(tester.getSize(find.text(helper)).height, greaterThan(oneLine));
+    });
+
     testWidgets('a valid paste saves the project and commits', (tester) async {
       SharedPreferences.setMockInitialValues({});
       var commits = 0;
