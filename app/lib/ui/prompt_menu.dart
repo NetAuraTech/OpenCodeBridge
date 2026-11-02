@@ -1,3 +1,5 @@
+import 'dart:async';
+
 /// How a menu trigger anchors to the field's text.
 enum MenuAnchoring {
   /// The menu opens only when the field's text starts with the trigger
@@ -14,8 +16,9 @@ enum MenuAnchoring {
 
 /// One prompt menu (issue #56): the [trigger] character that opens it,
 /// [anchoring] how the trigger binds to the field's text, [rows] the rows
-/// for a filter token (the bar re-asks on every keystroke and cursor move),
-/// and [emptyLabel] the line the chrome shows when [rows] yields none.
+/// for a filter token (the bar re-asks on every keystroke and cursor move,
+/// keeping the previous rows on screen until new ones land), and
+/// [emptyLabel] the line the chrome shows when [rows] yields none.
 ///
 /// The prompt bar hosts one menu per definition, and the chrome — the
 /// popup, the live filtering as the token changes, the keyboard selection
@@ -37,8 +40,9 @@ class PromptMenuDefinition {
   /// How the trigger anchors to the field's text.
   final MenuAnchoring anchoring;
 
-  /// The rows for a filter token.
-  final List<PromptMenuRow> Function(String token) rows;
+  /// The rows for a filter token; may resolve asynchronously (the `@` menu
+  /// re-queries the service's file search per token).
+  final FutureOr<List<PromptMenuRow>> Function(String token) rows;
 
   /// The line the menu chrome shows when the rows yield none.
   final String emptyLabel;
@@ -54,6 +58,7 @@ class PromptMenuRow {
     this.subtitle,
     this.hint,
     this.badge,
+    this.insertion,
     this.takesArg = false,
     required this.onActivate,
   });
@@ -74,6 +79,12 @@ class PromptMenuRow {
 
   /// The trailing badge (e.g. `custom`); `null` hides it.
   final String? badge;
+
+  /// The text the bar inserts in place of the trigger's token when the row
+  /// activates (the `@` menu's mentions, issue #58): the surrounding text
+  /// stays, the cursor lands right after it. `null` rows clear the field
+  /// instead (the `/` menu's commands).
+  final String? insertion;
 
   /// Whether the row takes an argument typed after it: the bar holds the
   /// activation until the argument is typed (the TUI behavior).

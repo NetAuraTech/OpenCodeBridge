@@ -248,6 +248,13 @@ abstract class OpencodeService {
   /// resolved from the session on the service.
   Future<String> worktrees(String sessionId);
 
+  /// The files the session's working directory offers for the `@` mention
+  /// menu (issue #58): the service's `GET /api/fs/find` over the session's
+  /// working directory, re-queried per typed token (server-side fuzzy rank,
+  /// the TUI behavior). Returns the matched file paths relative to the
+  /// session's working directory.
+  Future<List<String>> findFiles(String id, String query);
+
   // Global (not tied to the open session).
 
   /// The account's usage limits (the service's

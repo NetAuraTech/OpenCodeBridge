@@ -158,6 +158,9 @@ class SessionsBackend {
 
   Future<String> worktrees(String sessionId) => service.worktrees(sessionId);
 
+  Future<List<String>> findFiles(String id, String query) =>
+      service.findFiles(id, query);
+
   Future<String> usage() => service.usage();
 
   Future<String> mcps() => service.mcps();

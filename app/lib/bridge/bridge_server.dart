@@ -1669,6 +1669,14 @@ class BridgeServer {
             jsonEncode([for (final s in skills) s.toJson()]),
           );
           return;
+        case ('GET', ['files']):
+          // The `@` mention menu's file rows (issue #58): the service's
+          // file search re-queried per typed token. The token is the
+          // `query` param (the TUI re-queries on every keystroke).
+          final query = request.uri.queryParameters['query'] ?? '';
+          final files = await sessions.findFiles(id, query);
+          await BridgeServer._jsonOk(response, jsonEncode(files));
+          return;
         case ('POST', ['skills', final skillId]):
           await sessions.activateSkill(id, skillId);
           await BridgeServer._noContent(response);

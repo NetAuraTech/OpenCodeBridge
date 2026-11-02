@@ -26,6 +26,8 @@ void main() {
   late List<String> btwBodies;
   late List<String> connectBodies;
   late List<String> worktreesQueries;
+  // The `@` menu's file search (issue #58): recorded `GET .../files` tokens.
+  late List<String> filesQueries;
   late SessionsClient client;
 
   var failList = false;
@@ -46,6 +48,7 @@ void main() {
     btwBodies = [];
     connectBodies = [];
     worktreesQueries = [];
+    filesQueries = [];
     failList = false;
     failDelete = false;
     failProjects = false;
@@ -444,6 +447,20 @@ void main() {
               {'id': 'sk1', 'name': 'Skill One', 'description': 'a skill'},
             ]),
           );
+        }
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/files')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/files'.length,
+        );
+        filesQueries.add(request.uri.queryParameters['query'] ?? '');
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode(['src/main.dart', 'pubspec.yaml']));
         }
       } else if (request.method == 'POST' &&
           request.uri.path.contains('/skills/')) {
@@ -1010,6 +1027,23 @@ void main() {
       expect(await client.listSkills('ses_1'), const [
         SkillOption(id: 'sk1', name: 'Skill One', description: 'a skill'),
       ]);
+    });
+
+    test('findFiles lists the session files and sends the token', () async {
+      expect(await client.findFiles('ses_1', 'main'), [
+        'src/main.dart',
+        'pubspec.yaml',
+      ]);
+      expect(filesQueries, ['main']);
+    });
+
+    test('findFiles maps the bridge 404 to SessionsClientError(404)', () async {
+      try {
+        await client.findFiles('ses_missing', 'main');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
     });
 
     test('activateSkill accepts 204', () async {

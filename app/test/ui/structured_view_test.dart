@@ -133,12 +133,52 @@ class _FakeClient extends SessionsClient {
     this.questionLists = const [],
     this.commands = const [],
     this.models = const [],
+    this.skills = const [],
+    this.filesFound = const [],
     this.runCommandError,
     this.currentModels = const <ModelRef?>[null],
   }) : super(Uri.parse('http://bridge.test/'));
 
   /// The project's custom commands (`listCommands`), for the `/` menu.
   final List<OpencodeCommand> commands;
+
+  /// The session's skills (`listSkills`), for the `@` menu (issue #58).
+  final List<SkillOption> skills;
+
+  /// The files `findFiles` returns for every token, unless [fileResults]
+  /// holds per-call lists.
+  final List<String> filesFound;
+
+  /// Per-call file lists (issue #58): the n-th call returns the n-th list,
+  /// the last repeats — to hold a search in flight.
+  List<List<String>> fileResults = const [];
+
+  /// When set, `findFiles` awaits it before returning (the search held in
+  /// flight).
+  Completer<void>? findFilesGate;
+
+  /// The file searches (issue #58): (sessionId, token) pairs.
+  final List<(String, String)> fileQueries = [];
+
+  int skillCalls = 0;
+
+  @override
+  Future<List<SkillOption>> listSkills(String id) async {
+    skillCalls++;
+    return skills;
+  }
+
+  @override
+  Future<List<String>> findFiles(String id, String query) async {
+    final index = fileQueries.length;
+    fileQueries.add((id, query));
+    final gate = findFilesGate;
+    if (gate != null) await gate.future;
+    if (fileResults.isEmpty) return filesFound;
+    return fileResults[index < fileResults.length
+        ? index
+        : fileResults.length - 1];
+  }
 
   /// The model registry (`listModels`), for the `/models` picker.
   final List<ModelOption> models;
@@ -443,6 +483,13 @@ void _setCaret(WidgetTester tester, int offset) {
   tester.widget<TextField>(find.byKey(_promptInput)).controller!.selection =
       TextSelection.collapsed(offset: offset);
 }
+
+/// The field's caret offset.
+int _caret(WidgetTester tester) => tester
+    .widget<TextField>(find.byKey(_promptInput))
+    .controller!
+    .selection
+    .baseOffset;
 
 Future<void> _pressEnter(WidgetTester tester) async {
   await tester.testTextInput.receiveAction(TextInputAction.done);
@@ -2565,6 +2612,203 @@ void main() {
         find.byKey(const ValueKey('structured-command-menu-card')),
         findsNothing,
       );
+    });
+  });
+
+  group('StructuredSessionScreen `@` mention menu (issue #58)', () {
+    _FakeClient fakeClient({
+      List<SkillOption> skills = const [],
+      List<String> files = const [],
+    }) => _FakeClient(
+      details: const [_detail0],
+      skills: skills,
+      filesFound: files,
+    );
+
+    testWidgets('a bare @ lists the session skills, then the working '
+        "directory's files", (tester) async {
+      final client = fakeClient(
+        skills: const [
+          SkillOption(
+            id: 'a11y',
+            name: 'A11y',
+            description: 'Accessibility checks',
+          ),
+        ],
+        files: const ['src/main.dart', 'README.md'],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+      expect(find.text('Accessibility checks'), findsOneWidget);
+      expect(_commandRowFinder('file:src/main.dart'), findsOneWidget);
+      expect(_commandRowFinder('file:README.md'), findsOneWidget);
+      // The skills sit above the files (the TUI's order).
+      expect(
+        tester.getTopLeft(_commandRowFinder('skill:a11y')).dy,
+        lessThan(tester.getTopLeft(_commandRowFinder('file:README.md')).dy),
+      );
+      // The file list is the service's search, queried for the token.
+      expect(client.fileQueries, const [('ses_1', '')]);
+      expect(client.skillCalls, 1);
+    });
+
+    testWidgets(
+      'the file rows are re-queried per token, and a stale answer never lands',
+      (tester) async {
+        final client = fakeClient();
+        client.fileResults = const [
+          ['zzz.txt'], // the '' token: stale by the end
+          ['aa.txt'], // the 'a' token
+        ];
+        client.findFilesGate = Completer<void>();
+        await _pump(tester, client: client);
+
+        await _typePrompt(tester, '@');
+        await tester.pump();
+
+        await _typePrompt(tester, '@a');
+        await tester.pump();
+
+        client.findFilesGate!.complete();
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.fileQueries, const [('ses_1', ''), ('ses_1', 'a')]);
+        expect(_commandRowFinder('file:aa.txt'), findsOneWidget);
+        expect(_commandRowFinder('file:zzz.txt'), findsNothing);
+      },
+    );
+
+    testWidgets('picking a file row inserts the mention in place of its '
+        'token, the cursor after it, the menu closed', (tester) async {
+      final client = fakeClient(files: const ['src/main.dart']);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, 'please read @sr');
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.fileQueries, const [('ses_1', 'sr')]);
+      await tester.tap(_commandRowFinder('file:src/main.dart'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(_promptText(tester), 'please read @src/main.dart');
+      expect(_caret(tester), _promptText(tester).length);
+      // The mention's own tail text is not a filter token: the menu stays
+      // closed.
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+      'a committed mention deletes as one unit, Backspace backward and Delete forward',
+      (tester) async {
+        final client = fakeClient(files: const ['src/main.dart']);
+        await _pump(tester, client: client);
+
+        await _typePrompt(tester, 'please read @sr');
+        await tester.pump();
+        await tester.pump();
+        await tester.tap(_commandRowFinder('file:src/main.dart'));
+        await tester.pump();
+        await tester.pump();
+
+        // Backspace at the mention's end deletes it whole, not one char.
+        await tester.showKeyboard(find.byKey(_promptInput));
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+        await tester.pump();
+        expect(_promptText(tester), 'please read ');
+
+        // Delete from before the mention removes it forward.
+        await _typePrompt(tester, 'please read @sr');
+        await tester.pump();
+        await tester.pump();
+        await tester.tap(_commandRowFinder('file:src/main.dart'));
+        await tester.pump();
+        await tester.pump();
+        _setCaret(tester, 'please read '.length);
+        await tester.showKeyboard(find.byKey(_promptInput));
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.delete);
+        await tester.pump();
+        expect(_promptText(tester), 'please read ');
+      },
+    );
+
+    testWidgets('multiple mentions coexist, and each occurrence sends '
+        'one attachment', (tester) async {
+      final client = fakeClient(
+        skills: const [
+          SkillOption(
+            id: 'a11y',
+            name: 'A11y',
+            description: 'Accessibility checks',
+          ),
+        ],
+        files: const ['src/main.dart'],
+      );
+      await _pump(tester, client: client);
+
+      // A skill mention and a file mention in one prompt.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(_commandRowFinder('skill:a11y'));
+      await tester.pump();
+      await tester.pump();
+      expect(_promptText(tester), '@a11y');
+
+      await _typePrompt(tester, '@a11y and @');
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(_commandRowFinder('file:src/main.dart'));
+      await tester.pump();
+      await tester.pump();
+      expect(_promptText(tester), '@a11y and @src/main.dart');
+
+      await _pressEnter(tester);
+      await tester.pump();
+
+      final sent = client.prompts.single;
+      expect(sent.$1, 'ses_1');
+      expect(sent.$2, '@a11y and @src/main.dart');
+      expect(sent.$3, [
+        {'uri': 'file:///x/src/main.dart'},
+      ]);
+      expect(sent.$4, [
+        {'id': 'a11y'},
+      ]);
+      expect(_promptText(tester), isEmpty);
+
+      // The same file twice: two file attachments, no skills.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(_commandRowFinder('file:src/main.dart'));
+      await tester.pump();
+      await tester.pump();
+      await _typePrompt(tester, '@src/main.dart and @');
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(_commandRowFinder('file:src/main.dart'));
+      await tester.pump();
+      await tester.pump();
+
+      await _pressEnter(tester);
+      await tester.pump();
+
+      expect(client.prompts.last.$3, const [
+        {'uri': 'file:///x/src/main.dart'},
+        {'uri': 'file:///x/src/main.dart'},
+      ]);
+      expect(client.prompts.last.$4, isNull);
     });
   });
 

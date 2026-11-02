@@ -211,12 +211,32 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   List<SlashCommand> _commands = SlashCommands.catalog;
 
   /// The prompt bar's menus (issue #56), one per trigger; rebuilt when the
-  /// project's custom commands land (the bar re-filters on the change).
+  /// project's custom commands or the session's skills land (the bar
+  /// re-filters on the change).
   late List<PromptMenuDefinition> _menus;
 
   /// The project's custom commands have been requested already (the menu
   /// keeps showing the static catalog when the fetch fails).
   bool _commandsFetched = false;
+
+  /// The `@` menu's skill rows (issue #58): the session's skills, fetched
+  /// when a menu first opens (`const []` until then, or when the fetch
+  /// fails).
+  List<SkillOption> _skills = const [];
+
+  /// The session's skills have been requested already.
+  bool _skillsFetched = false;
+
+  /// The `@` menu's file search results, by the token they were searched
+  /// for: the service's search is queried once per token (issue #58).
+  String? _filesToken;
+
+  List<String>? _files;
+
+  /// The mentions committed to the prompt (issue #58), in pick order: the
+  /// field's text carries them as typed (`@<id>` / `@<path>`); each
+  /// deletes as one unit and sends as an attachment.
+  List<_Mention> _mentions = const [];
 
   /// True while a `/` command runs (the prompt bar is disabled so a command
   /// cannot be double-run).
@@ -227,6 +247,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     super.initState();
     _title = widget.title;
     _menus = _buildMenus();
+    _prompt.addListener(_onPromptCleared);
     _scroll.addListener(_onScroll);
     _loadInitial();
     final stream = widget.events;
@@ -244,6 +265,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _events?.cancel();
     _gapsSub?.cancel();
     _flush?.cancel();
+    _prompt.removeListener(_onPromptCleared);
     _prompt.dispose();
     _scroll.dispose();
     super.dispose();
@@ -952,11 +974,18 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// in the service's copy, in which case the append is skipped so the prompt
   /// is not shown twice.
   Future<void> _sendPrompt() async {
-    final text = _prompt.text.trim();
+    final raw = _prompt.text;
+    final text = raw.trim();
     if (text.isEmpty || _promptBusy) return;
+    final (files, skills) = _attachments(raw);
     setState(() => _promptBusy = true);
     try {
-      await widget.client.prompt(widget.sessionId, text);
+      await widget.client.prompt(
+        widget.sessionId,
+        text,
+        files: files,
+        skills: skills,
+      );
       _prompt.clear();
       if (!mounted) return;
       // The turn-start re-fetch may have landed between the prompt POST
@@ -989,6 +1018,50 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       if (mounted) _snackBar('Could not send the message.');
     } finally {
       if (mounted) setState(() => _promptBusy = false);
+    }
+  }
+
+  /// The prompt's committed mentions (issue #58), in text order: at each
+  /// position the longest committed text that starts there wins, and every
+  /// occurrence counts (one attachment per mention). File mentions send a
+  /// `file://` uri resolved against the session's working directory; skill
+  /// mentions send the skill id.
+  (List<Map<String, Object?>>?, List<Map<String, Object?>>?) _attachments(
+    String text,
+  ) {
+    final mentions = [..._mentions]
+      ..sort((a, b) => b.text.length.compareTo(a.text.length));
+    final files = <Map<String, Object?>>[];
+    final skills = <Map<String, Object?>>[];
+    var index = 0;
+    while (index < text.length) {
+      _Mention? found;
+      for (final mention in mentions) {
+        if (text.startsWith(mention.text, index)) {
+          found = mention;
+          break;
+        }
+      }
+      if (found == null) {
+        index++;
+        continue;
+      }
+      if (found.isSkill) {
+        skills.add({'id': found.target});
+      } else {
+        final location = _detail?.location ?? '';
+        files.add({'uri': Uri.file('$location/${found.target}').toString()});
+      }
+      index += found.text.length;
+    }
+    return (files.isEmpty ? null : files, skills.isEmpty ? null : skills);
+  }
+
+  /// The prompt was cleared (Esc, a `/` command, a send): its committed
+  /// mentions are gone with it.
+  void _onPromptCleared() {
+    if (_prompt.text.isEmpty && _mentions.isNotEmpty) {
+      setState(() => _mentions = const []);
     }
   }
 
@@ -1147,8 +1220,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// The prompt bar's menus (issue #56), one per trigger: the anchored `/`
   /// command menu — its row provider filters [_commands] (the static catalog
   /// until the project's custom commands land) by the typed token — and the
-  /// inline `@` mention menu, whose row provider yields no rows until the
-  /// mention menu lands (the TUI's skills + files).
+  /// inline `@` mention menu (issue #58), whose row provider yields the
+  /// session's skills, then the working directory's files (the TUI's
+  /// skills + files).
   List<PromptMenuDefinition> _buildMenus() {
     return [
       PromptMenuDefinition(
@@ -1164,9 +1238,68 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         trigger: '@',
         anchoring: MenuAnchoring.inline,
         emptyLabel: 'No matching mention',
-        rows: (token) => const <PromptMenuRow>[],
+        rows: (token) => _mentionRows(token),
       ),
     ];
+  }
+
+  /// The `@` menu's rows (issue #58): the session's skills (filtered by the
+  /// typed token), then the working directory's files — the service's file
+  /// search, re-queried once per token (the TUI behavior; [_filesToken] /
+  /// [_files] keep it from re-querying when the row provider runs again for
+  /// the same token, e.g. when the skills land).
+  Future<List<PromptMenuRow>> _mentionRows(String token) async {
+    if (_filesToken != token) {
+      _filesToken = token;
+      try {
+        _files = await widget.client.findFiles(widget.sessionId, token);
+      } catch (_) {
+        // A failed search yields no file rows (the skill rows stay).
+        _files = const [];
+      }
+    }
+    final rows = <PromptMenuRow>[
+      for (final skill in _skills)
+        if (_skillMatches(skill, token))
+          PromptMenuRow(
+            name: 'skill:${skill.id}',
+            label: '@${skill.id}',
+            subtitle: skill.description.isEmpty ? null : skill.description,
+            insertion: '@${skill.id}',
+            onActivate: (_) => _mentionPicked(isSkill: true, target: skill.id),
+          ),
+    ];
+    for (final path in _files ?? const <String>[]) {
+      rows.add(
+        PromptMenuRow(
+          name: 'file:$path',
+          label: '@$path',
+          insertion: '@$path',
+          onActivate: (_) => _mentionPicked(isSkill: false, target: path),
+        ),
+      );
+    }
+    return rows;
+  }
+
+  /// The skill rows filter client-side on the typed token (the files go
+  /// through the service's search).
+  static bool _skillMatches(SkillOption skill, String token) {
+    if (token.isEmpty) return true;
+    final needle = token.toLowerCase();
+    return skill.id.toLowerCase().contains(needle) ||
+        skill.name.toLowerCase().contains(needle);
+  }
+
+  /// A mention row was picked (issue #58): the mention is committed — it is
+  /// tracked so it deletes as one unit and sends as an attachment.
+  void _mentionPicked({required bool isSkill, required String target}) {
+    setState(() {
+      _mentions = [
+        ..._mentions,
+        _Mention(text: '@$target', isSkill: isSkill, target: target),
+      ];
+    });
   }
 
   /// One `/` menu row (issue #56): the command's display fields, and its
@@ -1183,22 +1316,38 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   );
 
   /// A menu is open (issue #56): fetch the project's custom commands (the
-  /// service's `GET /api/command`) once and merge them into the `/` menu.
-  /// A failed fetch keeps the static catalog on screen.
+  /// service's `GET /api/command`) and, for the `@` menu, the session's
+  /// skills — once each — and merge them into the menus. A failed fetch
+  /// keeps the static catalog (or no skill rows) on screen.
   void _onMenuOpened() {
-    if (_commandsFetched) return;
-    _commandsFetched = true;
-    widget.client
-        .listCommands(widget.sessionId)
-        .then((commands) {
-          if (mounted) {
-            setState(() {
-              _commands = SlashCommands.withCustom(commands);
-              _menus = _buildMenus();
-            });
-          }
-        })
-        .catchError((Object _) {});
+    if (!_commandsFetched) {
+      _commandsFetched = true;
+      widget.client
+          .listCommands(widget.sessionId)
+          .then((commands) {
+            if (mounted) {
+              setState(() {
+                _commands = SlashCommands.withCustom(commands);
+                _menus = _buildMenus();
+              });
+            }
+          })
+          .catchError((Object _) {});
+    }
+    if (!_skillsFetched) {
+      _skillsFetched = true;
+      widget.client
+          .listSkills(widget.sessionId)
+          .then((skills) {
+            if (mounted) {
+              setState(() {
+                _skills = skills;
+                _menus = _buildMenus();
+              });
+            }
+          })
+          .catchError((Object _) {});
+    }
   }
 
   /// Runs the row the user picked from the `/` menu (issue #46). The bar
@@ -1815,6 +1964,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                               busy: _promptBusy || _commandBusy,
                               onSend: _sendPrompt,
                               menus: _menus,
+                              mentions: [
+                                for (final mention in _mentions) mention.text,
+                              ],
                               onMenuOpened: _onMenuOpened,
                               onToggleMode: _toggleMode,
                               onCycleVariant: _cycleVariant,
@@ -2689,6 +2841,7 @@ class _PromptBar extends StatefulWidget {
     required this.busy,
     required this.onSend,
     required this.menus,
+    required this.mentions,
     required this.onMenuOpened,
     required this.onToggleMode,
     required this.onCycleVariant,
@@ -2704,8 +2857,12 @@ class _PromptBar extends StatefulWidget {
   /// trigger is active owns the menu.
   final List<PromptMenuDefinition> menus;
 
+  /// The mentions committed to the field (issue #58): each deletes as one
+  /// unit (atomic Backspace/Delete, the menu closed).
+  final List<String> mentions;
+
   /// A menu is open; the screen may need to fetch the project's custom
-  /// commands.
+  /// commands and the session's skills.
   final VoidCallback onMenuOpened;
 
   /// Tab (the menu closed): toggles the session's mode, `build` or `plan`.
@@ -2725,9 +2882,23 @@ class _PromptBarState extends State<_PromptBar> {
 
   bool get _menuOpen => _active != null;
 
-  /// The open menu's rows: the active definition's rows for the typed
-  /// filter token.
+  /// The open menu's rows, fetched for [_rowsToken].
   List<PromptMenuRow> _matches = const [];
+
+  /// The filter token [_matches] were fetched for; the rows are re-fetched
+  /// when the open definition or the token changes, and the previous rows
+  /// stay on screen until the new ones land.
+  String? _rowsToken;
+
+  /// How many row fetches have been started: a fetch completing with a stale
+  /// generation (the token, or the trigger, changed meanwhile) never lands
+  /// its rows.
+  int _fetches = 0;
+
+  /// The (text, caret) right after a mention insertion (issue #58): the
+  /// caret sits on the mention's own tail text, which would read as a live
+  /// filter token and re-open the menu; the state is consumed once.
+  (String, int)? _inserted;
 
   /// The selected row in [_matches] (`-1` when there is no match).
   int _selected = -1;
@@ -2746,10 +2917,10 @@ class _PromptBarState extends State<_PromptBar> {
   void didUpdateWidget(covariant _PromptBar oldWidget) {
     super.didUpdateWidget(oldWidget);
     // The row provider's data landed while the menu is open (the project's
-    // custom commands): re-filter (the synced token is invalidated so the
-    // re-filter re-selects the top row, as a re-typed token would).
+    // custom commands, the session's skills): the definitions are new
+    // instances, so the re-filter re-fetches and re-selects the top row, as
+    // a re-typed token would.
     if (oldWidget.menus != widget.menus && _menuOpen) {
-      _syncedToken = null;
       _syncMenu();
     }
   }
@@ -2761,14 +2932,11 @@ class _PromptBarState extends State<_PromptBar> {
     super.dispose();
   }
 
-  /// The filter token [_syncMenu] last filtered; a selection-only change
-  /// (the cursor moved) re-runs [_syncMenu] without re-selecting the top
-  /// row, so the menu's selection survives cursor moves.
-  String? _syncedToken;
-
   /// The filter token [definition] owns for the field's [text] and
-  /// [selection], or `null` when its trigger is not active.
-  String? _filterToken(
+  /// [selection] — as a (token start, token) pair, the token start being
+  /// the trigger's position in the text — or `null` when its trigger is
+  /// not active.
+  (int, String)? _filterToken(
     PromptMenuDefinition definition,
     String text,
     TextSelection selection,
@@ -2781,7 +2949,10 @@ class _PromptBarState extends State<_PromptBar> {
       if (!text.startsWith(trigger)) return null;
       final space = text.indexOf(' ');
       final end = space >= 0 ? space : text.length;
-      return end <= trigger.length ? '' : text.substring(trigger.length, end);
+      return (
+        0,
+        end > trigger.length ? text.substring(trigger.length, end) : '',
+      );
     }
     // The inline trigger is active while the caret is inside a token that
     // starts with it, wherever the token appears; the token is the text
@@ -2795,42 +2966,75 @@ class _PromptBarState extends State<_PromptBar> {
     }
     if (caret < start + trigger.length) return null;
     if (!text.startsWith(trigger, start)) return null;
-    return text.substring(start + trigger.length, caret);
+    return (start, text.substring(start + trigger.length, caret));
   }
 
   /// Re-filters the menu from the field's text. The bar's definitions claim
-  /// the field in turn: the first whose trigger is active filters the menu,
-  /// and its row provider supplies the rows. A re-typed token re-selects
-  /// the top row (the TUI does the same); a selection-only change (the
-  /// cursor moved) keeps the current row.
+  /// the field in turn: the first whose trigger is active owns the menu,
+  /// and its row provider supplies the rows — fetched for the typed token,
+  /// and the previous rows stay on screen until the new ones land (a row
+  /// fetch is a generation: a stale one never lands). A change of token
+  /// (or definition) re-selects the top row on the arrival, as a re-typed
+  /// token would; a selection-only change (the cursor moved within the
+  /// token) keeps the current row.
   void _syncMenu() {
     final text = widget.controller.text;
     final selection = widget.controller.selection;
+    final inserted = _inserted;
+    if (inserted != null &&
+        text == inserted.$1 &&
+        selection.isCollapsed &&
+        selection.baseOffset == inserted.$2) {
+      // The caret sits right after the just-inserted mention: its own tail
+      // text is not a filter token; the menu stays closed.
+      _inserted = null;
+      _closeMenu();
+      return;
+    }
     PromptMenuDefinition? active;
     String? token;
     for (final definition in widget.menus) {
       final candidate = _filterToken(definition, text, selection);
       if (candidate != null) {
         active = definition;
-        token = candidate;
+        token = candidate.$2;
         break;
       }
     }
-    final matches = active == null || token == null
-        ? const <PromptMenuRow>[]
-        : active.rows(token);
-    final tokenChanged = token != _syncedToken;
-    _syncedToken = token;
-    setState(() {
-      _active = active;
-      _matches = matches;
-      if (tokenChanged) _selected = matches.isEmpty ? -1 : 0;
-    });
-    if (active != null) {
-      // The token changed, so the selection is back on the top row: the
-      // menu scrolls with it.
-      if (tokenChanged && matches.isNotEmpty) _showMenuRow(0);
-      widget.onMenuOpened();
+    if (active == null || token == null) {
+      _closeMenu();
+      return;
+    }
+    final definitionChanged = _active != active;
+    if (definitionChanged) {
+      setState(() => _active = active);
+    }
+    if (definitionChanged || token != _rowsToken) {
+      final fetch = ++_fetches;
+      Future.value(active.rows(token)).then((rows) {
+        if (!mounted || fetch != _fetches || _active != active) return;
+        setState(() {
+          _rowsToken = token;
+          _matches = rows;
+          _selected = rows.isEmpty ? -1 : 0;
+        });
+        if (rows.isNotEmpty) _showMenuRow(0);
+      });
+    }
+    widget.onMenuOpened();
+  }
+
+  /// The menu closes: its in-flight fetches are stale, its rows and
+  /// selection are dropped.
+  void _closeMenu() {
+    _fetches++;
+    if (_active != null) {
+      setState(() {
+        _active = null;
+        _matches = const [];
+        _selected = -1;
+        _rowsToken = null;
+      });
     }
   }
 
@@ -2856,10 +3060,38 @@ class _PromptBarState extends State<_PromptBar> {
     });
   }
 
-  /// Runs the tapped (or submitted) row: clears the field and hands the row
-  /// plus its typed argument to the row's activation. A `takesArg` row with
-  /// no argument yet keeps the menu open and waits for the argument.
+  /// Runs the tapped (or submitted) row. A row carrying an [insertion]
+  /// (the `@` menu's mentions, issue #58) replaces its token — the trigger
+  /// and the typed token — with the mention in place, the cursor right
+  /// after it, and runs with no argument; the other rows (the `/` menu's
+  /// commands) clear the field and run with the typed argument. A
+  /// `takesArg` row with no argument yet keeps the menu open and waits for
+  /// the argument.
   void _activate(PromptMenuRow row) {
+    final insertion = row.insertion;
+    final active = _active;
+    if (insertion != null && active != null) {
+      final value = widget.controller.value;
+      final span = _filterToken(active, value.text, value.selection);
+      if (span != null) {
+        final text = value.text;
+        final caret = value.selection.isCollapsed
+            ? value.selection.baseOffset
+            : value.selection.extentOffset;
+        final nextCaret = span.$1 + insertion.length;
+        final nextText =
+            text.substring(0, span.$1) + insertion + text.substring(caret);
+        // The caret lands on the mention's own tail text: [_syncMenu]
+        // suppresses the re-open of the menu on that exact state.
+        _inserted = (nextText, nextCaret);
+        widget.controller.value = TextEditingValue(
+          text: nextText,
+          selection: TextSelection.collapsed(offset: nextCaret),
+        );
+      }
+      row.onActivate('');
+      return;
+    }
     final text = widget.controller.text;
     final space = text.indexOf(' ');
     final argument = (space >= 0 ? text.substring(space) : '').trim();
@@ -2915,6 +3147,12 @@ class _PromptBarState extends State<_PromptBar> {
         }
         return KeyEventResult.ignored;
       }
+      if (key == LogicalKeyboardKey.backspace) {
+        // The menu closed: a committed mention deletes as one unit.
+        if (_deleteMentionBackward()) return KeyEventResult.handled;
+      } else if (key == LogicalKeyboardKey.delete) {
+        if (_deleteMentionForward()) return KeyEventResult.handled;
+      }
       if (key == LogicalKeyboardKey.tab) {
         widget.onToggleMode();
         return KeyEventResult.handled;
@@ -2926,6 +3164,56 @@ class _PromptBarState extends State<_PromptBar> {
       }
     }
     return KeyEventResult.ignored;
+  }
+
+  /// The longest committed mention (issue #58) the [text] carries at
+  /// [caret] — ending at it (Backspace) or starting from it (Delete) — or
+  /// `null`.
+  String? _atomicMention(String text, int caret, {required bool forward}) {
+    String? best;
+    for (final mention in widget.mentions) {
+      if (best != null && mention.length <= best.length) continue;
+      final match = forward
+          ? caret + mention.length <= text.length &&
+                text.substring(caret, caret + mention.length) == mention
+          : caret >= mention.length &&
+                text.substring(caret - mention.length, caret) == mention;
+      if (match) best = mention;
+    }
+    return best;
+  }
+
+  /// Backspace (the menu closed) at the end of a committed mention deletes
+  /// it whole — the mention is atomic (issue #58); `handled` only then.
+  bool _deleteMentionBackward() {
+    final value = widget.controller.value;
+    if (!value.selection.isCollapsed) return false;
+    final text = value.text;
+    final caret = value.selection.baseOffset;
+    final mention = _atomicMention(text, caret, forward: false);
+    if (mention == null) return false;
+    widget.controller.value = TextEditingValue(
+      text: text.substring(0, caret - mention.length) + text.substring(caret),
+      selection: TextSelection.collapsed(offset: caret - mention.length),
+    );
+    return true;
+  }
+
+  /// Delete (the menu closed) right before a committed mention removes it
+  /// forward (issue #58); `handled` only then.
+  bool _deleteMentionForward() {
+    final value = widget.controller.value;
+    if (!value.selection.isCollapsed) return false;
+    final text = value.text;
+    final caret = value.selection.baseOffset;
+    final mention = _atomicMention(text, caret, forward: true);
+    if (mention == null) return false;
+    final end = caret + mention.length;
+    widget.controller.value = TextEditingValue(
+      text: text.substring(0, caret) + text.substring(end),
+      selection: TextSelection.collapsed(offset: caret),
+    );
+    return true;
   }
 
   @override
@@ -3105,4 +3393,24 @@ class _CenteredMessage extends StatelessWidget {
       style: TextStyle(color: Theme.of(context).colorScheme.outline),
     ),
   );
+}
+
+/// One mention committed to the prompt by the `@` menu (issue #58): its
+/// text as typed in the field, and what it refers to — a skill id or a file
+/// path relative to the session's working directory.
+class _Mention {
+  const _Mention({
+    required this.text,
+    required this.isSkill,
+    required this.target,
+  });
+
+  /// The mention's text in the field (`@<id>` / `@<path>`).
+  final String text;
+
+  /// Whether the mention is a skill (rather than a file).
+  final bool isSkill;
+
+  /// The skill id, or the file path relative to the working directory.
+  final String target;
 }
