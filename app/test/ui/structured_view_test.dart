@@ -126,6 +126,7 @@ class _FakeClient extends SessionsClient {
     this.messageLists = const [],
     this.permissionLists = const [],
     this.promptError,
+    this.promptGate,
     this.commands = const [],
     this.models = const [],
     this.runCommandError,
@@ -226,6 +227,10 @@ class _FakeClient extends SessionsClient {
   /// repeats.
   final List<List<PermissionRequest>> permissionLists;
 
+  /// When set, `prompt` awaits it before returning (the send POST held in
+  /// flight, to sequence it against the events).
+  Completer<void>? promptGate;
+
   final List<(String, String)> prompts = [];
 
   final List<(String, String, PermissionReply)> replies = [];
@@ -258,6 +263,8 @@ class _FakeClient extends SessionsClient {
 
   @override
   Future<void> prompt(String id, String text) async {
+    final gate = promptGate;
+    if (gate != null) await gate.future;
     final error = promptError;
     if (error is Object) throw error;
     prompts.add((id, text));
@@ -780,6 +787,78 @@ void main() {
     });
 
     testWidgets(
+      'session.execution.started re-fetches, so a prompt sent from another '
+      'client is visible without a reload',
+      (tester) async {
+        // A client that did not send the prompt: its history is stale until
+        // the turn-start re-fetch brings in the user message the other
+        // client sent (the service persists it before the turn starts).
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [
+            <SessionMessage>[],
+            <SessionMessage>[
+              SessionMessage(role: 'user', text: 'sent from the other client'),
+            ],
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        expect(find.text('No messages yet.'), findsOneWidget);
+        expect(client.messageCalls, 1);
+
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.messageCalls, 2);
+        expect(find.text('sent from the other client'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'the optimistic append is skipped when the turn-start re-fetch already '
+      'brought in the user message',
+      (tester) async {
+        // The send POST is held in flight (promptGate) so the `started`
+        // re-fetch can land between the POST resolving and the local append —
+        // the race that would otherwise show the prompt twice.
+        final promptGate = Completer<void>();
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [
+            <SessionMessage>[],
+            <SessionMessage>[SessionMessage(role: 'user', text: 'keep going')],
+          ],
+          promptGate: promptGate,
+        );
+        final events = await _pump(tester, client: client);
+
+        await tester.enterText(find.byKey(_promptInput), 'keep going');
+        await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+        await tester.pump();
+        expect(client.prompts, isEmpty); // The POST is still in flight.
+
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        // The re-fetch brought in the service's copy of the user message;
+        // the field still carries the text until the POST resolves.
+        expect(client.messageCalls, 2);
+        expect(find.text('keep going').evaluate().length, 2);
+
+        promptGate.complete();
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.prompts, const [('ses_1', 'keep going')]);
+        expect(_promptText(tester), isEmpty);
+        // The single service copy stands — the local append was skipped.
+        expect(find.text('keep going'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
       'text deltas grow the in-flight message live, without a re-fetch',
       (tester) async {
         final client = _FakeClient(details: const [_detail0]);
@@ -811,8 +890,12 @@ void main() {
 
         expect(find.text('Assistant · working…'), findsOneWidget);
         expect(find.text('Hello'), findsOneWidget);
-        expect(client.messageCalls, 1);
-        expect(client.detailCalls, 1);
+        // The only re-fetch is the turn-start one: the initial load plus the
+        // `session.execution.started` normalize. The text deltas themselves
+        // grow the in-flight message live and fetch nothing.
+        expect(client.messageCalls, 2);
+        expect(client.detailCalls, 2);
+        expect(client.permissionCalls, 2);
       },
     );
 
