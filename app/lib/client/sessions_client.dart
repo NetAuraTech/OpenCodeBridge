@@ -81,7 +81,7 @@ class SessionsClient {
   /// Create a session in [projectId]'s project (spec section 5, fill-in †,
   /// endpoint 2). The body is only the project id; the bridge creates the
   /// session on the shared service, records the launch, and returns the
-  /// session (no terminal window is opened).
+  /// session.
   Future<Session> create(String projectId) async {
     final client = HttpClient();
     try {
@@ -834,36 +834,6 @@ class SessionsClient {
       if (response.statusCode != HttpStatus.noContent) {
         throw SessionsClientError(response.statusCode, body);
       }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  /// Open a terminal for the session (the `/` menu's `/terminal`): the
-  /// service's `POST /api/experimental/session/{id}/terminal`, as its
-  /// decoded JSON.
-  Future<String> newTerminal(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/terminal'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! String) {
-        throw SessionsClientError(0, 'terminal returned no payload');
-      }
-      return decoded;
     } on SessionsClientError {
       rethrow;
     } catch (error) {

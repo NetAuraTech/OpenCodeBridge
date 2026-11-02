@@ -239,9 +239,6 @@ class FakeOpencodeService implements OpencodeService {
   Future<String> stats(String id) async => '{"stats":true}';
 
   @override
-  Future<String> newTerminal(String id) async => '{"terminal":true}';
-
-  @override
   Future<String> worktrees(String projectId) async {
     worktreesFor.add(projectId);
     return '{"worktrees":true}';
@@ -651,7 +648,6 @@ void main() {
       expect(await backend.exportSession('ses_1'), '{"info":"export"}');
       expect(await backend.diff('ses_1'), '{"diff":true}');
       expect(await backend.stats('ses_1'), '{"stats":true}');
-      expect(await backend.newTerminal('ses_1'), '{"terminal":true}');
       expect(await backend.worktrees('ses_1'), '{"worktrees":true}');
       expect(await backend.usage(), '{"usage":true}');
       expect(await backend.mcps(), '{"mcps":true}');

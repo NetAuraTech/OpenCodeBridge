@@ -9,10 +9,10 @@ enum SessionClassification {
   /// Started manually in a terminal, never launched by the bridge.
   external('external'),
 
-  /// In the persistence file and its attach child is alive.
+  /// In the persistence file and live in this bridge process.
   appLaunchedLive('app-launched-live'),
 
-  /// In the persistence file, attach child not alive (its window is closed).
+  /// In the persistence file, not live in this bridge process.
   appLaunchedClosed('app-launched-closed');
 
   const SessionClassification(this.wire);
@@ -84,8 +84,8 @@ class Session {
   final bool active;
   final SessionClassification classification;
 
-  /// This row with [newClassification] replaced (the window flow flips
-  /// live/closed without changing the other row facts).
+  /// This row with [newClassification] replaced (the live/closed flip changes
+  /// no other row fact).
   Session withClassification(SessionClassification newClassification) =>
       Session(
         id: id,

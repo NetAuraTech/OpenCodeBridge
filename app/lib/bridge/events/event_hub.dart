@@ -25,8 +25,8 @@ abstract class EventConnection {
 /// The hub holds the bridge's **single** upstream [OpencodeEventService]
 /// subscription and re-emits every opencode event **verbatim** to any number
 /// of downstream [EventConnection]s (the app SSE connections). Bridge-native
-/// events (spec §8: `session.closed`, `terminal.closed`, `docker.*`) are
-/// multiplexed onto the same stream through [emit]. Every live connection
+/// events (spec §8: `session.closed`, `docker.*`) are multiplexed onto the
+/// same stream through [emit]. Every live connection
 /// receives an identical frame for every event, so a raw SSE client and the
 /// app always see the same stream.
 class EventHub {

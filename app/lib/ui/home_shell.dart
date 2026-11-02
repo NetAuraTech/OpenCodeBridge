@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
 import '../app_mode.dart';
-import '../bridge/terminal/terminal_backend.dart';
 import '../client/authenticated_http.dart';
 import '../client/connection_monitor.dart';
 import '../notify/deep_link.dart';
@@ -24,7 +23,6 @@ class HomeShell extends StatefulWidget {
     required this.settings,
     required this.mode,
     this.localBridgeUri,
-    this.terminals,
     this.onTunnelUrlCommitted,
     this.auth,
     this.access,
@@ -41,10 +39,6 @@ class HomeShell extends StatefulWidget {
 
   /// Present in server mode: where the embedded bridge listens.
   final Uri? localBridgeUri;
-
-  /// Present in server mode with a shared opencode service: the terminal
-  /// backend the Sessions tab attaches to in-process (spec §12).
-  final TerminalBackend? terminals;
 
   /// Re-points the connection at the tunnel URL after it is committed.
   final VoidCallback? onTunnelUrlCommitted;
@@ -176,7 +170,6 @@ class _HomeShellState extends State<HomeShell> {
           apiBase: _apiBase,
           settings: widget.settings,
           onThemeModeChanged: widget.onThemeModeChanged,
-          terminals: widget.terminals,
           auth: widget.auth,
           access: widget.access,
           deepLinkSession: _sessionTarget,

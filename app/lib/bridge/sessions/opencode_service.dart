@@ -91,7 +91,7 @@ abstract class OpencodeService {
 
   /// Create a new session in [projectId]'s project (`POST /api/session` with
   /// the project's canonical directory as its `location.directory`). The
-  /// session has no TUI attached yet; the caller opens its terminal window.
+  /// session has no TUI attached yet.
   Future<OpencodeSession> createSession(String projectId);
 
   /// Delete a session (and its child sessions) on the service.
@@ -226,10 +226,6 @@ abstract class OpencodeService {
   /// The session's usage statistics (the service's
   /// `GET /api/experimental/session/stats`), as decoded JSON.
   Future<String> stats(String id);
-
-  /// Open a terminal for the session (the service's
-  /// `POST /api/experimental/session/{id}/terminal`), as decoded JSON.
-  Future<String> newTerminal(String id);
 
   /// The open session's project's worktrees (the service's
   /// `GET /api/worktree?projectID=…`), as decoded JSON. The project id is

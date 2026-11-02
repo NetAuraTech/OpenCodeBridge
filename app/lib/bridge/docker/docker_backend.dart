@@ -111,7 +111,7 @@ class DockerLogStream {
 }
 
 /// The bridge's Docker backend (issue #21): it shells out to the host docker
-/// CLI (ADR-0002, like the terminal-window spawner) and exposes the
+/// CLI and exposes the
 /// container list, the name-addressed start/stop/restart actions, the
 /// container's log stream, and the host event watch that re-emits
 /// `docker.container.stopped` (clean exit) and `docker.container.crashed`

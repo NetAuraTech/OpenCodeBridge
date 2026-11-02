@@ -238,12 +238,6 @@ class SlashCommands {
       scope: CommandScope.session,
     ),
     SlashCommand(
-      name: 'terminal',
-      title: 'New terminal',
-      family: CommandFamily.service,
-      scope: CommandScope.session,
-    ),
-    SlashCommand(
       name: 'worktrees',
       title: 'Manage workspaces',
       family: CommandFamily.service,

@@ -1326,9 +1326,6 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         case 'stats':
           await _payloadDialog('Usage statistics', () => client.stats(id));
           return;
-        case 'terminal':
-          await _payloadDialog('Terminal', () => client.newTerminal(id));
-          return;
         case 'worktrees':
           await _payloadDialog('Worktrees', () => client.worktrees(id));
           return;
@@ -1576,7 +1573,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     );
   }
 
-  /// The menu's "info" commands (export, diff, stats, terminal, worktrees,
+  /// The menu's "info" commands (export, diff, stats, worktrees,
   /// usage, mcps, plugins, status, pair): fetch the service's payload (its
   /// decoded JSON, as a string) and show it pretty-printed.
   Future<void> _payloadDialog(

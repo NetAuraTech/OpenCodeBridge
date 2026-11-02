@@ -213,7 +213,6 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
         settings: settings,
         mode: mode,
         localBridgeUri: _bridge?.healthUri,
-        terminals: _bridge?.terminals,
         onTunnelUrlCommitted: () => _enter(settings, AppMode.client),
         auth: _mode == AppMode.client ? _access?.authorizationHeader : null,
         access: _mode == AppMode.client ? _access : null,

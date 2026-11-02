@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
-import '../bridge/terminal/terminal_backend.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/sessions_client.dart';
@@ -20,13 +19,12 @@ import 'structured_view.dart';
 /// global New session button opens the project picker (spec §5, fill-in †);
 /// each project group carries a New session button of its own that creates
 /// in that project directly. Both create the session on the shared service
-/// (no terminal window) and open its structured view.
+/// and open its structured view.
 class SessionsTab extends StatefulWidget {
   const SessionsTab({
     super.key,
     required this.apiBase,
     this.client,
-    this.terminals,
     this.events,
     this.auth,
     this.access,
@@ -55,11 +53,6 @@ class SessionsTab extends StatefulWidget {
   /// The Access login's header provider (issue #23, client mode); `null` in
   /// server mode.
   final AuthHeaderProvider? auth;
-
-  /// Present in server mode with a shared opencode service (spec §12);
-  /// `null` in client mode. The tab no longer reads it (issue #51: the
-  /// terminal view is being retired); the shell still passes it through.
-  final TerminalBackend? terminals;
 
   /// The source of the bridge's unified event stream (spec §8) the tab's
   /// views listen to. Defaults to a real [EventsClient] at [apiBase] (owned
@@ -289,8 +282,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
 
   /// Creates a session in the project [projectId] and opens its structured
   /// view (spec §5, fill-in †). The bridge creates the session on the shared
-  /// service and records the launch (no terminal window); afterwards the app
-  /// opens the session's structured view, in server and client mode alike.
+  /// service and records the launch; afterwards the app opens the session's
+  /// structured view, in server and client mode alike.
   /// Shared by the global new-session flow (after the picker) and each
   /// project group's New session button.
   Future<void> _createInProject(String projectId) async {
@@ -342,9 +335,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   /// Opens [session] in the structured view (spec §6: *External* →
-  /// structured view). The structured view is fully usable without a TUI:
-  /// the session stays sendable after its terminal window closes. When the
-  /// view closes, the list re-loads.
+  /// structured view). The structured view is fully usable on its own: the
+  /// session stays sendable after the view closes. When the view closes, the
+  /// list re-loads.
   Future<void> _openStructured(Session session) async {
     final client = _client;
     if (client == null) return;
