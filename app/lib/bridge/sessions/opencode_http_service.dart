@@ -337,12 +337,23 @@ class OpencodeHttpService implements OpencodeService {
 
   /// Endpoint 7 (spec §5): send a prompt. `delivery: steer` is the verified
   /// mid-turn delivery — the service accepts it at any time and runs turns
-  /// sequentially.
+  /// sequentially. [files] and [skills] are the service's `PromptInput`
+  /// attachments (the TUI's `@` file/skill mentions), forwarded as-is in the
+  /// same request — the service reads the file content and prepares the
+  /// skill text; omitted or empty sends exactly the text, as before.
   @override
-  Future<void> prompt(String id, String text) async {
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
+    final body = <String, Object?>{'text': text, 'delivery': 'steer'};
+    if (files != null && files.isNotEmpty) body['files'] = files;
+    if (skills != null && skills.isNotEmpty) body['skills'] = skills;
     await _post(
       _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/prompt'),
-      jsonEncode({'text': text, 'delivery': 'steer'}),
+      jsonEncode(body),
     );
   }
 

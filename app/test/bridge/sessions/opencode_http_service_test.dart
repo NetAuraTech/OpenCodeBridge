@@ -410,8 +410,24 @@ void main() {
         resp.write(jsonEncode({'data': pendingPerms}));
       } else if (path == '/api/session/ses_1/prompt' && req.method == 'POST') {
         final body = await utf8.decodeStream(req);
-        promptBodies.add(jsonDecode(body) as Map<String, Object?>);
-        resp.write(jsonEncode({'data': {}}));
+        final decoded = jsonDecode(body) as Map<String, Object?>;
+        promptBodies.add(decoded);
+        // The service rejects an unreadable file attachment with a 400
+        // naming the offending field (the TUI's @-mention failure mode).
+        final files = decoded['files'];
+        final unreadable =
+            files is List &&
+            files.any(
+              (item) =>
+                  item is Map<String, Object?> &&
+                  ((item['uri'] as String?) ?? '').endsWith('/missing.txt'),
+            );
+        if (unreadable) {
+          resp.statusCode = HttpStatus.badRequest;
+          resp.write(jsonEncode({'error': 'files: no such file'}));
+        } else {
+          resp.write(jsonEncode({'data': {}}));
+        }
       } else if (path.startsWith('/api/session/ses_1/permission/') &&
           path.endsWith('/reply') &&
           req.method == 'POST') {
@@ -832,6 +848,68 @@ void main() {
       expect(promptBodies, [
         {'text': 'hello', 'delivery': 'steer'},
       ]);
+    });
+
+    test(
+      'prompt posts files and skills with the text and delivery steer',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        // The records list is shared with the test above.
+        promptBodies.clear();
+        await service.prompt(
+          'ses_1',
+          'read the notes',
+          files: const [
+            {
+              'uri': 'file:///proj/one/notes.md',
+              'name': 'notes.md',
+              'description': 'field notes',
+              'source': {'path': '/proj/one/notes.md'},
+              'mention': {'start': 0, 'end': 12},
+            },
+          ],
+          skills: const [
+            {'id': 'orbs'},
+          ],
+        );
+        expect(promptBodies, [
+          {
+            'text': 'read the notes',
+            'delivery': 'steer',
+            'files': [
+              {
+                'uri': 'file:///proj/one/notes.md',
+                'name': 'notes.md',
+                'description': 'field notes',
+                'source': {'path': '/proj/one/notes.md'},
+                'mention': {'start': 0, 'end': 12},
+              },
+            ],
+            'skills': [
+              {'id': 'orbs'},
+            ],
+          },
+        ]);
+      },
+    );
+
+    test('prompt maps the service 400 for an unreadable file to a 400 '
+        'OpencodeServiceError', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await expectLater(
+        service.prompt(
+          'ses_1',
+          'read it',
+          files: const [
+            {'uri': 'file:///proj/one/missing.txt', 'name': 'missing.txt'},
+          ],
+        ),
+        throwsA(
+          isA<OpencodeServiceError>()
+              .having((e) => e.statusCode, 'statusCode', 400)
+              .having((e) => e.message, 'message', contains('files')),
+        ),
+      );
     });
 
     test('pendingPermissions maps the service requests', () async {

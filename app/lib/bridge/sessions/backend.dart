@@ -80,7 +80,12 @@ class SessionsBackend {
   Future<List<SessionMessage>> getMessages(String id) =>
       service.getMessages(id);
 
-  Future<void> prompt(String id, String text) => service.prompt(id, text);
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) => service.prompt(id, text, files: files, skills: skills);
 
   Future<List<PermissionRequest>> pendingPermissions(String id) =>
       service.pendingPermissions(id);

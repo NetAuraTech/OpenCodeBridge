@@ -218,15 +218,26 @@ class SessionsClient {
 
   /// Send a prompt (spec section 5, endpoint 7). The prompt is enabled at
   /// any time: the bridge forwards it to the service with `delivery:
-  /// steer`, which queues a mid-turn prompt.
-  Future<void> prompt(String id, String text) async {
+  /// steer`, which queues a mid-turn prompt. [files] and [skills] are the
+  /// optional attachment arrays (the TUI's `@` file/skill mentions) the
+  /// service resolves at prompt time; a plain call sends exactly the text,
+  /// as before.
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
+    final requestBody = <String, Object?>{'text': text};
+    if (files != null && files.isNotEmpty) requestBody['files'] = files;
+    if (skills != null && skills.isNotEmpty) requestBody['skills'] = skills;
     final client = HttpClient();
     try {
       final response = await bridgeRequest(
         client,
         'POST',
         _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/messages'),
-        body: jsonEncode({'text': text}),
+        body: jsonEncode(requestBody),
         contentType: ContentType.json,
         auth: _auth,
       );

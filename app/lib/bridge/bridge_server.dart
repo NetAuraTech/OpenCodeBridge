@@ -1235,14 +1235,19 @@ class BridgeServer {
       return;
     }
     String? text;
+    List<Map<String, Object?>>? files;
+    List<Map<String, Object?>>? skills;
     try {
       final raw = await utf8.decodeStream(request);
       final decoded = jsonDecode(raw);
-      text = decoded is Map<String, Object?>
-          ? decoded['text'] as String?
-          : null;
+      if (decoded is Map<String, Object?>) {
+        text = decoded['text'] as String?;
+        files = BridgeServer._attachmentList(decoded['files']);
+        skills = BridgeServer._attachmentList(decoded['skills']);
+      }
     } catch (_) {
-      text = null; // A non-JSON body is an invalid body.
+      text = null; // A non-JSON body or a malformed attachment array is an
+      // invalid body.
     }
     if (text == null || text.trim().isEmpty) {
       response.statusCode = HttpStatus.badRequest;
@@ -1251,12 +1256,22 @@ class BridgeServer {
       return;
     }
     try {
-      await sessions.prompt(id, text);
+      await sessions.prompt(id, text, files: files, skills: skills);
       response.statusCode = HttpStatus.accepted;
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
     }
     await response.close();
+  }
+
+  /// A prompt attachment array (`files` / `skills`), or `null` when the
+  /// field is absent: a JSON array of objects, forwarded to the service
+  /// as-is. Anything else (a scalar, a non-object entry) throws into the
+  /// caller's invalid-body path.
+  static List<Map<String, Object?>>? _attachmentList(Object? value) {
+    final list = value as List?;
+    if (list == null) return null;
+    return [for (final item in list) item as Map<String, Object?>];
   }
 
   /// Endpoint 8 (spec section 5): the session's pending permission requests.

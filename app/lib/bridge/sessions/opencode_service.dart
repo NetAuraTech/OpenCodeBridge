@@ -114,8 +114,17 @@ abstract class OpencodeService {
 
   /// Send a prompt to the session (spec §5, endpoint 7). Input is enabled at
   /// any time; a mid-turn prompt is accepted with `delivery: steer` and the
-  /// service runs turns sequentially.
-  Future<void> prompt(String id, String text);
+  /// service runs turns sequentially. [files] and [skills] are the optional
+  /// attachment arrays the service's `PromptInput` accepts (the TUI's `@`
+  /// file/skill mentions): the service resolves them (reads the file
+  /// content, prepares the skill text), so they ride the same request
+  /// as-is; omitted or empty sends the text only.
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  });
 
   /// The session's pending permission requests (spec §5, endpoint 8).
   Future<List<PermissionRequest>> pendingPermissions(String id);

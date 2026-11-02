@@ -142,7 +142,12 @@ class _FakeSessionsClient extends SessionsClient {
   ];
 
   @override
-  Future<void> prompt(String id, String text) async {
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
     prompts.add((id, text));
   }
 
