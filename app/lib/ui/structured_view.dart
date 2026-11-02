@@ -2330,6 +2330,15 @@ class _Markdown extends StatelessWidget {
         ).copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
         listBullet: style(color: palette.listBullet),
         blockquote: style(color: palette.blockQuote),
+        // The quote's box: the theme's surface, like the code blocks — the
+        // markdown default is a fixed light box the light quote color is
+        // unreadable on in dark mode.
+        blockquoteDecoration: BoxDecoration(
+          color: dim
+              ? null
+              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(4),
+        ),
         codeblockDecoration: BoxDecoration(
           color: dim
               ? null

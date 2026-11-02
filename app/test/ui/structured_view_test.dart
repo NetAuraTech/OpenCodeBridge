@@ -2346,6 +2346,48 @@ void main() {
         Brightness.dark,
       );
     });
+
+    testWidgets('a dark-mode blockquote keeps a readable box', (
+      tester,
+    ) async {
+      // The markdown default boxes quotes in a fixed light color — in dark
+      // mode the TUI's light quote color is unreadable on it: the box takes
+      // the theme's surface instead, like the code blocks.
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(
+            role: 'assistant',
+            text: 'done\n\n> Note: the note.',
+          ),
+        ],
+      );
+      final events = StreamController<BridgeEvent>.broadcast();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: StructuredSessionScreen(
+            sessionId: 'ses_1',
+            title: 'external session',
+            client: client,
+            events: events.stream,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final box = tester.widget<DecoratedBox>(
+        find.ancestor(
+          of: find.textContaining('the note.'),
+          matching: find.byType(DecoratedBox),
+        ),
+      );
+      expect(
+        (box.decoration as BoxDecoration).color,
+        ThemeData.dark().colorScheme.surfaceContainerHighest,
+      );
+    });
   });
 
   group('StructuredSessionScreen mode and variant keys (issue #46)', () {
