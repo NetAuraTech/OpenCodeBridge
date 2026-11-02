@@ -22,8 +22,6 @@
 /// - `/editor` — left out: it opens the host's `$EDITOR` on the TUI prompt;
 ///   the app's prompt field is already the in-app editor, so the command
 ///   would only duplicate typing.
-/// - `/themes` — left out: the app has no theme setting yet (a dark theme is
-///   planned long-term); revisit once it exists.
 /// - `/highlights` — left out: the release notes are embedded in the TUI
 ///   build; the app has no source for them.
 /// - `/update` — left out: it updates the opencode binary on the host, which
@@ -343,6 +341,13 @@ class SlashCommands {
     SlashCommand(
       name: 'settings',
       title: 'Open settings',
+      family: CommandFamily.local,
+      scope: CommandScope.global,
+    ),
+    SlashCommand(
+      name: 'themes',
+      title: 'Switch theme',
+      aliases: ['theme'],
       family: CommandFamily.local,
       scope: CommandScope.global,
     ),

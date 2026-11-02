@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
@@ -54,5 +55,26 @@ void main() {
 
     reloaded.notifyDockerContainer = true;
     expect((await AppSettings.load()).notifyDockerContainer, isTrue);
+  });
+
+  test(
+    'theme mode defaults to light (the app was light until the choice existed)',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      expect(settings.themeMode, ThemeMode.light);
+    },
+  );
+
+  test('persists the theme mode for the next launch', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = await AppSettings.load();
+    settings.themeMode = ThemeMode.dark;
+
+    final reloaded = await AppSettings.load();
+    expect(reloaded.themeMode, ThemeMode.dark);
+
+    reloaded.themeMode = ThemeMode.system;
+    expect((await AppSettings.load()).themeMode, ThemeMode.system);
   });
 }

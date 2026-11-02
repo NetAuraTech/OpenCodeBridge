@@ -14,6 +14,12 @@ import 'tunnel_url.dart';
 import 'ui/home_shell.dart';
 import 'ui/mode_choice_screen.dart';
 
+/// The app's themes (issue #49): the stock Material light and dark themes,
+/// picked by the persisted theme choice. The light one is exactly what the
+/// app rendered before the choice existed.
+final ThemeData _lightTheme = ThemeData.light();
+final ThemeData _darkTheme = ThemeData.dark();
+
 /// The app root.
 ///
 /// Desktop (Linux) launches show the mode choice at every launch; Android
@@ -164,31 +170,45 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
     if (mounted) setState(() {});
   }
 
+  /// The app's [MaterialApp] (issue #49): the theme follows the persisted
+  /// choice; a changed choice rebuilds here and re-themes the whole app
+  /// live (no restart).
+  Widget _materialApp(ThemeMode mode, Widget home) => MaterialApp(
+    title: 'OpenCodeBridge',
+    theme: _lightTheme,
+    darkTheme: _darkTheme,
+    themeMode: mode,
+    home: home,
+  );
+
   @override
   Widget build(BuildContext context) {
     final settings = _settings;
     if (settings == null) {
-      return const MaterialApp(
-        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+      return _materialApp(
+        ThemeMode.system,
+        const Scaffold(body: Center(child: CircularProgressIndicator())),
       );
     }
     final mode = _mode;
     if (mode == null) {
       return _showsModeChoice
-          ? MaterialApp(
-              home: ModeChoiceScreen(
+          ? _materialApp(
+              settings.themeMode,
+              ModeChoiceScreen(
                 settings: settings,
                 onSelected: _choose,
                 error: _serverError,
               ),
             )
-          : const MaterialApp(
-              home: Scaffold(body: Center(child: CircularProgressIndicator())),
+          : _materialApp(
+              settings.themeMode,
+              const Scaffold(body: Center(child: CircularProgressIndicator())),
             );
     }
-    return MaterialApp(
-      title: 'OpenCodeBridge',
-      home: HomeShell(
+    return _materialApp(
+      settings.themeMode,
+      HomeShell(
         monitor: _monitor,
         settings: settings,
         mode: mode,
@@ -211,6 +231,12 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
           // The Settings save already wrote the file; the running bridge
           // picks it up without a restart (issue #24).
           unawaited(_bridge?.reloadNotify());
+        },
+        onThemeModeChanged: () {
+          // The choice is already persisted by whoever changed it (the
+          // Settings tab or the structured view's /themes); the rebuild
+          // re-themes from the same settings (issue #49).
+          if (mounted) setState(() {});
         },
       ),
     );

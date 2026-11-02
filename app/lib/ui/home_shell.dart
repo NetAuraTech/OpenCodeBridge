@@ -32,6 +32,7 @@ class HomeShell extends StatefulWidget {
     this.onNotifyToggled,
     this.onPushProjectCommitted,
     this.onServiceAccountCommitted,
+    this.onThemeModeChanged,
   });
 
   final ConnectionMonitor monitor;
@@ -74,6 +75,11 @@ class HomeShell extends StatefulWidget {
   /// service account (issue #24, server mode); the Settings tab calls it
   /// when the user saves the service account.
   final VoidCallback? onServiceAccountCommitted;
+
+  /// Re-themes the whole app live from the persisted choice (issue #49);
+  /// the Settings tab's Theme section and the structured view's `/themes`
+  /// command call it after the choice is persisted.
+  final VoidCallback? onThemeModeChanged;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -168,6 +174,8 @@ class _HomeShellState extends State<HomeShell> {
       children: [
         SessionsTab(
           apiBase: _apiBase,
+          settings: widget.settings,
+          onThemeModeChanged: widget.onThemeModeChanged,
           terminals: widget.terminals,
           auth: widget.auth,
           access: widget.access,
@@ -200,6 +208,7 @@ class _HomeShellState extends State<HomeShell> {
           onNotifyToggled: widget.onNotifyToggled,
           onPushProjectCommitted: widget.onPushProjectCommitted,
           onServiceAccountCommitted: widget.onServiceAccountCommitted,
+          onThemeModeChanged: widget.onThemeModeChanged,
         ),
       ],
     ),

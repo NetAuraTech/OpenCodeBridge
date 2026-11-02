@@ -127,6 +127,11 @@ void main() {
     return settings;
   }
 
+  /// The Theme section (issue #49) grew the tab: drag the list until
+  /// [target] is built and visible.
+  Future<void> scrollSettings(WidgetTester tester, Finder target) => tester
+      .dragUntilVisible(target, find.byType(ListView), const Offset(0, -200));
+
   group('SettingsTab', () {
     testWidgets('client mode: shows and persists the tunnel url', (
       tester,
@@ -160,6 +165,10 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final settings = await pumpSettings(tester, mode: AppMode.client);
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('notify-turn-ended')),
+      );
       await tester.tap(find.byType(Switch).first);
       await tester.pump();
       expect(settings.notifyPermissionAsked, isTrue);
@@ -226,6 +235,10 @@ void main() {
         onNotifyToggled: () => toggles++,
       );
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('notify-turn-ended')),
+      );
       await tester.tap(find.byKey(const ValueKey('notify-turn-ended')));
       await tester.pump();
 
@@ -243,6 +256,10 @@ void main() {
         onPushProjectCommitted: () => commits++,
       );
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('push-project-field')),
+      );
       await tester.enterText(
         find.byKey(const ValueKey('push-project-field')),
         'not a json',
@@ -274,7 +291,8 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester);
 
-      await tester.ensureVisible(
+      await scrollSettings(
+        tester,
         find.byKey(const ValueKey('push-project-save')),
       );
       await tester.pump();
@@ -296,6 +314,10 @@ void main() {
         onPushProjectCommitted: () => commits++,
       );
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('push-project-field')),
+      );
       await tester.enterText(
         find.byKey(const ValueKey('push-project-field')),
         kGoodProjectJson,
@@ -321,6 +343,10 @@ void main() {
       });
       await pumpSettings(tester);
 
+      await scrollSettings(
+        tester,
+        find.text('Firebase project: opencodebridge-test.'),
+      );
       expect(
         find.text('Firebase project: opencodebridge-test.'),
         findsOneWidget,
@@ -362,6 +388,10 @@ void main() {
         serviceAccountPath: accountPath,
       );
 
+      await scrollSettings(
+        tester,
+        find.text('Service account: not configured.'),
+      );
       expect(find.text('Service account: not configured.'), findsOneWidget);
     });
 
@@ -375,6 +405,10 @@ void main() {
         serviceAccountPath: accountPath,
       );
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('service-account-field')),
+      );
       await tester.enterText(
         find.byKey(const ValueKey('service-account-field')),
         kAccountJson,
@@ -417,6 +451,10 @@ void main() {
         serviceAccountPath: accountPath,
       );
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('service-account-field')),
+      );
       await tester.enterText(
         find.byKey(const ValueKey('service-account-field')),
         'not a json',
@@ -445,6 +483,12 @@ void main() {
         serviceAccountPath: accountPath,
       );
 
+      await scrollSettings(
+        tester,
+        find.text(
+          'Service account: svc@opencodebridge-test.iam.gserviceaccount.com.',
+        ),
+      );
       expect(
         find.text(
           'Service account: svc@opencodebridge-test.iam.gserviceaccount.com.',
@@ -457,6 +501,10 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, mode: AppMode.client);
 
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('push-project-field')),
+      );
       expect(find.byKey(const ValueKey('service-account-field')), findsNothing);
       // The client side keeps the google-services.json field.
       expect(find.byKey(const ValueKey('push-project-field')), findsOneWidget);
