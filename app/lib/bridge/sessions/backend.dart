@@ -1,6 +1,7 @@
 import '../../model/command.dart';
 import '../../model/message.dart';
 import '../../model/permission.dart';
+import '../../model/question.dart';
 import '../../model/session.dart';
 import '../../model/session_detail.dart';
 import 'opencode_service.dart';
@@ -115,6 +116,20 @@ class SessionsBackend {
     String requestID,
     PermissionReply reply,
   ) => service.replyPermission(id, requestID, reply);
+
+  // The structured view's question forms (issue #50): pure pass-throughs to
+  // the service seam, like endpoints 5–9 (no persistence or live fact).
+  Future<List<QuestionForm>> pendingQuestions(String id) =>
+      service.pendingQuestions(id);
+
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) => service.answerQuestion(id, formID, answers);
+
+  Future<void> dismissQuestion(String id, String formID) =>
+      service.dismissQuestion(id, formID);
 
   // The structured view's `/` command menu (issue #46): the service-backed
   // commands, pure pass-throughs to the service seam (no persistence or live

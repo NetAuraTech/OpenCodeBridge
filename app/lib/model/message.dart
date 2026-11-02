@@ -13,6 +13,7 @@ class ToolCall {
     this.input,
     this.error,
     this.patch,
+    this.answers,
   });
 
   /// The tool call id (the service's tool part `id`). The structured view
@@ -40,6 +41,12 @@ class ToolCall {
   /// `null` for tools that carry no patch (or before the edit runs).
   final String? patch;
 
+  /// The answers the user gave the agent's `question` tool (the tool state's
+  /// `metadata.answers`): one list of the picked option values per question,
+  /// in form order. `null` for every other tool, and for a question the user
+  /// hasn't answered yet.
+  final List<List<String>>? answers;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
@@ -47,6 +54,7 @@ class ToolCall {
     'input': input,
     'error': error,
     'patch': patch,
+    'answers': answers,
   };
 
   factory ToolCall.fromJson(Object? json) {
@@ -58,7 +66,29 @@ class ToolCall {
       input: map['input'],
       error: map['error'] is String ? map['error'] as String : null,
       patch: map['patch'] is String ? map['patch'] as String : null,
+      answers: answersFrom(map['answers']),
     );
+  }
+
+  /// The tool state's `metadata.answers` (the agent's `question` tool): a
+  /// list of answers, each a list of the option values the user picked, one
+  /// entry per question in form order. Parsed from the service's JSON;
+  /// `null` when the field is absent or not of that shape.
+  static List<List<String>>? answersFrom(Object? json) {
+    final list = json is List ? json : null;
+    if (list == null) return null;
+    final rows = <List<String>>[];
+    for (final row in list) {
+      if (row is List) {
+        rows.add([
+          for (final value in row)
+            if (value is String) value,
+        ]);
+      } else if (row is String) {
+        rows.add([row]);
+      }
+    }
+    return rows.isEmpty ? null : rows;
   }
 
   /// The "new file" unified diff of a [write] tool's content (every line
@@ -102,15 +132,18 @@ class ToolCall {
       other.status == status &&
       other.input == input &&
       other.error == error &&
-      other.patch == patch;
+      other.patch == patch &&
+      _answersEqual(other.answers, answers);
 
   @override
-  int get hashCode => Object.hash(id, name, status, input, error, patch);
+  int get hashCode =>
+      Object.hash(id, name, status, input, error, patch, _answersHash(answers));
 
   @override
   String toString() =>
       'ToolCall(id: $id, name: $name, status: $status, '
-      'input: $input, error: $error, patch: $patch)';
+      'input: $input, error: $error, patch: $patch, '
+      'answers: $answers)';
 }
 
 /// One message of a session's history (spec section 5, endpoint 6).
@@ -213,4 +246,26 @@ bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {
     if (a[i] != b[i]) return false;
   }
   return true;
+}
+
+/// [ToolCall.answers] compare by content (the lists are compared row by
+/// row, value by value), not by identity, so two calls composed from
+/// separate decodes of the same service state are equal.
+bool _answersEqual(List<List<String>>? a, List<List<String>>? b) {
+  if (a == null || b == null) return a == null && b == null;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].length != b[i].length) return false;
+    for (var j = 0; j < a[i].length; j++) {
+      if (a[i][j] != b[i][j]) return false;
+    }
+  }
+  return true;
+}
+
+/// A stable hash of [ToolCall.answers] matching [_answersEqual]: the same
+/// content always hashes the same, so equal calls share a hashCode.
+int _answersHash(List<List<String>>? answers) {
+  if (answers == null) return 0;
+  return Object.hashAll([for (final row in answers) Object.hashAll(row)]);
 }

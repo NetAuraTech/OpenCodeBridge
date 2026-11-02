@@ -16,6 +16,7 @@ import 'package:opencodebridge/bridge/terminal/terminal_window_token.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
 /// Endpoint 10 (`GET /api/sessions/{id}/terminal`, WebSocket) end-to-end over
@@ -353,6 +354,16 @@ class _NoopSessions implements OpencodeService {
     String requestID,
     PermissionReply reply,
   ) async {}
+  @override
+  Future<List<QuestionForm>> pendingQuestions(String id) async => const [];
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {}
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {}
   @override
   Future<List<OpencodeCommand>> listCommands() async => const [];
   @override

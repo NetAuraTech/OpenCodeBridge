@@ -3,6 +3,7 @@ library;
 import '../../model/command.dart';
 import '../../model/message.dart';
 import '../../model/permission.dart';
+import '../../model/question.dart';
 import '../../model/session_detail.dart';
 
 /// The bridge's seam over the shared opencode service (ADR-0001: the app
@@ -118,6 +119,33 @@ abstract class OpencodeService {
     String requestID,
     PermissionReply reply,
   );
+
+  // The structured-view question forms (issue #50): the opencode agent's
+  // `question` tool surfaces its questions as service forms with
+  // `metadata.kind == "question"`. The bridge filters those forms and hides
+  // the service's internal `q0`/`q1` field keys, so the app answers per
+  // question in the form's order.
+
+  /// The session's pending question forms (its `GET /api/session/{id}/form`
+  /// filtered to `metadata.kind == "question"`), each with its questions in
+  /// the form's field order.
+  Future<List<QuestionForm>> pendingQuestions(String id);
+
+  /// Submit the answers to a pending question form [formID]. [answers] has one
+  /// entry per question, in the form's field order: each entry is the list of
+  /// selected option labels (or the typed text for a free-text question). The
+  /// bridge re-fetches the form to recover the field order/types and rebuilds
+  /// the service's `q0`/`q1` `answer` record (the keys are never exposed to
+  /// the app).
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  );
+
+  /// Dismiss a pending question form [formID] (the agent continues without an
+  /// answer): the service's `DELETE /api/session/{id}/form/{formID}`.
+  Future<void> dismissQuestion(String id, String formID);
 
   // The structured view's `/` command menu (issue #46): the service-backed
   // commands. Each is a thin mapping over a shared-service endpoint; the

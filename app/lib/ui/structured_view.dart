@@ -12,10 +12,12 @@ import '../client/sessions_client.dart';
 import '../model/command.dart';
 import '../model/message.dart';
 import '../model/permission.dart';
+import '../model/question.dart';
 import '../model/session_detail.dart';
 import '../settings/app_settings.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
+import 'question_panel.dart';
 import 'slash_commands.dart';
 
 /// The structured view of one session (spec §6: *External* → structured
@@ -93,6 +95,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   List<SessionMessage> _messages = const [];
 
   List<PermissionRequest> _pending = const [];
+
+  /// The session's pending question forms (issue #50), the agent's
+  /// `question` tool.
+  List<QuestionForm> _questions = const [];
+
+  /// The question form whose answer (or dismissal) is in flight.
+  String? _answerBusyId;
 
   /// True until the initial load (endpoints 5, 6, 8) settles.
   bool _loading = true;
@@ -283,6 +292,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         widget.client.getDetail(widget.sessionId),
         widget.client.getMessages(widget.sessionId),
         widget.client.getPermissions(widget.sessionId),
+        widget.client.getQuestions(widget.sessionId),
       ]);
       if (!mounted) return;
       // The fetched history is authoritative: drop the streamed leftovers.
@@ -294,6 +304,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
         _pending = results[2] as List<PermissionRequest>;
+        _questions = results[3] as List<QuestionForm>;
         _loading = false;
         _compacting = false;
         _seedLiveMessages();
@@ -424,17 +435,30 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       case 'permission.replied':
         _refreshPermissions();
         break;
+      // The agent's `question` tool (issue #50): the form appears, is
+      // answered, or is dismissed. The `form.created` payload nests the
+      // session under `data.form` (matched in [_forSession]).
+      case 'form.created':
+      case 'form.replied':
+      case 'form.cancelled':
+        _refreshQuestions();
+        break;
     }
   }
 
   /// True when [event] belongs to this session: the durable aggregate id, or
   /// the payload's `sessionID` when the event carries no durable position.
+  /// `form.created` nests the session under `data.form` (the form object),
+  /// so that shape is matched too.
   bool _forSession(BridgeEvent event) {
     final durable = event.durable;
     if (durable != null) {
       return durable.aggregateID == widget.sessionId;
     }
-    return event.data['sessionID'] == widget.sessionId;
+    if (event.data['sessionID'] == widget.sessionId) return true;
+    final form = event.data['form'];
+    return form is Map<String, Object?> &&
+        form['sessionID'] == widget.sessionId;
   }
 
   /// A `llama.speed` payload moves the header's prefill/decode throughput.
@@ -685,6 +709,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     final toolId = data['id'] is String ? data['id'] as String : null;
     if (toolId == null || !mounted) return;
     final servicePatch = _patchFromState(data);
+    final answers = _answersFromState(data);
     setState(
       () => _updateToolCard(
         toolId,
@@ -694,6 +719,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           patch:
               servicePatch ??
               (tool.name == 'write' ? ToolCall.writePatch(tool.input) : null),
+          answers: answers,
         ),
       ),
     );
@@ -712,6 +738,17 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       }
     }
     return null;
+  }
+
+  /// The answers the user gave the agent's `question` tool (issue #50), from
+  /// a tool-state payload — the success event's `data` and the history's tool
+  /// `state` both carry `metadata.answers` — so the live card settles on the
+  /// same question/answer lines the reopened history shows.
+  static List<List<String>>? _answersFromState(Map<String, Object?> state) {
+    final metadata = state['metadata'];
+    return metadata is Map<String, Object?>
+        ? ToolCall.answersFrom(metadata['answers'])
+        : null;
   }
 
   /// The tool failed.
@@ -818,8 +855,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _setMessageAt(index, _rebuildMessage(message, tools: tools));
   }
 
-  /// A [ToolCall] copy with [name], [status], [input], [error], and [patch]
-  /// replaced.
+  /// A [ToolCall] copy with [name], [status], [input], [error], [patch], and
+  /// [answers] replaced.
   ToolCall _rebuildTool(
     ToolCall tool, {
     String? name,
@@ -827,6 +864,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     Object? input,
     String? error,
     String? patch,
+    List<List<String>>? answers,
   }) => ToolCall(
     id: tool.id,
     name: name ?? tool.name,
@@ -834,6 +872,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     input: input ?? tool.input,
     error: error ?? tool.error,
     patch: patch ?? tool.patch,
+    answers: answers ?? tool.answers,
   );
 
   /// The turn boundary just ended (or started): re-fetch the service's
@@ -848,6 +887,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         widget.client.getDetail(widget.sessionId),
         widget.client.getMessages(widget.sessionId),
         widget.client.getPermissions(widget.sessionId),
+        widget.client.getQuestions(widget.sessionId),
       ]);
       if (!mounted) return;
       // The fetched history is authoritative: drop the streamed leftovers.
@@ -859,6 +899,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _detail = results.first as SessionDetail;
         _messages = results[1] as List<SessionMessage>;
         _pending = results[2] as List<PermissionRequest>;
+        _questions = results[3] as List<QuestionForm>;
         _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
@@ -881,6 +922,18 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       final pending = await widget.client.getPermissions(widget.sessionId);
       if (!mounted) return;
       setState(() => _pending = pending);
+    } on SessionsClientError {
+      // Keep the last pending list on screen.
+    }
+  }
+
+  /// Re-fetches the pending question forms (issue #50); a transient failure
+  /// keeps the last list on screen.
+  Future<void> _refreshQuestions() async {
+    try {
+      final questions = await widget.client.getQuestions(widget.sessionId);
+      if (!mounted) return;
+      setState(() => _questions = questions);
     } on SessionsClientError {
       // Keep the last pending list on screen.
     }
@@ -1034,6 +1087,54 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       if (mounted) _snackBar('Could not reply to the permission request.');
     } finally {
       if (mounted) setState(() => _replyBusyId = null);
+    }
+  }
+
+  /// Submits the answers to a pending question form (issue #50) and
+  /// re-fetches the pending list: the agent continues once the service
+  /// records the reply.
+  Future<void> _submitAnswers(
+    QuestionForm form,
+    List<List<String>> answers,
+  ) async {
+    if (_answerBusyId != null) return;
+    setState(() => _answerBusyId = form.id);
+    try {
+      await widget.client.answerQuestion(widget.sessionId, form.id, answers);
+      await _refreshQuestions();
+    } on SessionsClientError catch (e) {
+      if (mounted) {
+        _snackBar(
+          'Could not submit the answer '
+          '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+        );
+      }
+    } catch (_) {
+      if (mounted) _snackBar('Could not submit the answer.');
+    } finally {
+      if (mounted) setState(() => _answerBusyId = null);
+    }
+  }
+
+  /// Dismisses a pending question form (issue #50): the agent continues
+  /// without an answer.
+  Future<void> _dismissQuestion(QuestionForm form) async {
+    if (_answerBusyId != null) return;
+    setState(() => _answerBusyId = form.id);
+    try {
+      await widget.client.dismissQuestion(widget.sessionId, form.id);
+      await _refreshQuestions();
+    } on SessionsClientError catch (e) {
+      if (mounted) {
+        _snackBar(
+          'Could not dismiss the question '
+          '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+        );
+      }
+    } catch (_) {
+      if (mounted) _snackBar('Could not dismiss the question.');
+    } finally {
+      if (mounted) setState(() => _answerBusyId = null);
     }
   }
 
@@ -1640,6 +1741,24 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                                       ),
                                     ),
                                   ),
+                                // The pending question forms (issue #50) float over the
+                                // list, just above the prompt bar — like the TUI
+                                // prompts above the input, so the header and the cost
+                                // bar never shift. The list is lazy, so the panel
+                                // scrolls when a long form is taller than the room.
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  child: SingleChildScrollView(
+                                    child: QuestionPanel(
+                                      pending: _questions,
+                                      onSubmit: _submitAnswers,
+                                      onDismiss: _dismissQuestion,
+                                      busyId: _answerBusyId,
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -2315,9 +2434,37 @@ class _ToolCard extends StatelessWidget {
     return null;
   }
 
+  /// The agent's `question` tool (issue #50), rendered TUI-style instead of
+  /// as raw JSON: each question's text, with the answer the user gave below
+  /// it (the tool state's `metadata.answers`, in form order). `null` while
+  /// the input is still streaming (a partial JSON string, shown raw like any
+  /// other input).
+  List<({String question, List<String>? answers})>? get _questions {
+    final input = tool.input;
+    if (input is! Map<String, Object?>) return null;
+    final list = input['questions'];
+    if (list is! List) return null;
+    final answers = tool.answers;
+    final lines = <({String question, List<String>? answers})>[];
+    for (var i = 0; i < list.length; i++) {
+      final item = list[i];
+      final question =
+          item is Map<String, Object?> && item['question'] is String
+          ? item['question'] as String
+          : null;
+      if (question == null) continue;
+      lines.add((
+        question: question,
+        answers: answers != null && i < answers.length ? answers[i] : null,
+      ));
+    }
+    return lines.isEmpty ? null : lines;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final questions = _questions;
     final (icon, iconColor) = switch (tool.status) {
       'streaming' || 'running' => (Icons.pending, Colors.orange),
       'completed' => (Icons.check_circle, Colors.green),
@@ -2369,7 +2516,37 @@ class _ToolCard extends StatelessWidget {
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: DiffView(patch: tool.patch!),
             ),
-          ] else if (_inputText.isNotEmpty)
+          ] else if (questions != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < questions.length; i++) ...[
+                    Text(
+                      questions[i].question,
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
+                    if (questions[i].answers != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2, left: 8),
+                        child: Text(
+                          questions[i].answers!.isEmpty
+                              ? '—'
+                              : questions[i].answers!.join(', '),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            color: scheme.outline,
+                          ),
+                        ),
+                      ),
+                    if (i + 1 < questions.length) const SizedBox(height: 8),
+                  ],
+                ],
+              ),
+            )
+          else if (_inputText.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: Text(

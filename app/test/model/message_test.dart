@@ -17,6 +17,7 @@ void main() {
         'input': {'command': 'ls -la'},
         'error': null,
         'patch': null,
+        'answers': null,
       });
       final back = ToolCall.fromJson(tc.toJson());
       expect(back.id, 'call_1');
@@ -35,11 +36,53 @@ void main() {
         'input': null,
         'error': null,
         'patch': null,
+        'answers': null,
       });
       final back = ToolCall.fromJson(tc.toJson());
       expect(back.input, isNull);
       expect(back.error, isNull);
       expect(back.patch, isNull);
+      expect(back.answers, isNull);
+    });
+
+    test('the question answers round-trip and compare by content', () {
+      const tc = ToolCall(
+        id: 'call_q',
+        name: 'question',
+        status: 'completed',
+        input: {
+          'questions': [
+            {'question': 'Ship it?'},
+            {'question': 'Which environment?'},
+          ],
+        },
+        answers: [
+          ['Yes'],
+          ['Staging'],
+        ],
+      );
+      final back = ToolCall.fromJson(tc.toJson());
+      expect(back.answers, [
+        ['Yes'],
+        ['Staging'],
+      ]);
+      expect(back, tc);
+    });
+
+    test('answersFrom parses the service shape and ignores other values', () {
+      expect(
+        ToolCall.answersFrom([
+          ['Yes'],
+          ['A', 'B'],
+        ]),
+        [
+          ['Yes'],
+          ['A', 'B'],
+        ],
+      );
+      expect(ToolCall.answersFrom(null), isNull);
+      expect(ToolCall.answersFrom('nope'), isNull);
+      expect(ToolCall.answersFrom([]), isNull);
     });
 
     test('the file patch round-trips', () {
@@ -139,6 +182,7 @@ void main() {
             'input': {'command': 'ls'},
             'error': null,
             'patch': null,
+            'answers': null,
           },
         ],
       });

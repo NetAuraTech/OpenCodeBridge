@@ -4,6 +4,7 @@ import 'dart:io';
 import '../../model/command.dart';
 import '../../model/message.dart';
 import '../../model/permission.dart';
+import '../../model/question.dart';
 import '../../model/session_detail.dart';
 import 'opencode_service.dart';
 import 'paths.dart';
@@ -365,6 +366,155 @@ class OpencodeHttpService implements OpencodeService {
       ),
       jsonEncode({'decision': reply.wire}),
     );
+  }
+
+  // The structured view's question forms (issue #50): the agent's `question`
+  // tool surfaces its questions as service forms with
+  // `metadata.kind == "question"`. The bridge filters those forms, hides the
+  // service's internal `q0`/`q1` field keys, and rebuilds them on answer —
+  // the app only ever sees per-question answers in the form's field order.
+
+  /// The session's pending question forms: its `GET /api/session/{id}/form`,
+  /// filtered to `metadata.kind == "question"` and flattened to the
+  /// [QuestionForm] contract (no `q0`/`q1` keys).
+  @override
+  Future<List<QuestionForm>> pendingQuestions(String id) async {
+    final forms = await _questionFormsRaw(id);
+    return [for (final form in forms) _questionFormFrom(form)];
+  }
+
+  /// Submit the answers to a pending question form [formID]. [answers] has one
+  /// entry per question, in the form's field order; the bridge re-fetches the
+  /// form to recover the field order and types, then rebuilds the service's
+  /// `q0`/`q1` `answer` record (the keys never cross the bridge).
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {
+    final forms = await _questionFormsRaw(id);
+    Map<String, Object?>? form;
+    for (final candidate in forms) {
+      if (candidate['id'] == formID) {
+        form = candidate;
+        break;
+      }
+    }
+    if (form == null) {
+      throw const OpencodeServiceError(404, 'unknown question form');
+    }
+    final fields = form['fields'] is List
+        ? [
+            for (final f in form['fields'] as List)
+              if (f is Map<String, Object?>) f,
+          ]
+        : const <Map<String, Object?>>[];
+    await _post(
+      _base.replace(
+        path:
+            '/api/session/${Uri.encodeComponent(id)}'
+            '/form/${Uri.encodeComponent(formID)}/reply',
+      ),
+      jsonEncode({'answer': _answerRecord(fields, answers)}),
+    );
+  }
+
+  /// Dismiss a pending question form [formID] (the agent continues without an
+  /// answer): the service's `DELETE /api/session/{id}/form/{formID}`.
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {
+    await _deleteVoid(
+      _base.replace(
+        path:
+            '/api/session/${Uri.encodeComponent(id)}'
+            '/form/${Uri.encodeComponent(formID)}',
+      ),
+    );
+  }
+
+  /// The raw pending question-form maps (the service's `GET /form`, its
+  /// `data` envelope, kept to `metadata.kind == "question"`), in service
+  /// order.
+  Future<List<Map<String, Object?>>> _questionFormsRaw(String id) async {
+    final body = await _get(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/form'),
+    );
+    final list = _dataList(jsonDecode(body));
+    final forms = <Map<String, Object?>>[];
+    for (final item in list) {
+      if (item is! Map<String, Object?>) continue;
+      final metadata = item['metadata'];
+      if (metadata is Map<String, Object?> && metadata['kind'] == 'question') {
+        forms.add(item);
+      }
+    }
+    return forms;
+  }
+
+  /// One question form (the service's form map) to its [QuestionForm]
+  /// contract: the questions are the form's `fields`, in field order.
+  static QuestionForm _questionFormFrom(Map<String, Object?> form) {
+    final rawFields = form['fields'];
+    final fields = <Map<String, Object?>>[
+      if (rawFields is List)
+        for (final f in rawFields)
+          if (f is Map<String, Object?>) f,
+    ];
+    return QuestionForm(
+      id: form['id'] as String? ?? '',
+      title: form['title'] is String && (form['title'] as String).isNotEmpty
+          ? form['title'] as String
+          : 'Questions',
+      questions: [for (final f in fields) _questionFrom(f)],
+    );
+  }
+
+  /// One form field (the service's field map) to its [Question] contract, with
+  /// the internal `q${i}` key hidden.
+  static Question _questionFrom(Map<String, Object?> field) {
+    final rawOptions = field['options'];
+    final options = <QuestionOption>[
+      if (rawOptions is List)
+        for (final o in rawOptions)
+          if (o is Map<String, Object?>)
+            QuestionOption(
+              label: o['label'] is String ? o['label'] as String : '',
+              description: o['description'] is String
+                  ? o['description'] as String
+                  : null,
+            ),
+    ];
+    return Question(
+      header: field['title'] as String? ?? '',
+      question: field['description'] as String? ?? '',
+      multiple: field['type'] == 'multiselect',
+      custom: field['custom'] == true,
+      options: options,
+    );
+  }
+
+  /// The service's `answer` record for a form: [answers] (one entry per
+  /// question, in the form's field order) mapped back onto the form's `q0`/
+  /// `q1` field keys. A multiselect field takes its entry's list; a string
+  /// field takes the first selected label, or `''` when the question left no
+  /// option selected. A missing entry is treated as an empty selection.
+  static Map<String, Object?> _answerRecord(
+    List<Map<String, Object?>> fields,
+    List<List<String>> answers,
+  ) {
+    final record = <String, Object?>{};
+    for (var i = 0; i < fields.length; i++) {
+      final field = fields[i];
+      final key = field['key'] is String ? field['key'] as String : 'q$i';
+      final selected = i < answers.length ? answers[i] : const <String>[];
+      if (field['type'] == 'multiselect') {
+        record[key] = [for (final label in selected) label];
+      } else {
+        record[key] = selected.isNotEmpty ? selected.first : '';
+      }
+    }
+    return record;
   }
 
   // The structured view's `/` command menu (issue #46): the service-backed
@@ -864,6 +1014,7 @@ class OpencodeHttpService implements OpencodeService {
       }
     }
     final name = part['name'] as String? ?? '';
+    final metadata = state['metadata'];
     return ToolCall(
       id: part['id'] is String ? part['id'] as String : null,
       name: name,
@@ -871,6 +1022,9 @@ class OpencodeHttpService implements OpencodeService {
       input: state['input'],
       error: error,
       patch: _patchFrom(state, name: name),
+      answers: metadata is Map<String, Object?>
+          ? ToolCall.answersFrom(metadata['answers'])
+          : null,
     );
   }
 

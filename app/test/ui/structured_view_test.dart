@@ -8,6 +8,7 @@ import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:opencodebridge/ui/structured_view.dart';
@@ -129,6 +130,7 @@ class _FakeClient extends SessionsClient {
     this.permissionLists = const [],
     this.promptError,
     this.promptGate,
+    this.questionLists = const [],
     this.commands = const [],
     this.models = const [],
     this.runCommandError,
@@ -291,6 +293,46 @@ class _FakeClient extends SessionsClient {
     final error = replyError;
     if (error is Object) throw error;
     replies.add((id, requestID, reply));
+  }
+
+  /// Per-call pending question forms (issue #50): the n-th call returns the
+  /// n-th list, the last repeats.
+  final List<List<QuestionForm>> questionLists;
+
+  int questionCalls = 0;
+
+  final List<(String, String, List<List<String>>)> questionAnswers = [];
+
+  final List<(String, String)> questionDismissals = [];
+
+  Object? questionError;
+
+  @override
+  Future<List<QuestionForm>> getQuestions(String id) async {
+    questionCalls++;
+    if (questionLists.isEmpty) return const [];
+    final index = questionCalls - 1 < questionLists.length
+        ? questionCalls - 1
+        : questionLists.length - 1;
+    return questionLists[index];
+  }
+
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {
+    final error = questionError;
+    if (error is Object) throw error;
+    questionAnswers.add((id, formID, answers));
+  }
+
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {
+    final error = questionError;
+    if (error is Object) throw error;
+    questionDismissals.add((id, formID));
   }
 }
 
@@ -663,6 +705,80 @@ void main() {
       expect(added.style?.color, const Color(0xFF1E725C));
     });
 
+    testWidgets(
+      'a question tool renders each question with the answer below it '
+      '(issue #50)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              id: 'm1',
+              role: 'assistant',
+              tools: [
+                ToolCall(
+                  id: 't1',
+                  name: 'question',
+                  status: 'completed',
+                  input: {
+                    'questions': [
+                      {'question': 'Ship it?'},
+                      {'question': 'Which environment?'},
+                    ],
+                  },
+                  answers: [
+                    ['Yes'],
+                    ['Staging'],
+                  ],
+                ),
+              ],
+            ),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        expect(find.text('question · completed'), findsOneWidget);
+        // Each question's text with the user's answer below it — not the
+        // input's raw JSON.
+        expect(find.text('Ship it?'), findsOneWidget);
+        expect(find.text('Yes'), findsOneWidget);
+        expect(find.text('Which environment?'), findsOneWidget);
+        expect(find.text('Staging'), findsOneWidget);
+        expect(find.textContaining('"questions"'), findsNothing);
+      },
+    );
+
+    testWidgets('a running question shows its questions before the answers', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(
+            id: 'm1',
+            role: 'assistant',
+            tools: [
+              ToolCall(
+                id: 't1',
+                name: 'question',
+                status: 'running',
+                input: {
+                  'questions': [
+                    {'question': 'Ship it?'},
+                  ],
+                },
+              ),
+            ],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(find.text('question · running'), findsOneWidget);
+      expect(find.text('Ship it?'), findsOneWidget);
+      expect(find.text('—'), findsNothing);
+    });
+
     testWidgets('sends the prompt, posts only the text, and clears the input', (
       tester,
     ) async {
@@ -773,6 +889,71 @@ void main() {
           ('ses_1', 'per_1', PermissionReply.once),
         ]);
         expect(find.byKey(const ValueKey('permission-banner')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'form.created shows the question panel; answering records it and '
+      'clears the panel',
+      (tester) async {
+        const form = QuestionForm(
+          id: 'form_1',
+          title: 'Questions',
+          questions: [
+            Question(
+              header: 'Confirm',
+              question: 'Proceed with the deployment?',
+              multiple: false,
+              custom: false,
+              options: [
+                QuestionOption(label: 'Yes'),
+                QuestionOption(label: 'No'),
+              ],
+            ),
+          ],
+        );
+        final client = _FakeClient(
+          details: const [_detail0],
+          questionLists: const [
+            <QuestionForm>[],
+            <QuestionForm>[form],
+            <QuestionForm>[],
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        expect(find.byKey(const ValueKey('question-banner')), findsNothing);
+
+        // The `form.created` payload nests the session under `data.form`
+        // (no top-level `sessionID`): the view still matches it.
+        events.add(
+          _event(
+            'form.created',
+            data: {
+              'form': {'id': 'form_1', 'sessionID': 'ses_1'},
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.byKey(const ValueKey('question-banner')), findsOneWidget);
+        expect(find.text('Proceed with the deployment?'), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('question-option-form_1-0-0')),
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('question-submit-form_1')));
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.questionAnswers, hasLength(1));
+        final (sid, fid, answers) = client.questionAnswers.single;
+        expect(sid, 'ses_1');
+        expect(fid, 'form_1');
+        expect(answers.single, ['Yes']);
+        expect(find.byKey(const ValueKey('question-banner')), findsNothing);
       },
     );
 
@@ -1138,6 +1319,65 @@ void main() {
       expect(find.text('shell · completed'), findsOneWidget);
       expect(client.messageCalls, 1);
     });
+
+    testWidgets(
+      'a question tool settles on the answers from its success event',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        final events = await _pump(tester, client: client);
+
+        events.add(
+          _event(
+            'session.tool.input.started',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'q1',
+              'name': 'question',
+            },
+          ),
+        );
+        events.add(
+          _event(
+            'session.tool.input.ended',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'q1',
+              'text': '{"questions":[{"question":"Ship it?"}]}',
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('question · running'), findsOneWidget);
+        expect(find.text('Ship it?'), findsOneWidget);
+
+        events.add(
+          _event(
+            'session.tool.success',
+            aggregateID: 'ses_1',
+            data: {
+              'assistantMessageID': 'msg_1',
+              'id': 'q1',
+              // The success payload carries the tool state: the answers the
+              // user gave, one list per question in form order.
+              'metadata': {
+                'answers': [
+                  ['Yes'],
+                ],
+              },
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('question · completed'), findsOneWidget);
+        expect(find.text('Yes'), findsOneWidget);
+      },
+    );
 
     testWidgets('a live write renders its content as a diff', (tester) async {
       final client = _FakeClient(details: const [_detail0]);

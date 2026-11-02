@@ -10,6 +10,7 @@ import 'package:opencodebridge/model/container.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/notify/deep_link.dart';
@@ -61,6 +62,19 @@ class _FakeSessionsClient extends SessionsClient {
 
   @override
   Future<List<PermissionRequest>> getPermissions(String id) async => const [];
+
+  @override
+  Future<List<QuestionForm>> getQuestions(String id) async => const [];
+
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {}
+
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {}
 }
 
 class _FakeDockerClient extends DockerClient {
