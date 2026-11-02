@@ -1292,6 +1292,16 @@ void main() {
       );
       final textBlock = tester.widget<Text>(find.text('done'));
       expect(textBlock.style, isNull);
+
+      // The text block sits a little further below the dimmed reasoning
+      // than it would without one, so the two read as separate blocks.
+      final textPaddings = tester.widgetList<Padding>(
+        find.ancestor(of: find.text('done'), matching: find.byType(Padding)),
+      );
+      expect(
+        textPaddings.map((p) => p.padding),
+        contains(const EdgeInsets.only(top: 12)),
+      );
     });
 
     testWidgets(

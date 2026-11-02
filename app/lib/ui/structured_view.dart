@@ -2207,7 +2207,12 @@ class _MessagePane extends StatelessWidget {
                     child: _Markdown(data: message.text!),
                   )
                 : Padding(
-                    padding: const EdgeInsets.only(top: 2),
+                    // More room below the dimmed thinking text, so the
+                    // response reads as the model's answer and not a
+                    // continuation of the thinking.
+                    padding: EdgeInsets.only(
+                      top: message.reasoning != null ? 12 : 2,
+                    ),
                     child: _Markdown(data: message.text!),
                   ),
           for (final tool in message.tools) _ToolCard(tool: tool),
