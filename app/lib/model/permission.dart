@@ -22,9 +22,8 @@ enum PermissionReply {
   /// The wire value on the bridge contract.
   final String wire;
 
-  /// Parse the bridge contract's `reply` value. Unlike the tolerant
-  /// [SessionClassification.fromWire] (which reads service data), this reads a
-  /// user decision: an unknown value is a client error, so it throws
+  /// Parse the bridge contract's `reply` value. This reads a user decision,
+  /// not service data: an unknown value is a client error, so it throws
   /// [ArgumentError] for the bridge to map to a 400 rather than silently
   /// auto-approving.
   static PermissionReply fromWire(Object? value) => switch (value) {

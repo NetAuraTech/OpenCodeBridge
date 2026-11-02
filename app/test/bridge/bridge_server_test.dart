@@ -15,7 +15,6 @@ import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
-import 'package:opencodebridge/bridge/sessions/session_store.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
@@ -128,33 +127,22 @@ void main() {
   group('BridgeServer sessions', () {
     late BridgeServer server;
     late Uri base;
-    late Directory dir;
     late _FakeService service;
-    late SessionStore store;
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-sessions',
-      );
       service = _FakeService();
-      store = await SessionStore.load(dir: dir);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service, store: store),
+        sessions: SessionsBackend(service: service),
       );
       base = server.baseUri;
     });
 
     tearDown(() async {
       await server.stop();
-      await dir.delete(recursive: true);
     });
 
-    test('GET /api/sessions returns the merged rows, newest first', () async {
-      // ses_two is persisted but not live -> app-launched-closed.
-      store.add('ses_two');
-      await store.save();
-
+    test('GET /api/sessions returns the rows, newest first', () async {
       final (status, body) = await _get(base, 'api/sessions');
       expect(status, 200);
       final rows = (jsonDecode(body) as List).cast<Map<String, Object?>>();
@@ -166,25 +154,16 @@ void main() {
         'created': 300,
         'location': '/two',
         'active': false,
-        'classification': 'app-launched-closed',
       });
       expect(rows[1]['active'], true);
-      expect(rows[1]['classification'], 'external');
     });
 
-    test(
-      'DELETE /api/sessions/{id} answers 204 and removes the record',
-      () async {
-        store.add('ses_one');
-        await store.save();
-
-        final (status, body) = await _delete(base, 'api/sessions/ses_one');
-        expect(status, 204);
-        expect(body, isEmpty);
-        expect(service.deleted, ['ses_one']);
-        expect((await SessionStore.load(dir: dir)).has('ses_one'), isFalse);
-      },
-    );
+    test('DELETE /api/sessions/{id} answers 204', () async {
+      final (status, body) = await _delete(base, 'api/sessions/ses_one');
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.deleted, ['ses_one']);
+    });
 
     test('DELETE of a session unknown to the service is 404', () async {
       final (status, body) = await _delete(base, 'api/sessions/ses_missing');
@@ -193,14 +172,10 @@ void main() {
       expect(service.deleted, isEmpty);
     });
 
-    test('DELETE failing on the service is 502 and keeps the record', () async {
-      store.add('ses_boom');
-      await store.save();
-
+    test('DELETE failing on the service is 502', () async {
       final (status, body) = await _delete(base, 'api/sessions/ses_boom');
       expect(status, 502);
       expect(jsonDecode(body), {'error': 'opencode_unreachable'});
-      expect((await SessionStore.load(dir: dir)).has('ses_boom'), isTrue);
     });
 
     test('GET /api/sessions is 502 when the service is down', () async {
@@ -219,9 +194,7 @@ void main() {
   group('BridgeServer structured view', () {
     late BridgeServer server;
     late Uri base;
-    late Directory dir;
     late _FakeService service;
-    late SessionStore store;
 
     const detail = SessionDetail(
       id: 'ses_one',
@@ -250,25 +223,20 @@ void main() {
     ];
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-structured',
-      );
       service = _FakeService(
         detail: detail,
         messages: messages,
         permissions: permissions,
       );
-      store = await SessionStore.load(dir: dir);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service, store: store),
+        sessions: SessionsBackend(service: service),
       );
       base = server.baseUri;
     });
 
     tearDown(() async {
       await server.stop();
-      await dir.delete(recursive: true);
     });
 
     test('GET /api/sessions/{id} returns the detail', () async {
@@ -481,9 +449,7 @@ void main() {
   group('BridgeServer question forms (issue #50)', () {
     late BridgeServer server;
     late Uri base;
-    late Directory dir;
     late _FakeService service;
-    late SessionStore store;
 
     const detail = SessionDetail(
       id: 'ses_one',
@@ -529,21 +495,16 @@ void main() {
     ];
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-questions',
-      );
       service = _FakeService(detail: detail, questions: questions);
-      store = await SessionStore.load(dir: dir);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service, store: store),
+        sessions: SessionsBackend(service: service),
       );
       base = server.baseUri;
     });
 
     tearDown(() async {
       await server.stop();
-      await dir.delete(recursive: true);
     });
 
     test(
@@ -717,9 +678,7 @@ void main() {
   group('BridgeServer `/` command menu (issue #46)', () {
     late BridgeServer server;
     late Uri base;
-    late Directory dir;
     late _FakeService service;
-    late SessionStore store;
 
     const detail = SessionDetail(
       id: 'ses_one',
@@ -737,21 +696,16 @@ void main() {
     );
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-commands',
-      );
       service = _FakeService(detail: detail);
-      store = await SessionStore.load(dir: dir);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service, store: store),
+        sessions: SessionsBackend(service: service),
       );
       base = server.baseUri;
     });
 
     tearDown(() async {
       await server.stop();
-      await dir.delete(recursive: true);
     });
 
     test(
@@ -1130,21 +1084,17 @@ void main() {
   group('BridgeServer events', () {
     late BridgeServer server;
     late Uri base;
-    late Directory dir;
     late _FakeService service;
-    late SessionStore store;
     late _FakeEventUpstream upstream;
     late EventHub hub;
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-events');
       upstream = _FakeEventUpstream();
       hub = EventHub(service: upstream);
       service = _FakeService();
-      store = await SessionStore.load(dir: dir);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service, store: store),
+        sessions: SessionsBackend(service: service),
         events: hub,
       );
       base = server.baseUri;
@@ -1152,7 +1102,6 @@ void main() {
 
     tearDown(() async {
       await server.stop();
-      await dir.delete(recursive: true);
     });
 
     test('GET /api/events streams opencode events verbatim as SSE', () async {
@@ -1232,8 +1181,6 @@ void main() {
 
     test('a successful DELETE emits a bridge-native session.closed on the '
         'stream', () async {
-      store.add('ses_one');
-      await store.save();
       final tap = await _SseTap.open(base);
       try {
         await _until(() => tap.ready);
@@ -1306,19 +1253,13 @@ void main() {
   group('BridgeServer sessions (create & projects)', () {
     late BridgeServer server;
     late Uri base;
-    late Directory dir;
     late _FakeService service;
-    late SessionStore store;
     late SessionsBackend backend;
     late EventHub hub;
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp(
-        'opencodebridge-srv-sessions',
-      );
       service = _FakeService();
-      store = await SessionStore.load(dir: dir);
-      backend = SessionsBackend(service: service, store: store);
+      backend = SessionsBackend(service: service);
       hub = EventHub(service: _FakeEventUpstream());
       server = await BridgeServer.start(
         port: 0,
@@ -1330,7 +1271,6 @@ void main() {
 
     tearDown(() async {
       await server.stop();
-      await dir.delete(recursive: true);
     });
 
     test('GET /api/projects returns the project list', () async {
@@ -1361,28 +1301,26 @@ void main() {
       }
     });
 
-    test('POST /api/sessions creates the session on the service, persists '
-        'the id, and returns it', () async {
-      final (status, body) = await _postRaw(
-        base,
-        'api/sessions',
-        jsonEncode({'project': 'p1'}),
-      );
+    test(
+      'POST /api/sessions creates the session on the service and returns it',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions',
+          jsonEncode({'project': 'p1'}),
+        );
 
-      expect(status, 201);
-      expect(jsonDecode(body), {
-        'id': 'ses_created',
-        'title': 'created',
-        'project': {'id': 'p1', 'name': 'proj-one'},
-        'created': 400,
-        'location': '/created',
-        'active': false,
-        'classification': 'app-launched-closed',
-      });
-      expect(backend.liveSessionIds, isEmpty);
-      // The persistence "add id" write happened at launch.
-      expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
-    });
+        expect(status, 201);
+        expect(jsonDecode(body), {
+          'id': 'ses_created',
+          'title': 'created',
+          'project': {'id': 'p1', 'name': 'proj-one'},
+          'created': 400,
+          'location': '/created',
+          'active': false,
+        });
+      },
+    );
 
     test('POST /api/sessions with an invalid body is 400', () async {
       for (final raw in <String>['', 'not json', '{}', '{"project": ""}']) {
@@ -1390,7 +1328,6 @@ void main() {
         expect(status, 400, reason: raw);
         expect(jsonDecode(body), {'error': 'invalid_body'});
       }
-      expect(store.ids(), isEmpty);
     });
 
     test('POST /api/sessions for an unknown project is 404', () async {
@@ -1401,7 +1338,6 @@ void main() {
       );
       expect(status, 404);
       expect(jsonDecode(body), {'error': 'not_found'});
-      expect(store.ids(), isEmpty);
     });
 
     test('POST /api/sessions is 502 when the service is down', () async {
@@ -1413,7 +1349,6 @@ void main() {
       );
       expect(status, 502);
       expect(jsonDecode(body), {'error': 'opencode_unreachable'});
-      expect(store.ids(), isEmpty);
     });
   });
 
@@ -1694,7 +1629,6 @@ void main() {
     late BridgeServer server;
     late Uri base;
     late _FakeDockerBridge fake;
-    late SessionStore store;
     late Directory temp;
     late Directory repo;
     late Directory bare;
@@ -1710,7 +1644,6 @@ void main() {
       bare = Directory('${temp.path}/bare');
       await bare.create();
       fake = _FakeDockerBridge();
-      store = await SessionStore.load(dir: temp);
       server = await BridgeServer.start(
         port: 0,
         sessions: SessionsBackend(
@@ -1720,7 +1653,6 @@ void main() {
               OpencodeProject(id: 'p2', name: 'proj-two', canonical: bare.path),
             ],
           ),
-          store: store,
         ),
         docker: fake.backend,
       );
@@ -1812,7 +1744,6 @@ void main() {
           port: 0,
           sessions: SessionsBackend(
             service: _FakeService(overrideProjects: const []),
-            store: store,
           ),
         );
         try {
@@ -1835,7 +1766,6 @@ void main() {
           port: 0,
           sessions: SessionsBackend(
             service: _FakeService(overrideProjects: const []),
-            store: store,
           ),
           docker: fake.backend,
         );
@@ -1938,10 +1868,7 @@ void main() {
       notify = NotifyService(sender: _NotifyFakeSender());
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(
-          service: _FakeService(),
-          store: await SessionStore.load(dir: dir),
-        ),
+        sessions: SessionsBackend(service: _FakeService()),
         notify: notify,
       );
       base = server.baseUri;
@@ -2022,10 +1949,7 @@ void main() {
         // its own).
         final unconfigured = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(
-            service: _FakeService(),
-            store: await SessionStore.load(dir: dir),
-          ),
+          sessions: SessionsBackend(service: _FakeService()),
           notifyCredential: '${dir.path}/no-such-account.json',
         );
         try {
@@ -2110,10 +2034,7 @@ void main() {
       () async {
         final server = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(
-            service: _FakeService(),
-            store: await SessionStore.load(dir: dir),
-          ),
+          sessions: SessionsBackend(service: _FakeService()),
           notifyCredential: accountPath,
           notifySenderFactory: fakeSender,
         );
@@ -2150,10 +2071,7 @@ void main() {
         FirebaseServiceAccount.install(kAccountJson, path: accountPath);
         final server = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(
-            service: _FakeService(),
-            store: await SessionStore.load(dir: dir),
-          ),
+          sessions: SessionsBackend(service: _FakeService()),
           notifyCredential: accountPath,
           notifySenderFactory: fakeSender,
         );

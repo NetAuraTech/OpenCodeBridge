@@ -25,7 +25,6 @@ import 'sessions/backend.dart';
 import 'sessions/opencode_http_service.dart';
 import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
-import 'sessions/session_store.dart';
 import 'tunnel/cloudflared_binary.dart';
 import 'tunnel/cloudflared_config.dart';
 import 'tunnel/tunnel_cli.dart';
@@ -198,8 +197,7 @@ class BridgeServer {
   /// opencode service and Docker as not configured yet.
   /// [sessions], when provided, serves the sessions endpoints (tests);
   /// the default builds a [SessionsBackend] over the shared opencode
-  /// service and `~/.config/opencodebridge/sessions.json` and runs the
-  /// startup orphan reconciliation (spec section 11) against it.
+  /// service.
   /// [events], when provided, serves the unified event stream (14, tests);
   /// the default builds an [EventHub] over the shared opencode event
   /// service (the bridge's single upstream subscription).
@@ -404,23 +402,14 @@ class BridgeServer {
     await _notify?.close();
   }
 
-  /// The default sessions backend: the real shared opencode service plus the
-  /// on-disk persistence, with the startup orphan reconciliation (spec §11).
-  /// Returns `null` when this machine has no shared opencode service (no
-  /// service descriptor), in which case the sessions endpoints report
+  /// The default sessions backend: the real shared opencode service. Returns
+  /// `null` when this machine has no shared opencode service (no service
+  /// descriptor), in which case the sessions endpoints report
   /// `opencode_unavailable`.
   static Future<SessionsBackend?> _defaultSessions() async {
     try {
       final service = await OpencodeHttpService.fromHost();
-      final store = await SessionStore.load();
-      final backend = SessionsBackend(service: service, store: store);
-      try {
-        await backend.reconcile();
-      } catch (_) {
-        // The service is not up yet; orphan records get reconciled at the
-        // next bridge startup.
-      }
-      return backend;
+      return SessionsBackend(service: service);
     } catch (_) {
       return null;
     }
@@ -1747,10 +1736,9 @@ class BridgeServer {
   }
 
   /// Endpoint 2 (spec section 5, fill-in †): create a session in the
-  /// picked project on the shared service and record the launch
-  /// (persistence write #1), returning the session. No terminal window is
-  /// involved: the app opens the session's structured view. A body that is
-  /// not `{"project": "<id>"}` is a 400; a project the service does not
+  /// picked project on the shared service, returning the session. The app
+  /// opens the session's structured view. A body that is not
+  /// `{"project": "<id>"}` is a 400; a project the service does not
   /// have is a 404; a service failure is a 502.
   static Future<void> _createSession(
     HttpRequest request,
