@@ -17,6 +17,7 @@ import '../model/session_detail.dart';
 import '../settings/app_settings.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
+import 'prompt_menu.dart';
 import 'question_panel.dart';
 import 'slash_commands.dart';
 
@@ -209,6 +210,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// custom commands land (fetched when the menu first opens).
   List<SlashCommand> _commands = SlashCommands.catalog;
 
+  /// The prompt bar's menus (issue #56), one per trigger; rebuilt when the
+  /// project's custom commands land (the bar re-filters on the change).
+  late List<PromptMenuDefinition> _menus;
+
   /// The project's custom commands have been requested already (the menu
   /// keeps showing the static catalog when the fetch fails).
   bool _commandsFetched = false;
@@ -221,6 +226,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   void initState() {
     super.initState();
     _title = widget.title;
+    _menus = _buildMenus();
     _scroll.addListener(_onScroll);
     _loadInitial();
     final stream = widget.events;
@@ -1138,8 +1144,46 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
-  /// The `/` menu is open (issue #46): fetch the project's custom commands
-  /// (the service's `GET /api/command`) once and merge them into the menu.
+  /// The prompt bar's menus (issue #56), one per trigger: the anchored `/`
+  /// command menu — its row provider filters [_commands] (the static catalog
+  /// until the project's custom commands land) by the typed token — and the
+  /// inline `@` mention menu, whose row provider yields no rows until the
+  /// mention menu lands (the TUI's skills + files).
+  List<PromptMenuDefinition> _buildMenus() {
+    return [
+      PromptMenuDefinition(
+        trigger: '/',
+        anchoring: MenuAnchoring.anchored,
+        emptyLabel: 'No matching command',
+        rows: (token) => [
+          for (final command in _commands)
+            if (command.matches(token)) _commandRow(command),
+        ],
+      ),
+      PromptMenuDefinition(
+        trigger: '@',
+        anchoring: MenuAnchoring.inline,
+        emptyLabel: 'No matching mention',
+        rows: (token) => const <PromptMenuRow>[],
+      ),
+    ];
+  }
+
+  /// One `/` menu row (issue #56): the command's display fields, and its
+  /// activation — the bar clears the field, then the command runs with the
+  /// typed argument.
+  PromptMenuRow _commandRow(SlashCommand command) => PromptMenuRow(
+    name: command.name,
+    label: '/${command.name}',
+    subtitle: command.subtitle == command.name ? null : command.subtitle,
+    hint: command.takesArg && command.argHint != null ? command.argHint : null,
+    badge: command.family == CommandFamily.custom ? 'custom' : null,
+    takesArg: command.takesArg,
+    onActivate: (argument) => _runCommand(command, argument),
+  );
+
+  /// A menu is open (issue #56): fetch the project's custom commands (the
+  /// service's `GET /api/command`) once and merge them into the `/` menu.
   /// A failed fetch keeps the static catalog on screen.
   void _onMenuOpened() {
     if (_commandsFetched) return;
@@ -1148,7 +1192,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         .listCommands(widget.sessionId)
         .then((commands) {
           if (mounted) {
-            setState(() => _commands = SlashCommands.withCustom(commands));
+            setState(() {
+              _commands = SlashCommands.withCustom(commands);
+              _menus = _buildMenus();
+            });
           }
         })
         .catchError((Object _) {});
@@ -1767,8 +1814,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                               controller: _prompt,
                               busy: _promptBusy || _commandBusy,
                               onSend: _sendPrompt,
-                              commands: _commands,
-                              onCommand: _runCommand,
+                              menus: _menus,
                               onMenuOpened: _onMenuOpened,
                               onToggleMode: _toggleMode,
                               onCycleVariant: _cycleVariant,
@@ -2624,15 +2670,16 @@ class _ToolCard extends StatelessWidget {
 /// disabled and the send button is only busy while a send is in flight.
 /// A mid-turn prompt is queued by the service (`delivery: steer`).
 ///
-/// The `/` command menu (issue #46): typing `/` at the start of the input
-/// opens the command menu above the field, filtered live as the user types
-/// (matching command names and their aliases, exactly like the TUI). Enter
-/// runs the selected row; a command that takes an argument (`takesArg`)
-/// takes the text typed after the name and keeps the menu open until the
-/// argument is typed (the TUI behavior). A prefix that matches no command
-/// stays put on Enter — it is neither run nor sent.
+/// The prompt menus (issue #56): the bar hosts one menu per [menus]
+/// definition, and the chrome is shared across triggers. The `/` command
+/// menu (issue #46) opens when the input starts with `/`, filtered live as
+/// the user types (matching command names and their aliases, exactly like
+/// the TUI). Enter runs the selected row; a row that takes an argument
+/// (`takesArg`) takes the text typed after the name and keeps the menu open
+/// until the argument is typed (the TUI behavior). A token that matches no
+/// row stays put on Enter — it is neither run nor sent.
 ///
-/// With the menu closed, two keys take on the TUI's mode shortcuts: Tab
+/// With no menu open, two keys take on the TUI's mode shortcuts: Tab
 /// toggles the session's mode (`build`/`plan`, the TUI's `agent.cycle`)
 /// and Ctrl+T cycles the current model's variant (the TUI's
 /// `variant.cycle`); both are reported through the screen's handlers.
@@ -2641,8 +2688,7 @@ class _PromptBar extends StatefulWidget {
     required this.controller,
     required this.busy,
     required this.onSend,
-    required this.commands,
-    required this.onCommand,
+    required this.menus,
     required this.onMenuOpened,
     required this.onToggleMode,
     required this.onCycleVariant,
@@ -2654,15 +2700,11 @@ class _PromptBar extends StatefulWidget {
 
   final Future<void> Function() onSend;
 
-  /// The full command menu (built-in + the project's custom commands), in
-  /// menu order; the bar filters it by the typed command token.
-  final List<SlashCommand> commands;
+  /// The menus the bar hosts, one per trigger; the first definition whose
+  /// trigger is active owns the menu.
+  final List<PromptMenuDefinition> menus;
 
-  /// Runs [command] with [argument] (the text typed after the command name,
-  /// trimmed). The bar clears the field before calling it.
-  final Future<void> Function(SlashCommand command, String argument) onCommand;
-
-  /// The menu is open; the screen may need to fetch the project's custom
+  /// A menu is open; the screen may need to fetch the project's custom
   /// commands.
   final VoidCallback onMenuOpened;
 
@@ -2678,12 +2720,14 @@ class _PromptBar extends StatefulWidget {
 }
 
 class _PromptBarState extends State<_PromptBar> {
-  /// The menu is open while the input starts with `/` (the TUI trigger).
-  bool get _menuOpen => widget.controller.text.startsWith('/');
+  /// The definition of the menu that is open, or `null` when no menu is.
+  PromptMenuDefinition? _active;
 
-  /// The filtered menu rows: the [widget.commands] matching the typed
-  /// command token (name or alias prefix).
-  List<SlashCommand> _matches = const [];
+  bool get _menuOpen => _active != null;
+
+  /// The open menu's rows: the active definition's rows for the typed
+  /// filter token.
+  List<PromptMenuRow> _matches = const [];
 
   /// The selected row in [_matches] (`-1` when there is no match).
   int _selected = -1;
@@ -2701,10 +2745,10 @@ class _PromptBarState extends State<_PromptBar> {
   @override
   void didUpdateWidget(covariant _PromptBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // The custom commands landed while the menu is open: re-filter (the
-    // synced token is invalidated so the re-filter re-selects the top row,
-    // as a re-typed token would).
-    if (oldWidget.commands != widget.commands && _menuOpen) {
+    // The row provider's data landed while the menu is open (the project's
+    // custom commands): re-filter (the synced token is invalidated so the
+    // re-filter re-selects the top row, as a re-typed token would).
+    if (oldWidget.menus != widget.menus && _menuOpen) {
       _syncedToken = null;
       _syncMenu();
     }
@@ -2717,35 +2761,72 @@ class _PromptBarState extends State<_PromptBar> {
     super.dispose();
   }
 
-  /// The command token [_syncMenu] last filtered; a selection-only change
+  /// The filter token [_syncMenu] last filtered; a selection-only change
   /// (the cursor moved) re-runs [_syncMenu] without re-selecting the top
   /// row, so the menu's selection survives cursor moves.
   String? _syncedToken;
 
-  /// Re-filters the menu from the field's text. The command token is the
-  /// text after the leading slash up to the first space (the TUI's live
-  /// filter); everything after the space is the command's argument. A
-  /// re-typed token re-selects the top row (the TUI does the same); a
-  /// selection-only change (the cursor moved) keeps the current row.
+  /// The filter token [definition] owns for the field's [text] and
+  /// [selection], or `null` when its trigger is not active.
+  String? _filterToken(
+    PromptMenuDefinition definition,
+    String text,
+    TextSelection selection,
+  ) {
+    final trigger = definition.trigger;
+    if (definition.anchoring == MenuAnchoring.anchored) {
+      // The anchored trigger is active only at the start of the field; the
+      // token is the text after it up to the first space (the TUI's live
+      // filter).
+      if (!text.startsWith(trigger)) return null;
+      final space = text.indexOf(' ');
+      final end = space >= 0 ? space : text.length;
+      return end <= trigger.length ? '' : text.substring(trigger.length, end);
+    }
+    // The inline trigger is active while the caret is inside a token that
+    // starts with it, wherever the token appears; the token is the text
+    // between the trigger and the caret.
+    final caret = selection.isCollapsed
+        ? selection.baseOffset
+        : selection.extentOffset;
+    var start = caret;
+    while (start > 0 && text[start - 1] != ' ') {
+      start--;
+    }
+    if (caret < start + trigger.length) return null;
+    if (!text.startsWith(trigger, start)) return null;
+    return text.substring(start + trigger.length, caret);
+  }
+
+  /// Re-filters the menu from the field's text. The bar's definitions claim
+  /// the field in turn: the first whose trigger is active filters the menu,
+  /// and its row provider supplies the rows. A re-typed token re-selects
+  /// the top row (the TUI does the same); a selection-only change (the
+  /// cursor moved) keeps the current row.
   void _syncMenu() {
     final text = widget.controller.text;
+    final selection = widget.controller.selection;
+    PromptMenuDefinition? active;
     String? token;
-    var matches = const <SlashCommand>[];
-    if (text.startsWith('/')) {
-      final space = text.indexOf(' ');
-      token = space >= 0 ? text.substring(1, space) : text.substring(1);
-      matches = [
-        for (final c in widget.commands)
-          if (c.matches(token)) c,
-      ];
+    for (final definition in widget.menus) {
+      final candidate = _filterToken(definition, text, selection);
+      if (candidate != null) {
+        active = definition;
+        token = candidate;
+        break;
+      }
     }
+    final matches = active == null || token == null
+        ? const <PromptMenuRow>[]
+        : active.rows(token);
     final tokenChanged = token != _syncedToken;
     _syncedToken = token;
     setState(() {
+      _active = active;
       _matches = matches;
       if (tokenChanged) _selected = matches.isEmpty ? -1 : 0;
     });
-    if (_menuOpen) {
+    if (active != null) {
       // The token changed, so the selection is back on the top row: the
       // menu scrolls with it.
       if (tokenChanged && matches.isNotEmpty) _showMenuRow(0);
@@ -2775,16 +2856,16 @@ class _PromptBarState extends State<_PromptBar> {
     });
   }
 
-  /// Runs the tapped (or submitted) row: clears the field and hands the
-  /// command plus its typed argument to the screen. A `takesArg` command
-  /// with no argument yet keeps the menu open and waits for the argument.
-  void _activate(SlashCommand command) {
+  /// Runs the tapped (or submitted) row: clears the field and hands the row
+  /// plus its typed argument to the row's activation. A `takesArg` row with
+  /// no argument yet keeps the menu open and waits for the argument.
+  void _activate(PromptMenuRow row) {
     final text = widget.controller.text;
     final space = text.indexOf(' ');
     final argument = (space >= 0 ? text.substring(space) : '').trim();
-    if (command.takesArg && argument.isEmpty) return;
+    if (row.takesArg && argument.isEmpty) return;
     widget.controller.clear();
-    widget.onCommand(command, argument);
+    row.onActivate(argument);
   }
 
   /// Enter in the field: the menu open runs the selected row (a prefix that
@@ -2850,11 +2931,12 @@ class _PromptBarState extends State<_PromptBar> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final menu = _active;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (_menuOpen)
+        if (menu != null)
           // The card flexes: on a short screen (the keyboard up) it takes
           // only the height the prompt bar was given, and the list scrolls
           // inside it (the rows keep their uniform height, so the keyboard
@@ -2886,7 +2968,7 @@ class _PromptBarState extends State<_PromptBar> {
                           horizontal: 16,
                           vertical: 12,
                         ),
-                        child: const Text('No matching command'),
+                        child: Text(menu.emptyLabel),
                       )
                     : ConstrainedBox(
                         constraints: const BoxConstraints(maxHeight: 280),
@@ -2896,7 +2978,7 @@ class _PromptBarState extends State<_PromptBar> {
                           shrinkWrap: true,
                           itemCount: _matches.length,
                           itemBuilder: (context, index) {
-                            final command = _matches[index];
+                            final row = _matches[index];
                             final selected = index == _selected;
                             return Material(
                               color: selected
@@ -2904,9 +2986,9 @@ class _PromptBarState extends State<_PromptBar> {
                                   : Colors.transparent,
                               child: InkWell(
                                 key: ValueKey(
-                                  'structured-command-row-${command.name}',
+                                  'structured-command-row-${row.name}',
                                 ),
-                                onTap: () => _activate(command),
+                                onTap: () => _activate(row),
                                 child: Padding(
                                   // The text keeps its inset now that the row
                                   // (and its highlight) is full width.
@@ -2921,27 +3003,25 @@ class _PromptBarState extends State<_PromptBar> {
                                       Row(
                                         children: [
                                           Text(
-                                            '/${command.name}',
+                                            row.label,
                                             style: TextStyle(
                                               fontWeight: selected
                                                   ? FontWeight.bold
                                                   : FontWeight.w600,
                                             ),
                                           ),
-                                          if (command.takesArg &&
-                                              command.argHint != null)
+                                          if (row.hint != null)
                                             Text(
-                                              ' ${command.argHint}',
+                                              ' ${row.hint}',
                                               style: TextStyle(
                                                 color: scheme.outline,
                                                 fontSize: 13,
                                               ),
                                             ),
                                           const Spacer(),
-                                          if (command.family ==
-                                              CommandFamily.custom)
+                                          if (row.badge != null)
                                             Text(
-                                              'custom',
+                                              row.badge!,
                                               style: const TextStyle(
                                                 fontSize: 11,
                                               ),
@@ -2952,9 +3032,7 @@ class _PromptBarState extends State<_PromptBar> {
                                       // row has the same height: the keyboard
                                       // scroll math relies on it.
                                       Text(
-                                        command.subtitle == command.name
-                                            ? ''
-                                            : command.subtitle,
+                                        row.subtitle ?? '',
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(

@@ -430,6 +430,12 @@ Finder _commandRowFinder(String name) =>
 Future<void> _typePrompt(WidgetTester tester, String text) =>
     tester.enterText(find.byKey(_promptInput), text);
 
+/// Moves the field's caret to [offset] without changing the text.
+void _setCaret(WidgetTester tester, int offset) {
+  tester.widget<TextField>(find.byKey(_promptInput)).controller!.selection =
+      TextSelection.collapsed(offset: offset);
+}
+
 Future<void> _pressEnter(WidgetTester tester) async {
   await tester.testTextInput.receiveAction(TextInputAction.done);
   await tester.pump();
@@ -2381,6 +2387,175 @@ void main() {
       expect(
         (box.decoration as BoxDecoration).color,
         ThemeData.dark().colorScheme.surfaceContainerHighest,
+      );
+    });
+  });
+
+  group('StructuredSessionScreen `@` menu trigger (issue #56)', () {
+    testWidgets('typing @ at the start opens the menu with no rows', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@');
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+      // The row provider yields no rows yet: the chrome keeps its card and
+      // shows its empty line instead of a list.
+      expect(_menuFinder(), findsNothing);
+      expect(find.text('No matching mention'), findsOneWidget);
+      // Opening any menu fetches the project commands once.
+      expect(client.commandCalls, 1);
+    });
+
+    testWidgets(
+      'an @ mid-text opens the menu while the caret is in its token',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+
+        await _typePrompt(tester, 'How is auth handled in @packages/functions');
+        await tester.pump();
+        // The caret is at the end of the token.
+        expect(
+          find.byKey(const ValueKey('structured-command-menu-card')),
+          findsOneWidget,
+        );
+
+        // The caret moves to the middle of the token: the menu stays open.
+        _setCaret(tester, 'How is auth handled in @pack'.length);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('structured-command-menu-card')),
+          findsOneWidget,
+        );
+
+        // The caret lands before the token: the menu closes.
+        _setCaret(tester, 'How is auth handled in '.length);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('structured-command-menu-card')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('a token that does not start with @ does not open the menu', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, 'use a@b');
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a space after the @ closes the menu', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the / menu does not open for @ text and vice versa', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+      expect(_commandRowFinder('models'), findsNothing);
+
+      await _typePrompt(tester, '/');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+      expect(_commandRowFinder('models'), findsOneWidget);
+      expect(find.text('No matching mention'), findsNothing);
+    });
+
+    testWidgets('Enter with the @ menu open and no rows stays put', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(client.prompts, isEmpty);
+      expect(_promptText(tester), '@');
+    });
+
+    testWidgets('a prompt with @ sends the raw text once the menu is closed', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, 'use @x');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+
+      // The caret leaves the token: the menu closes, the text stays.
+      _setCaret(tester, 'use '.length);
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
+      );
+
+      await _pressEnter(tester);
+
+      expect(client.prompts, const [('ses_1', 'use @x')]);
+      expect(_promptText(tester), isEmpty);
+    });
+
+    testWidgets('Esc closes the @ menu by clearing the field', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, 'use @x');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+
+      expect(_promptText(tester), isEmpty);
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
       );
     });
   });
