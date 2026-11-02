@@ -709,6 +709,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     final toolId = data['id'] is String ? data['id'] as String : null;
     if (toolId == null || !mounted) return;
     final servicePatch = _patchFromState(data);
+    final answers = _answersFromState(data);
     setState(
       () => _updateToolCard(
         toolId,
@@ -718,6 +719,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           patch:
               servicePatch ??
               (tool.name == 'write' ? ToolCall.writePatch(tool.input) : null),
+          answers: answers,
         ),
       ),
     );
@@ -736,6 +738,17 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       }
     }
     return null;
+  }
+
+  /// The answers the user gave the agent's `question` tool (issue #50), from
+  /// a tool-state payload — the success event's `data` and the history's tool
+  /// `state` both carry `metadata.answers` — so the live card settles on the
+  /// same question/answer lines the reopened history shows.
+  static List<List<String>>? _answersFromState(Map<String, Object?> state) {
+    final metadata = state['metadata'];
+    return metadata is Map<String, Object?>
+        ? ToolCall.answersFrom(metadata['answers'])
+        : null;
   }
 
   /// The tool failed.
@@ -842,8 +855,8 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _setMessageAt(index, _rebuildMessage(message, tools: tools));
   }
 
-  /// A [ToolCall] copy with [name], [status], [input], [error], and [patch]
-  /// replaced.
+  /// A [ToolCall] copy with [name], [status], [input], [error], [patch], and
+  /// [answers] replaced.
   ToolCall _rebuildTool(
     ToolCall tool, {
     String? name,
@@ -851,6 +864,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     Object? input,
     String? error,
     String? patch,
+    List<List<String>>? answers,
   }) => ToolCall(
     id: tool.id,
     name: name ?? tool.name,
@@ -858,6 +872,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     input: input ?? tool.input,
     error: error ?? tool.error,
     patch: patch ?? tool.patch,
+    answers: answers ?? tool.answers,
   );
 
   /// The turn boundary just ended (or started): re-fetch the service's
@@ -2419,9 +2434,37 @@ class _ToolCard extends StatelessWidget {
     return null;
   }
 
+  /// The agent's `question` tool (issue #50), rendered TUI-style instead of
+  /// as raw JSON: each question's text, with the answer the user gave below
+  /// it (the tool state's `metadata.answers`, in form order). `null` while
+  /// the input is still streaming (a partial JSON string, shown raw like any
+  /// other input).
+  List<({String question, List<String>? answers})>? get _questions {
+    final input = tool.input;
+    if (input is! Map<String, Object?>) return null;
+    final list = input['questions'];
+    if (list is! List) return null;
+    final answers = tool.answers;
+    final lines = <({String question, List<String>? answers})>[];
+    for (var i = 0; i < list.length; i++) {
+      final item = list[i];
+      final question =
+          item is Map<String, Object?> && item['question'] is String
+              ? item['question'] as String
+              : null;
+      if (question == null) continue;
+      lines.add((
+        question: question,
+        answers: answers != null && i < answers.length ? answers[i] : null,
+      ));
+    }
+    return lines.isEmpty ? null : lines;
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final questions = _questions;
     final (icon, iconColor) = switch (tool.status) {
       'streaming' || 'running' => (Icons.pending, Colors.orange),
       'completed' => (Icons.check_circle, Colors.green),
@@ -2473,7 +2516,38 @@ class _ToolCard extends StatelessWidget {
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: DiffView(patch: tool.patch!),
             ),
-          ] else if (_inputText.isNotEmpty)
+          ] else if (questions != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var i = 0; i < questions.length; i++) ...[
+                    Text(
+                      questions[i].question,
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
+                    if (questions[i].answers != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2, left: 8),
+                        child: Text(
+                          questions[i].answers!.isEmpty
+                              ? '—'
+                              : questions[i].answers!.join(', '),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            color: scheme.outline,
+                          ),
+                        ),
+                      ),
+                    if (i + 1 < questions.length)
+                      const SizedBox(height: 8),
+                  ],
+                ],
+              ),
+            )
+          else if (_inputText.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: Text(

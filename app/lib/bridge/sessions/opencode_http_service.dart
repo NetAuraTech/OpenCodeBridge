@@ -1012,6 +1012,7 @@ class OpencodeHttpService implements OpencodeService {
       }
     }
     final name = part['name'] as String? ?? '';
+    final metadata = state['metadata'];
     return ToolCall(
       id: part['id'] is String ? part['id'] as String : null,
       name: name,
@@ -1019,6 +1020,10 @@ class OpencodeHttpService implements OpencodeService {
       input: state['input'],
       error: error,
       patch: _patchFrom(state, name: name),
+      answers:
+          metadata is Map<String, Object?>
+              ? ToolCall.answersFrom(metadata['answers'])
+              : null,
     );
   }
 

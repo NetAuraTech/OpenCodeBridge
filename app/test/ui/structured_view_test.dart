@@ -705,6 +705,79 @@ void main() {
       expect(added.style?.color, const Color(0xFF1E725C));
     });
 
+    testWidgets(
+      'a question tool renders each question with the answer below it '
+      '(issue #50)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              id: 'm1',
+              role: 'assistant',
+              tools: [
+                ToolCall(
+                  id: 't1',
+                  name: 'question',
+                  status: 'completed',
+                  input: {
+                    'questions': [
+                      {'question': 'Ship it?'},
+                      {'question': 'Which environment?'},
+                    ],
+                  },
+                  answers: [
+                    ['Yes'],
+                    ['Staging'],
+                  ],
+                ),
+              ],
+            ),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        expect(find.text('question · completed'), findsOneWidget);
+        // Each question's text with the user's answer below it — not the
+        // input's raw JSON.
+        expect(find.text('Ship it?'), findsOneWidget);
+        expect(find.text('Yes'), findsOneWidget);
+        expect(find.text('Which environment?'), findsOneWidget);
+        expect(find.text('Staging'), findsOneWidget);
+        expect(find.textContaining('"questions"'), findsNothing);
+      });
+
+    testWidgets('a running question shows its questions before the answers', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(
+            id: 'm1',
+            role: 'assistant',
+            tools: [
+              ToolCall(
+                id: 't1',
+                name: 'question',
+                status: 'running',
+                input: {
+                  'questions': [
+                    {'question': 'Ship it?'},
+                  ],
+                },
+              ),
+            ],
+          ),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(find.text('question · running'), findsOneWidget);
+      expect(find.text('Ship it?'), findsOneWidget);
+      expect(find.text('—'), findsNothing);
+    });
+
     testWidgets('sends the prompt, posts only the text, and clears the input', (
       tester,
     ) async {
@@ -1250,6 +1323,64 @@ void main() {
       expect(find.text('shell · completed'), findsOneWidget);
       expect(client.messageCalls, 1);
     });
+
+    testWidgets(
+      'a question tool settles on the answers from its success event',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        final events = await _pump(tester, client: client);
+
+        events.add(
+          _event(
+            'session.tool.input.started',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'q1',
+              'name': 'question',
+            },
+          ),
+        );
+        events.add(
+          _event(
+            'session.tool.input.ended',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'q1',
+              'text': '{"questions":[{"question":"Ship it?"}]}',
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('question · running'), findsOneWidget);
+        expect(find.text('Ship it?'), findsOneWidget);
+
+        events.add(
+          _event(
+            'session.tool.success',
+            aggregateID: 'ses_1',
+            data: {
+              'assistantMessageID': 'msg_1',
+              'id': 'q1',
+              // The success payload carries the tool state: the answers the
+              // user gave, one list per question in form order.
+              'metadata': {
+                'answers': [
+                  ['Yes'],
+                ],
+              },
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(find.text('question · completed'), findsOneWidget);
+        expect(find.text('Yes'), findsOneWidget);
+      });
 
     testWidgets('a live write renders its content as a diff', (tester) async {
       final client = _FakeClient(details: const [_detail0]);

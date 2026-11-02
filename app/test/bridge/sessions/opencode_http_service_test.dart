@@ -194,6 +194,28 @@ void main() {
             'metadata': {'truncated': false},
           },
         },
+        {
+          'type': 'tool',
+          'id': 't5',
+          'name': 'question',
+          'time': {'created': 7},
+          'state': {
+            'status': 'completed',
+            'input': {
+              'questions': [
+                {'question': 'Ship it?'},
+                {'question': 'Which environment?'},
+              ],
+            },
+            'metadata': {
+              'kind': 'question',
+              'answers': [
+                ['Yes'],
+                ['Staging'],
+              ],
+            },
+          },
+        },
       ],
     },
     {
@@ -739,7 +761,7 @@ void main() {
       expect(assistant.role, 'assistant');
       expect(assistant.text, 'working');
       expect(assistant.reasoning, 'hmm');
-      expect(assistant.tools, hasLength(4));
+      expect(assistant.tools, hasLength(5));
       // The tool input is a map, so compare fields (deep) not by ==.
       expect(assistant.tools[0].id, 't1');
       expect(assistant.tools[0].name, 'bash');
@@ -775,6 +797,19 @@ void main() {
         '@@ -0,0 +1,2 @@\n'
         '+hello\n'
         '+world\n',
+      );
+      // The agent's `question` tool (issue #50): the user's answers come off
+      // the tool state's metadata, one list per question in form order, for
+      // the structured view's question/answer render.
+      expect(assistant.tools[4].id, 't5');
+      expect(assistant.tools[4].name, 'question');
+      expect(assistant.tools[4].status, 'completed');
+      expect(
+        assistant.tools[4].answers,
+        [
+          ['Yes'],
+          ['Staging'],
+        ],
       );
       // The context gauge: the model call's total input (100 + 5000 + 10).
       expect(assistant.contextTokens, 5110);
