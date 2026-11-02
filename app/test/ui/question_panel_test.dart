@@ -38,9 +38,7 @@ const _solo = QuestionForm(
       question: 'Should I ship it?',
       multiple: false,
       custom: false,
-      options: [
-        QuestionOption(label: 'Yes', description: 'ship it'),
-      ],
+      options: [QuestionOption(label: 'Yes', description: 'ship it')],
     ),
   ],
 );
@@ -93,7 +91,8 @@ void main() {
       await _pumpPanel(tester, pending: const [_solo]);
 
       expect(find.byKey(const ValueKey('question-banner')), findsOneWidget);
-      expect(find.byKey(const ValueKey('question-row-form_solo')),
+      expect(
+        find.byKey(const ValueKey('question-row-form_solo')),
         findsOneWidget,
       );
       // One question: the body renders directly, no tabs, no Next — the
@@ -165,7 +164,10 @@ void main() {
       await tester.pump();
       // A multi-question form has no Submit until the recap: Next walks
       // question to question, then the recap.
-      expect(find.byKey(const ValueKey('question-submit-form_q')), findsNothing);
+      expect(
+        find.byKey(const ValueKey('question-submit-form_q')),
+        findsNothing,
+      );
       await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
@@ -175,13 +177,10 @@ void main() {
 
       expect(submissions, hasLength(1));
       expect(submissions.single.$1, _form);
-      _expectAnswers(
-        submissions.single.$2,
-        [
-          ['Yes'],
-          const <String>[],
-        ],
-      );
+      _expectAnswers(submissions.single.$2, [
+        ['Yes'],
+        const <String>[],
+      ]);
     });
 
     testWidgets('a single-select free text wins over the selected option', (
@@ -213,46 +212,40 @@ void main() {
       expect(submissions.single.$2[0], ['ship, but quietly']);
     });
 
-    testWidgets(
-      'submits the selected options for a multiple-select question, '
-      'appending its free text',
-      (tester) async {
-        final submissions = <(QuestionForm, List<List<String>>)>[];
-        await _pumpPanel(
-          tester,
-          pending: const [_form],
-          submissions: submissions,
-        );
+    testWidgets('submits the selected options for a multiple-select question, '
+        'appending its free text', (tester) async {
+      final submissions = <(QuestionForm, List<List<String>>)>[];
+      await _pumpPanel(
+        tester,
+        pending: const [_form],
+        submissions: submissions,
+      );
 
-        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
-        await tester.pump();
-        await tester.tap(
-          find.byKey(const ValueKey('question-option-form_q-1-0')),
-        );
-        await tester.pump();
-        await tester.tap(
-          find.byKey(const ValueKey('question-option-form_q-1-1')),
-        );
-        await tester.pump();
-        await tester.enterText(
-          find.byKey(const ValueKey('question-text-form_q-1')),
-          'extra',
-        );
-        await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
-        await tester.pump();
-        await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
-        await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+      await tester.pump();
+      await tester.tap(
+        find.byKey(const ValueKey('question-option-form_q-1-0')),
+      );
+      await tester.pump();
+      await tester.tap(
+        find.byKey(const ValueKey('question-option-form_q-1-1')),
+      );
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const ValueKey('question-text-form_q-1')),
+        'extra',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-next-form_q')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('question-submit-form_q')));
+      await tester.pump();
 
-        _expectAnswers(
-          submissions.single.$2,
-          [
-            const <String>[],
-            ['A', 'B', 'extra'],
-          ],
-        );
-      },
-    );
+      _expectAnswers(submissions.single.$2, [
+        const <String>[],
+        ['A', 'B', 'extra'],
+      ]);
+    });
 
     testWidgets('deselecting a multiple-select option unselects it', (
       tester,
@@ -293,7 +286,8 @@ void main() {
         );
 
         // The multi-question form has no Submit until the recap.
-        expect(find.byKey(const ValueKey('question-submit-form_q')),
+        expect(
+          find.byKey(const ValueKey('question-submit-form_q')),
           findsNothing,
         );
 
@@ -357,23 +351,16 @@ void main() {
         await tester.pump();
 
         expect(submissions, hasLength(1));
-        _expectAnswers(
-          submissions.single.$2,
-          [
-            ['Yes'],
-            ['A'],
-          ],
-        );
+        _expectAnswers(submissions.single.$2, [
+          ['Yes'],
+          ['A'],
+        ]);
       },
     );
 
     testWidgets('dismiss sends the form to onDismiss', (tester) async {
       final dismissed = <QuestionForm>[];
-      await _pumpPanel(
-        tester,
-        pending: const [_form],
-        dismissed: dismissed,
-      );
+      await _pumpPanel(tester, pending: const [_form], dismissed: dismissed);
 
       await tester.tap(find.byKey(const ValueKey('question-dismiss-form_q')));
       await tester.pump();
@@ -390,10 +377,7 @@ void main() {
         find.byKey(const ValueKey('question-submit-form_q')),
         findsNothing,
       );
-      expect(
-        find.byKey(const ValueKey('question-next-form_q')),
-        findsNothing,
-      );
+      expect(find.byKey(const ValueKey('question-next-form_q')), findsNothing);
       expect(
         find.byKey(const ValueKey('question-dismiss-form_q')),
         findsNothing,

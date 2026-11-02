@@ -1506,7 +1506,9 @@ class BridgeServer {
     } catch (_) {
       return null;
     }
-    final value = decoded is Map<String, Object?> ? decoded['answers'] : decoded;
+    final value = decoded is Map<String, Object?>
+        ? decoded['answers']
+        : decoded;
     final list = value is List ? value : null;
     if (list == null) return null;
     final answers = <List<String>>[];

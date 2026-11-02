@@ -44,7 +44,8 @@ class QuestionOption {
   int get hashCode => Object.hash(label, description);
 
   @override
-  String toString() => 'QuestionOption(label: $label, description: $description)';
+  String toString() =>
+      'QuestionOption(label: $label, description: $description)';
 }
 
 /// One question of a question form (the service's form field, with the
@@ -162,8 +163,7 @@ class QuestionForm {
       _questionsEqual(other.questions, questions);
 
   @override
-  int get hashCode =>
-      Object.hash(id, title, Object.hashAll(questions));
+  int get hashCode => Object.hash(id, title, Object.hashAll(questions));
 
   @override
   String toString() =>

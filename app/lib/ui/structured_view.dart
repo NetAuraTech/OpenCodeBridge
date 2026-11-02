@@ -1741,24 +1741,24 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                                       ),
                                     ),
                                   ),
-                                 // The pending question forms (issue #50) float over the
-                                 // list, just above the prompt bar — like the TUI
-                                 // prompts above the input, so the header and the cost
-                                 // bar never shift. The list is lazy, so the panel
-                                 // scrolls when a long form is taller than the room.
-                                 Positioned(
-                                   left: 0,
-                                   right: 0,
-                                   bottom: 0,
-                                   child: SingleChildScrollView(
-                                     child: QuestionPanel(
-                                       pending: _questions,
-                                       onSubmit: _submitAnswers,
-                                       onDismiss: _dismissQuestion,
-                                       busyId: _answerBusyId,
-                                     ),
-                                   ),
-                                 ),
+                                // The pending question forms (issue #50) float over the
+                                // list, just above the prompt bar — like the TUI
+                                // prompts above the input, so the header and the cost
+                                // bar never shift. The list is lazy, so the panel
+                                // scrolls when a long form is taller than the room.
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  child: SingleChildScrollView(
+                                    child: QuestionPanel(
+                                      pending: _questions,
+                                      onSubmit: _submitAnswers,
+                                      onDismiss: _dismissQuestion,
+                                      busyId: _answerBusyId,
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -2450,8 +2450,8 @@ class _ToolCard extends StatelessWidget {
       final item = list[i];
       final question =
           item is Map<String, Object?> && item['question'] is String
-              ? item['question'] as String
-              : null;
+          ? item['question'] as String
+          : null;
       if (question == null) continue;
       lines.add((
         question: question,
@@ -2541,8 +2541,7 @@ class _ToolCard extends StatelessWidget {
                           ),
                         ),
                       ),
-                    if (i + 1 < questions.length)
-                      const SizedBox(height: 8),
+                    if (i + 1 < questions.length) const SizedBox(height: 8),
                   ],
                 ],
               ),

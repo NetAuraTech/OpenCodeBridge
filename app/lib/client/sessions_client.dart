@@ -320,7 +320,9 @@ class SessionsClient {
       final response = await bridgeRequest(
         client,
         'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/questions'),
+        _base.replace(
+          path: 'api/sessions/${Uri.encodeComponent(id)}/questions',
+        ),
         auth: _auth,
       );
       final body = await response.transform(const Utf8Decoder()).join();

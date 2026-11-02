@@ -405,8 +405,10 @@ class OpencodeHttpService implements OpencodeService {
       throw const OpencodeServiceError(404, 'unknown question form');
     }
     final fields = form['fields'] is List
-        ? [for (final f in form['fields'] as List)
-            if (f is Map<String, Object?>) f]
+        ? [
+            for (final f in form['fields'] as List)
+              if (f is Map<String, Object?>) f,
+          ]
         : const <Map<String, Object?>>[];
     await _post(
       _base.replace(
@@ -1020,10 +1022,9 @@ class OpencodeHttpService implements OpencodeService {
       input: state['input'],
       error: error,
       patch: _patchFrom(state, name: name),
-      answers:
-          metadata is Map<String, Object?>
-              ? ToolCall.answersFrom(metadata['answers'])
-              : null,
+      answers: metadata is Map<String, Object?>
+          ? ToolCall.answersFrom(metadata['answers'])
+          : null,
     );
   }
 

@@ -492,7 +492,13 @@ void main() {
       title: 'one',
       location: '/one',
       cost: 0.75,
-      tokens: TokenUsage(input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0),
+      tokens: TokenUsage(
+        input: 1,
+        output: 1,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      ),
       outcome: 'succeeded',
     );
     const questions = [
@@ -505,14 +511,20 @@ void main() {
             question: 'Proceed with the deployment?',
             multiple: false,
             custom: false,
-            options: [QuestionOption(label: 'Yes'), QuestionOption(label: 'No')],
+            options: [
+              QuestionOption(label: 'Yes'),
+              QuestionOption(label: 'No'),
+            ],
           ),
           Question(
             header: 'Pick',
             question: 'Choose some',
             multiple: true,
             custom: true,
-            options: [QuestionOption(label: 'A'), QuestionOption(label: 'B')],
+            options: [
+              QuestionOption(label: 'A'),
+              QuestionOption(label: 'B'),
+            ],
           ),
         ],
       ),
@@ -539,7 +551,10 @@ void main() {
     test(
       'GET /api/sessions/{id}/questions returns the pending forms',
       () async {
-        final (status, body) = await _get(base, 'api/sessions/ses_one/questions');
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/questions',
+        );
         expect(status, 200);
         expect(jsonDecode(body), [for (final f in questions) f.toJson()]);
       },
@@ -561,28 +576,33 @@ void main() {
       'GET /api/sessions/{id}/questions is 502 when the service is down',
       () async {
         service.failQuestions = true;
-        final (status, body) = await _get(base, 'api/sessions/ses_one/questions');
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/questions',
+        );
         expect(status, 502);
         expect(jsonDecode(body), {'error': 'opencode_unreachable'});
       },
     );
 
-    test(
-      'POST .../questions/{formID}/answer answers and is 204',
-      () async {
-        final (status, body) = await _postRaw(
-          base,
-          'api/sessions/ses_one/questions/form_1/answer',
-          jsonEncode({'answers': [['Yes'], ['A', 'extra']]}),
-        );
-        expect(status, 204);
-        expect(body, isEmpty);
-        _expectAnswered(service, 'form_1', [
-          ['Yes'],
-          ['A', 'extra'],
-        ]);
-      },
-    );
+    test('POST .../questions/{formID}/answer answers and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/questions/form_1/answer',
+        jsonEncode({
+          'answers': [
+            ['Yes'],
+            ['A', 'extra'],
+          ],
+        }),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      _expectAnswered(service, 'form_1', [
+        ['Yes'],
+        ['A', 'extra'],
+      ]);
+    });
 
     test(
       'POST .../questions/{formID}/answer accepts a bare answers array',
@@ -590,7 +610,10 @@ void main() {
         final (status, body) = await _postRaw(
           base,
           'api/sessions/ses_one/questions/form_1/answer',
-          jsonEncode([['No'], ['B']]),
+          jsonEncode([
+            ['No'],
+            ['B'],
+          ]),
         );
         expect(status, 204);
         expect(body, isEmpty);
@@ -628,7 +651,11 @@ void main() {
         final (status, body) = await _postRaw(
           base,
           'api/sessions/ses_one/questions/form_missing/answer',
-          jsonEncode({'answers': [['Yes']]}),
+          jsonEncode({
+            'answers': [
+              ['Yes'],
+            ],
+          }),
         );
         expect(status, 404);
         expect(jsonDecode(body), {'error': 'not_found'});
@@ -643,7 +670,12 @@ void main() {
         final (status, body) = await _postRaw(
           base,
           'api/sessions/ses_one/questions/form_1/answer',
-          jsonEncode({'answers': [['Yes'], ['A']]}),
+          jsonEncode({
+            'answers': [
+              ['Yes'],
+              ['A'],
+            ],
+          }),
         );
         expect(status, 502);
         expect(jsonDecode(body), {'error': 'opencode_unreachable'});
@@ -662,17 +694,14 @@ void main() {
       },
     );
 
-    test(
-      'DELETE .../questions/{formID} is 404 for an unknown form',
-      () async {
-        final (status, _) = await _delete(
-          base,
-          'api/sessions/ses_one/questions/form_missing',
-        );
-        expect(status, 404);
-        expect(service.questionDismissed, isEmpty);
-      },
-    );
+    test('DELETE .../questions/{formID} is 404 for an unknown form', () async {
+      final (status, _) = await _delete(
+        base,
+        'api/sessions/ses_one/questions/form_missing',
+      );
+      expect(status, 404);
+      expect(service.questionDismissed, isEmpty);
+    });
 
     test(
       'DELETE .../questions/{formID} is 502 when the service is down',

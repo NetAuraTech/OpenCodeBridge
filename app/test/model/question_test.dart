@@ -4,10 +4,7 @@ import 'package:opencodebridge/model/question.dart';
 void main() {
   group('QuestionOption round-trip', () {
     test('serializes and deserializes with a description', () {
-      const option = QuestionOption(
-        label: 'Yes',
-        description: 'Do the thing',
-      );
+      const option = QuestionOption(label: 'Yes', description: 'Do the thing');
       final json = option.toJson();
       expect(json, {'label': 'Yes', 'description': 'Do the thing'});
       final back = QuestionOption.fromJson(json);
@@ -60,7 +57,10 @@ void main() {
         question: 'Choose some',
         multiple: true,
         custom: true,
-        options: [QuestionOption(label: 'A'), QuestionOption(label: 'B')],
+        options: [
+          QuestionOption(label: 'A'),
+          QuestionOption(label: 'B'),
+        ],
       );
       final back = Question.fromJson(question.toJson());
       expect(back.multiple, isTrue);
@@ -94,7 +94,10 @@ void main() {
             question: 'Second question?',
             multiple: true,
             custom: true,
-            options: [QuestionOption(label: 'A'), QuestionOption(label: 'B')],
+            options: [
+              QuestionOption(label: 'A'),
+              QuestionOption(label: 'B'),
+            ],
           ),
         ],
       );

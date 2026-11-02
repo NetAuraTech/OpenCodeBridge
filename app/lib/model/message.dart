@@ -80,7 +80,10 @@ class ToolCall {
     final rows = <List<String>>[];
     for (final row in list) {
       if (row is List) {
-        rows.add([for (final value in row) if (value is String) value]);
+        rows.add([
+          for (final value in row)
+            if (value is String) value,
+        ]);
       } else if (row is String) {
         rows.add([row]);
       }
@@ -133,15 +136,8 @@ class ToolCall {
       _answersEqual(other.answers, answers);
 
   @override
-  int get hashCode => Object.hash(
-    id,
-    name,
-    status,
-    input,
-    error,
-    patch,
-    _answersHash(answers),
-  );
+  int get hashCode =>
+      Object.hash(id, name, status, input, error, patch, _answersHash(answers));
 
   @override
   String toString() =>
@@ -271,7 +267,5 @@ bool _answersEqual(List<List<String>>? a, List<List<String>>? b) {
 /// content always hashes the same, so equal calls share a hashCode.
 int _answersHash(List<List<String>>? answers) {
   if (answers == null) return 0;
-  return Object.hashAll([
-    for (final row in answers) Object.hashAll(row),
-  ]);
+  return Object.hashAll([for (final row in answers) Object.hashAll(row)]);
 }

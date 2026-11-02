@@ -745,7 +745,8 @@ void main() {
         expect(find.text('Which environment?'), findsOneWidget);
         expect(find.text('Staging'), findsOneWidget);
         expect(find.textContaining('"questions"'), findsNothing);
-      });
+      },
+    );
 
     testWidgets('a running question shows its questions before the answers', (
       tester,
@@ -929,10 +930,7 @@ void main() {
           _event(
             'form.created',
             data: {
-              'form': {
-                'id': 'form_1',
-                'sessionID': 'ses_1',
-              },
+              'form': {'id': 'form_1', 'sessionID': 'ses_1'},
             },
           ),
         );
@@ -946,9 +944,7 @@ void main() {
           find.byKey(const ValueKey('question-option-form_1-0-0')),
         );
         await tester.pump();
-        await tester.tap(
-          find.byKey(const ValueKey('question-submit-form_1')),
-        );
+        await tester.tap(find.byKey(const ValueKey('question-submit-form_1')));
         await tester.pump();
         await tester.pump();
 
@@ -1380,7 +1376,8 @@ void main() {
 
         expect(find.text('question · completed'), findsOneWidget);
         expect(find.text('Yes'), findsOneWidget);
-      });
+      },
+    );
 
     testWidgets('a live write renders its content as a diff', (tester) async {
       final client = _FakeClient(details: const [_detail0]);

@@ -106,9 +106,7 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
   void initState() {
     super.initState();
     final questions = widget.form.questions;
-    _selections = [
-      for (var i = 0; i < questions.length; i++) <String>{},
-    ];
+    _selections = [for (var i = 0; i < questions.length; i++) <String>{}];
     _controllers = [
       for (var i = 0; i < questions.length; i++) TextEditingController(),
     ];
@@ -169,8 +167,8 @@ class _QuestionFormCardState extends State<_QuestionFormCard> {
 
   /// The recap screen, shown instead of the questions when a multi-question
   /// form reaches its end: it lists every answer and carries the Submit.
-  bool get _recap => widget.form.questions.length > 1 &&
-      _tab == widget.form.questions.length;
+  bool get _recap =>
+      widget.form.questions.length > 1 && _tab == widget.form.questions.length;
 
   /// The answer of question [i] as the recap displays it: the selected
   /// option labels (option order) plus the free text, joined by a comma;
@@ -322,10 +320,7 @@ class _TabStrip extends StatelessWidget {
             onTap: enabled ? () => onSelect(i) : null,
             borderRadius: BorderRadius.circular(6),
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 10,
-                vertical: 6,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
                 color: i == selected
                     ? scheme.primaryContainer
@@ -449,7 +444,9 @@ class _QuestionBody extends StatelessWidget {
               controller: controller,
               enabled: enabled,
               maxLines: 1,
-              textInputAction: question.multiple ? TextInputAction.newline : null,
+              textInputAction: question.multiple
+                  ? TextInputAction.newline
+                  : null,
               decoration: InputDecoration(
                 isDense: true,
                 hintText: 'Or type an answer…',

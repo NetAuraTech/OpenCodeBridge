@@ -804,13 +804,10 @@ void main() {
       expect(assistant.tools[4].id, 't5');
       expect(assistant.tools[4].name, 'question');
       expect(assistant.tools[4].status, 'completed');
-      expect(
-        assistant.tools[4].answers,
-        [
-          ['Yes'],
-          ['Staging'],
-        ],
-      );
+      expect(assistant.tools[4].answers, [
+        ['Yes'],
+        ['Staging'],
+      ]);
       // The context gauge: the model call's total input (100 + 5000 + 10).
       expect(assistant.contextTokens, 5110);
       // The compaction marker keeps the summary the compaction wrote.
@@ -855,39 +852,41 @@ void main() {
       expect(repliedRequestIDs, ['per_1']);
     });
 
-    test('pendingQuestions maps the question forms without the q-keys',
-        () async {
-      final service = OpencodeHttpService(baseUrl: base, password: password);
-      final forms = await service.pendingQuestions('ses_1');
-      expect(forms, [
-        const QuestionForm(
-          id: 'form_q',
-          title: 'Questions',
-          questions: [
-            Question(
-              header: 'Ship it?',
-              question: 'Should I ship it?',
-              multiple: false,
-              custom: true,
-              options: [
-                QuestionOption(label: 'Yes', description: 'ship it'),
-                QuestionOption(label: 'No', description: 'hold off'),
-              ],
-            ),
-            Question(
-              header: 'Areas',
-              question: 'Which areas do you want?',
-              multiple: true,
-              custom: false,
-              options: [
-                QuestionOption(label: 'A', description: 'area A'),
-                QuestionOption(label: 'B', description: 'area B'),
-              ],
-            ),
-          ],
-        ),
-      ]);
-    });
+    test(
+      'pendingQuestions maps the question forms without the q-keys',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final forms = await service.pendingQuestions('ses_1');
+        expect(forms, [
+          const QuestionForm(
+            id: 'form_q',
+            title: 'Questions',
+            questions: [
+              Question(
+                header: 'Ship it?',
+                question: 'Should I ship it?',
+                multiple: false,
+                custom: true,
+                options: [
+                  QuestionOption(label: 'Yes', description: 'ship it'),
+                  QuestionOption(label: 'No', description: 'hold off'),
+                ],
+              ),
+              Question(
+                header: 'Areas',
+                question: 'Which areas do you want?',
+                multiple: true,
+                custom: false,
+                options: [
+                  QuestionOption(label: 'A', description: 'area A'),
+                  QuestionOption(label: 'B', description: 'area B'),
+                ],
+              ),
+            ],
+          ),
+        ]);
+      },
+    );
 
     test('answerQuestion rebuilds the q0/q1 answer record', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
@@ -896,7 +895,12 @@ void main() {
         ['A', 'B'],
       ]);
       expect(formReplyBodies, [
-        {'answer': {'q0': 'Yes', 'q1': ['A', 'B']}},
+        {
+          'answer': {
+            'q0': 'Yes',
+            'q1': ['A', 'B'],
+          },
+        },
       ]);
     });
 
@@ -906,18 +910,19 @@ void main() {
       formReplyBodies.clear();
       // No selection for either question: the string field answers with the
       // empty option value, the multiselect with the empty list.
-      await service.answerQuestion('ses_1', 'form_q', [
-        [],
-        [],
-      ]);
+      await service.answerQuestion('ses_1', 'form_q', [[], []]);
       expect(formReplyBodies, [
-        {'answer': {'q0': '', 'q1': <String>[]}},
+        {
+          'answer': {'q0': '', 'q1': <String>[]},
+        },
       ]);
       // A missing entry is treated as an empty selection too.
       await service.answerQuestion('ses_1', 'form_q', [
         ['No'],
       ]);
-      expect(formReplyBodies.last, {'answer': {'q0': 'No', 'q1': <String>[]}});
+      expect(formReplyBodies.last, {
+        'answer': {'q0': 'No', 'q1': <String>[]},
+      });
     });
 
     test('answerQuestion throws 404 for an unknown form', () async {
