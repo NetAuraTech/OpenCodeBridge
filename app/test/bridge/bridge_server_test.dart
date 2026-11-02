@@ -1313,7 +1313,9 @@ void main() {
     late EventHub hub;
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-sessions');
+      dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-srv-sessions',
+      );
       service = _FakeService();
       store = await SessionStore.load(dir: dir);
       backend = SessionsBackend(service: service, store: store);

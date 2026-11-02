@@ -2154,5 +2154,4 @@ class BridgeServer {
       response.write(jsonEncode({'error': 'opencode_unreachable'}));
     }
   }
-
 }
