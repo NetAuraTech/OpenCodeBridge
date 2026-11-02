@@ -404,6 +404,44 @@ void main() {
       expect(find.byKey(const ValueKey('permission-banner')), findsOneWidget);
     });
 
+    testWidgets('a phone-sized screen with the keyboard up does not '
+        'overflow', (tester) async {
+      // A phone with the soft keyboard up: the body is squeezed to about
+      // 360x487 (the VOG L29 log).
+      tester.view.physicalSize = const Size(360, 543);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      const request = PermissionRequest(
+        id: 'per_1',
+        action: 'shell',
+        resources: ['rm -rf node_modules'],
+      );
+      final client = _FakeClient(
+        details: const [_detail0],
+        permissionLists: const [
+          <PermissionRequest>[request],
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(tester.takeException(), isNull);
+
+      // The densest state: the pending banner, the cost bar, the open `/`
+      // menu and the input row, all with the keyboard up: the menu must
+      // shrink, and the input row must stay on screen.
+      await _typePrompt(tester, '/');
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(_menuFinder(), findsOneWidget);
+      expect(
+        tester.getRect(find.byKey(_promptInput)).bottom,
+        lessThan(543.0 + 1),
+      );
+    });
+
     testWidgets('the header shows the llama.cpp prefill and decode speed '
         'from llama.speed, and clears it when idle', (tester) async {
       final client = _FakeClient(details: const [_detail0]);
