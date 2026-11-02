@@ -69,7 +69,6 @@ void main() {
                 'created': 100,
                 'location': '/one',
                 'active': true,
-                'classification': 'app-launched-live',
               },
               {
                 'id': 'ses_2',
@@ -78,7 +77,6 @@ void main() {
                 'created': 200,
                 'location': '/two',
                 'active': false,
-                'classification': 'external',
               },
             ]),
           );
@@ -132,7 +130,6 @@ void main() {
               'created': 400,
               'location': '/created',
               'active': false,
-              'classification': 'app-launched-closed',
             }),
           );
         } else if (project == 'p_missing') {
@@ -577,7 +574,6 @@ void main() {
         created: 100,
         location: '/one',
         active: true,
-        classification: SessionClassification.appLaunchedLive,
       ),
       const Session(
         id: 'ses_2',
@@ -586,7 +582,6 @@ void main() {
         created: 200,
         location: '/two',
         active: false,
-        classification: SessionClassification.external,
       ),
     ]);
   });
@@ -652,7 +647,6 @@ void main() {
           created: 400,
           location: '/created',
           active: false,
-          classification: SessionClassification.appLaunchedClosed,
         ),
       );
     },

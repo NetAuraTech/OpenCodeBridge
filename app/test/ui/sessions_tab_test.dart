@@ -23,7 +23,6 @@ const _one = Session(
   created: 100,
   location: '/code/app',
   active: false,
-  classification: SessionClassification.external,
 );
 const _two = Session(
   id: 'ses_2',
@@ -32,7 +31,6 @@ const _two = Session(
   created: 300,
   location: '/code/app',
   active: true,
-  classification: SessionClassification.appLaunchedClosed,
 );
 const _three = Session(
   id: 'ses_3',
@@ -41,7 +39,6 @@ const _three = Session(
   created: 200,
   location: '/code/infra',
   active: false,
-  classification: SessionClassification.external,
 );
 const _four = Session(
   id: 'ses_4',
@@ -50,7 +47,6 @@ const _four = Session(
   created: 400,
   location: '/code/app',
   active: false,
-  classification: SessionClassification.appLaunchedLive,
 );
 
 /// A scripted [SessionsClient] for the tab tests.
@@ -105,7 +101,6 @@ class _FakeSessionsClient extends SessionsClient {
       created: 500,
       location: '/code/app',
       active: false,
-      classification: SessionClassification.appLaunchedClosed,
     );
     rows.insert(0, session);
     return session;
@@ -262,7 +257,7 @@ void main() {
           expect(find.text('docker logs'), findsOneWidget);
           expect(find.text('/code/infra'), findsOneWidget);
 
-          // No classification captions anywhere.
+          // No "App-launched" captions anywhere.
           expect(find.textContaining('App-launched'), findsNothing);
 
           // Each group carries its own New session action.
@@ -437,7 +432,7 @@ void main() {
     });
 
     group('delete', () {
-      testWidgets('delete on a live app-launched session', (tester) async {
+      testWidgets('delete a session created from the app', (tester) async {
         final client = await _pumpTab(tester, rows: [_four, _one]);
 
         await tester.tap(

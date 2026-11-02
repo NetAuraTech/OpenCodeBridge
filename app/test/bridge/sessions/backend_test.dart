@@ -1,9 +1,6 @@
-import 'dart:io';
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
-import 'package:opencodebridge/bridge/sessions/session_store.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
@@ -295,29 +292,14 @@ const s3 = OpencodeSession(
 );
 
 void main() {
-  late Directory dir;
-
-  setUp(() async {
-    dir = await Directory.systemTemp.createTemp('opencodebridge-backend');
-  });
-
-  tearDown(() async {
-    await dir.delete(recursive: true);
-  });
-
   group('SessionsBackend.list', () {
-    test('merges classification, active, project name; newest first', () async {
-      final store = await SessionStore.load(dir: dir);
-      // ses_2 is persisted but not live -> app-launched-closed.
-      store.add('ses_2');
-      await store.save();
-
+    test('merges active and project name; newest first', () async {
       final service = FakeOpencodeService(
         sessions: [s1, s2, s3],
         names: {'p1': 'proj-one', 'p2': 'proj-two'},
         active: {'ses_3'},
       );
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
       final rows = await backend.list();
 
@@ -333,93 +315,38 @@ void main() {
           created: 300,
           location: '/two',
           active: false,
-          classification: SessionClassification.appLaunchedClosed,
         ),
       );
       expect(rows[1].active, isTrue);
-      expect(rows[1].classification, SessionClassification.external);
-      expect(rows[2].classification, SessionClassification.external);
+      expect(rows[2].active, isFalse);
     });
 
-    test(
-      'persisted + live -> app-launched-live; unknown project id falls back',
-      () async {
-        final store = await SessionStore.load(dir: dir);
-        store.add('ses_1');
-        await store.save();
+    test('unknown project id falls back', () async {
+      final service = FakeOpencodeService(
+        sessions: [s1],
+        names: const {}, // no name for p1 -> falls back to the id
+        active: const {},
+      );
+      final backend = SessionsBackend(service: service);
 
-        final service = FakeOpencodeService(
-          sessions: [s1],
-          names: const {}, // no name for p1 -> falls back to the id
-          active: const {},
-        );
-        final backend = SessionsBackend(
-          service: service,
-          store: store,
-          liveSessionIds: const {'ses_1'},
-        );
-
-        final row = (await backend.list()).single;
-        expect(row.classification, SessionClassification.appLaunchedLive);
-        expect(row.project, const SessionProject(id: 'p1', name: 'p1'));
-      },
-    );
+      final row = (await backend.list()).single;
+      expect(row.project, const SessionProject(id: 'p1', name: 'p1'));
+    });
   });
 
   group('SessionsBackend.delete', () {
-    test(
-      'deletes on the service and removes the record in one action',
-      () async {
-        final store = await SessionStore.load(dir: dir);
-        store.add('ses_1');
-        await store.save();
-
-        final service = FakeOpencodeService(sessions: [s1]);
-        final backend = SessionsBackend(service: service, store: store);
-
-        await backend.delete('ses_1');
-
-        expect(service.deleted, ['ses_1']);
-        expect(store.has('ses_1'), isFalse);
-        // Persisted the removal.
-        expect((await SessionStore.load(dir: dir)).has('ses_1'), isFalse);
-      },
-    );
-
-    test(
-      'delete of an external session still deletes on the service',
-      () async {
-        final store = await SessionStore.load(dir: dir);
-        final service = FakeOpencodeService(sessions: [s3]);
-        final backend = SessionsBackend(service: service, store: store);
-
-        await backend.delete('ses_3');
-
-        expect(service.deleted, ['ses_3']);
-        expect(store.ids(), isEmpty);
-      },
-    );
-  });
-
-  group('SessionsBackend.reconcile', () {
-    test('drops store records no longer on the service', () async {
-      final store = await SessionStore.load(dir: dir);
-      store.add('ses_1');
-      store.add('ses_gone');
-      await store.save();
-
+    test('deletes on the service', () async {
       final service = FakeOpencodeService(sessions: [s1]);
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
-      await backend.reconcile();
+      await backend.delete('ses_1');
 
-      expect((await SessionStore.load(dir: dir)).ids(), {'ses_1'});
+      expect(service.deleted, ['ses_1']);
     });
   });
 
   group('SessionsBackend.create', () {
-    test('creates on the service, persists the id at launch, and classifies '
-        'the row app-launched-closed until the window opens', () async {
+    test('creates on the service and returns the row', () async {
       final created = const OpencodeSession(
         id: 'ses_new',
         title: 'new',
@@ -427,20 +354,16 @@ void main() {
         created: 400,
         location: '/new',
       );
-      final store = await SessionStore.load(dir: dir);
       final service = FakeOpencodeService(
         sessions: [created],
         names: {'p1': 'proj-one'},
         createdSession: created,
       );
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
       final row = await backend.create('p1');
 
       expect(service.created, ['p1']);
-      expect(store.has('ses_new'), isTrue);
-      // The persistence "add id" write was saved, not just in memory.
-      expect((await SessionStore.load(dir: dir)).has('ses_new'), isTrue);
       expect(
         row,
         const Session(
@@ -450,35 +373,8 @@ void main() {
           created: 400,
           location: '/new',
           active: false,
-          classification: SessionClassification.appLaunchedClosed,
         ),
       );
-    });
-
-    test('a live window flips the returned row to app-launched-live', () async {
-      final created = const OpencodeSession(
-        id: 'ses_new',
-        title: 'new',
-        projectId: 'p1',
-        created: 400,
-        location: '/new',
-      );
-      final store = await SessionStore.load(dir: dir);
-      final service = FakeOpencodeService(
-        sessions: [created],
-        names: const {},
-        createdSession: created,
-      );
-      final backend = SessionsBackend(
-        service: service,
-        store: store,
-        liveSessionIds: <String>{},
-      );
-      backend.liveSessionIds.add('ses_new');
-
-      final row = await backend.create('p1');
-
-      expect(row.classification, SessionClassification.appLaunchedLive);
     });
   });
 
@@ -488,32 +384,17 @@ void main() {
         OpencodeProject(id: 'p1', name: 'proj-one', canonical: '/one'),
         OpencodeProject(id: 'p2', name: 'proj-two', canonical: '/two'),
       ];
-      final store = await SessionStore.load(dir: dir);
       final service = FakeOpencodeService(allProjects: projects);
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
       expect(await backend.projects(), projects);
     });
   });
 
-  group('SessionsBackend.isAppLaunched', () {
-    test('reflects the persistence records', () async {
-      final store = await SessionStore.load(dir: dir);
-      store.add('ses_1');
-      await store.save();
-      final service = FakeOpencodeService(sessions: [s1]);
-      final backend = SessionsBackend(service: service, store: store);
-
-      expect(backend.isAppLaunched('ses_1'), isTrue);
-      expect(backend.isAppLaunched('ses_3'), isFalse);
-    });
-  });
-
   group('SessionsBackend.exists', () {
     test('true while the service has the session, false once gone', () async {
-      final store = await SessionStore.load(dir: dir);
       final service = FakeOpencodeService(sessions: [s1]);
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
       expect(await backend.exists('ses_1'), isTrue);
       expect(await backend.exists('ses_gone'), isFalse);
@@ -547,13 +428,12 @@ void main() {
     ];
 
     test('detail, messages, permissions pass through to the service', () async {
-      final store = await SessionStore.load(dir: dir);
       final service = FakeOpencodeService(
         detail: detail,
         messages: messages,
         permissions: permissions,
       );
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
       expect(await backend.getDetail('ses_1'), detail);
       expect(await backend.getMessages('ses_1'), messages);
@@ -561,9 +441,8 @@ void main() {
     });
 
     test('a service error on the detail passes through', () async {
-      final store = await SessionStore.load(dir: dir);
       final service = FakeOpencodeService();
-      final backend = SessionsBackend(service: service, store: store);
+      final backend = SessionsBackend(service: service);
 
       await expectLater(
         backend.getDetail('ses_1'),
@@ -574,9 +453,8 @@ void main() {
     test(
       'prompt and reply record the id, text/request id, and decision',
       () async {
-        final store = await SessionStore.load(dir: dir);
         final service = FakeOpencodeService();
-        final backend = SessionsBackend(service: service, store: store);
+        final backend = SessionsBackend(service: service);
 
         await backend.prompt('ses_1', 'keep going');
         await backend.replyPermission('ses_1', 'req_1', PermissionReply.once);
@@ -597,10 +475,9 @@ void main() {
     late SessionsBackend backend;
     late FakeOpencodeService service;
 
-    setUp(() async {
-      final store = await SessionStore.load(dir: dir);
+    setUp(() {
       service = FakeOpencodeService();
-      backend = SessionsBackend(service: service, store: store);
+      backend = SessionsBackend(service: service);
     });
 
     test('the registries pass through to the service', () async {

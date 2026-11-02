@@ -32,7 +32,6 @@ class _FakeSessionsClient extends SessionsClient {
       created: 100,
       location: '/code/app',
       active: false,
-      classification: SessionClassification.external,
     ),
   ];
 

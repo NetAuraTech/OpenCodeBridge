@@ -5,64 +5,31 @@ import '../../model/question.dart';
 import '../../model/session.dart';
 import '../../model/session_detail.dart';
 import 'opencode_service.dart';
-import 'reconcile.dart';
-import 'session_store.dart';
 
-/// The bridge's sessions backend (spec §5 endpoints 1 & 4, §6, §11): it owns
-/// the [OpencodeService] seam, the [SessionStore] persistence, and the
-/// in-process "live" fact, and composes them into the home-list rows.
+/// The bridge's sessions backend (spec §5 endpoints 1 & 4, §6): it owns the
+/// [OpencodeService] seam and composes it into the home-list rows.
 ///
-/// - [list] merges the service session list, the persistence classification,
-///   and the service's active list, newest first.
-/// - [create] is the new-session flow's service + persistence half (spec §11
-///   write #1).
-/// - [delete] performs the service `DELETE` and, in the same action, removes
-///   the persistence record.
-/// - [reconcile] is the startup orphan reconciliation.
+/// - [list] merges the service session list and the service's active list,
+///   newest first.
+/// - [create] creates the session on the service (spec §5 fill-in †).
+/// - [delete] performs the service `DELETE`.
 class SessionsBackend {
-  SessionsBackend({
-    required this.service,
-    required this.store,
-    Set<String>? liveSessionIds,
-  }) : liveSessionIds = liveSessionIds ?? <String>{};
+  SessionsBackend({required this.service});
 
   final OpencodeService service;
-  final SessionStore store;
-
-  /// In-process fact (spec §6/§11): the sessions classified live in this
-  /// bridge process. "Live is an in-process fact": a session in this set
-  /// classifies as [SessionClassification.appLaunchedLive].
-  final Set<String> liveSessionIds;
-
-  /// Startup reconciliation (spec §11 write #3): drops persistence records
-  /// whose session no longer exists on the service, rewriting only on change.
-  Future<void> reconcile() async {
-    final sessions = await service.listSessions();
-    await reconcileOrphans(store, sessions.map((s) => s.id).toSet());
-  }
 
   /// The service's project list (spec §5 fill-in †): what the app's project
   /// picker offers and what [create] takes as its only parameter.
   Future<List<OpencodeProject>> projects() => service.projects();
 
-  /// Create a session (spec §5 fill-in †, §11 write #1): the service
-  /// `POST /api/session` in [projectId]'s project, then the persistence "add
-  /// id" write — `store.add` + `store.save`, at launch.
-  ///
-  /// The in-process live fact is not set here, so the returned row classifies
-  /// [SessionClassification.appLaunchedClosed].
+  /// Create a session (spec §5 fill-in †): the service `POST /api/session`
+  /// in [projectId]'s project.
   Future<Session> create(String projectId) async {
     final session = await service.createSession(projectId);
-    store.add(session.id);
-    await store.save();
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return _row(session, names, active);
   }
-
-  /// Whether [id] has a persistence record (it was app-launched by this
-  /// bridge, spec §11).
-  bool isAppLaunched(String id) => store.has(id);
 
   /// Whether the service still has [id] (the reopen guard).
   Future<bool> exists(String id) async {
@@ -73,7 +40,7 @@ class SessionsBackend {
     return false;
   }
 
-  /// The merged home-list rows, newest first (spec §5 endpoint 1, §6).
+  /// The home-list rows, newest first (spec §5 endpoint 1, §6).
   Future<List<Session>> list() async {
     final sessions = await service.listSessions();
     final names = await service.projectNames();
@@ -84,18 +51,11 @@ class SessionsBackend {
     return rows;
   }
 
-  /// Delete (spec §5 endpoint 4, §11 write #2): the service deletion and the
-  /// persistence-record removal happen in the same action.
-  Future<void> delete(String id) async {
-    await service.deleteSession(id);
-    if (store.remove(id)) {
-      await store.save();
-    }
-  }
+  /// Delete (spec §5 endpoint 4): the service `DELETE`.
+  Future<void> delete(String id) => service.deleteSession(id);
 
   // The structured-view reads/writes (spec §5, endpoints 5–9) are pure
-  // pass-throughs to the service seam: no persistence or live fact is
-  // involved, so they are exposed directly.
+  // pass-throughs to the service seam, so they are exposed directly.
   Future<SessionDetail> getDetail(String id) => service.getDetail(id);
 
   Future<List<SessionMessage>> getMessages(String id) =>
@@ -113,7 +73,7 @@ class SessionsBackend {
   ) => service.replyPermission(id, requestID, reply);
 
   // The structured view's question forms (issue #50): pure pass-throughs to
-  // the service seam, like endpoints 5–9 (no persistence or live fact).
+  // the service seam, like endpoints 5–9.
   Future<List<QuestionForm>> pendingQuestions(String id) =>
       service.pendingQuestions(id);
 
@@ -127,8 +87,7 @@ class SessionsBackend {
       service.dismissQuestion(id, formID);
 
   // The structured view's `/` command menu (issue #46): the service-backed
-  // commands, pure pass-throughs to the service seam (no persistence or live
-  // fact involved, like endpoints 5–9).
+  // commands, pure pass-throughs to the service seam (like endpoints 5–9).
 
   Future<List<OpencodeCommand>> listCommands() => service.listCommands();
 
@@ -192,8 +151,8 @@ class SessionsBackend {
 
   Future<String> plugins() => service.plugins();
 
-  /// One home-list row, from the service's session plus the persistence and
-  /// live facts (spec §6 classification).
+  /// One home-list row, from the service's session plus its project name and
+  /// active fact (spec §6).
   Session _row(
     OpencodeSession s,
     Map<String, String> names,
@@ -209,11 +168,6 @@ class SessionsBackend {
       created: s.created,
       location: s.location,
       active: active.contains(s.id),
-      classification: store.has(s.id)
-          ? liveSessionIds.contains(s.id)
-                ? SessionClassification.appLaunchedLive
-                : SessionClassification.appLaunchedClosed
-          : SessionClassification.external,
     );
   }
 }

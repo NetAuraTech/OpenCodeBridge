@@ -11,7 +11,6 @@ void main() {
         created: 1793233781396,
         location: '/run/media/x/opencodebridge',
         active: true,
-        classification: SessionClassification.appLaunchedLive,
       );
       expect(session.toJson(), {
         'id': 'ses_1',
@@ -20,7 +19,6 @@ void main() {
         'created': 1793233781396,
         'location': '/run/media/x/opencodebridge',
         'active': true,
-        'classification': 'app-launched-live',
       });
     });
 
@@ -32,7 +30,6 @@ void main() {
         created: 42,
         location: '/x',
         active: false,
-        classification: SessionClassification.external,
       );
       expect(Session.fromJson(session.toJson()), session);
     });
@@ -47,7 +44,6 @@ void main() {
           created: 0,
           location: '',
           active: false,
-          classification: SessionClassification.external,
         ),
       );
       expect(
@@ -59,42 +55,7 @@ void main() {
           created: 7,
           location: '',
           active: false,
-          classification: SessionClassification.external,
         ),
-      );
-    });
-  });
-
-  group('SessionClassification', () {
-    test('wire values match the bridge contract', () {
-      expect(SessionClassification.external.wire, 'external');
-      expect(SessionClassification.appLaunchedLive.wire, 'app-launched-live');
-      expect(
-        SessionClassification.appLaunchedClosed.wire,
-        'app-launched-closed',
-      );
-    });
-
-    test('fromWire maps known values and defaults unknown to external', () {
-      expect(
-        SessionClassification.fromWire('external'),
-        SessionClassification.external,
-      );
-      expect(
-        SessionClassification.fromWire('app-launched-live'),
-        SessionClassification.appLaunchedLive,
-      );
-      expect(
-        SessionClassification.fromWire('app-launched-closed'),
-        SessionClassification.appLaunchedClosed,
-      );
-      expect(
-        SessionClassification.fromWire('bogus'),
-        SessionClassification.external,
-      );
-      expect(
-        SessionClassification.fromWire(null),
-        SessionClassification.external,
       );
     });
   });
