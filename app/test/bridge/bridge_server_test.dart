@@ -1504,7 +1504,8 @@ void main() {
       expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
     });
 
-    test('POST /api/sessions/{id}/window is gone (404) and opens nothing',
+    test(
+      'POST /api/sessions/{id}/window is gone (404) and opens nothing',
       () async {
         store.add('ses_two');
         await store.save();
@@ -1569,10 +1570,7 @@ void main() {
           reason: 'the delete must no longer close the session window',
         );
         expect(service.deleted, ['ses_one']);
-        expect(
-          (await SessionStore.load(dir: dir)).has('ses_one'),
-          isFalse,
-        );
+        expect((await SessionStore.load(dir: dir)).has('ses_one'), isFalse);
         await _until(
           () => tap.dataPayloads.any((p) => p.contains('session.closed')),
           message: 'expected the session.closed frame',

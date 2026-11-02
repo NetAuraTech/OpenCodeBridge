@@ -420,8 +420,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
 
   /// The rows grouped by project, newest first (the rows arrive pre-sorted,
   /// so grouping preserves the order).
-  List<_ProjectGroup> get _groups =>
-      _groupByProject(_rows ?? const []);
+  List<_ProjectGroup> get _groups => _groupByProject(_rows ?? const []);
 
   @override
   Widget build(BuildContext context) {

@@ -271,16 +271,15 @@ void main() {
         },
       );
 
-      testWidgets(
-        'no Closed section: closed rows sit in their project group',
-        (tester) async {
-          await _pumpTab(tester, rows: [_two, _three]);
+      testWidgets('no Closed section: closed rows sit in their project group', (
+        tester,
+      ) async {
+        await _pumpTab(tester, rows: [_two, _three]);
 
-          expect(find.byKey(const ValueKey('closed-section')), findsNothing);
-          expect(find.byKey(const ValueKey('session-ses_2')), findsOneWidget);
-          expect(find.textContaining('App-launched'), findsNothing);
-        },
-      );
+        expect(find.byKey(const ValueKey('closed-section')), findsNothing);
+        expect(find.byKey(const ValueKey('session-ses_2')), findsOneWidget);
+        expect(find.textContaining('App-launched'), findsNothing);
+      });
 
       testWidgets('shows the active indicator only on active sessions', (
         tester,
@@ -438,30 +437,27 @@ void main() {
     });
 
     group('delete', () {
-      testWidgets(
-        'delete on a live app-launched session',
-        (tester) async {
-          final client = await _pumpTab(tester, rows: [_four, _one]);
+      testWidgets('delete on a live app-launched session', (tester) async {
+        final client = await _pumpTab(tester, rows: [_four, _one]);
 
-          await tester.tap(
-            find.byKey(const ValueKey('menu-ses_4')),
-            warnIfMissed: false,
-          );
-          await tester.pumpAndSettle();
-          await tester.tap(find.text('Delete session…'));
-          await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_4')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Delete session…'));
+        await tester.pumpAndSettle();
 
-          // No terminal window is involved any more.
-          expect(find.textContaining('terminal window'), findsNothing);
+        // No terminal window is involved any more.
+        expect(find.textContaining('terminal window'), findsNothing);
 
-          await tester.tap(find.text('Delete'));
-          await tester.pumpAndSettle();
+        await tester.tap(find.text('Delete'));
+        await tester.pumpAndSettle();
 
-          expect(client.deleted, ['ses_4']);
-          expect(find.byKey(const ValueKey('session-ses_4')), findsNothing);
-          expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
-        },
-      );
+        expect(client.deleted, ['ses_4']);
+        expect(find.byKey(const ValueKey('session-ses_4')), findsNothing);
+        expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+      });
 
       testWidgets('delete: confirm removes the session and refreshes', (
         tester,
