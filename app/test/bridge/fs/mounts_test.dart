@@ -69,6 +69,14 @@ void main() {
       expect(mountPoints(content), ['/']);
     });
 
+    test('drops boot partitions', () {
+      const content =
+          '/dev/nvme0n1p1\t/boot/efi\tvfat\trw 0 0\n'
+          '/dev/nvme0n1p2\t/boot\text4\trw 0 0\n'
+          '/dev/nvme0n1p3\t/booty\text4\trw 0 0\n';
+      expect(mountPoints(content), ['/booty']);
+    });
+
     test('drops a container rootfs overlay, keeps an overlay root', () {
       const content =
           'overlay\t/var/lib/docker/rootfs/overlayfs/abc\toverlay\trw 0 0\n'

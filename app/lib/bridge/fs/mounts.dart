@@ -15,6 +15,8 @@
 /// - a user-space FUSE mount (`fuse.*`: gvfs, sshfs, …) is not a drive;
 /// - a container rootfs (an `overlay` mount at a deep path) is not a drive;
 ///   an overlay mounted at `/` is (an app in a container browses its root);
+/// - a boot partition (a mount at `/boot` or under it, e.g. the EFI system
+///   partition) is not a drive;
 /// - a non-absolute mountpoint is not a drive;
 /// - a drive is listed once, sorted.
 List<String> mountPoints(String content) {
@@ -34,6 +36,8 @@ List<String> mountPoints(String content) {
     // path; the only overlay a desktop user browses is the system root
     // itself (an app in a container has overlay as its root and keeps it).
     if (fstype == 'overlay' && point != '/') continue;
+    // Boot partitions (/boot, /boot/efi) are never project storage.
+    if (point == '/boot' || point.startsWith('/boot/')) continue;
     if (!point.startsWith('/')) continue;
     drives.add(point);
   }
