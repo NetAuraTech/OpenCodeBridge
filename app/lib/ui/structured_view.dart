@@ -2461,10 +2461,48 @@ class _ToolCard extends StatelessWidget {
     return lines.isEmpty ? null : lines;
   }
 
+  /// A one-line, human-readable summary of the tool's input, for the tools
+  /// whose raw JSON input is mostly noise for what the user wants to glance
+  /// at: `shell` shows its command, `read` its path (with `offset` / `limit`
+  /// when given), `grep` its pattern (and path), `execute` its code. `null`
+  /// when the input is not the map expected for the tool (a still-streaming
+  /// input is a partial JSON string) or carries none of the fields the tool
+  /// is known for — then the card falls back to the raw input, unchanged.
+  String? get _detail {
+    final input = tool.input;
+    if (input is! Map<String, Object?>) return null;
+    switch (tool.name) {
+      case 'shell':
+        return _string(input['command']);
+      case 'execute':
+        return _string(input['code']);
+      case 'read':
+        final path = _string(input['path']);
+        if (path == null) return null;
+        final extra = [
+          if (input['offset'] is int) 'offset ${input['offset']}',
+          if (input['limit'] is int) 'limit ${input['limit']}',
+        ].join(', ');
+        return extra.isEmpty ? path : '$path ($extra)';
+      case 'grep':
+        final pattern = _string(input['pattern']);
+        if (pattern == null) return null;
+        final path = _string(input['path']);
+        return path == null ? pattern : '$pattern in $path';
+    }
+    return null;
+  }
+
+  /// A non-empty string field of the input, or `null` when the field is
+  /// absent or not a non-empty string.
+  static String? _string(Object? value) =>
+      value is String && value.isNotEmpty ? value : null;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final questions = _questions;
+    final detail = _detail;
     final (icon, iconColor) = switch (tool.status) {
       'streaming' || 'running' => (Icons.pending, Colors.orange),
       'completed' => (Icons.check_circle, Colors.green),
@@ -2546,11 +2584,11 @@ class _ToolCard extends StatelessWidget {
                 ],
               ),
             )
-          else if (_inputText.isNotEmpty)
+          else if (detail != null || _inputText.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: Text(
-                _inputText,
+                detail ?? _inputText,
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
