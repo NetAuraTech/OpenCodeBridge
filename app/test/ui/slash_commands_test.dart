@@ -40,6 +40,7 @@ void main() {
         'copy',
         'help',
         'settings',
+        'themes',
         'debug',
         'exit',
       ]);
@@ -52,6 +53,7 @@ void main() {
         'copy',
         'help',
         'settings',
+        'themes',
         'debug',
         'exit',
       };
@@ -89,18 +91,13 @@ void main() {
       expect(byName('open').aliases, containsAll(['projects', 'project']));
       expect(byName('pair').aliases, contains('web'));
       expect(byName('exit').aliases, containsAll(['quit', 'q']));
+      expect(byName('themes').aliases, contains('theme'));
     });
 
     test('the agent call commands are deliberately left out', () {
       final names = {for (final c in SlashCommands.catalog) c.name};
-      // Each of the five is absent (not merely "not all five").
-      for (final name in const [
-        'editor',
-        'themes',
-        'highlights',
-        'update',
-        'restart',
-      ]) {
+      // Each is absent (not merely "not all of them").
+      for (final name in const ['editor', 'highlights', 'update', 'restart']) {
         expect(names, isNot(contains(name)), reason: name);
       }
     });

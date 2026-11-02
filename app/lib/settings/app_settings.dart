@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_mode.dart';
@@ -5,13 +6,15 @@ import '../app_mode.dart';
 /// Persisted app settings, backed by [SharedPreferences].
 ///
 /// The scaffold persists: the last launch mode (so it is preselected at the
-/// next desktop launch), the client-mode tunnel URL, and the three push-event
-/// toggles (which become live with the push ticket).
+/// next desktop launch), the client-mode tunnel URL, the theme choice
+/// (issue #49), and the three push-event toggles (which become live with the
+/// push ticket).
 class AppSettings {
   AppSettings._(this._prefs);
 
   /// Preference key for the last launch mode. Exposed so tests can seed it.
   static const String keyLastMode = 'app.lastMode';
+  static const String keyThemeMode = 'app.themeMode';
   static const String _keyTunnelUrl = 'host.tunnelUrl';
   static const String _keyNotifyPermission = 'notify.permissionAsked';
   static const String _keyNotifyTurnEnded = 'notify.turnEnded';
@@ -40,6 +43,16 @@ class AppSettings {
       _prefs.setString(keyLastMode, mode.name);
     }
   }
+
+  /// The app's theme (issue #49): Light, Dark, or System (follow the OS).
+  /// Persisted like the other settings and restored at the next launch;
+  /// until the user chooses, the app stays Light as it always has.
+  ThemeMode get themeMode {
+    final value = _prefs.getString(keyThemeMode) ?? 'light';
+    return ThemeMode.values.byName(value);
+  }
+
+  set themeMode(ThemeMode mode) => _prefs.setString(keyThemeMode, mode.name);
 
   /// The tunnel URL the client mode connects to (spec: Settings).
   String get tunnelUrl => _prefs.getString(_keyTunnelUrl) ?? '';

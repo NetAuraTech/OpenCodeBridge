@@ -12,10 +12,11 @@ import '../settings/app_settings.dart';
 import '../tunnel_url.dart';
 import 'tunnel_setup_wizard.dart';
 
-/// The Settings tab (spec: section 13): host connection (client mode: the
-/// tunnel URL), the Access login (issue #23), the tunnel status (issue
-/// #22), the push setup (issue #24: the Firebase project pasted once, and
-/// the three per-event toggles), and the app version.
+/// The Settings tab (spec: section 13): the theme choice (issue #49:
+/// Light, Dark, or System), host connection (client mode: the tunnel URL),
+/// the Access login (issue #23), the tunnel status (issue #22), the push
+/// setup (issue #24: the Firebase project pasted once, and the three
+/// per-event toggles), and the app version.
 class SettingsTab extends StatefulWidget {
   const SettingsTab({
     super.key,
@@ -29,6 +30,7 @@ class SettingsTab extends StatefulWidget {
     this.onNotifyToggled,
     this.onPushProjectCommitted,
     this.onServiceAccountCommitted,
+    this.onThemeModeChanged,
     this.serviceAccountPath,
   });
 
@@ -67,6 +69,10 @@ class SettingsTab extends StatefulWidget {
   /// the freshly written file.
   final VoidCallback? onServiceAccountCommitted;
 
+  /// Re-themes the whole app live from the persisted choice (issue #49);
+  /// the Theme section calls it after the choice is persisted.
+  final VoidCallback? onThemeModeChanged;
+
   /// Where the service account file lives ([FirebaseServiceAccount.defaultPath]
   /// by default; tests point it at a temp dir).
   final String? serviceAccountPath;
@@ -101,6 +107,12 @@ class _SettingsTabState extends State<SettingsTab> {
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.all(8),
     children: [
+      const _SectionLabel('Theme'),
+      _ThemeSection(
+        settings: widget.settings,
+        onChanged: widget.onThemeModeChanged,
+      ),
+      const SizedBox(height: 8),
       const _SectionLabel('Host connection'),
       if (widget.mode == AppMode.client)
         Padding(
@@ -883,6 +895,49 @@ class _ServiceAccountSectionState extends State<_ServiceAccountSection> {
       ),
     );
   }
+}
+
+/// The theme choice (issue #49): Light, Dark, or System (follow the OS).
+/// The choice persists on change and re-applies live across the app (no
+/// restart), so every screen follows it.
+class _ThemeSection extends StatefulWidget {
+  const _ThemeSection({required this.settings, required this.onChanged});
+
+  final AppSettings settings;
+
+  /// Re-themes the whole app live after the choice is persisted (issue
+  /// #49); `null` leaves the choice persisted but unapplied until a relaunch.
+  final VoidCallback? onChanged;
+
+  @override
+  State<_ThemeSection> createState() => _ThemeSectionState();
+}
+
+class _ThemeSectionState extends State<_ThemeSection> {
+  late ThemeMode _selected = widget.settings.themeMode;
+
+  @override
+  Widget build(BuildContext context) => RadioGroup<ThemeMode>(
+    groupValue: _selected,
+    onChanged: (value) {
+      if (value == null) return;
+      setState(() => _selected = value);
+      widget.settings.themeMode = value;
+      widget.onChanged?.call();
+    },
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: const [
+        RadioListTile<ThemeMode>(value: ThemeMode.light, title: Text('Light')),
+        RadioListTile<ThemeMode>(value: ThemeMode.dark, title: Text('Dark')),
+        RadioListTile<ThemeMode>(
+          value: ThemeMode.system,
+          title: Text('System'),
+          subtitle: Text('Follow the OS'),
+        ),
+      ],
+    ),
+  );
 }
 
 class _SectionLabel extends StatelessWidget {

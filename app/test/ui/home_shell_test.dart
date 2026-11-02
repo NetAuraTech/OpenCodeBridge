@@ -46,9 +46,16 @@ void main() {
         findsOneWidget,
       );
 
-      // Switch to the Settings tab.
+      // Switch to the Settings tab. The Theme section (issue #49) grew
+      // the tab, so the Notifications section sits below the fold: scroll
+      // to it.
       await tester.tap(find.text('Settings').last);
       await tester.pump();
+      await tester.dragUntilVisible(
+        find.text('Notifications'),
+        find.byType(ListView),
+        const Offset(0, -200),
+      );
       expect(find.text('Notifications'), findsOneWidget);
 
       monitor.dispose();

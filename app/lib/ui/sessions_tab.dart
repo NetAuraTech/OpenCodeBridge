@@ -9,6 +9,7 @@ import '../client/events_client.dart';
 import '../client/sessions_client.dart';
 import '../model/project.dart';
 import '../model/session.dart';
+import '../settings/app_settings.dart';
 import 'structured_view.dart';
 import 'terminal_view.dart';
 
@@ -35,6 +36,8 @@ class SessionsTab extends StatefulWidget {
     this.deepLinkSession,
     this.onDeepLinkSessionConsumed,
     this.onOpenSettings,
+    this.settings,
+    this.onThemeModeChanged,
   });
 
   /// The tunnel's Access login (issue #23, client mode); `null` in server
@@ -78,6 +81,16 @@ class SessionsTab extends StatefulWidget {
   /// command, issue #46); the shell provides it. `null` leaves `/settings`
   /// a note that it is unavailable.
   final FutureOr<void> Function()? onOpenSettings;
+
+  /// The app's settings (issue #49): the structured view's `/themes`
+  /// command reads and persists the theme choice from here. `null` leaves
+  /// `/themes` a note that it is unavailable.
+  final AppSettings? settings;
+
+  /// Re-themes the whole app live from the persisted choice (issue #49);
+  /// the structured view's `/themes` command calls it after the choice is
+  /// persisted.
+  final VoidCallback? onThemeModeChanged;
 
   @override
   State<SessionsTab> createState() => SessionsTabState();
@@ -369,6 +382,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           gaps: _events?.gaps,
           onNewSession: _newSession,
           onOpenSettings: widget.onOpenSettings,
+          settings: widget.settings,
+          onThemeModeChanged: widget.onThemeModeChanged,
         ),
       ),
     );

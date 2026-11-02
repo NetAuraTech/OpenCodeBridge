@@ -13,6 +13,7 @@ import '../model/command.dart';
 import '../model/message.dart';
 import '../model/permission.dart';
 import '../model/session_detail.dart';
+import '../settings/app_settings.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
 import 'slash_commands.dart';
@@ -40,6 +41,8 @@ class StructuredSessionScreen extends StatefulWidget {
     this.gaps,
     this.onNewSession,
     this.onOpenSettings,
+    this.settings,
+    this.onThemeModeChanged,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -68,6 +71,16 @@ class StructuredSessionScreen extends StatefulWidget {
 
   /// `/settings`: open the app's Settings tab.
   final FutureOr<void> Function()? onOpenSettings;
+
+  /// The app's settings (issue #49): `/themes` reads and persists the theme
+  /// choice from here. `null` leaves `/themes` a note that it is
+  /// unavailable.
+  final AppSettings? settings;
+
+  /// Re-themes the whole app live after `/themes` persists the choice
+  /// (issue #49); `null` leaves the choice persisted but unapplied until a
+  /// relaunch.
+  final VoidCallback? onThemeModeChanged;
 
   @override
   State<StructuredSessionScreen> createState() =>
@@ -1376,6 +1389,26 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         Navigator.of(context).pop();
         await onOpenSettings();
         return;
+      case 'themes':
+        final settings = widget.settings;
+        final onThemeModeChanged = widget.onThemeModeChanged;
+        if (settings == null || onThemeModeChanged == null) {
+          if (!mounted) return;
+          _snackBar('Theme is not available from this screen.');
+          return;
+        }
+        final picked = await _pick<ThemeMode>(
+          'Switch theme',
+          ThemeMode.values,
+          (mode) => _themeLabel(mode, settings.themeMode),
+          null,
+        );
+        if (picked == null) return;
+        settings.themeMode = picked;
+        onThemeModeChanged();
+        if (!mounted) return;
+        _snackBar('Theme set to ${_themeLabel(picked, null)}.');
+        return;
       case 'debug':
         String service = 'unreachable';
         try {
@@ -1410,6 +1443,16 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// A bridge failure in one line, for a snackbar.
   String _describe(SessionsClientError e) =>
       e.statusCode == 0 ? 'unreachable' : 'status ${e.statusCode}';
+
+  /// The label of a theme choice (issue #49), with the current one marked
+  /// in the `/themes` picker.
+  String _themeLabel(ThemeMode mode, ThemeMode? current) =>
+      (switch (mode) {
+        ThemeMode.light => 'Light',
+        ThemeMode.dark => 'Dark',
+        ThemeMode.system => 'System',
+      }) +
+      (mode == current ? ' (current)' : '');
 
   /// A plain dialog: a title over the (selectable) [text], scrollable.
   void _dialog(String title, String text, {bool mono = false}) {

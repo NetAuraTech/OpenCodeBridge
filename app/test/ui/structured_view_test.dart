@@ -9,7 +9,9 @@ import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session_detail.dart';
+import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:opencodebridge/ui/structured_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _zero = TokenUsage(
   input: 0,
@@ -312,6 +314,46 @@ Future<StreamController<BridgeEvent>> _pump(
   await tester.pump();
   await tester.pump();
   return events;
+}
+
+/// The app's root (issue #49): the MaterialApp follows the persisted theme
+/// choice and re-themes in place when the choice changes — the callback
+/// re-runs this build, exactly like `OpenCodeBridgeApp`.
+class _ThemedRoot extends StatefulWidget {
+  const _ThemedRoot({
+    required this.client,
+    required this.settings,
+    required this.events,
+    required this.onThemeModeChanged,
+  });
+
+  final SessionsClient client;
+  final AppSettings settings;
+  final Stream<BridgeEvent> events;
+  final VoidCallback onThemeModeChanged;
+
+  @override
+  State<_ThemedRoot> createState() => _ThemedRootState();
+}
+
+class _ThemedRootState extends State<_ThemedRoot> {
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    theme: ThemeData.light(),
+    darkTheme: ThemeData.dark(),
+    themeMode: widget.settings.themeMode,
+    home: StructuredSessionScreen(
+      sessionId: 'ses_1',
+      title: 'external session',
+      client: widget.client,
+      events: widget.events,
+      settings: widget.settings,
+      onThemeModeChanged: () {
+        widget.onThemeModeChanged();
+        setState(() {});
+      },
+    ),
+  );
 }
 
 BridgeEvent _event(
@@ -1906,6 +1948,70 @@ void main() {
       await _pressEnter(tester);
 
       expect(find.text('Not available from this screen.'), findsOneWidget);
+    });
+
+    testWidgets('`/themes` picks the theme, persists it, and re-themes', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      var themeChanges = 0;
+      final client = _FakeClient(details: const [_detail0]);
+      final events = StreamController<BridgeEvent>.broadcast();
+
+      // The app's root (issue #49): the MaterialApp follows the persisted
+      // choice and re-themes in place — the callback re-runs the build,
+      // exactly like OpenCodeBridgeApp.
+      await tester.pumpWidget(
+        _ThemedRoot(
+          client: client,
+          settings: settings,
+          events: events.stream,
+          onThemeModeChanged: () {
+            themeChanges++;
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        Theme.of(tester.element(find.text('external session'))).brightness,
+        Brightness.light,
+      );
+
+      // The alias filters the menu to the one row; Enter runs it.
+      await _typePrompt(tester, '/theme');
+      await tester.pump();
+      await _pressEnter(tester);
+      await tester.pump();
+
+      expect(find.text('Switch theme'), findsOneWidget);
+      expect(find.text('Light (current)'), findsOneWidget);
+      expect(find.text('Dark'), findsOneWidget);
+      expect(find.text('System'), findsOneWidget);
+
+      await tester.tap(find.text('Dark'));
+      await tester.pump();
+      await tester.pump();
+
+      // The choice is persisted, the callback fired once...
+      expect(settings.themeMode, ThemeMode.dark);
+      expect(themeChanges, 1);
+      expect(find.text('Theme set to Dark.'), findsOneWidget);
+      // ...and it is a local command: nothing reached the shared service,
+      // the prompt field is cleared.
+      expect(client.commandsRun, isEmpty);
+      expect(client.prompts, isEmpty);
+      expect(_promptText(tester), '');
+
+      // The callback's rebuild re-themes the visible screen live.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        Theme.of(tester.element(find.text('external session'))).brightness,
+        Brightness.dark,
+      );
     });
   });
 
