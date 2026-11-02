@@ -378,6 +378,32 @@ void main() {
       expect(find.text('Cost \$0.0000'), findsOneWidget);
     });
 
+    testWidgets('a phone-sized screen shows the pending banner without '
+        'overflowing', (tester) async {
+      // A phone with the soft keyboard up: the body is squeezed to about
+      // 360x487 (the VOG L29 log).
+      tester.view.physicalSize = const Size(360, 543);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      const request = PermissionRequest(
+        id: 'per_1',
+        action: 'shell',
+        resources: ['rm -rf node_modules'],
+      );
+      final client = _FakeClient(
+        details: const [_detail0],
+        permissionLists: const [
+          <PermissionRequest>[request],
+        ],
+      );
+      await _pump(tester, client: client);
+
+      // The banner's decision buttons wrap rather than run off the edge.
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const ValueKey('permission-banner')), findsOneWidget);
+    });
+
     testWidgets('the header shows the llama.cpp prefill and decode speed '
         'from llama.speed, and clears it when idle', (tester) async {
       final client = _FakeClient(details: const [_detail0]);
