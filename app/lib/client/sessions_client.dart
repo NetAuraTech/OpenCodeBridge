@@ -79,9 +79,9 @@ class SessionsClient {
   }
 
   /// Create a session in [projectId]'s project (spec section 5, fill-in †,
-  /// endpoint 2). The body is only the project id; the bridge records the
-  /// launch, opens the session's terminal window, and returns the session
-  /// (classified `app-launched-live` once the window is open).
+  /// endpoint 2). The body is only the project id; the bridge creates the
+  /// session on the shared service, records the launch, and returns the
+  /// session (no terminal window is opened).
   Future<Session> create(String projectId) async {
     final client = HttpClient();
     try {
@@ -98,34 +98,6 @@ class SessionsClient {
         throw SessionsClientError(response.statusCode, body);
       }
       return Session.fromJson(jsonDecode(body));
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  /// Reopen the terminal window of a closed app-launched session (spec
-  /// section 5, endpoint 3).
-  Future<void> openWindow(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/window'),
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent &&
-          response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(
-          response.statusCode,
-          'window of $id was not opened',
-        );
-      }
     } on SessionsClientError {
       rethrow;
     } catch (error) {

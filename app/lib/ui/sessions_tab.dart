@@ -11,19 +11,16 @@ import '../model/project.dart';
 import '../model/session.dart';
 import '../settings/app_settings.dart';
 import 'structured_view.dart';
-import 'terminal_view.dart';
 
 /// The Sessions tab: the home list (spec section 5 endpoint 1, section 6).
 ///
 /// Shows every session of the shared opencode service, grouped by project
 /// (collapsible), newest first, with the active indicator and a per-session
-/// delete action. App-launched sessions whose window is closed collect in
-/// the Closed section at the bottom; tapping one reopens its window. Tapping
-/// an *external* row opens the structured view (spec §6); tapping an
-/// app-launched live row follows its terminal (server mode). The New session
-/// button starts a session in a project (spec §5, fill-in †): the bridge
-/// creates the session, its PTY, and its terminal window, and in server mode
-/// the app follows the terminal.
+/// delete action. Tapping any row opens the structured view (spec §6). The
+/// global New session button opens the project picker (spec §5, fill-in †);
+/// each project group carries a New session button of its own that creates
+/// in that project directly. Both create the session on the shared service
+/// (no terminal window) and open its structured view.
 class SessionsTab extends StatefulWidget {
   const SessionsTab({
     super.key,
@@ -59,9 +56,9 @@ class SessionsTab extends StatefulWidget {
   /// server mode.
   final AuthHeaderProvider? auth;
 
-  /// Present in server mode with a shared opencode service: the terminal
-  /// backend the tab attaches to in-process (spec §12). `null` in client
-  /// mode, where the app cannot follow the terminal.
+  /// Present in server mode with a shared opencode service (spec §12);
+  /// `null` in client mode. The tab no longer reads it (issue #51: the
+  /// terminal view is being retired); the shell still passes it through.
   final TerminalBackend? terminals;
 
   /// The source of the bridge's unified event stream (spec §8) the tab's
@@ -119,11 +116,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// The id whose delete is in flight (its row shows progress).
   String? _deletingId;
 
-  /// The id whose window reopen is in flight (its row shows progress).
-  String? _reopeningId;
-
-  /// True while a session create (the new-session flow, after the project
-  /// is picked) is in flight.
+  /// True while a session create (the new-session flow) is in flight.
   bool _newSessionBusy = false;
 
   /// The deep-link session awaiting a loaded list (issue #24): set when the
@@ -284,28 +277,31 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
-  /// The new-session flow (spec §5, fill-in †): pick a project, then create
-  /// the session in it. The bridge creates the session + PTY + window and
-  /// returns the session; afterwards the app follows the terminal (server
-  /// mode) or just reports the launch (client mode).
+  /// The global new-session flow (spec §5, fill-in †): pick a project, then
+  /// create the session in it and open its structured view.
   Future<void> _newSession() async {
     final client = _client;
     if (client == null || _newSessionBusy) return;
     final project = await _pickProject(client);
     if (project == null) return;
+    await _createInProject(project.id);
+  }
+
+  /// Creates a session in the project [projectId] and opens its structured
+  /// view (spec §5, fill-in †). The bridge creates the session on the shared
+  /// service and records the launch (no terminal window); afterwards the app
+  /// opens the session's structured view, in server and client mode alike.
+  /// Shared by the global new-session flow (after the picker) and each
+  /// project group's New session button.
+  Future<void> _createInProject(String projectId) async {
+    final client = _client;
+    if (client == null || _newSessionBusy) return;
     setState(() => _newSessionBusy = true);
     try {
-      final session = await client.create(project.id);
+      final session = await client.create(projectId);
       if (!mounted) return;
       await _load();
-      final terminals = widget.terminals;
-      if (terminals == null) {
-        // Client mode: the window opened on the host machine; this client
-        // cannot follow the terminal.
-        _snackBar('Session created; its terminal window opened on the host.');
-        return;
-      }
-      await _openTerminal(session, terminals);
+      await _openStructured(session);
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       _snackBar(
@@ -345,26 +341,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     );
   }
 
-  /// Follows [session]'s terminal in the interactive view (spec §12). The
-  /// attach is in-process: the app and the window's attach client are
-  /// attached simultaneously. When the view closes, the list re-loads so
-  /// the section the session belongs to is up to date.
-  Future<void> _openTerminal(Session session, TerminalBackend terminals) async {
-    final client = _client;
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (context) => TerminalScreen(
-          title: session.title.isNotEmpty ? session.title : session.location,
-          attach: () => terminals.proxyFor(session.id).attach(),
-          sessionId: session.id,
-          client: client,
-          events: _events?.events,
-        ),
-      ),
-    );
-    if (mounted) await _load();
-  }
-
   /// Opens [session] in the structured view (spec §6: *External* →
   /// structured view). The structured view is fully usable without a TUI:
   /// the session stays sendable after its terminal window closes. When the
@@ -390,51 +366,15 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     if (mounted) await _load();
   }
 
-  /// Reopens [session]'s window (spec §5 endpoint 3) and, in server mode,
-  /// follows the terminal as in the new-session flow.
-  Future<void> _reopen(Session session) async {
-    final client = _client;
-    if (client == null || _reopeningId != null) return;
-    final terminals = widget.terminals;
-    setState(() => _reopeningId = session.id);
-    try {
-      await client.openWindow(session.id);
-      if (!mounted) return;
-      if (terminals == null) {
-        _snackBar('Window reopened on the host.');
-        await _load();
-        return;
-      }
-      await _openTerminal(session, terminals);
-    } on SessionsClientError catch (e) {
-      if (!mounted) return;
-      _snackBar(
-        'Could not reopen the window '
-        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
-      );
-    } catch (_) {
-      if (!mounted) return;
-      _snackBar('Could not reopen the window.');
-    } finally {
-      if (mounted) setState(() => _reopeningId = null);
-    }
-  }
-
   Future<void> _confirmDelete(Session session) async {
     final context = this.context;
-    final live =
-        session.classification == SessionClassification.appLaunchedLive;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete this session?'),
         content: Text(
-          live
-              ? '"${session.title}" is live: its terminal window will be '
-                    'closed and the session deleted from the opencode service. '
-                    'This cannot be undone.'
-              : '"${session.title}" will be deleted from the opencode service. '
-                    'This cannot be undone.',
+          '"${session.title}" will be deleted from the opencode service. '
+          'This cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -478,23 +418,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// The live / external rows grouped by project (newest first): everything
-  /// that is not in the Closed section.
-  List<_ProjectGroup> get _liveGroups => _groupByProject([
-    if (_rows != null)
-      for (final row in _rows!)
-        if (row.classification != SessionClassification.appLaunchedClosed) row,
-  ]);
-
-  /// The Closed section's rows, newest first.
-  List<Session> get _closedRows {
-    final rows = _rows;
-    if (rows == null) return const [];
-    return [
-      for (final row in rows)
-        if (row.classification == SessionClassification.appLaunchedClosed) row,
-    ];
-  }
+  /// The rows grouped by project, newest first (the rows arrive pre-sorted,
+  /// so grouping preserves the order).
+  List<_ProjectGroup> get _groups => _groupByProject(_rows ?? const []);
 
   @override
   Widget build(BuildContext context) {
@@ -512,7 +438,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       return _ErrorState(message: error, onRetry: _load);
     }
     final rows = _rows!;
-    final closed = _closedRows;
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(
@@ -521,7 +446,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         children: [
           _NewSessionButton(busy: _newSessionBusy, onPressed: _newSession),
           if (rows.isEmpty) const _CenteredMessage(text: 'No sessions yet.'),
-          for (final group in _liveGroups)
+          for (final group in _groups)
             ExpansionTile(
               key: ValueKey('project-${group.project.id}'),
               initiallyExpanded: true,
@@ -532,6 +457,11 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     : '${group.sessions.length} sessions',
               ),
               children: [
+                _GroupNewSessionButton(
+                  projectId: group.project.id,
+                  busy: _newSessionBusy,
+                  onPressed: () => _createInProject(group.project.id),
+                ),
                 for (final s in group.sessions)
                   _SessionRow(
                     session: s,
@@ -541,50 +471,17 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                   ),
               ],
             ),
-          if (closed.isNotEmpty) ...[
-            const Padding(
-              key: ValueKey('closed-section'),
-              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
-                'Closed',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.grey,
-                ),
-              ),
-            ),
-            for (final s in closed)
-              _SessionRow(
-                session: s,
-                deleting: _deletingId == s.id,
-                reopening: _reopeningId == s.id,
-                closed: true,
-                onTap: () => _reopen(s),
-                onDelete: _confirmDelete,
-              ),
-          ],
         ],
       ),
     );
   }
 
-  /// The tap target of a live / external row:
-  ///   * *external* → the structured view (spec §6), always (the session
-  ///     stays fully usable without a TUI);
-  ///   * *app-launched live* → following the terminal in server mode;
-  ///   * otherwise → `null` (nothing to open from a live row).
+  /// The tap target of a row: the structured view, every row (spec §6); the
+  /// session stays fully usable without a TUI.
   VoidCallback? _rowTap(Session session) {
     final client = _client;
     if (client == null) return null;
-    return switch (session.classification) {
-      SessionClassification.external => () => _openStructured(session),
-      SessionClassification.appLaunchedLive =>
-        widget.terminals == null
-            ? null
-            : () => _openTerminal(session, widget.terminals!),
-      SessionClassification.appLaunchedClosed => null,
-    };
+    return () => _openStructured(session);
   }
 }
 
@@ -633,6 +530,37 @@ class _NewSessionButton extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : const Icon(Icons.add),
+      label: busy ? const Text('Creating…') : const Text('New session'),
+    ),
+  );
+}
+
+/// A project group's New session action (spec §5, fill-in †): creates a
+/// session directly in the group's project, no picker.
+class _GroupNewSessionButton extends StatelessWidget {
+  const _GroupNewSessionButton({
+    required this.projectId,
+    required this.busy,
+    required this.onPressed,
+  });
+
+  final String projectId;
+  final bool busy;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    key: ValueKey('session-new-$projectId'),
+    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+    child: TextButton.icon(
+      onPressed: busy ? null : onPressed,
+      icon: busy
+          ? const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.add, size: 18),
       label: busy ? const Text('Creating…') : const Text('New session'),
     ),
   );
@@ -750,20 +678,12 @@ class _SessionRow extends StatelessWidget {
     required this.deleting,
     required this.onDelete,
     this.onTap,
-    this.reopening = false,
-    this.closed = false,
   });
 
   final Session session;
 
-  /// True for rows of the Closed section (window reopen is in flight).
-  final bool reopening;
-
-  /// True for rows of the Closed section.
-  final bool closed;
-
-  /// Follow the terminal (live rows) or reopen the window (Closed rows);
-  /// `null` when the row has nothing to open.
+  /// Opens the session's structured view; `null` when the row has nothing
+  /// to open.
   final VoidCallback? onTap;
 
   final bool deleting;
@@ -771,11 +691,6 @@ class _SessionRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final classificationCaption = switch (session.classification) {
-      SessionClassification.appLaunchedLive => 'App-launched · window open',
-      SessionClassification.appLaunchedClosed => 'App-launched · window closed',
-      SessionClassification.external => null,
-    };
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -822,34 +737,11 @@ class _SessionRow extends StatelessWidget {
                         color: Theme.of(context).colorScheme.outline,
                       ),
                     ),
-                    if (classificationCaption != null)
-                      Text(
-                        classificationCaption,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Theme.of(context).colorScheme.outlineVariant,
-                        ),
-                      ),
                   ],
                 ),
               ),
               const SizedBox(width: 8),
-              if (closed && !reopening && !deleting)
-                IconButton(
-                  key: ValueKey('reopen-${session.id}'),
-                  icon: const Icon(Icons.replay),
-                  tooltip: 'Reopen window',
-                  onPressed: onTap,
-                ),
               deleting
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : reopening
                   ? const SizedBox(
                       width: 20,
                       height: 20,

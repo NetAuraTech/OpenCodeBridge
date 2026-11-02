@@ -41,7 +41,7 @@ An opencode conversation on the host's shared opencode service.
 _Avoid_: conversation (in UI copy), thread
 
 **App-launched session**:
-A session whose terminal window was opened by the bridge on the host.
+A session created by the bridge on the shared opencode service from the app (no terminal window is opened).
 _Avoid_: owned session, tracked session
 
 **External session**:
@@ -49,7 +49,7 @@ A session started manually by the user in a terminal, never launched by the brid
 _Avoid_: manual session, foreign session
 
 **Closed session**:
-An app-launched session whose terminal window has been closed; the session remains on the opencode service and can be reopened in a new window.
+An app-launched session whose window (if any) is no longer open; the session remains on the opencode service, viewable and sendable from the app.
 _Avoid_: dead session, finished session
 
 **Active**:
@@ -81,5 +81,5 @@ The app view of an app-launched session: the live content of the host terminal, 
 _Avoid_: terminal session, raw view
 
 **Structured view**:
-The app view of an external session: messages, tools in flight, costs, permissions.
+The app view of a session (any row in the home list): messages, tools in flight, costs, permissions.
 _Avoid_: message view, chat view

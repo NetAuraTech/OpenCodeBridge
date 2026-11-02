@@ -15,7 +15,6 @@ void main() {
   late Uri base;
   late List<String> deletedPaths;
   late List<String> createdBodies;
-  late List<String> windowPaths;
   late List<String> promptBodies;
   late List<String> replyBodies;
   // The `/` command menu (issue #46) recordings.
@@ -37,7 +36,6 @@ void main() {
   setUp(() async {
     deletedPaths = [];
     createdBodies = [];
-    windowPaths = [];
     promptBodies = [];
     replyBodies = [];
     commandBodies = [];
@@ -134,7 +132,7 @@ void main() {
               'created': 400,
               'location': '/created',
               'active': false,
-              'classification': 'app-launched-live',
+              'classification': 'app-launched-closed',
             }),
           );
         } else if (project == 'p_missing') {
@@ -143,19 +141,6 @@ void main() {
         } else {
           response.statusCode = HttpStatus.badRequest;
           response.write(jsonEncode({'error': 'invalid_body'}));
-        }
-      } else if (request.method == 'POST' &&
-          request.uri.path.endsWith('/window')) {
-        final id = request.uri.path.substring(
-          '/api/sessions/'.length,
-          request.uri.path.length - '/window'.length,
-        );
-        if (id == 'ses_missing') {
-          response.statusCode = HttpStatus.notFound;
-          response.write(jsonEncode({'error': 'not_found'}));
-        } else {
-          windowPaths.add(id);
-          response.statusCode = HttpStatus.noContent;
         }
       } else if (request.method == 'GET' &&
           request.uri.path == '/api/sessions/ses_1') {
@@ -671,7 +656,7 @@ void main() {
           created: 400,
           location: '/created',
           active: false,
-          classification: SessionClassification.appLaunchedLive,
+          classification: SessionClassification.appLaunchedClosed,
         ),
       );
     },
@@ -680,23 +665,6 @@ void main() {
   test('create maps the bridge 404 to SessionsClientError(404)', () async {
     try {
       await client.create('p_missing');
-      fail('expected SessionsClientError');
-    } on SessionsClientError catch (e) {
-      expect(e.statusCode, HttpStatus.notFound);
-    }
-  });
-
-  test(
-    'openWindow posts to /api/sessions/{id}/window and accepts 204',
-    () async {
-      await client.openWindow('ses_2');
-      expect(windowPaths, ['ses_2']);
-    },
-  );
-
-  test('openWindow maps the bridge 404 to SessionsClientError(404)', () async {
-    try {
-      await client.openWindow('ses_missing');
       fail('expected SessionsClientError');
     } on SessionsClientError catch (e) {
       expect(e.statusCode, HttpStatus.notFound);
