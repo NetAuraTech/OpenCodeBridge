@@ -2,15 +2,19 @@
 /// the "New project" file-picker starts from (issue #54, the Linux
 /// adapter's half of ADR-0002's per-OS seam).
 ///
-/// The mount table is one line per mount, tab-separated fields
-/// `<device> <mountpoint> <fstype> <options> <super> <special>`; the kernel
-/// octal-escapes a literal space, tab, and newline inside a name as
-/// `\040`, `\011`, and `\012`. Only the mountpoint and the fstype matter
-/// here:
+/// The mount table is one line per mount, with the fields
+/// `<device> <mountpoint> <fstype> <options> <super> <special>` separated by
+/// whitespace (the kernel writes a tab, but some hosts write a space). The
+/// kernel octal-escapes a literal space, tab, and newline inside a name as
+/// `\040`, `\011`, and `\012`, so a raw space or tab only ever appears
+/// between the fields. Only the mountpoint and the fstype matter here:
 ///
-/// - a line needs at least three tab-separated fields (device, mountpoint,
-///   fstype) to count;
+/// - a line needs at least three fields (device, mountpoint, fstype) to
+///   count;
 /// - a pseudo fstype (proc, sysfs, cgroup2, tmpfs, …) is not a drive;
+/// - a user-space FUSE mount (`fuse.*`: gvfs, sshfs, …) is not a drive;
+/// - a container rootfs (an `overlay` mount at a deep path) is not a drive;
+///   an overlay mounted at `/` is (an app in a container browses its root);
 /// - a non-absolute mountpoint is not a drive;
 /// - a drive is listed once, sorted.
 List<String> mountPoints(String content) {
@@ -18,10 +22,18 @@ List<String> mountPoints(String content) {
   for (final raw in content.split('\n')) {
     final line = raw.trim();
     if (line.isEmpty) continue;
-    final fields = line.split('\t');
+    final fields = line.split(RegExp(r'\s+'));
     if (fields.length < 3) continue;
-    if (_pseudoFstypes.contains(_unescape(fields[2]))) continue;
+    final fstype = _unescape(fields[2]);
+    if (_pseudoFstypes.contains(fstype)) continue;
+    // User-space FUSE mounts (gvfs, sshfs, fuse-overlayfs, …) are not
+    // storage a project lives on.
+    if (fstype.startsWith('fuse.')) continue;
     final point = _unescape(fields[1]);
+    // A container runtime's container rootfs is an overlay mounted at a deep
+    // path; the only overlay a desktop user browses is the system root
+    // itself (an app in a container has overlay as its root and keeps it).
+    if (fstype == 'overlay' && point != '/') continue;
     if (!point.startsWith('/')) continue;
     drives.add(point);
   }

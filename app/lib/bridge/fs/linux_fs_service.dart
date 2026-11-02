@@ -5,7 +5,7 @@ import 'mounts.dart';
 
 /// The [FsService] for a Linux host (ADR-0002's Linux adapter): the drives
 /// come from the host's mount table ([mountsPath], `/proc/self/mounts` by
-/// default) filtered to the directories still mounted, and the
+/// default) kept while still mounted and stat-able, and the
 /// subdirectories come from the host's filesystem.
 class LinuxFsService implements FsService {
   const LinuxFsService({this.mountsPath = '/proc/self/mounts'});
@@ -24,7 +24,7 @@ class LinuxFsService implements FsService {
     }
     return [
       for (final point in mountPoints(content))
-        if (Directory(point).existsSync()) point,
+        if (_isDirectory(point)) point,
     ];
   }
 

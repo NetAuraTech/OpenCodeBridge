@@ -47,6 +47,27 @@ void main() {
       },
     );
 
+    test('drives skips a mountpoint it cannot stat', () async {
+      if (_runningAsRoot()) {
+        markTestSkipped('permission denial cannot be exercised as root');
+      }
+      final locked = Directory('${tmp.path}/locked')..createSync();
+      Directory('${locked.path}/inner').createSync();
+      Process.runSync('chmod', ['0', locked.path]);
+      try {
+        mountsFile.writeAsStringSync(
+          [
+            '/\t${tmp.path}\text4\trw 0 0',
+            '/dev/loop3\t${locked.path}/inner\text4\trw 0 0',
+          ].join('\n'),
+        );
+        expect(await service.drives(), [tmp.path]);
+      } finally {
+        // Restored so tearDown can delete the tree.
+        Process.runSync('chmod', ['755', locked.path]);
+      }
+    });
+
     test(
       'subdirectories lists subdirectories only, full paths, sorted',
       () async {

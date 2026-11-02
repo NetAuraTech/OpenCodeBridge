@@ -46,14 +46,39 @@ void main() {
     test('malformed lines are dropped', () {
       const content =
           '\n' // blank
-          'no tabs at all\n'
+          'only two fields\n' // missing the fstype
           '/dev/sda1\t/\n' // missing the fstype
           '/dev/sda1\t/\text4\t0 0\n';
       expect(mountPoints(content), ['/']);
     });
 
-    // In the mount table the fields are real tabs; a literal space, tab, or
-    // newline inside a name is the kernel's octal escape.
+    // This host's /proc/self/mounts separates the fields with spaces (the
+    // standard kernel writes tabs): both must parse the same.
+    test('parses a mount table whose fields are separated by spaces', () {
+      const content =
+          '/dev/nvme0n1p1 / ext4 rw,relatime 0 0\n'
+          '/dev/nvme0n1p2 /home ext4 rw,relatime 0 0\n'
+          'tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n';
+      expect(mountPoints(content), ['/', '/home']);
+    });
+
+    test('drops user-space fuse mounts', () {
+      const content =
+          'gvfsd-fuse\t/run/user/1000/gvfs\tfuse.gvfsd-fuse\t0 0\n'
+          '/dev/sda1\t/\text4\t0 0\n';
+      expect(mountPoints(content), ['/']);
+    });
+
+    test('drops a container rootfs overlay, keeps an overlay root', () {
+      const content =
+          'overlay\t/var/lib/docker/rootfs/overlayfs/abc\toverlay\trw 0 0\n'
+          'overlay\t/\toverlay\trw 0 0\n'
+          '/dev/sda1\t/home\text4\t0 0\n';
+      expect(mountPoints(content), ['/', '/home']);
+    });
+
+    // A literal space, tab, or newline inside a name is the kernel's octal
+    // escape.
     test('decodes the kernel octal escape for a space in a mountpoint', () {
       const content =
           '/dev/sda1\t'
