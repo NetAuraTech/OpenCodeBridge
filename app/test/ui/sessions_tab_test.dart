@@ -5,10 +5,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/access_session.dart';
 import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/client/events_client.dart';
+import 'package:opencodebridge/client/fs_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
-import 'package:opencodebridge/model/project.dart';
 import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
@@ -51,27 +51,24 @@ const _four = Session(
 
 /// A scripted [SessionsClient] for the tab tests.
 class _FakeSessionsClient extends SessionsClient {
-  _FakeSessionsClient({this.rows = const [], this.pickerProjects = const []})
+  _FakeSessionsClient({this.rows = const []})
     : super(Uri.parse('http://bridge.test/'));
 
   /// The rows the client returns; delete mutates it, like a re-fetch would
   /// see.
   final List<Session> rows;
 
-  /// The picker's rows (spec fill-in †).
-  final List<Project> pickerProjects;
-
   Object? listError;
   Object? deleteError;
-  Object? projectsError;
   Object? createError;
+  Object? createDirectoryError;
 
   final List<String> deleted = [];
   final List<String> created = [];
+  final List<String> createdIn = [];
   final List<(String, String)> prompts = [];
   final List<(String, String, PermissionReply)> replies = [];
   var listCalls = 0;
-  var projectsCalls = 0;
 
   @override
   Future<List<Session>> list() async {
@@ -79,14 +76,6 @@ class _FakeSessionsClient extends SessionsClient {
     final error = listError;
     if (error is Object) throw error;
     return rows;
-  }
-
-  @override
-  Future<List<Project>> projects() async {
-    projectsCalls++;
-    final error = projectsError;
-    if (error is Object) throw error;
-    return pickerProjects;
   }
 
   @override
@@ -100,6 +89,23 @@ class _FakeSessionsClient extends SessionsClient {
       project: SessionProject(id: projectId, name: 'app'),
       created: 500,
       location: '/code/app',
+      active: false,
+    );
+    rows.insert(0, session);
+    return session;
+  }
+
+  @override
+  Future<Session> createInDirectory(String directory) async {
+    final error = createDirectoryError;
+    if (error is Object) throw error;
+    createdIn.add(directory);
+    final session = Session(
+      id: 'ses_new_dir',
+      title: 'new in $directory',
+      project: SessionProject(id: 'p_dir', name: 'p_dir'),
+      created: 500,
+      location: directory,
       active: false,
     );
     rows.insert(0, session);
@@ -166,6 +172,51 @@ class _FakeSessionsClient extends SessionsClient {
   Future<void> dismissQuestion(String id, String formID) async {}
 }
 
+/// A scripted [FsClient] for the tab tests (no real bridge).
+class _FakeFsClient extends FsClient {
+  _FakeFsClient({
+    this.drivesResult = const [],
+    this.subdirectoriesResult = const {},
+  }) : super(Uri.parse('http://bridge.test/'));
+
+  /// The drives (the picker's top level).
+  final List<String> drivesResult;
+
+  /// The subdirectories, keyed by the directory asked for.
+  final Map<String, List<String>> subdirectoriesResult;
+
+  Object? drivesError;
+  Object? subdirectoriesError;
+  Object? createDirectoryError;
+
+  var drivesCalls = 0;
+  final List<String> subdirectoriesCalls = [];
+  final List<String> createdDirectories = [];
+
+  @override
+  Future<List<String>> drives() async {
+    drivesCalls++;
+    final error = drivesError;
+    if (error is Object) throw error;
+    return drivesResult;
+  }
+
+  @override
+  Future<List<String>> subdirectories(String path) async {
+    subdirectoriesCalls.add(path);
+    final error = subdirectoriesError;
+    if (error is Object) throw error;
+    return subdirectoriesResult[path] ?? const [];
+  }
+
+  @override
+  Future<void> createDirectory(String path) async {
+    final error = createDirectoryError;
+    if (error is Object) throw error;
+    createdDirectories.add(path);
+  }
+}
+
 /// A scripted [EventSource] for the tab tests (no real SSE connection).
 class _FakeEventsSource implements EventSource {
   final _controller = StreamController<BridgeEvent>.broadcast();
@@ -198,20 +249,18 @@ class _FakeEventsSource implements EventSource {
 Future<_FakeSessionsClient> _pumpTab(
   WidgetTester tester, {
   List<Session> rows = const [],
-  List<Project> projects = const [],
   _FakeEventsSource? events,
   AccessSession? access,
+  _FakeFsClient? fs,
 }) async {
-  final client = _FakeSessionsClient(
-    rows: List<Session>.of(rows),
-    pickerProjects: List<Project>.of(projects),
-  );
+  final client = _FakeSessionsClient(rows: List<Session>.of(rows));
   await tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
         body: SessionsTab(
           apiBase: Uri.parse('http://bridge.test/'),
           client: client,
+          fs: fs ?? _FakeFsClient(),
           events: events ?? _FakeEventsSource(),
           access: access,
         ),
@@ -285,52 +334,66 @@ void main() {
       });
     });
 
-    group('new session', () {
-      const project = Project(id: 'p1', name: 'app', canonical: '/code/app');
-
-      testWidgets('pick a project, create, open the structured view', (
+    group('new project (issue #54)', () {
+      testWidgets('browse the drives, create here, open the structured view', (
         tester,
       ) async {
-        final client = await _pumpTab(tester, projects: [project]);
+        final fs = _FakeFsClient(
+          drivesResult: const ['/proj'],
+          subdirectoriesResult: const {
+            '/proj': ['/proj/one'],
+          },
+        );
+        final client = await _pumpTab(tester, fs: fs);
 
         await tester.tap(find.byKey(const ValueKey('sessions-new')));
         await tester.pumpAndSettle();
 
-        // The project picker, fed by GET /api/projects.
-        expect(find.byKey(const ValueKey('project-picker')), findsOneWidget);
-        expect(client.projectsCalls, 1);
-        expect(find.text('/code/app'), findsOneWidget);
+        // The dialog opens at the drives level, fed by GET /api/fs/drives.
+        expect(
+          find.byKey(const ValueKey('new-project-dialog')),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('dir-/proj')), findsOneWidget);
+        expect(fs.drivesCalls, 1);
 
-        await tester.tap(find.byKey(const ValueKey('project-p1')));
+        // Descend one level into the drive.
+        await tester.tap(find.byKey(const ValueKey('dir-/proj')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('dir-/proj/one')), findsOneWidget);
+        expect(fs.subdirectoriesCalls, ['/proj']);
+
+        // "Create here" creates at the directory on screen; the
+        // structured view opens on the new session.
+        await tester.tap(find.byKey(const ValueKey('new-project-create')));
         await tester.pumpAndSettle();
 
-        // Created with the project as the only parameter; the structured
-        // view opens on the new session.
-        expect(client.created, ['p1']);
+        expect(client.createdIn, ['/proj']);
         expect(find.byType(StructuredSessionScreen), findsOneWidget);
 
         // Going back returns to the list with the new row.
         await tester.pageBack();
         await tester.pumpAndSettle();
-        expect(find.byKey(const ValueKey('session-ses_new')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('session-ses_new_dir')),
+          findsOneWidget,
+        );
       });
 
       testWidgets(
-        'a group\'s New session button creates in its project, no picker',
+        'a group\'s New session button creates in its project, no dialog',
         (tester) async {
-          final client = await _pumpTab(
-            tester,
-            rows: [_one],
-            projects: [project],
-          );
+          final client = await _pumpTab(tester, rows: [_one]);
 
           await tester.tap(find.byKey(const ValueKey('session-new-p1')));
           await tester.pumpAndSettle();
 
-          // No picker: created straight in the group's project, and the
+          // No dialog: created straight in the group's project, and the
           // structured view opens on the new session.
-          expect(client.projectsCalls, 0);
-          expect(find.byKey(const ValueKey('project-picker')), findsNothing);
+          expect(
+            find.byKey(const ValueKey('new-project-dialog')),
+            findsNothing,
+          );
           expect(client.created, ['p1']);
           expect(find.byType(StructuredSessionScreen), findsOneWidget);
 
@@ -340,46 +403,40 @@ void main() {
         },
       );
 
-      testWidgets('canceling the picker creates nothing', (tester) async {
-        final client = await _pumpTab(tester, projects: [project]);
+      testWidgets('canceling the dialog creates nothing', (tester) async {
+        final fs = _FakeFsClient(drivesResult: const ['/proj']);
+        final client = await _pumpTab(tester, fs: fs);
 
         await tester.tap(find.byKey(const ValueKey('sessions-new')));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Cancel'));
         await tester.pumpAndSettle();
 
-        expect(client.projectsCalls, 1);
+        expect(client.createdIn, isEmpty);
         expect(client.created, isEmpty);
-      });
-
-      testWidgets('a project-list failure shows a snackbar', (tester) async {
-        final client = await _pumpTab(tester, projects: [project]);
-        client.projectsError = const SessionsClientError(502, 'down');
-
-        await tester.tap(find.byKey(const ValueKey('sessions-new')));
-        await tester.pumpAndSettle();
-
-        expect(
-          find.textContaining('Could not load the projects'),
-          findsOneWidget,
-        );
-        expect(client.created, isEmpty);
+        expect(find.byKey(const ValueKey('new-project-dialog')), findsNothing);
       });
 
       testWidgets('a create failure shows a snackbar and no view', (
         tester,
       ) async {
-        final client = await _pumpTab(tester, projects: [project]);
-        client.createError = const SessionsClientError(502, 'down');
+        final fs = _FakeFsClient(drivesResult: const ['/proj']);
+        final client = await _pumpTab(tester, fs: fs);
+        client.createDirectoryError = const SessionsClientError(
+          404,
+          'no such directory',
+        );
 
         await tester.tap(find.byKey(const ValueKey('sessions-new')));
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('project-p1')));
+        await tester.tap(find.byKey(const ValueKey('dir-/proj')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('new-project-create')));
         await tester.pumpAndSettle();
 
-        expect(client.created, isEmpty);
+        expect(client.createdIn, isEmpty);
         expect(
-          find.textContaining('Could not create the session'),
+          find.textContaining('Could not create the project'),
           findsOneWidget,
         );
         expect(find.byType(StructuredSessionScreen), findsNothing);

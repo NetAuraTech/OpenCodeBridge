@@ -5,10 +5,11 @@ import 'package:flutter/material.dart';
 import '../access/access_session.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
+import '../client/fs_client.dart';
 import '../client/sessions_client.dart';
-import '../model/project.dart';
 import '../model/session.dart';
 import '../settings/app_settings.dart';
+import 'new_project_dialog.dart';
 import 'structured_view.dart';
 
 /// The Sessions tab: the home list (spec section 5 endpoint 1, section 6).
@@ -16,15 +17,16 @@ import 'structured_view.dart';
 /// Shows every session of the shared opencode service, grouped by project
 /// (collapsible), newest first, with the active indicator and a per-session
 /// delete action. Tapping any row opens the structured view (spec §6). The
-/// global New session button opens the project picker (spec §5, fill-in †);
-/// each project group carries a New session button of its own that creates
-/// in that project directly. Both create the session on the shared service
-/// and open its structured view.
+/// global New project button (issue #54) opens a filesystem browser that
+/// creates a session at the directory you pick; each project group carries a
+/// New session button of its own that creates in that project directly. Both
+/// create the session on the shared service and open its structured view.
 class SessionsTab extends StatefulWidget {
   const SessionsTab({
     super.key,
     required this.apiBase,
     this.client,
+    this.fs,
     this.events,
     this.auth,
     this.access,
@@ -49,6 +51,10 @@ class SessionsTab extends StatefulWidget {
   /// The client for the bridge's sessions API. Defaults to a real
   /// [SessionsClient] at [apiBase]; tests inject a fake.
   final SessionsClient? client;
+
+  /// The client for the bridge's filesystem API (issue #54's "New project"
+  /// picker). Defaults to a real [FsClient] at [apiBase]; tests inject a fake.
+  final FsClient? fs;
 
   /// The Access login's header provider (issue #23, client mode); `null` in
   /// server mode.
@@ -89,6 +95,10 @@ class SessionsTab extends StatefulWidget {
 class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   SessionsClient? _client;
 
+  /// The bridge's filesystem API (issue #54's "New project" picker), `null`
+  /// when there is no bridge to browse.
+  FsClient? _fs;
+
   /// The event stream source (spec §8) the tab's views listen to, `null`
   /// when there is no bridge to listen on.
   EventSource? _events;
@@ -124,6 +134,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     final base = widget.apiBase;
     if (base != null) {
       _client = widget.client ?? SessionsClient(base, auth: widget.auth);
+      _fs = widget.fs ?? FsClient(base, auth: widget.auth);
       _setupEvents(base);
       widget.access?.addListener(_onAccessState);
       _load();
@@ -168,6 +179,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     if (widget.apiBase != oldWidget.apiBase && widget.apiBase != null) {
       _client =
           widget.client ?? SessionsClient(widget.apiBase!, auth: widget.auth);
+      _fs = widget.fs ?? FsClient(widget.apiBase!, auth: widget.auth);
       _setupEvents(widget.apiBase!);
       _load();
     }
@@ -270,22 +282,35 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
-  /// The global new-session flow (spec §5, fill-in †): pick a project, then
-  /// create the session in it and open its structured view.
-  Future<void> _newSession() async {
+  /// The global new-project flow (issue #54): browse the host's filesystem
+  /// one level at a time, then "Create here" — the dialog creates the session
+  /// at the directory on screen (it shows the create's busy state itself),
+  /// and this opens the new session's structured view.
+  Future<void> _newProject() async {
     final client = _client;
-    if (client == null || _newSessionBusy) return;
-    final project = await _pickProject(client);
-    if (project == null) return;
-    await _createInProject(project.id);
+    final fs = _fs;
+    if (client == null || fs == null || _newSessionBusy) return;
+    final session = await showDialog<Session>(
+      context: context,
+      builder: (context) =>
+          NewProjectDialog(fs: fs, onCreate: client.createInDirectory),
+    );
+    if (session == null || !mounted) return; // The user cancelled.
+    setState(() => _newSessionBusy = true);
+    try {
+      await _load();
+      await _openStructured(session);
+    } finally {
+      if (mounted) setState(() => _newSessionBusy = false);
+    }
   }
 
   /// Creates a session in the project [projectId] and opens its structured
   /// view (spec §5, fill-in †). The bridge creates the session on the shared
   /// service and records the launch; afterwards the app opens the session's
   /// structured view, in server and client mode alike.
-  /// Shared by the global new-session flow (after the picker) and each
-  /// project group's New session button.
+  /// Each project group's New session button creates directly in that
+  /// project, no browsing.
   Future<void> _createInProject(String projectId) async {
     final client = _client;
     if (client == null || _newSessionBusy) return;
@@ -309,31 +334,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
-  /// Shows the project picker (spec fill-in †); returns the picked project
-  /// or `null` when the user dismissed it.
-  Future<Project?> _pickProject(SessionsClient client) async {
-    List<Project> projects;
-    try {
-      projects = await client.projects();
-    } on SessionsClientError catch (e) {
-      if (!mounted) return null;
-      _snackBar(
-        'Could not load the projects '
-        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
-      );
-      return null;
-    } catch (_) {
-      if (!mounted) return null;
-      _snackBar('Could not load the projects.');
-      return null;
-    }
-    if (!mounted) return null;
-    return showDialog<Project>(
-      context: context,
-      builder: (context) => _ProjectPicker(projects: projects),
-    );
-  }
-
   /// Opens [session] in the structured view (spec §6: *External* →
   /// structured view). The structured view is fully usable on its own: the
   /// session stays sendable after the view closes. When the view closes, the
@@ -349,7 +349,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           client: client,
           events: _events?.events,
           gaps: _events?.gaps,
-          onNewSession: _newSession,
+          onNewSession: _newProject,
           onOpenSettings: widget.onOpenSettings,
           settings: widget.settings,
           onThemeModeChanged: widget.onThemeModeChanged,
@@ -437,7 +437,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.only(top: 8),
         children: [
-          _NewSessionButton(busy: _newSessionBusy, onPressed: _newSession),
+          _NewSessionButton(busy: _newSessionBusy, onPressed: _newProject),
           if (rows.isEmpty) const _CenteredMessage(text: 'No sessions yet.'),
           for (final group in _groups)
             ExpansionTile(
@@ -503,7 +503,8 @@ List<_ProjectGroup> _groupByProject(List<Session> rows) {
   return byProject.values.toList();
 }
 
-/// The New session action (spec §5, fill-in †): opens the project picker.
+/// The global New project action (issue #54): opens the filesystem browser
+/// and creates a session at the directory you pick.
 class _NewSessionButton extends StatelessWidget {
   const _NewSessionButton({required this.busy, required this.onPressed});
 
@@ -523,7 +524,7 @@ class _NewSessionButton extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : const Icon(Icons.add),
-      label: busy ? const Text('Creating…') : const Text('New session'),
+      label: busy ? const Text('Creating…') : const Text('New project'),
     ),
   );
 }
@@ -557,72 +558,6 @@ class _GroupNewSessionButton extends StatelessWidget {
       label: busy ? const Text('Creating…') : const Text('New session'),
     ),
   );
-}
-
-/// The new-session project picker (spec §5, fill-in †): the shared opencode
-/// service's projects, the only parameter of a new session.
-///
-/// A plain [Dialog] rather than an [AlertDialog] (issue #41): an
-/// [AlertDialog] sizes itself to its content's intrinsic width, and the
-/// project list is a viewport, which cannot report intrinsic dimensions.
-/// Here the list takes the width the dialog is given, capped on desktop,
-/// so the picker fits both a phone and a desktop window.
-class _ProjectPicker extends StatelessWidget {
-  const _ProjectPicker({required this.projects});
-
-  final List<Project> projects;
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      key: const ValueKey('project-picker'),
-      constraints: const BoxConstraints(maxWidth: 560),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-            child: Text(
-              'New session',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
-          ),
-          if (projects.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Text('No projects found.'),
-            )
-          else
-            SizedBox(
-              height: 320,
-              child: ListView.builder(
-                itemCount: projects.length,
-                itemBuilder: (context, index) {
-                  final project = projects[index];
-                  return ListTile(
-                    key: ValueKey('project-${project.id}'),
-                    title: Text(project.name),
-                    subtitle: Text(project.canonical),
-                    onTap: () => Navigator.of(context).pop(project),
-                  );
-                },
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancel'),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _CenteredMessage extends StatelessWidget {

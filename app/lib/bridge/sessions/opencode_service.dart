@@ -14,7 +14,7 @@ import '../../model/session_detail.dart';
 /// - the project list (display names + canonical directories) and the project
 ///   display names derived from it;
 /// - the TUI-attached / agent-working set (the service's active list);
-/// - creating a new session in a project;
+/// - creating a new session in a project or at a bare directory;
 /// - deletion of a session;
 /// - the structured-view reads (detail, messages) and writes (prompt,
 ///   permission reply) of spec section 5 (endpoints 5–9).
@@ -93,6 +93,13 @@ abstract class OpencodeService {
   /// the project's canonical directory as its `location.directory`). The
   /// session has no TUI attached yet.
   Future<OpencodeSession> createSession(String projectId);
+
+  /// Create a new session whose working directory is [directory] as-is
+  /// (`POST /api/session` with [directory] as its `location.directory`): the
+  /// service auto-creates a project for a directory it has never seen and
+  /// reuses the existing project for one it has. The session has no TUI
+  /// attached yet.
+  Future<OpencodeSession> createSessionInDirectory(String directory);
 
   /// Delete a session (and its child sessions) on the service.
   Future<void> deleteSession(String id);

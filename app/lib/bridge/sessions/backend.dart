@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import '../../model/command.dart';
 import '../../model/message.dart';
 import '../../model/permission.dart';
@@ -26,6 +28,23 @@ class SessionsBackend {
   /// in [projectId]'s project.
   Future<Session> create(String projectId) async {
     final session = await service.createSession(projectId);
+    final names = await service.projectNames();
+    final active = await service.activeSessionIds();
+    return _row(session, names, active);
+  }
+
+  /// Create a session at [directory] (issue #54's "New project"):
+  /// [directory] is the working directory as-is, and the service auto-creates
+  /// a project for a directory it has never seen. A [directory] missing on
+  /// this host is a clear 404, not a service round-trip.
+  Future<Session> createInDirectory(String directory) async {
+    if (!Directory(directory).existsSync()) {
+      throw const OpencodeServiceError(
+        HttpStatus.notFound,
+        'no such directory',
+      );
+    }
+    final session = await service.createSessionInDirectory(directory);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return _row(session, names, active);

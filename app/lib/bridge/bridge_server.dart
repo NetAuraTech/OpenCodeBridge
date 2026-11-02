@@ -12,6 +12,8 @@ import '../model/tunnel_setup.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/event_hub.dart';
+import 'fs/fs_service.dart';
+import 'fs/linux_fs_service.dart';
 import 'notify/fcm_http_v1_sender.dart';
 import 'notify/fcm_sender.dart';
 import 'notify/firebase_service_account.dart';
@@ -43,6 +45,7 @@ class BridgeServer {
     this._server,
     this._health,
     this._sessions,
+    this._fs,
     this._events,
     this._speed,
     this._docker,
@@ -68,6 +71,14 @@ class BridgeServer {
   /// The project list endpoint (spec section 5, fill-in †): feeds the
   /// new-session project picker.
   static const String projectsPath = '/api/projects';
+
+  /// The "New project" file-picker's drives (issue #54): the host's real
+  /// filesystem mounts, the picker's top level.
+  static const String fsDrivesPath = '/api/fs/drives';
+
+  /// The "New project" file-picker's directory listing (issue #54): the
+  /// subdirectories of the `path` query parameter, one level at a time.
+  static const String fsDirectoriesPath = '/api/fs/directories';
 
   /// The unified event stream (spec section 8, endpoint 14): SSE.
   static const String eventsPath = '/api/events';
@@ -152,6 +163,10 @@ class BridgeServer {
   /// `opencode_unavailable`.
   final SessionsBackend? _sessions;
 
+  /// The host filesystem seam the "New project" file-picker browses (issue
+  /// #54, the Linux adapter of ADR-0002's per-OS seam).
+  final FsService _fs;
+
   /// The unified event hub (endpoint 14); `null` when this machine has no
   /// shared opencode service, in which case the events endpoint reports
   /// `opencode_unavailable`.
@@ -198,6 +213,9 @@ class BridgeServer {
   /// [sessions], when provided, serves the sessions endpoints (tests);
   /// the default builds a [SessionsBackend] over the shared opencode
   /// service.
+  /// [fs], when provided, is the host filesystem seam the "New project"
+  /// file-picker browses (issue #54, tests); the default is the Linux
+  /// adapter (ADR-0002).
   /// [events], when provided, serves the unified event stream (14, tests);
   /// the default builds an [EventHub] over the shared opencode event
   /// service (the bridge's single upstream subscription).
@@ -232,6 +250,7 @@ class BridgeServer {
     int port = defaultPort,
     HealthReport Function()? health,
     SessionsBackend? sessions,
+    FsService? fs,
     EventHub? events,
     LlamaSpeedFeed? speedFeed,
     DockerBackend? docker,
@@ -244,6 +263,7 @@ class BridgeServer {
   }) async {
     final server = await HttpServer.bind(host, port);
     final backend = sessions ?? await BridgeServer._defaultSessions();
+    final fsService = fs ?? const LinuxFsService();
     final eventHub = events ?? await BridgeServer._defaultEvents();
     final speed =
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
@@ -274,6 +294,7 @@ class BridgeServer {
       server,
       health ?? BridgeServer._scaffoldHealth,
       backend,
+      fsService,
       eventHub,
       speed,
       dockerBackend,
@@ -300,6 +321,7 @@ class BridgeServer {
       request,
       _health,
       _sessions,
+      _fs,
       _events,
       _docker,
       _tunnel,
@@ -626,6 +648,7 @@ class BridgeServer {
     HttpRequest request,
     HealthReport Function() report,
     SessionsBackend? sessions,
+    FsService fs,
     EventHub? events,
     DockerBackend? docker,
     TunnelSupervisor? tunnel,
@@ -664,6 +687,24 @@ class BridgeServer {
       if (request.method == 'GET' &&
           request.uri.path == BridgeServer.projectsPath) {
         await BridgeServer._listProjects(request, sessions);
+        return;
+      }
+      // The "New project" file-picker's fs endpoints (issue #54), checked
+      // before the session matchers (a bare path would otherwise read as a
+      // session id to them).
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.fsDrivesPath) {
+        await BridgeServer._fsDrives(request, fs);
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.fsDirectoriesPath) {
+        await BridgeServer._fsDirectories(request, fs);
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.fsDirectoriesPath) {
+        await BridgeServer._fsCreateDirectory(request, fs);
         return;
       }
       // The docker endpoints (issue #21), checked before the session matchers
@@ -1735,11 +1776,101 @@ class BridgeServer {
     await response.close();
   }
 
-  /// Endpoint 2 (spec section 5, fill-in †): create a session in the
-  /// picked project on the shared service, returning the session. The app
-  /// opens the session's structured view. A body that is not
-  /// `{"project": "<id>"}` is a 400; a project the service does not
-  /// have is a 404; a service failure is a 502.
+  /// The "New project" file-picker's drives (issue #54): the host's real
+  /// filesystem mounts, a JSON list of absolute paths, sorted.
+  static Future<void> _fsDrives(HttpRequest request, FsService fs) async {
+    final response = request.response;
+    try {
+      final drives = await fs.drives();
+      await BridgeServer._jsonOk(response, jsonEncode(drives));
+    } on FsError catch (e) {
+      BridgeServer._fsError(response, e);
+    }
+  }
+
+  /// The "New project" file-picker's directory listing (issue #54): the
+  /// subdirectories of the `path` query parameter (directories only), a JSON
+  /// list of absolute paths, sorted. A missing or non-absolute `path` is a
+  /// 400 `invalid_path`.
+  static Future<void> _fsDirectories(HttpRequest request, FsService fs) async {
+    final response = request.response;
+    final path = request.uri.queryParameters['path'];
+    if (path == null || !isAbsolutePath(path)) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_path'}));
+      await response.close();
+      return;
+    }
+    try {
+      final subdirectories = await fs.subdirectories(path);
+      await BridgeServer._jsonOk(response, jsonEncode(subdirectories));
+    } on FsError catch (e) {
+      BridgeServer._fsError(response, e);
+    }
+  }
+
+  /// The "New project" file-picker's directory creation (issue #54's
+  /// "New folder"): the body's `path` is created as an empty directory and
+  /// the response is a 201. A missing or non-absolute `path` is a 400
+  /// `invalid_path`; a missing parent is a 404 `not_found`; an existing
+  /// entry is a 409 `already_exists`.
+  static Future<void> _fsCreateDirectory(
+    HttpRequest request,
+    FsService fs,
+  ) async {
+    final response = request.response;
+    String? path;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, Object?>) {
+        final p = decoded['path'];
+        path = p is String && isAbsolutePath(p) ? p : null;
+      }
+    } catch (_) {
+      path = null; // A non-JSON body is an invalid path.
+    }
+    if (path == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_path'}));
+      await response.close();
+      return;
+    }
+    try {
+      await fs.createDirectory(path);
+      response.statusCode = HttpStatus.created;
+      await response.close();
+    } on FsError catch (e) {
+      BridgeServer._fsError(response, e);
+    }
+  }
+
+  /// Maps an [FsError] to the bridge contract: [FsErrorKind.badPath] is a
+  /// 400 `invalid_path`, [FsErrorKind.notFound] is a 404 `not_found`,
+  /// [FsErrorKind.permissionDenied] is a 403 `permission_denied`, and
+  /// [FsErrorKind.alreadyExists] is a 409 `already_exists`.
+  static void _fsError(HttpResponse response, FsError e) {
+    final (status, code) = switch (e.kind) {
+      FsErrorKind.badPath => (HttpStatus.badRequest, 'invalid_path'),
+      FsErrorKind.notFound => (HttpStatus.notFound, 'not_found'),
+      FsErrorKind.permissionDenied => (
+        HttpStatus.forbidden,
+        'permission_denied',
+      ),
+      FsErrorKind.alreadyExists => (HttpStatus.conflict, 'already_exists'),
+    };
+    response.statusCode = status;
+    response.write(jsonEncode({'error': code}));
+    response.close();
+  }
+
+  /// Endpoint 2 (spec section 5, fill-in †): create a session on the shared
+  /// service, returning the session. The body is `{"project": "<id>"}` or
+  /// `{"directory": "<absolute path>"}` (issue #54's "New project": the
+  /// directory is the working directory as-is, and the service auto-creates
+  /// a project for one it has never seen). The app opens the session's
+  /// structured view. A body with neither or both is a 400; a directory
+  /// missing on this host is a 404; a service failure is a 502.
   static Future<void> _createSession(
     HttpRequest request,
     SessionsBackend? sessions,
@@ -1750,23 +1881,33 @@ class BridgeServer {
       return;
     }
     String? project;
+    String? directory;
     try {
       final raw = await utf8.decodeStream(request);
       final decoded = jsonDecode(raw);
-      project = decoded is Map<String, Object?>
-          ? decoded['project'] as String?
-          : null;
+      if (decoded is Map<String, Object?>) {
+        final p = decoded['project'];
+        project = p is String && p.trim().isNotEmpty ? p : null;
+        final d = decoded['directory'];
+        directory = d is String && isAbsolutePath(d) ? d : null;
+      }
     } catch (_) {
       project = null; // A non-JSON body is an invalid body.
+      directory = null;
     }
-    if (project == null || project.trim().isEmpty) {
+    final byProject = project != null;
+    final byDirectory = directory != null;
+    if (byProject == byDirectory) {
+      // Neither (the legacy absent case) or both at once: an invalid body.
       response.statusCode = HttpStatus.badRequest;
       response.write(jsonEncode({'error': 'invalid_body'}));
       await response.close();
       return;
     }
     try {
-      final row = await sessions.create(project);
+      final row = byDirectory
+          ? await sessions.createInDirectory(directory)
+          : await sessions.create(project!);
       response.statusCode = HttpStatus.created;
       response.write(jsonEncode(row));
     } on OpencodeServiceError catch (e) {
