@@ -1637,12 +1637,6 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   onReply: _reply,
                   replyBusyId: _replyBusyId,
                 ),
-                QuestionPanel(
-                  pending: _questions,
-                  onSubmit: _submitAnswers,
-                  onDismiss: _dismissQuestion,
-                  busyId: _answerBusyId,
-                ),
                 _CostBar(
                   detail: _detail,
                   contextUsed: _contextUsed,
@@ -1732,6 +1726,24 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                                       ),
                                     ),
                                   ),
+                                 // The pending question forms (issue #50) float over the
+                                 // list, just above the prompt bar — like the TUI
+                                 // prompts above the input, so the header and the cost
+                                 // bar never shift. The list is lazy, so the panel
+                                 // scrolls when a long form is taller than the room.
+                                 Positioned(
+                                   left: 0,
+                                   right: 0,
+                                   bottom: 0,
+                                   child: SingleChildScrollView(
+                                     child: QuestionPanel(
+                                       pending: _questions,
+                                       onSubmit: _submitAnswers,
+                                       onDismiss: _dismissQuestion,
+                                       busyId: _answerBusyId,
+                                     ),
+                                   ),
+                                 ),
                               ],
                             ),
                           ),

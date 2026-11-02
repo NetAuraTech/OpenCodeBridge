@@ -13,9 +13,10 @@ import '../model/question.dart';
 /// question, Next / Back between them) and ends on a recap of the answers
 /// before the Submit; a single-question form submits it directly.
 ///
-/// Mirrors [PermissionBanner] (spec §6): rendered by the structured view with
-/// the pending list as the initial state, kept live by the `form.created` /
-/// `form.replied` / `form.cancelled` events.
+/// Mirrors [PermissionBanner] (spec §6): kept live by the `form.created` /
+/// `form.replied` / `form.cancelled` events. The structured view floats it
+/// over the chat list, just above the prompt bar (the TUI prompts above the
+/// input rather than in the page flow).
 class QuestionPanel extends StatelessWidget {
   const QuestionPanel({
     super.key,
