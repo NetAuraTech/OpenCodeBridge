@@ -7,6 +7,7 @@ import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
 /// A stand-in for the shared opencode service: it serves the four endpoints
@@ -228,10 +229,54 @@ void main() {
     },
   ];
 
+  // The service's pending form list for `ses_1` (issue #50): a question form
+  // (the agent's `question` tool) plus a non-question form the client must
+  // filter out.
+  final pendingForms = [
+    {
+      'id': 'form_q',
+      'sessionID': 'ses_1',
+      'title': 'Questions',
+      'metadata': {'kind': 'question', 'tool': 'question'},
+      'fields': [
+        {
+          'key': 'q0',
+          'title': 'Ship it?',
+          'description': 'Should I ship it?',
+          'type': 'string',
+          'custom': true,
+          'options': [
+            {'value': 'Yes', 'label': 'Yes', 'description': 'ship it'},
+            {'value': 'No', 'label': 'No', 'description': 'hold off'},
+          ],
+        },
+        {
+          'key': 'q1',
+          'title': 'Areas',
+          'description': 'Which areas do you want?',
+          'type': 'multiselect',
+          'options': [
+            {'value': 'A', 'label': 'A', 'description': 'area A'},
+            {'value': 'B', 'label': 'B', 'description': 'area B'},
+          ],
+        },
+      ],
+    },
+    {
+      'id': 'form_todo',
+      'sessionID': 'ses_1',
+      'title': 'Todos',
+      'metadata': {'kind': 'todo'},
+      'fields': <Object?>[],
+    },
+  ];
+
   final promptBodies = <Map<String, Object?>>[];
   final replyBodies = <Map<String, Object?>>[];
   final repliedRequestIDs = <String>[];
   final messageOffsets = <int>[];
+  final formReplyBodies = <Map<String, Object?>>[];
+  final dismissedFormPaths = <String>[];
 
   // The command-menu (issue #46) registries and recorded request bodies.
   final projectCommands = [
@@ -357,6 +402,18 @@ void main() {
             path.length - '/reply'.length,
           ),
         );
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1/form' && req.method == 'GET') {
+        resp.write(jsonEncode({'data': pendingForms}));
+      } else if (path.startsWith('/api/session/ses_1/form/') &&
+          path.endsWith('/reply') &&
+          req.method == 'POST') {
+        final body = await utf8.decodeStream(req);
+        formReplyBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path.startsWith('/api/session/ses_1/form/') &&
+          req.method == 'DELETE') {
+        dismissedFormPaths.add(path);
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1' && req.method == 'GET') {
         resp.write(jsonEncode({'data': detailInfo}));
@@ -761,6 +818,93 @@ void main() {
         {'decision': 'always'},
       ]);
       expect(repliedRequestIDs, ['per_1']);
+    });
+
+    test('pendingQuestions maps the question forms without the q-keys',
+        () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final forms = await service.pendingQuestions('ses_1');
+      expect(forms, [
+        const QuestionForm(
+          id: 'form_q',
+          title: 'Questions',
+          questions: [
+            Question(
+              header: 'Ship it?',
+              question: 'Should I ship it?',
+              multiple: false,
+              custom: true,
+              options: [
+                QuestionOption(label: 'Yes', description: 'ship it'),
+                QuestionOption(label: 'No', description: 'hold off'),
+              ],
+            ),
+            Question(
+              header: 'Areas',
+              question: 'Which areas do you want?',
+              multiple: true,
+              custom: false,
+              options: [
+                QuestionOption(label: 'A', description: 'area A'),
+                QuestionOption(label: 'B', description: 'area B'),
+              ],
+            ),
+          ],
+        ),
+      ]);
+    });
+
+    test('answerQuestion rebuilds the q0/q1 answer record', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await service.answerQuestion('ses_1', 'form_q', [
+        ['Yes'],
+        ['A', 'B'],
+      ]);
+      expect(formReplyBodies, [
+        {'answer': {'q0': 'Yes', 'q1': ['A', 'B']}},
+      ]);
+    });
+
+    test('answerQuestion empties unselected questions', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      // The records list is shared with the test above.
+      formReplyBodies.clear();
+      // No selection for either question: the string field answers with the
+      // empty option value, the multiselect with the empty list.
+      await service.answerQuestion('ses_1', 'form_q', [
+        [],
+        [],
+      ]);
+      expect(formReplyBodies, [
+        {'answer': {'q0': '', 'q1': <String>[]}},
+      ]);
+      // A missing entry is treated as an empty selection too.
+      await service.answerQuestion('ses_1', 'form_q', [
+        ['No'],
+      ]);
+      expect(formReplyBodies.last, {'answer': {'q0': 'No', 'q1': <String>[]}});
+    });
+
+    test('answerQuestion throws 404 for an unknown form', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await expectLater(
+        service.answerQuestion('ses_1', 'form_missing', [
+          ['Yes'],
+        ]),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
+    });
+
+    test('dismissQuestion deletes the form', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await service.dismissQuestion('ses_1', 'form_q');
+      expect(dismissedFormPaths, ['/api/session/ses_1/form/form_q']);
     });
 
     test('a bad password surfaces a 401 OpencodeServiceError', () async {

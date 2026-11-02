@@ -6,6 +6,7 @@ import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
@@ -296,6 +297,107 @@ class SessionsClient {
         throw SessionsClientError(
           response.statusCode,
           'reply to $requestID was not accepted',
+        );
+      }
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  // The structured view's question forms (issue #50): the agent's `question`
+  // tool, answered or dismissed from the structured view. The bridge hides the
+  // service's internal `q0`/`q1` field keys; the app answers per question, in
+  // the form's field order.
+
+  /// The session's pending question forms (issue #50).
+  Future<List<QuestionForm>> getQuestions(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/questions'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) {
+        throw SessionsClientError(response.statusCode, body);
+      }
+      final decoded = jsonDecode(body);
+      final list = decoded is List ? decoded : const <Object?>[];
+      return [for (final item in list) QuestionForm.fromJson(item)];
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Submit the answers to a pending question form [formID] (issue #50).
+  /// [answers] has one entry per question, in the form's field order.
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(
+          path:
+              'api/sessions/${Uri.encodeComponent(id)}/questions/'
+              '${Uri.encodeComponent(formID)}/answer',
+        ),
+        body: jsonEncode({'answers': answers}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
+      await response.drain<void>();
+      if (response.statusCode != HttpStatus.noContent &&
+          response.statusCode != HttpStatus.ok) {
+        throw SessionsClientError(
+          response.statusCode,
+          'answer to $formID was not accepted',
+        );
+      }
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Dismiss a pending question form [formID] (issue #50): the agent continues
+  /// without an answer.
+  Future<void> dismissQuestion(String id, String formID) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'DELETE',
+        _base.replace(
+          path:
+              'api/sessions/${Uri.encodeComponent(id)}/questions/'
+              '${Uri.encodeComponent(formID)}',
+        ),
+        auth: _auth,
+      );
+      await response.drain<void>();
+      if (response.statusCode != HttpStatus.noContent &&
+          response.statusCode != HttpStatus.ok) {
+        throw SessionsClientError(
+          response.statusCode,
+          'dismiss of $formID was not accepted',
         );
       }
     } on SessionsClientError {

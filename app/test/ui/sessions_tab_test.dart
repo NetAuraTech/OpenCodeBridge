@@ -14,6 +14,7 @@ import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
@@ -170,6 +171,19 @@ class _FakeSessionsClient extends SessionsClient {
   ) async {
     replies.add((id, requestID, reply));
   }
+
+  @override
+  Future<List<QuestionForm>> getQuestions(String id) async => const [];
+
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {}
+
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {}
 }
 
 /// A scripted [EventSource] for the tab tests (no real SSE connection).

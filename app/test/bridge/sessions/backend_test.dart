@@ -7,6 +7,7 @@ import 'package:opencodebridge/bridge/sessions/session_store.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
@@ -96,6 +97,30 @@ class FakeOpencodeService implements OpencodeService {
     PermissionReply reply,
   ) async {
     replies.add((id, requestID, reply));
+  }
+
+  // The structured view's question forms (issue #50): recorded
+  // pass-throughs.
+
+  final List<QuestionForm> questions = const [];
+  final List<(String, String, List<List<String>>)> answerRecords = [];
+  final List<(String, String)> dismissed = [];
+
+  @override
+  Future<List<QuestionForm>> pendingQuestions(String id) async => questions;
+
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {
+    answerRecords.add((id, formID, answers));
+  }
+
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {
+    dismissed.add((id, formID));
   }
 
   // The structured view's `/` command menu (issue #46): recorded

@@ -6,6 +6,7 @@ import '../model/command.dart';
 import '../model/compose_project.dart';
 import '../model/container.dart';
 import '../model/permission.dart';
+import '../model/question.dart';
 import '../model/session.dart';
 import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
@@ -957,6 +958,41 @@ class BridgeServer {
           return;
         }
       }
+      // The structured-view question forms (issue #50): the agent's
+      // `question` tool, surfaced and answered from the structured view.
+      // Checked before the `/` command menu's fallthrough so the
+      // subpath wins.
+      if (request.method == 'GET') {
+        final id = BridgeServer._questionsSessionIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._questions(request, id, sessions);
+          return;
+        }
+      }
+      if (request.method == 'POST') {
+        final answer = BridgeServer._questionAnswerIn(request.uri.path);
+        if (answer != null) {
+          await BridgeServer._questionAnswer(
+            request,
+            answer.$1,
+            answer.$2,
+            sessions,
+          );
+          return;
+        }
+      }
+      if (request.method == 'DELETE') {
+        final dismiss = BridgeServer._questionDismissIn(request.uri.path);
+        if (dismiss != null) {
+          await BridgeServer._questionDismiss(
+            request,
+            dismiss.$1,
+            dismiss.$2,
+            sessions,
+          );
+          return;
+        }
+      }
       if (request.method == 'POST') {
         final id = BridgeServer._windowSessionIn(request.uri.path);
         if (id != null) {
@@ -1132,6 +1168,60 @@ class BridgeServer {
       return null;
     }
     return (Uri.decodeComponent(id), Uri.decodeComponent(requestID));
+  }
+
+  /// The single session id in a questions path, or `null` when [path] is not
+  /// `api/sessions/{id}/questions` (issue #50).
+  static String? _questionsSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/questions';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
+  /// The (session id, question id) in a question-answer path, or `null` when
+  /// [path] is not `api/sessions/{id}/questions/{questionID}/answer`
+  /// (issue #50).
+  static (String, String)? _questionAnswerIn(String path) {
+    const prefix = '/api/sessions/';
+    const mid = '/questions/';
+    const suffix = '/answer';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final rest = path.substring(prefix.length, path.length - suffix.length);
+    final i = rest.indexOf(mid);
+    if (i < 0) return null;
+    final id = rest.substring(0, i);
+    final questionID = rest.substring(i + mid.length);
+    if (id.isEmpty ||
+        id.contains('/') ||
+        questionID.isEmpty ||
+        questionID.contains('/')) {
+      return null;
+    }
+    return (Uri.decodeComponent(id), Uri.decodeComponent(questionID));
+  }
+
+  /// The (session id, question id) in a question-dismiss path, or `null` when
+  /// [path] is not `api/sessions/{id}/questions/{questionID}` (issue #50;
+  /// exactly two segments, so the answer subpath falls through).
+  static (String, String)? _questionDismissIn(String path) {
+    const prefix = '/api/sessions/';
+    const mid = '/questions/';
+    if (!path.startsWith(prefix)) return null;
+    final rest = path.substring(prefix.length);
+    final i = rest.indexOf(mid);
+    if (i < 0) return null;
+    final id = rest.substring(0, i);
+    final questionID = rest.substring(i + mid.length);
+    if (id.isEmpty ||
+        id.contains('/') ||
+        questionID.isEmpty ||
+        questionID.contains('/')) {
+      return null;
+    }
+    return (Uri.decodeComponent(id), Uri.decodeComponent(questionID));
   }
 
   static Future<void> _listSessions(
@@ -1325,6 +1415,118 @@ class BridgeServer {
       BridgeServer._serviceError(response, e);
     }
     await response.close();
+  }
+
+  /// The session's pending question forms (issue #50): the agent's `question`
+  /// tool, flattened to the [QuestionForm] contract (no `q0`/`q1` keys).
+  /// Unknown session is a 404; a service failure is a 502.
+  static Future<void> _questions(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final forms = await sessions.pendingQuestions(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode([for (final f in forms) f.toJson()]));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Submit the answers to a pending question form (issue #50). The body is
+  /// `{"answers": [[...], [...]]}` — one entry per question, in the form's
+  /// field order — or a bare `[[...], [...]]`; anything else is a 400. An
+  /// unknown session or form is a 404; a service failure is a 502.
+  static Future<void> _questionAnswer(
+    HttpRequest request,
+    String id,
+    String questionID,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final answers = await BridgeServer._answersBody(request);
+    if (answers == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_body'}));
+      await response.close();
+      return;
+    }
+    try {
+      await sessions.answerQuestion(id, questionID, answers);
+      response.statusCode = HttpStatus.noContent;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// Dismiss a pending question form (issue #50): the agent continues without
+  /// an answer. An unknown session or form is a 404; a service failure is a
+  /// 502.
+  static Future<void> _questionDismiss(
+    HttpRequest request,
+    String id,
+    String questionID,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      await sessions.dismissQuestion(id, questionID);
+      response.statusCode = HttpStatus.noContent;
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The question-answer body, parsed leniently to one entry per question
+  /// (in the form's field order), each a list of selected option labels (or
+  /// the typed text). Accepts `{"answers": [[...], ...]}` or a bare
+  /// `[[...], ...]`, and a bare string entry (a free-text answer); `null`
+  /// when the body is none of those shapes.
+  static Future<List<List<String>>?> _answersBody(HttpRequest request) async {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(await utf8.decodeStream(request));
+    } catch (_) {
+      return null;
+    }
+    final value = decoded is Map<String, Object?> ? decoded['answers'] : decoded;
+    final list = value is List ? value : null;
+    if (list == null) return null;
+    final answers = <List<String>>[];
+    for (final entry in list) {
+      if (entry is String) {
+        answers.add([entry]);
+        continue;
+      }
+      if (entry is List) {
+        final labels = <String>[];
+        for (final item in entry) {
+          if (item is! String) return null;
+          labels.add(item);
+        }
+        answers.add(labels);
+        continue;
+      }
+      return null;
+    }
+    return answers;
   }
 
   /// The `/` command menu's global commands (issue #46): a service endpoint

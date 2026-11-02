@@ -21,6 +21,7 @@ import 'package:opencodebridge/bridge/terminal/window_manager.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/notify/notify_kind.dart';
 
@@ -475,6 +476,213 @@ void main() {
         );
         expect(status, 502);
         expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
+  });
+
+  group('BridgeServer question forms (issue #50)', () {
+    late BridgeServer server;
+    late Uri base;
+    late Directory dir;
+    late _FakeService service;
+    late SessionStore store;
+
+    const detail = SessionDetail(
+      id: 'ses_one',
+      title: 'one',
+      location: '/one',
+      cost: 0.75,
+      tokens: TokenUsage(input: 1, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0),
+      outcome: 'succeeded',
+    );
+    const questions = [
+      QuestionForm(
+        id: 'form_1',
+        title: 'Questions',
+        questions: [
+          Question(
+            header: 'Confirm',
+            question: 'Proceed with the deployment?',
+            multiple: false,
+            custom: false,
+            options: [QuestionOption(label: 'Yes'), QuestionOption(label: 'No')],
+          ),
+          Question(
+            header: 'Pick',
+            question: 'Choose some',
+            multiple: true,
+            custom: true,
+            options: [QuestionOption(label: 'A'), QuestionOption(label: 'B')],
+          ),
+        ],
+      ),
+    ];
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-srv-questions',
+      );
+      service = _FakeService(detail: detail, questions: questions);
+      store = await SessionStore.load(dir: dir);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service, store: store),
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test(
+      'GET /api/sessions/{id}/questions returns the pending forms',
+      () async {
+        final (status, body) = await _get(base, 'api/sessions/ses_one/questions');
+        expect(status, 200);
+        expect(jsonDecode(body), [for (final f in questions) f.toJson()]);
+      },
+    );
+
+    test(
+      'GET /api/sessions/{id}/questions is 404 for an unknown session',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_missing/questions',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      },
+    );
+
+    test(
+      'GET /api/sessions/{id}/questions is 502 when the service is down',
+      () async {
+        service.failQuestions = true;
+        final (status, body) = await _get(base, 'api/sessions/ses_one/questions');
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
+
+    test(
+      'POST .../questions/{formID}/answer answers and is 204',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/questions/form_1/answer',
+          jsonEncode({'answers': [['Yes'], ['A', 'extra']]}),
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+        _expectAnswered(service, 'form_1', [
+          ['Yes'],
+          ['A', 'extra'],
+        ]);
+      },
+    );
+
+    test(
+      'POST .../questions/{formID}/answer accepts a bare answers array',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/questions/form_1/answer',
+          jsonEncode([['No'], ['B']]),
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+        _expectAnswered(service, 'form_1', [
+          ['No'],
+          ['B'],
+        ]);
+      },
+    );
+
+    test(
+      'POST .../questions/{formID}/answer with an invalid body is 400',
+      () async {
+        for (final raw in <String>[
+          '',
+          'not json',
+          '{}',
+          '{"answers": "nope"}',
+        ]) {
+          final (status, body) = await _postRaw(
+            base,
+            'api/sessions/ses_one/questions/form_1/answer',
+            raw,
+          );
+          expect(status, 400, reason: raw);
+          expect(jsonDecode(body), {'error': 'invalid_body'});
+        }
+        expect(service.answered, isEmpty);
+      },
+    );
+
+    test(
+      'POST .../questions/{formID}/answer is 404 for an unknown form',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/questions/form_missing/answer',
+          jsonEncode({'answers': [['Yes']]}),
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+        expect(service.answered, isEmpty);
+      },
+    );
+
+    test(
+      'POST .../questions/{formID}/answer is 502 when the service is down',
+      () async {
+        service.failAnswer = true;
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/questions/form_1/answer',
+          jsonEncode({'answers': [['Yes'], ['A']]}),
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
+
+    test(
+      'DELETE /api/sessions/{id}/questions/{formID} dismisses and is 204',
+      () async {
+        final (status, _) = await _delete(
+          base,
+          'api/sessions/ses_one/questions/form_1',
+        );
+        expect(status, 204);
+        expect(service.questionDismissed, [('ses_one', 'form_1')]);
+      },
+    );
+
+    test(
+      'DELETE .../questions/{formID} is 404 for an unknown form',
+      () async {
+        final (status, _) = await _delete(
+          base,
+          'api/sessions/ses_one/questions/form_missing',
+        );
+        expect(status, 404);
+        expect(service.questionDismissed, isEmpty);
+      },
+    );
+
+    test(
+      'DELETE .../questions/{formID} is 502 when the service is down',
+      () async {
+        service.failDismiss = true;
+        final (status, _) = await _delete(
+          base,
+          'api/sessions/ses_one/questions/form_1',
+        );
+        expect(status, 502);
       },
     );
   });
@@ -2194,6 +2402,7 @@ class _FakeService implements OpencodeService {
     this.detail,
     this.messages = const [],
     this.permissions = const [],
+    this.questions = const [],
     this.overrideProjects,
   });
 
@@ -2211,6 +2420,9 @@ class _FakeService implements OpencodeService {
   var failPermissions = false;
   var failPrompt = false;
   var failReply = false;
+  var failQuestions = false;
+  var failAnswer = false;
+  var failDismiss = false;
   var failCompact = false;
   var failUsage = false;
 
@@ -2228,10 +2440,15 @@ class _FakeService implements OpencodeService {
   final SessionDetail? detail;
   final List<SessionMessage> messages;
   final List<PermissionRequest> permissions;
+  final List<QuestionForm> questions;
 
   final List<(String, String)> prompts = [];
 
   final List<(String, String, PermissionReply)> replies = [];
+
+  final List<(String, String, List<List<String>>)> answered = [];
+
+  final List<(String, String)> questionDismissed = [];
 
   @override
   Future<List<OpencodeSession>> listSessions() async {
@@ -2333,8 +2550,42 @@ class _FakeService implements OpencodeService {
     replies.add((id, requestID, reply));
   }
 
+  // The structured view's question forms (issue #50): recorded, keyed to the
+  // scripted session like the endpoint 5–9 ops above.
+
+  @override
+  Future<List<QuestionForm>> pendingQuestions(String id) async {
+    if (failQuestions) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return questions;
+  }
+
+  @override
+  Future<void> answerQuestion(
+    String id,
+    String formID,
+    List<List<String>> answers,
+  ) async {
+    if (failAnswer) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    if (!questions.any((f) => f.id == formID)) {
+      throw const OpencodeServiceError(404, 'not found');
+    }
+    answered.add((id, formID, answers));
+  }
+
+  @override
+  Future<void> dismissQuestion(String id, String formID) async {
+    if (failDismiss) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    if (!questions.any((f) => f.id == formID)) {
+      throw const OpencodeServiceError(404, 'not found');
+    }
+    questionDismissed.add((id, formID));
+  }
+
   // The structured view's `/` command menu (issue #46): recorded, keyed to
-  // the scripted session like the endpoint 5–9 ops above.
+  // the structured session like the endpoint 5–9 ops above.
 
   final List<OpencodeCommand> commands = const [
     OpencodeCommand(name: 'deploy', description: 'ship it'),
@@ -2533,6 +2784,24 @@ const _three = OpencodeSession(
   created: 200,
   location: '/three',
 );
+
+/// Assert the question group's recorded answer: the (session, form) pair and
+/// the answers, compared list by list (record `==` is identity on the answers
+/// list field).
+void _expectAnswered(
+  _FakeService service,
+  String formID,
+  List<List<String>> answers,
+) {
+  expect(service.answered, hasLength(1));
+  final (sid, fid, got) = service.answered.single;
+  expect(sid, 'ses_one');
+  expect(fid, formID);
+  expect(got.length, answers.length);
+  for (var i = 0; i < answers.length; i++) {
+    expect(got[i], answers[i]);
+  }
+}
 
 Future<(int, String)> _get(Uri base, String path, {String? query}) async {
   final client = HttpClient();
