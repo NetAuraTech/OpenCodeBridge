@@ -271,10 +271,7 @@ class FakeOpencodeService implements OpencodeService {
   }
 
   final List<(String, String)> filesSearched = [];
-  final List<String> filesFound = const [
-    'src/main.dart',
-    'pubspec.yaml',
-  ];
+  final List<String> filesFound = const ['src/main.dart', 'pubspec.yaml'];
 
   @override
   Future<List<String>> findFiles(String id, String query) async {
@@ -630,11 +627,13 @@ void main() {
       expect(await backend.listSkills(), service.skills);
     });
 
-    test('findFiles passes the session and token through to the service',
-        () async {
-      expect(await backend.findFiles('ses_1', 'main'), service.filesFound);
-      expect(service.filesSearched, const [('ses_1', 'main')]);
-    });
+    test(
+      'findFiles passes the session and token through to the service',
+      () async {
+        expect(await backend.findFiles('ses_1', 'main'), service.filesFound);
+        expect(service.filesSearched, const [('ses_1', 'main')]);
+      },
+    );
 
     test(
       'the session commands record the session and their argument',

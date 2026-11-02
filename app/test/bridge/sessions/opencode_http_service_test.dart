@@ -1323,16 +1323,9 @@ void main() {
         // The service resolves the working directory from the session, so the
         // request carries it as the deepObject `location[directory]` param
         // and restricts the search to files.
-        expect(
-          fsFindQueries,
-          [
-            {
-              'query': 'main',
-              'type': 'file',
-              'location[directory]': '/one',
-            },
-          ],
-        );
+        expect(fsFindQueries, [
+          {'query': 'main', 'type': 'file', 'location[directory]': '/one'},
+        ]);
       },
     );
 

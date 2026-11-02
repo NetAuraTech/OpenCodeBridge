@@ -175,9 +175,9 @@ class _FakeClient extends SessionsClient {
     final gate = findFilesGate;
     if (gate != null) await gate.future;
     if (fileResults.isEmpty) return filesFound;
-    return fileResults[
-      index < fileResults.length ? index : fileResults.length - 1
-    ];
+    return fileResults[index < fileResults.length
+        ? index
+        : fileResults.length - 1];
   }
 
   /// The model registry (`listModels`), for the `/models` picker.
@@ -2619,12 +2619,11 @@ void main() {
     _FakeClient fakeClient({
       List<SkillOption> skills = const [],
       List<String> files = const [],
-    }) =>
-        _FakeClient(
-          details: const [_detail0],
-          skills: skills,
-          filesFound: files,
-        );
+    }) => _FakeClient(
+      details: const [_detail0],
+      skills: skills,
+      filesFound: files,
+    );
 
     testWidgets('a bare @ lists the session skills, then the working '
         "directory's files", (tester) async {
@@ -2651,9 +2650,7 @@ void main() {
       // The skills sit above the files (the TUI's order).
       expect(
         tester.getTopLeft(_commandRowFinder('skill:a11y')).dy,
-        lessThan(
-          tester.getTopLeft(_commandRowFinder('file:README.md')).dy,
-        ),
+        lessThan(tester.getTopLeft(_commandRowFinder('file:README.md')).dy),
       );
       // The file list is the service's search, queried for the token.
       expect(client.fileQueries, const [('ses_1', '')]);
@@ -2681,13 +2678,7 @@ void main() {
         await tester.pump();
         await tester.pump();
 
-        expect(
-          client.fileQueries,
-          const [
-            ('ses_1', ''),
-            ('ses_1', 'a'),
-          ],
-        );
+        expect(client.fileQueries, const [('ses_1', ''), ('ses_1', 'a')]);
         expect(_commandRowFinder('file:aa.txt'), findsOneWidget);
         expect(_commandRowFinder('file:zzz.txt'), findsNothing);
       },
@@ -2813,13 +2804,10 @@ void main() {
       await _pressEnter(tester);
       await tester.pump();
 
-      expect(
-        client.prompts.last.$3,
-        const [
-          {'uri': 'file:///x/src/main.dart'},
-          {'uri': 'file:///x/src/main.dart'},
-        ],
-      );
+      expect(client.prompts.last.$3, const [
+        {'uri': 'file:///x/src/main.dart'},
+        {'uri': 'file:///x/src/main.dart'},
+      ]);
       expect(client.prompts.last.$4, isNull);
     });
   });

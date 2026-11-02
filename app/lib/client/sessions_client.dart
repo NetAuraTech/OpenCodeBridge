@@ -672,7 +672,10 @@ class SessionsClient {
       }
       final decoded = jsonDecode(body);
       final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) if (item is String) item];
+      return [
+        for (final item in list)
+          if (item is String) item,
+      ];
     } on SessionsClientError {
       rethrow;
     } catch (error) {

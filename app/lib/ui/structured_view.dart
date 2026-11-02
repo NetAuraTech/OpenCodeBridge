@@ -1054,10 +1054,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       }
       index += found.text.length;
     }
-    return (
-      files.isEmpty ? null : files,
-      skills.isEmpty ? null : skills,
-    );
+    return (files.isEmpty ? null : files, skills.isEmpty ? null : skills);
   }
 
   /// The prompt was cleared (Esc, a `/` command, a send): its committed
@@ -1269,10 +1266,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
             label: '@${skill.id}',
             subtitle: skill.description.isEmpty ? null : skill.description,
             insertion: '@${skill.id}',
-            onActivate: (_) => _mentionPicked(
-              isSkill: true,
-              target: skill.id,
-            ),
+            onActivate: (_) => _mentionPicked(isSkill: true, target: skill.id),
           ),
     ];
     for (final path in _files ?? const <String>[]) {
@@ -1281,10 +1275,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           name: 'file:$path',
           label: '@$path',
           insertion: '@$path',
-          onActivate: (_) => _mentionPicked(
-            isSkill: false,
-            target: path,
-          ),
+          onActivate: (_) => _mentionPicked(isSkill: false, target: path),
         ),
       );
     }
@@ -1974,8 +1965,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                               onSend: _sendPrompt,
                               menus: _menus,
                               mentions: [
-                                for (final mention in _mentions)
-                                  mention.text,
+                                for (final mention in _mentions) mention.text,
                               ],
                               onMenuOpened: _onMenuOpened,
                               onToggleMode: _toggleMode,

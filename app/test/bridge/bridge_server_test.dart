@@ -2822,10 +2822,7 @@ class _FakeService implements OpencodeService {
   @override
   Future<String> worktrees(String projectId) async => '{"worktrees":true}';
 
-  final List<String> filesFound = const [
-    'src/main.dart',
-    'pubspec.yaml',
-  ];
+  final List<String> filesFound = const ['src/main.dart', 'pubspec.yaml'];
   final List<(String, String)> filesSearched = [];
 
   @override

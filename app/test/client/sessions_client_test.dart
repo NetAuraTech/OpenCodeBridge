@@ -460,9 +460,7 @@ void main() {
           response.write(jsonEncode({'error': 'not_found'}));
         } else {
           response.statusCode = HttpStatus.ok;
-          response.write(
-            jsonEncode(['src/main.dart', 'pubspec.yaml']),
-          );
+          response.write(jsonEncode(['src/main.dart', 'pubspec.yaml']));
         }
       } else if (request.method == 'POST' &&
           request.uri.path.contains('/skills/')) {
