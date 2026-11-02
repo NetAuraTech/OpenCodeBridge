@@ -235,7 +235,10 @@ class _FakeClient extends SessionsClient {
   /// flight, to sequence it against the events).
   Completer<void>? promptGate;
 
-  final List<(String, String)> prompts = [];
+  final List<
+    (String, String, List<Map<String, Object?>>?, List<Map<String, Object?>>?)
+  >
+  prompts = [];
 
   final List<(String, String, PermissionReply)> replies = [];
 
@@ -266,12 +269,17 @@ class _FakeClient extends SessionsClient {
   }
 
   @override
-  Future<void> prompt(String id, String text) async {
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
     final gate = promptGate;
     if (gate != null) await gate.future;
     final error = promptError;
     if (error is Object) throw error;
-    prompts.add((id, text));
+    prompts.add((id, text, files, skills));
   }
 
   @override
@@ -888,7 +896,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
       await tester.pump();
 
-      expect(client.prompts, const [('ses_1', 'keep going')]);
+      expect(client.prompts, const [('ses_1', 'keep going', null, null)]);
       final field = tester.widget<TextField>(
         find.byKey(const ValueKey('structured-prompt-input')),
       );
@@ -1170,7 +1178,7 @@ void main() {
         await tester.pump();
         await tester.pump();
 
-        expect(client.prompts, const [('ses_1', 'keep going')]);
+        expect(client.prompts, const [('ses_1', 'keep going', null, null)]);
         expect(_promptText(tester), isEmpty);
         // The single service copy stands — the local append was skipped.
         expect(find.text('keep going'), findsOneWidget);
@@ -2534,7 +2542,7 @@ void main() {
 
       await _pressEnter(tester);
 
-      expect(client.prompts, const [('ses_1', 'use @x')]);
+      expect(client.prompts, const [('ses_1', 'use @x', null, null)]);
       expect(_promptText(tester), isEmpty);
     });
 

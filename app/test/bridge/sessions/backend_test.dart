@@ -45,7 +45,10 @@ class FakeOpencodeService implements OpencodeService {
 
   final List<String> createdIn = [];
 
-  final List<(String, String)> prompts = [];
+  final List<
+    (String, String, List<Map<String, Object?>>?, List<Map<String, Object?>>?)
+  >
+  prompts = [];
 
   final List<(String, String, PermissionReply)> replies = [];
 
@@ -100,8 +103,13 @@ class FakeOpencodeService implements OpencodeService {
   Future<List<SessionMessage>> getMessages(String id) async => messages;
 
   @override
-  Future<void> prompt(String id, String text) async {
-    prompts.add((id, text));
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
+    prompts.add((id, text, files, skills));
   }
 
   @override
@@ -550,7 +558,7 @@ void main() {
         await backend.replyPermission('ses_1', 'req_1', PermissionReply.always);
         await backend.replyPermission('ses_1', 'req_2', PermissionReply.reject);
 
-        expect(service.prompts, const [('ses_1', 'keep going')]);
+        expect(service.prompts, const [('ses_1', 'keep going', null, null)]);
         expect(service.replies, const [
           ('ses_1', 'req_1', PermissionReply.once),
           ('ses_1', 'req_1', PermissionReply.always),
@@ -558,6 +566,36 @@ void main() {
         ]);
       },
     );
+
+    test('prompt forwards the file and skill attachments unchanged', () async {
+      final service = FakeOpencodeService();
+      final backend = SessionsBackend(service: service);
+      const files = [
+        {
+          'uri': 'file:///proj/one/notes.md',
+          'name': 'notes.md',
+          'description': 'field notes',
+        },
+      ];
+      const skills = [
+        {'id': 'orbs'},
+      ];
+      await backend.prompt(
+        'ses_1',
+        'use the notes',
+        files: files,
+        skills: skills,
+      );
+
+      expect(service.prompts, hasLength(1));
+      final prompt = service.prompts.single;
+      expect(prompt.$1, 'ses_1');
+      expect(prompt.$2, 'use the notes');
+      // The backend passes the attachments through untouched (same
+      // instances, no copy).
+      expect(identical(prompt.$3, files), isTrue);
+      expect(identical(prompt.$4, skills), isTrue);
+    });
   });
 
   group('SessionsBackend `/` command menu (issue #46)', () {

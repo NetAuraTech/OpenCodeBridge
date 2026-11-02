@@ -300,9 +300,91 @@ void main() {
         );
         expect(status, 202);
         expect(body, isEmpty);
-        expect(service.prompts, [('ses_one', 'hello there')]);
+        expect(service.prompts, const [('ses_one', 'hello there', null, null)]);
       },
     );
+
+    test('POST /api/sessions/{id}/messages forwards files and skills unchanged '
+        'and is 202', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/messages',
+        jsonEncode({
+          'text': 'read the notes',
+          'files': [
+            {
+              'uri': 'file:///proj/one/notes.md',
+              'name': 'notes.md',
+              'description': 'field notes',
+              'source': {'path': '/proj/one/notes.md'},
+              'mention': {'start': 0, 'end': 12},
+            },
+          ],
+          'skills': [
+            {'id': 'orbs'},
+          ],
+        }),
+      );
+      expect(status, 202);
+      expect(body, isEmpty);
+      final prompt = service.prompts.single;
+      expect(prompt.$1, 'ses_one');
+      expect(prompt.$2, 'read the notes');
+      expect(prompt.$3, [
+        {
+          'uri': 'file:///proj/one/notes.md',
+          'name': 'notes.md',
+          'description': 'field notes',
+          'source': {'path': '/proj/one/notes.md'},
+          'mention': {'start': 0, 'end': 12},
+        },
+      ]);
+      expect(prompt.$4, [
+        {'id': 'orbs'},
+      ]);
+    });
+
+    test('POST /api/sessions/{id}/messages with a malformed attachment array '
+        'is 400', () async {
+      for (final raw in <String>[
+        jsonEncode({'text': 'hi', 'files': 'nope'}),
+        jsonEncode({
+          'text': 'hi',
+          'files': [1],
+        }),
+        jsonEncode({'text': 'hi', 'skills': 'nope'}),
+        jsonEncode({
+          'text': 'hi',
+          'skills': [1],
+        }),
+      ]) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/messages',
+          raw,
+        );
+        expect(status, 400, reason: raw);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+      }
+      expect(service.prompts, isEmpty);
+    });
+
+    test('POST /api/sessions/{id}/messages is 502 when the service rejects an '
+        'attachment', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/messages',
+        jsonEncode({
+          'text': 'read it',
+          'files': [
+            {'uri': 'file:///proj/one/missing.txt', 'name': 'missing.txt'},
+          ],
+        }),
+      );
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      expect(service.prompts, isEmpty);
+    });
 
     test(
       'POST /api/sessions/{id}/messages with an invalid body is 400',
@@ -2400,7 +2482,10 @@ class _FakeService implements OpencodeService {
   final List<PermissionRequest> permissions;
   final List<QuestionForm> questions;
 
-  final List<(String, String)> prompts = [];
+  final List<
+    (String, String, List<Map<String, Object?>>?, List<Map<String, Object?>>?)
+  >
+  prompts = [];
 
   final List<(String, String, PermissionReply)> replies = [];
 
@@ -2497,10 +2582,23 @@ class _FakeService implements OpencodeService {
   }
 
   @override
-  Future<void> prompt(String id, String text) async {
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
     if (failPrompt) throw const OpencodeServiceError(0, 'service down');
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
-    prompts.add((id, text));
+    // The service rejects an unreadable file attachment with a 400 naming
+    // the offending field (the TUI's @-mention failure mode).
+    final unreadable = files?.any(
+      (item) => ((item['uri'] as String?) ?? '').endsWith('/missing.txt'),
+    );
+    if (unreadable == true) {
+      throw const OpencodeServiceError(400, 'files: no such file');
+    }
+    prompts.add((id, text, files, skills));
   }
 
   @override

@@ -247,6 +247,11 @@ void main() {
         } else if (text == null || text.trim().isEmpty) {
           response.statusCode = HttpStatus.badRequest;
           response.write(jsonEncode({'error': 'invalid_body'}));
+        } else if (raw.contains('/missing.txt')) {
+          // The service rejected an attachment (its 400), which the bridge
+          // surfaces as a 502 like any other service failure.
+          response.statusCode = HttpStatus.badGateway;
+          response.write(jsonEncode({'error': 'opencode_unreachable'}));
         } else {
           promptBodies.add(raw);
           response.statusCode = HttpStatus.accepted;
@@ -807,6 +812,59 @@ void main() {
     expect(promptBodies, [
       jsonEncode({'text': 'keep going'}),
     ]);
+  });
+
+  test('prompt posts files and skills with the text and accepts 202', () async {
+    await client.prompt(
+      'ses_1',
+      'read the notes',
+      files: const [
+        {
+          'uri': 'file:///proj/one/notes.md',
+          'name': 'notes.md',
+          'description': 'field notes',
+          'source': {'path': '/proj/one/notes.md'},
+          'mention': {'start': 0, 'end': 12},
+        },
+      ],
+      skills: const [
+        {'id': 'orbs'},
+      ],
+    );
+    expect(promptBodies, [
+      jsonEncode({
+        'text': 'read the notes',
+        'files': [
+          {
+            'uri': 'file:///proj/one/notes.md',
+            'name': 'notes.md',
+            'description': 'field notes',
+            'source': {'path': '/proj/one/notes.md'},
+            'mention': {'start': 0, 'end': 12},
+          },
+        ],
+        'skills': [
+          {'id': 'orbs'},
+        ],
+      }),
+    ]);
+  });
+
+  test('prompt maps the bridge 502 for a rejected attachment to '
+      'SessionsClientError(502)', () async {
+    try {
+      await client.prompt(
+        'ses_1',
+        'read it',
+        files: const [
+          {'uri': 'file:///proj/one/missing.txt', 'name': 'missing.txt'},
+        ],
+      );
+      fail('expected SessionsClientError');
+    } on SessionsClientError catch (e) {
+      expect(e.statusCode, HttpStatus.badGateway);
+      expect(e.message, jsonEncode({'error': 'opencode_unreachable'}));
+    }
   });
 
   test('prompt maps the bridge 404 to SessionsClientError(404)', () async {
