@@ -29,9 +29,11 @@ class _FakeFsClient extends FsClient {
 
   Object? drivesError;
   Object? subdirectoriesError;
+  Object? createDirectoryError;
 
   var drivesCalls = 0;
   final List<String> subdirectoriesCalls = [];
+  final List<String> createdDirectories = [];
 
   @override
   Future<List<String>> drives() async {
@@ -46,7 +48,20 @@ class _FakeFsClient extends FsClient {
     subdirectoriesCalls.add(path);
     final error = subdirectoriesError;
     if (error is Object) throw error;
-    return subdirectoriesResult[path] ?? const [];
+    final entries = [
+      for (final created in createdDirectories)
+        if (created.startsWith('$path/')) created,
+      ...subdirectoriesResult[path] ?? const <String>[],
+    ];
+    entries.sort();
+    return entries;
+  }
+
+  @override
+  Future<void> createDirectory(String path) async {
+    final error = createDirectoryError;
+    if (error is Object) throw error;
+    createdDirectories.add(path);
   }
 }
 
@@ -98,7 +113,8 @@ void main() {
         expect(find.byKey(const ValueKey('dir-/proj')), findsOneWidget);
         expect(fs.drivesCalls, 1);
 
-        // No single directory on screen: "Create here" is unavailable.
+        // No single directory on screen: "Create here" is unavailable, and
+        // so is "New folder" (there is no single parent yet).
         expect(
           tester
               .widget<FilledButton>(
@@ -107,8 +123,122 @@ void main() {
               .onPressed,
           isNull,
         );
+        expect(
+          tester
+              .widget<IconButton>(
+                find.byKey(const ValueKey('new-project-new-folder')),
+              )
+              .onPressed,
+          isNull,
+        );
       },
     );
+
+    testWidgets('New folder creates the empty directory at the level', (
+      tester,
+    ) async {
+      final fs = _FakeFsClient(
+        drivesResult: const ['/proj'],
+        subdirectoriesResult: const {'/proj': []},
+      );
+      await _pumpDialog(tester, fs, (_) async => _created);
+
+      await tester.tap(find.byKey(const ValueKey('dir-/proj')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('new-project-new-folder')));
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        'fresh',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('new-project-folder-create')));
+      await tester.pumpAndSettle();
+
+      expect(fs.createdDirectories, ['/proj/fresh']);
+      expect(fs.subdirectoriesCalls, ['/proj', '/proj']);
+      // The refresh shows the new directory, the entry row is closed.
+      expect(find.byKey(const ValueKey('dir-/proj/fresh')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a failed New folder keeps the entry row open', (tester) async {
+      final fs = _FakeFsClient(drivesResult: const ['/proj']);
+      fs.createDirectoryError = const FsClientError(409, 'already_exists');
+      await _pumpDialog(tester, fs, (_) async => _created);
+
+      await tester.tap(find.byKey(const ValueKey('dir-/proj')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('new-project-new-folder')));
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        'again',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('new-project-folder-create')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Could not create the folder'),
+        findsOneWidget,
+      );
+      expect(fs.createdDirectories, isEmpty);
+      // The entry row stays open for another attempt.
+      expect(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a New folder name with a slash is rejected', (tester) async {
+      final fs = _FakeFsClient(drivesResult: const ['/proj']);
+      await _pumpDialog(tester, fs, (_) async => _created);
+
+      await tester.tap(find.byKey(const ValueKey('dir-/proj')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('new-project-new-folder')));
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        'a/b',
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('new-project-folder-create')),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        '',
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const ValueKey('new-project-folder-create')),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.byKey(const ValueKey('new-project-folder-cancel')));
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('new-project-folder-name')),
+        findsNothing,
+      );
+      expect(fs.createdDirectories, isEmpty);
+    });
 
     testWidgets('descends one level at a time, and Back returns up', (
       tester,

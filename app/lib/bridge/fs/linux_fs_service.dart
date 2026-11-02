@@ -29,6 +29,59 @@ class LinuxFsService implements FsService {
   }
 
   @override
+  Future<void> createDirectory(String path) async {
+    if (!isAbsolutePath(path)) {
+      throw FsError(FsErrorKind.badPath, path);
+    }
+    final parent = _parentOf(path);
+    if (_statType(parent) != FileSystemEntityType.directory) {
+      throw FsError(FsErrorKind.notFound, parent);
+    }
+    // A pre-check: dart:io's createSync is idempotent on an existing
+    // directory, so the already-exists case would otherwise slip through.
+    final existing = _statType(path);
+    if (existing != null && existing != FileSystemEntityType.notFound) {
+      throw FsError(FsErrorKind.alreadyExists, path);
+    }
+    // The EACCES of a mode-000 parent surfaces here, not on the stat above
+    // (the kernel answers ENOENT for a missing path under a directory it
+    // refuses to search).
+    try {
+      Directory(path).createSync();
+    } on FileSystemException catch (e) {
+      final message = e.osError?.message ?? '';
+      if (message.contains('Permission denied')) {
+        throw FsError(FsErrorKind.permissionDenied, path);
+      }
+      if (message.contains('File exists')) {
+        throw FsError(FsErrorKind.alreadyExists, path);
+      }
+      rethrow;
+    }
+  }
+
+  /// The type of [path] for the create check; a permission denial is an
+  /// [FsError]([FsErrorKind.permissionDenied]) (the entry exists but is not
+  /// ours to stat), a missing entry is [FileSystemEntityType.notFound], and
+  /// some other stat failure is `null`.
+  static FileSystemEntityType? _statType(String path) {
+    try {
+      return File(path).statSync().type;
+    } on FileSystemException catch (e) {
+      if (e.osError?.message.contains('Permission denied') ?? false) {
+        throw FsError(FsErrorKind.permissionDenied, path);
+      }
+      return null;
+    }
+  }
+
+  /// The parent directory of the absolute path [path] (`/` for a root entry).
+  static String _parentOf(String path) {
+    final i = path.lastIndexOf('/');
+    return i <= 0 ? '/' : path.substring(0, i);
+  }
+
+  @override
   Future<List<String>> subdirectories(String path) async {
     if (!isAbsolutePath(path)) {
       throw FsError(FsErrorKind.badPath, path);

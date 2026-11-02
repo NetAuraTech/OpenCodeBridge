@@ -1543,6 +1543,62 @@ void main() {
       expect(status, 400);
       expect(jsonDecode(body), {'error': 'invalid_path'});
     });
+
+    test('POST /api/fs/directories creates the directory', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/fs/directories',
+        jsonEncode({'path': '/tmp/new'}),
+      );
+      expect(status, 201);
+      expect(fs.createdDirectories, ['/tmp/new']);
+    });
+
+    test(
+      'POST /api/fs/directories without an absolute path is 400 invalid_path',
+      () async {
+        var (status, body) = await _postRaw(
+          base,
+          'api/fs/directories',
+          jsonEncode({'path': 'tmp/new'}),
+        );
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_path'});
+        expect(fs.createdDirectories, isEmpty);
+
+        (status, body) = await _postRaw(
+          base,
+          'api/fs/directories',
+          jsonEncode({'nope': true}),
+        );
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_path'});
+        expect(fs.createdDirectories, isEmpty);
+      },
+    );
+
+    test('POST /api/fs/directories maps the service FsErrors', () async {
+      fs.createDirectoryError = const FsError(
+        FsErrorKind.alreadyExists,
+        '/tmp/new',
+      );
+      var (status, body) = await _postRaw(
+        base,
+        'api/fs/directories',
+        jsonEncode({'path': '/tmp/new'}),
+      );
+      expect(status, 409);
+      expect(jsonDecode(body), {'error': 'already_exists'});
+
+      fs.createDirectoryError = const FsError(FsErrorKind.notFound, '/tmp');
+      (status, body) = await _postRaw(
+        base,
+        'api/fs/directories',
+        jsonEncode({'path': '/tmp/new'}),
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
   });
 
   group('BridgeServer docker', () {
@@ -2797,6 +2853,9 @@ class _FakeFsService implements FsService {
   Map<String, List<String>> subdirectoriesResult = const {};
   FsError? subdirectoriesError;
 
+  final List<String> createdDirectories = [];
+  FsError? createDirectoryError;
+
   @override
   Future<List<String>> drives() async {
     final error = drivesError;
@@ -2810,6 +2869,13 @@ class _FakeFsService implements FsService {
     final error = subdirectoriesError;
     if (error != null) throw error;
     return subdirectoriesResult[path] ?? const [];
+  }
+
+  @override
+  Future<void> createDirectory(String path) async {
+    final error = createDirectoryError;
+    if (error != null) throw error;
+    createdDirectories.add(path);
   }
 }
 

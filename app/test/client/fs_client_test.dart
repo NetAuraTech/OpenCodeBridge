@@ -8,12 +8,16 @@ void main() {
   late HttpServer server;
   late Uri base;
   late List<String> directoryQueries;
+  late List<String> createdPaths;
 
   var failDrives = false;
+  var failCreate = false;
 
   setUp(() async {
     directoryQueries = [];
+    createdPaths = [];
     failDrives = false;
+    failCreate = false;
     server = await HttpServer.bind('127.0.0.1', 0);
     server.listen((request) async {
       final response = request.response;
@@ -39,6 +43,17 @@ void main() {
         } else {
           response.statusCode = HttpStatus.badRequest;
           response.write(jsonEncode({'error': 'invalid_path'}));
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path == '/api/fs/directories') {
+        final raw = await utf8.decodeStream(request);
+        final decoded = jsonDecode(raw) as Map<String, Object?>;
+        createdPaths.add(decoded['path'] as String);
+        if (failCreate) {
+          response.statusCode = HttpStatus.conflict;
+          response.write(jsonEncode({'error': 'already_exists'}));
+        } else {
+          response.statusCode = HttpStatus.created;
         }
       } else {
         response.statusCode = HttpStatus.notFound;
@@ -93,6 +108,22 @@ void main() {
       fail('expected FsClientError');
     } on FsClientError catch (e) {
       expect(e.statusCode, HttpStatus.badRequest);
+    }
+  });
+
+  test('createDirectory POSTs the path and expects 201', () async {
+    await FsClient(base).createDirectory('/tmp/new');
+    expect(createdPaths, ['/tmp/new']);
+  });
+
+  test('createDirectory maps a bridge 409 to FsClientError(409)', () async {
+    failCreate = true;
+    final client = FsClient(base);
+    try {
+      await client.createDirectory('/tmp/new');
+      fail('expected FsClientError');
+    } on FsClientError catch (e) {
+      expect(e.statusCode, HttpStatus.conflict);
     }
   });
 

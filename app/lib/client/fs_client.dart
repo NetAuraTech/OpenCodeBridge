@@ -4,11 +4,11 @@ import 'dart:io';
 import 'package:opencodebridge/client/authenticated_http.dart';
 
 /// The app-side client of the bridge's filesystem endpoints (issue #54's
-/// "New project" file-picker): the host's drives and the subdirectories of a
-/// directory, one level at a time. Like every other bridge endpoint it works
-/// in both modes — loopback in server mode, the tunnel in client mode (issue
-/// #23: every request carries `Authorization: Bearer` from [auth] — see
-/// [bridgeRequest]).
+/// "New project" file-picker): the host's drives, the subdirectories of a
+/// directory one level at a time, and a "New folder" creation. Like every
+/// other bridge endpoint it works in both modes — loopback in server mode,
+/// the tunnel in client mode (issue #23: every request carries
+/// `Authorization: Bearer` from [auth] — see [bridgeRequest]).
 class FsClient {
   FsClient(this._base, {this._auth});
 
@@ -66,6 +66,32 @@ class FsClient {
       final decoded = jsonDecode(body);
       final list = decoded is List ? decoded : const <Object?>[];
       return [for (final item in list) item as String];
+    } on FsClientError {
+      rethrow;
+    } catch (error) {
+      throw FsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Creates [path] as an empty directory on the bridge host (the picker's
+  /// "New folder").
+  Future<void> createDirectory(String path) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/fs/directories'),
+        body: jsonEncode({'path': path}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.created) {
+        throw FsClientError(response.statusCode, body);
+      }
     } on FsClientError {
       rethrow;
     } catch (error) {

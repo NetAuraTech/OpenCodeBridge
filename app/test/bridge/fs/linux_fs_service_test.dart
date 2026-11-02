@@ -68,6 +68,58 @@ void main() {
       }
     });
 
+    test('createDirectory creates the empty directory', () async {
+      await service.createDirectory('${tmp.path}/new');
+      final created = Directory('${tmp.path}/new');
+      expect(created.existsSync(), isTrue);
+      expect(created.listSync(), isEmpty);
+    });
+
+    test('createDirectory rejects a non-absolute path with badPath', () async {
+      final error = await capture(() => service.createDirectory('rel/new'));
+      expect(error, isA<FsError>());
+      expect(error!.kind, FsErrorKind.badPath);
+    });
+
+    test('createDirectory maps a missing parent to notFound', () async {
+      final error = await capture(
+        () => service.createDirectory('${tmp.path}/nope/new'),
+      );
+      expect(error, isA<FsError>());
+      expect(error!.kind, FsErrorKind.notFound);
+      expect(error.path, '${tmp.path}/nope');
+    });
+
+    test('createDirectory maps an existing entry to alreadyExists', () async {
+      Directory('${tmp.path}/existing').createSync();
+      final error = await capture(
+        () => service.createDirectory('${tmp.path}/existing'),
+      );
+      expect(error, isA<FsError>());
+      expect(error!.kind, FsErrorKind.alreadyExists);
+    });
+
+    test(
+      'createDirectory maps a permission denial to permissionDenied',
+      () async {
+        if (_runningAsRoot()) {
+          markTestSkipped('permission denial cannot be exercised as root');
+        }
+        final locked = Directory('${tmp.path}/locked')..createSync();
+        Process.runSync('chmod', ['0', locked.path]);
+        try {
+          final error = await capture(
+            () => service.createDirectory('${locked.path}/new'),
+          );
+          expect(error, isA<FsError>());
+          expect(error!.kind, FsErrorKind.permissionDenied);
+        } finally {
+          // Restored so tearDown can delete the tree.
+          Process.runSync('chmod', ['755', locked.path]);
+        }
+      },
+    );
+
     test(
       'subdirectories lists subdirectories only, full paths, sorted',
       () async {
@@ -127,7 +179,7 @@ void main() {
   });
 }
 
-Future<FsError?> capture(Future<List<String>> Function() call) async {
+Future<FsError?> capture(Future<void> Function() call) async {
   try {
     await call();
     return null;

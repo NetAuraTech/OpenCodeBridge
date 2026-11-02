@@ -702,6 +702,11 @@ class BridgeServer {
         await BridgeServer._fsDirectories(request, fs);
         return;
       }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.fsDirectoriesPath) {
+        await BridgeServer._fsCreateDirectory(request, fs);
+        return;
+      }
       // The docker endpoints (issue #21), checked before the session matchers
       // (a bare list path would otherwise read as a session id to them).
       if (request.method == 'GET' &&
@@ -1804,9 +1809,46 @@ class BridgeServer {
     }
   }
 
+  /// The "New project" file-picker's directory creation (issue #54's
+  /// "New folder"): the body's `path` is created as an empty directory and
+  /// the response is a 201. A missing or non-absolute `path` is a 400
+  /// `invalid_path`; a missing parent is a 404 `not_found`; an existing
+  /// entry is a 409 `already_exists`.
+  static Future<void> _fsCreateDirectory(
+    HttpRequest request,
+    FsService fs,
+  ) async {
+    final response = request.response;
+    String? path;
+    try {
+      final raw = await utf8.decodeStream(request);
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, Object?>) {
+        final p = decoded['path'];
+        path = p is String && isAbsolutePath(p) ? p : null;
+      }
+    } catch (_) {
+      path = null; // A non-JSON body is an invalid path.
+    }
+    if (path == null) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'invalid_path'}));
+      await response.close();
+      return;
+    }
+    try {
+      await fs.createDirectory(path);
+      response.statusCode = HttpStatus.created;
+      await response.close();
+    } on FsError catch (e) {
+      BridgeServer._fsError(response, e);
+    }
+  }
+
   /// Maps an [FsError] to the bridge contract: [FsErrorKind.badPath] is a
   /// 400 `invalid_path`, [FsErrorKind.notFound] is a 404 `not_found`,
-  /// [FsErrorKind.permissionDenied] is a 403 `permission_denied`.
+  /// [FsErrorKind.permissionDenied] is a 403 `permission_denied`, and
+  /// [FsErrorKind.alreadyExists] is a 409 `already_exists`.
   static void _fsError(HttpResponse response, FsError e) {
     final (status, code) = switch (e.kind) {
       FsErrorKind.badPath => (HttpStatus.badRequest, 'invalid_path'),
@@ -1815,6 +1857,7 @@ class BridgeServer {
         HttpStatus.forbidden,
         'permission_denied',
       ),
+      FsErrorKind.alreadyExists => (HttpStatus.conflict, 'already_exists'),
     };
     response.statusCode = status;
     response.write(jsonEncode({'error': code}));

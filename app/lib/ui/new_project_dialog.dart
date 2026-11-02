@@ -46,10 +46,33 @@ class _NewProjectDialogState extends State<NewProjectDialog> {
   /// True while the create (the "Create here" action) is in flight.
   bool _creating = false;
 
+  /// Whether the "New folder" name-entry row is open.
+  bool _creatingFolder = false;
+
+  /// True while the "New folder" create action is in flight.
+  bool _folderCreating = false;
+
+  /// The "New folder" name entry's controller.
+  final TextEditingController _folderName = TextEditingController();
+
   @override
   void initState() {
     super.initState();
+    // The create button's availability follows the name, so the dialog
+    // rebuilds on every change.
+    _folderName.addListener(_folderNameChanged);
     unawaited(_load());
+  }
+
+  void _folderNameChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _folderName.removeListener(_folderNameChanged);
+    _folderName.dispose();
+    super.dispose();
   }
 
   /// The directory "Create here" would create in; `null` at the drives level
@@ -97,6 +120,51 @@ class _NewProjectDialogState extends State<NewProjectDialog> {
     _dirs.removeLast();
     await _load();
   }
+
+  /// Whether the entered "New folder" name is valid (a name with no slash).
+  bool get _folderNameValid =>
+      _folderName.text.trim().isNotEmpty && !_folderName.text.contains('/');
+
+  /// Opens the "New folder" name-entry row.
+  void _openFolderEntry() {
+    setState(() => _creatingFolder = true);
+  }
+
+  /// Closes the "New folder" name-entry row.
+  void _closeFolderEntry() {
+    _folderName.clear();
+    setState(() => _creatingFolder = false);
+  }
+
+  /// "New folder": creates the empty directory at the current level, closes
+  /// the entry row, and refreshes the level.
+  Future<void> _createFolder() async {
+    final here = _here;
+    if (here == null || !_folderNameValid) return;
+    setState(() => _folderCreating = true);
+    try {
+      await widget.fs.createDirectory(_join(here, _folderName.text.trim()));
+      if (!mounted) return;
+      _closeFolderEntry();
+      await _load();
+    } on FsClientError catch (e) {
+      if (!mounted) return;
+      _snackBar(
+        'Could not create the folder '
+        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _snackBar('Could not create the folder.');
+    } finally {
+      if (mounted) setState(() => _folderCreating = false);
+    }
+  }
+
+  /// Joins the folder [name] to the directory [dir] (the root keeps its
+  /// single leading slash).
+  static String _join(String dir, String name) =>
+      dir == '/' ? '/$name' : '$dir/$name';
 
   /// "Create here": creates the session at the directory on screen, then
   /// pops the dialog with the created session.
@@ -156,9 +224,58 @@ class _NewProjectDialogState extends State<NewProjectDialog> {
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),
+                IconButton(
+                  key: const ValueKey('new-project-new-folder'),
+                  onPressed: here == null
+                      ? null
+                      : (_creatingFolder ? null : _openFolderEntry),
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                  tooltip: 'New folder',
+                ),
               ],
             ),
           ),
+          if (_creatingFolder)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('new-project-folder-name'),
+                      controller: _folderName,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: 'Folder name',
+                        border: OutlineInputBorder(),
+                      ),
+                      onSubmitted: (_) => _createFolder(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    key: const ValueKey('new-project-folder-create'),
+                    onPressed: _folderCreating || !_folderNameValid
+                        ? null
+                        : _createFolder,
+                    icon: _folderCreating
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.add),
+                    label: const Text('Create'),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    key: const ValueKey('new-project-folder-cancel'),
+                    onPressed: _folderCreating ? null : _closeFolderEntry,
+                    child: const Text('Cancel'),
+                  ),
+                ],
+              ),
+            ),
           if (entries == null && error == null)
             const SizedBox(
               height: 320,

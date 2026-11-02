@@ -10,6 +10,9 @@ abstract class FsService {
 
   /// The subdirectories of [path] (directories only, no files), sorted.
   Future<List<String>> subdirectories(String path);
+
+  /// Creates [path] as an empty directory (the picker's "New folder").
+  Future<void> createDirectory(String path);
 }
 
 /// A failure reading the host filesystem for the "New project" flow, with
@@ -26,8 +29,9 @@ class FsError implements Exception {
 }
 
 /// The failure kinds of an [FsError]: the bridge maps [badPath] to a 400,
-/// [notFound] to a 404, and [permissionDenied] to a 403.
-enum FsErrorKind { badPath, notFound, permissionDenied }
+/// [notFound] to a 404, [permissionDenied] to a 403, and [alreadyExists] to
+/// a 409.
+enum FsErrorKind { badPath, notFound, permissionDenied, alreadyExists }
 
 final RegExp _windowsDrive = RegExp(r'^[A-Za-z]:[\\/]');
 

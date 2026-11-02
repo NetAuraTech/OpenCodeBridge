@@ -187,9 +187,11 @@ class _FakeFsClient extends FsClient {
 
   Object? drivesError;
   Object? subdirectoriesError;
+  Object? createDirectoryError;
 
   var drivesCalls = 0;
   final List<String> subdirectoriesCalls = [];
+  final List<String> createdDirectories = [];
 
   @override
   Future<List<String>> drives() async {
@@ -205,6 +207,13 @@ class _FakeFsClient extends FsClient {
     final error = subdirectoriesError;
     if (error is Object) throw error;
     return subdirectoriesResult[path] ?? const [];
+  }
+
+  @override
+  Future<void> createDirectory(String path) async {
+    final error = createDirectoryError;
+    if (error is Object) throw error;
+    createdDirectories.add(path);
   }
 }
 
