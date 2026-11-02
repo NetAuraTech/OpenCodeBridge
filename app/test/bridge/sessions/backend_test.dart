@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
@@ -16,6 +18,7 @@ class FakeOpencodeService implements OpencodeService {
     this.active = const {},
     this.allProjects = const [],
     this.createdSession,
+    this.createdInDirectory,
     this.detail,
     this.messages = const [],
     this.permissions = const [],
@@ -29,6 +32,9 @@ class FakeOpencodeService implements OpencodeService {
   /// The session [createSession] returns (the fake does not consult [names]).
   final OpencodeSession? createdSession;
 
+  /// The session [createSessionInDirectory] returns.
+  final OpencodeSession? createdInDirectory;
+
   final SessionDetail? detail;
   final List<SessionMessage> messages;
   final List<PermissionRequest> permissions;
@@ -36,6 +42,8 @@ class FakeOpencodeService implements OpencodeService {
   final List<String> deleted = [];
 
   final List<String> created = [];
+
+  final List<String> createdIn = [];
 
   final List<(String, String)> prompts = [];
 
@@ -59,6 +67,19 @@ class FakeOpencodeService implements OpencodeService {
     final session = createdSession;
     if (session == null) {
       throw const OpencodeServiceError(500, 'no created session scripted');
+    }
+    return session;
+  }
+
+  @override
+  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+    createdIn.add(directory);
+    final session = createdInDirectory;
+    if (session == null) {
+      throw const OpencodeServiceError(
+        500,
+        'no created-in-directory session scripted',
+      );
     }
     return session;
   }
@@ -375,6 +396,74 @@ void main() {
           active: false,
         ),
       );
+    });
+  });
+
+  group('SessionsBackend.createInDirectory', () {
+    late Directory dir;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('oc-be-create-in');
+    });
+
+    tearDown(() async {
+      await dir.delete(recursive: true);
+    });
+
+    test('creates at the directory and returns the row', () async {
+      final created = const OpencodeSession(
+        id: 'ses_new_dir',
+        title: 'new dir',
+        projectId: 'p_dir',
+        created: 400,
+        location:
+            '/tmp/oc-be-create-in.XXXXXX', // location as-is from the service
+      );
+      final service = FakeOpencodeService(
+        names: const {}, // no name for p_dir -> falls back to the id
+        createdInDirectory: created,
+      );
+      final backend = SessionsBackend(service: service);
+
+      final row = await backend.createInDirectory(dir.path);
+
+      expect(service.createdIn, [dir.path]);
+      expect(
+        row,
+        const Session(
+          id: 'ses_new_dir',
+          title: 'new dir',
+          project: SessionProject(id: 'p_dir', name: 'p_dir'),
+          created: 400,
+          location: '/tmp/oc-be-create-in.XXXXXX',
+          active: false,
+        ),
+      );
+    });
+
+    test('a missing directory is a clear 404, no service round-trip', () async {
+      final service = FakeOpencodeService(
+        createdInDirectory: const OpencodeSession(
+          id: 'ses_never',
+          title: 'never',
+          projectId: 'p_never',
+          created: 400,
+          location: '/never',
+        ),
+      );
+      final backend = SessionsBackend(service: service);
+
+      await expectLater(
+        backend.createInDirectory('/definitely/not/a/real/path-oc-be-x'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            HttpStatus.notFound,
+          ),
+        ),
+      );
+      expect(service.createdIn, isEmpty);
     });
   });
 

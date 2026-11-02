@@ -111,13 +111,18 @@ void main() {
           request.uri.path == '/api/sessions') {
         final raw = await utf8.decodeStream(request);
         String? project;
+        String? directory;
         try {
           final decoded = jsonDecode(raw);
           project = decoded is Map<String, Object?>
               ? decoded['project'] as String?
               : null;
+          directory = decoded is Map<String, Object?>
+              ? decoded['directory'] as String?
+              : null;
         } catch (_) {
           project = null;
+          directory = null;
         }
         if (project == 'p1') {
           createdBodies.add(raw);
@@ -133,6 +138,23 @@ void main() {
             }),
           );
         } else if (project == 'p_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else if (directory == '/proj/new') {
+          createdBodies.add(raw);
+          response.statusCode = HttpStatus.created;
+          response.write(
+            jsonEncode({
+              'id': 'ses_created_dir',
+              'title': 'created in /proj/new',
+              'project': {'id': 'p_new', 'name': 'p_new'},
+              'created': 400,
+              'location': '/proj/new',
+              'active': false,
+            }),
+          );
+        } else if (directory != null) {
+          // Any other directory is "no such directory" on the bridge.
           response.statusCode = HttpStatus.notFound;
           response.write(jsonEncode({'error': 'not_found'}));
         } else {
@@ -660,6 +682,39 @@ void main() {
       expect(e.statusCode, HttpStatus.notFound);
     }
   });
+
+  test(
+    'createInDirectory posts only the directory and parses the returned row',
+    () async {
+      final row = await client.createInDirectory('/proj/new');
+      expect(createdBodies, [
+        jsonEncode({'directory': '/proj/new'}),
+      ]);
+      expect(
+        row,
+        const Session(
+          id: 'ses_created_dir',
+          title: 'created in /proj/new',
+          project: SessionProject(id: 'p_new', name: 'p_new'),
+          created: 400,
+          location: '/proj/new',
+          active: false,
+        ),
+      );
+    },
+  );
+
+  test(
+    'createInDirectory maps the bridge 404 to SessionsClientError(404)',
+    () async {
+      try {
+        await client.createInDirectory('/missing/dir');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    },
+  );
 
   test('an unreachable bridge is SessionsClientError(0)', () async {
     final unreachable = SessionsClient(Uri.parse('http://127.0.0.1:1/'));

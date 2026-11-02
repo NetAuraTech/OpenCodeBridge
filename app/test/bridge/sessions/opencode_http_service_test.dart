@@ -656,6 +656,19 @@ void main() {
       );
     });
 
+    test(
+      'createSessionInDirectory posts the directory as-is as the location',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final session = await service.createSessionInDirectory('/proj/two');
+        expect(session.id, 'ses_new');
+        expect(session.title, 'new');
+        expect(session.projectId, 'p2');
+        expect(session.created, 400);
+        expect(session.location, '/proj/two');
+      },
+    );
+
     test('activeSessionIds returns the active set', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       expect(await service.activeSessionIds(), {'ses_2'});

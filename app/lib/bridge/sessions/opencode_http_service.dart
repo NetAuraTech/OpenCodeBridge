@@ -121,6 +121,26 @@ class OpencodeHttpService implements OpencodeService {
   }
 
   @override
+  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+    final body = await _post(
+      _base.replace(path: '/api/session'),
+      jsonEncode({
+        'location': {'directory': directory},
+      }),
+    );
+    final decoded = jsonDecode(body);
+    final outer = decoded is Map<String, Object?>
+        ? decoded
+        : const <String, Object?>{};
+    // The service wraps single-object responses in `{ "data": … }` (the same
+    // envelope as the list endpoint); unwrap it. The top-level fallback keeps
+    // a shape change from degrading to a silently-empty id.
+    final data = outer['data'];
+    final map = data is Map<String, Object?> ? data : outer;
+    return _sessionFrom(map);
+  }
+
+  @override
   Future<Set<String>> activeSessionIds() async {
     final body = await _get(_base.replace(path: '/api/session/active'));
     final decoded = jsonDecode(body);

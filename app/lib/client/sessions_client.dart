@@ -107,6 +107,35 @@ class SessionsClient {
     }
   }
 
+  /// Create a session whose working directory is [directory] as-is (issue
+  /// #54's "New project"): the body is the directory; the bridge checks it
+  /// exists on this host and creates the session on the shared service, which
+  /// auto-creates a project for a directory it has never seen.
+  Future<Session> createInDirectory(String directory) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/sessions'),
+        body: jsonEncode({'directory': directory}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.created) {
+        throw SessionsClientError(response.statusCode, body);
+      }
+      return Session.fromJson(jsonDecode(body));
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Deletes a session (spec section 5, endpoint 4): the bridge performs the
   /// service deletion and the persistence-record removal in one action.
   Future<void> delete(String id) async {

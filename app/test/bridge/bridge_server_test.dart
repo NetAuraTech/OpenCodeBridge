@@ -8,6 +8,7 @@ import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
 import 'package:opencodebridge/bridge/events/event_hub.dart';
 import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
+import 'package:opencodebridge/bridge/fs/fs_service.dart';
 import 'package:opencodebridge/bridge/health.dart';
 import 'package:opencodebridge/bridge/notify/fcm_sender.dart';
 import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
@@ -1352,6 +1353,198 @@ void main() {
     });
   });
 
+  group('BridgeServer sessions (create by directory, issue #54)', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeService service;
+    late SessionsBackend backend;
+    late EventHub hub;
+    late Directory dir;
+
+    setUp(() async {
+      service = _FakeService();
+      backend = SessionsBackend(service: service);
+      hub = EventHub(service: _FakeEventUpstream());
+      dir = await Directory.systemTemp.createTemp('oc-create-in');
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        events: hub,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test(
+      'POST /api/sessions with a directory creates the session there',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions',
+          jsonEncode({'directory': dir.path}),
+        );
+
+        expect(status, 201);
+        expect(jsonDecode(body), {
+          'id': 'ses_created_dir',
+          'title': 'created in ${dir.path}',
+          'project': {'id': 'p_dir', 'name': 'p_dir'},
+          'created': 400,
+          'location': dir.path,
+          'active': false,
+        });
+      },
+    );
+
+    test(
+      'POST /api/sessions with both a project and a directory is 400',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions',
+          jsonEncode({'project': 'p1', 'directory': dir.path}),
+        );
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+      },
+    );
+
+    test('POST /api/sessions with a relative directory is 400', () async {
+      for (final raw in <String>[
+        jsonEncode({'directory': 'relative/path'}),
+        jsonEncode({'directory': './relative'}),
+      ]) {
+        final (status, body) = await _postRaw(base, 'api/sessions', raw);
+        expect(status, 400, reason: raw);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+      }
+    });
+
+    test('POST /api/sessions for a missing directory is 404', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions',
+        jsonEncode({'directory': '/definitely/not/a/real/path-oc-create-in'}),
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test(
+      'POST /api/sessions with a directory is 502 when the service is down',
+      () async {
+        service.failCreateInDirectory = true;
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions',
+          jsonEncode({'directory': dir.path}),
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
+  });
+
+  group('BridgeServer fs (issue #54)', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeFsService fs;
+
+    setUp(() async {
+      fs = _FakeFsService();
+      server = await BridgeServer.start(port: 0, fs: fs);
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('GET /api/fs/drives returns the host drives', () async {
+      fs.drivesResult = const ['/mnt/data', '/'];
+      final (status, body) = await _get(base, 'api/fs/drives');
+      expect(status, 200);
+      expect(jsonDecode(body), ['/mnt/data', '/']);
+    });
+
+    test(
+      'GET /api/fs/directories lists the subdirectories of the path',
+      () async {
+        fs.subdirectoriesResult = {
+          '/tmp': const ['/tmp/b', '/tmp/a'],
+        };
+        final (status, body) = await _get(
+          base,
+          'api/fs/directories',
+          query: 'path=/tmp',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), ['/tmp/b', '/tmp/a']);
+        expect(fs.subdirectoriesCalled, ['/tmp']);
+      },
+    );
+
+    test(
+      'GET /api/fs/directories without a path is 400 invalid_path',
+      () async {
+        final (status, body) = await _get(base, 'api/fs/directories');
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_path'});
+        expect(fs.subdirectoriesCalled, isEmpty);
+      },
+    );
+
+    test(
+      'GET /api/fs/directories with a relative path is 400 invalid_path',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/fs/directories',
+          query: 'path=tmp/one',
+        );
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_path'});
+        expect(fs.subdirectoriesCalled, isEmpty);
+      },
+    );
+
+    test('GET /api/fs/directories maps the service FsErrors', () async {
+      fs.subdirectoriesError = const FsError(FsErrorKind.notFound, '/tmp');
+      var (status, body) = await _get(
+        base,
+        'api/fs/directories',
+        query: 'path=/tmp',
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+
+      fs.subdirectoriesError = const FsError(
+        FsErrorKind.permissionDenied,
+        '/tmp',
+      );
+      (status, body) = await _get(
+        base,
+        'api/fs/directories',
+        query: 'path=/tmp',
+      );
+      expect(status, 403);
+      expect(jsonDecode(body), {'error': 'permission_denied'});
+
+      fs.subdirectoriesError = const FsError(FsErrorKind.badPath, 'tmp');
+      (status, body) = await _get(
+        base,
+        'api/fs/directories',
+        query: 'path=/tmp',
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_path'});
+    });
+  });
+
   group('BridgeServer docker', () {
     late BridgeServer server;
     late Uri base;
@@ -2123,6 +2316,7 @@ class _FakeService implements OpencodeService {
   var failList = false;
   var failProjects = false;
   var failCreate = false;
+  var failCreateInDirectory = false;
   var failDetail = false;
   var failMessages = false;
   var failPermissions = false;
@@ -2195,6 +2389,22 @@ class _FakeService implements OpencodeService {
       throw const OpencodeServiceError(404, 'no such project');
     }
     return session;
+  }
+
+  /// The session [createSessionInDirectory] mints, at [directory] (issue
+  /// #54's "New project").
+  @override
+  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+    if (failCreateInDirectory) {
+      throw const OpencodeServiceError(0, 'service down');
+    }
+    return OpencodeSession(
+      id: 'ses_created_dir',
+      title: 'created in $directory',
+      projectId: 'p_dir',
+      created: 400,
+      location: directory,
+    );
   }
 
   @override
@@ -2575,6 +2785,32 @@ class _FakeEventUpstream implements OpencodeEventService {
 
   @override
   Future<void> close() async {}
+}
+
+/// A scripted [FsService] for the fs endpoint tests: the drives and
+/// subdirectory results are scripted, and an [FsError] can be injected.
+class _FakeFsService implements FsService {
+  List<String> drivesResult = const ['/'];
+  FsError? drivesError;
+
+  final List<String> subdirectoriesCalled = [];
+  Map<String, List<String>> subdirectoriesResult = const {};
+  FsError? subdirectoriesError;
+
+  @override
+  Future<List<String>> drives() async {
+    final error = drivesError;
+    if (error != null) throw error;
+    return drivesResult;
+  }
+
+  @override
+  Future<List<String>> subdirectories(String path) async {
+    subdirectoriesCalled.add(path);
+    final error = subdirectoriesError;
+    if (error != null) throw error;
+    return subdirectoriesResult[path] ?? const [];
+  }
 }
 
 /// A scripted docker backend for the route tests: the run seam is scripted,
