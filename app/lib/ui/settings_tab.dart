@@ -731,6 +731,11 @@ class _FirebaseProjectSectionState extends State<_FirebaseProjectSection> {
             maxLines: 4,
             decoration: const InputDecoration(
               labelText: 'google-services.json',
+              // Without helperMaxLines the SDK truncates a helperText wider
+              // than the field with an ellipsis (one line, cropped on a
+              // phone); 4 lines keeps the whole sentence with text-scale
+              // headroom.
+              helperMaxLines: 4,
               helperText:
                   'Paste the JSON from the Firebase Console (Android app); '
                   'it configures push on this device only.',
@@ -844,6 +849,11 @@ class _ServiceAccountSectionState extends State<_ServiceAccountSection> {
             maxLines: 4,
             decoration: const InputDecoration(
               labelText: 'service-account.json',
+              // Without helperMaxLines the SDK truncates a helperText wider
+              // than the field with an ellipsis (one line, cropped on a
+              // phone); 4 lines keeps the whole sentence with text-scale
+              // headroom.
+              helperMaxLines: 4,
               helperText:
                   'Paste the JSON from the Firebase Console (Project settings → '
                   'Service accounts); it is saved on this host and lets the '

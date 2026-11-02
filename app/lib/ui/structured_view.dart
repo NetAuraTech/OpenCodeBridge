@@ -1,16 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
+import '../app_info.dart';
 import '../client/events_client.dart';
 import '../client/sessions_client.dart';
+import '../model/command.dart';
 import '../model/message.dart';
 import '../model/permission.dart';
 import '../model/session_detail.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
+import 'slash_commands.dart';
 
 /// The structured view of one session (spec §6: *External* → structured
 /// view): the message history with the tools in flight, the live cost bar,
@@ -33,6 +38,8 @@ class StructuredSessionScreen extends StatefulWidget {
     required this.client,
     this.events,
     this.gaps,
+    this.onNewSession,
+    this.onOpenSettings,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -53,6 +60,14 @@ class StructuredSessionScreen extends StatefulWidget {
   /// gap means events were missed (typically across a reconnect), so the
   /// view re-fetches its state and the final content is always complete.
   final Stream<SessionGap>? gaps;
+
+  /// The `/` menu's navigation commands (`/new`, `/sessions`, `/open`,
+  /// `/settings`, `/clear`): the screen closes and the app runs the flow.
+  /// `null` leaves the command in the menu but a no-op (the menu still opens).
+  final FutureOr<void> Function()? onNewSession;
+
+  /// `/settings`: open the app's Settings tab.
+  final FutureOr<void> Function()? onOpenSettings;
 
   @override
   State<StructuredSessionScreen> createState() =>
@@ -164,9 +179,26 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
   final TextEditingController _prompt = TextEditingController();
 
+  /// The title shown in the app bar: the route's title at first, replaced by
+  /// `/rename` while the view stays open.
+  String _title = '';
+
+  /// The `/` menu's rows (issue #46): the static catalog until the project's
+  /// custom commands land (fetched when the menu first opens).
+  List<SlashCommand> _commands = SlashCommands.catalog;
+
+  /// The project's custom commands have been requested already (the menu
+  /// keeps showing the static catalog when the fetch fails).
+  bool _commandsFetched = false;
+
+  /// True while a `/` command runs (the prompt bar is disabled so a command
+  /// cannot be double-run).
+  bool _commandBusy = false;
+
   @override
   void initState() {
     super.initState();
+    _title = widget.title;
     _scroll.addListener(_onScroll);
     _loadInitial();
     final stream = widget.events;
@@ -869,6 +901,88 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
+  /// Tab in the prompt (the menu closed): toggles the session's mode,
+  /// `plan` to `build` and `build` (or unset) to `plan`, via the service's
+  /// `setAgent` — the session's agent is the single source of truth (the
+  /// service's TUIs see the same switch), so normalize afterwards and the
+  /// cost bar's mode chip follows.
+  Future<void> _toggleMode() async {
+    if (_promptBusy || _commandBusy) return;
+    final next = _detail?.agent == 'plan' ? 'build' : 'plan';
+    try {
+      await widget.client.setAgent(widget.sessionId, next);
+      if (!mounted) return;
+      _snackBar('Mode: $next.');
+      _normalize();
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not switch the mode (${_describe(e)}).');
+    } catch (_) {
+      if (mounted) _snackBar('Could not switch the mode.');
+    }
+  }
+
+  /// Ctrl+T in the prompt (the menu closed): cycles the current model's
+  /// variants (the reasoning effort) — the TUI's `variant.cycle`: none to
+  /// the first variant, the last back to none. The session must carry a
+  /// model the registry knows and that exposes variants; otherwise it is
+  /// reported, nothing is set.
+  Future<void> _cycleVariant() async {
+    if (_promptBusy || _commandBusy) return;
+    final id = widget.sessionId;
+    try {
+      final current = await widget.client.currentModel(id);
+      ModelOption? model;
+      if (current != null) {
+        for (final m in await widget.client.listModels(id)) {
+          if (m.id == current.id && m.providerId == current.providerId) {
+            model = m;
+            break;
+          }
+        }
+      }
+      if (model == null) {
+        if (!mounted) return;
+        _snackBar('No model set for the session.');
+        return;
+      }
+      final named = [
+        for (final v in model.variants)
+          if (v != 'default') v,
+      ];
+      if (named.isEmpty) {
+        if (!mounted) return;
+        _snackBar('No variants available.');
+        return;
+      }
+      final variant = _nextVariant(current?.variant, named);
+      await widget.client.setModel(
+        id,
+        ModelRef(id: model.id, providerId: model.providerId, variant: variant),
+      );
+      if (!mounted) return;
+      _snackBar(
+        variant == null ? 'Variant set to none.' : 'Variant set to $variant.',
+      );
+      _normalize();
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not cycle the variant (${_describe(e)}).');
+    } catch (_) {
+      if (mounted) _snackBar('Could not cycle the variant.');
+    }
+  }
+
+  /// The TUI's `cycleModelVariant` on the named variants (the ids that are
+  /// not `default`): none (or an id the registry no longer carries) cycles
+  /// to the first, the last cycles to none, otherwise the next.
+  static String? _nextVariant(String? current, List<String> named) {
+    if (named.isEmpty) return null;
+    final value = current == 'default' ? null : current;
+    if (value == null) return named.first;
+    final index = named.indexOf(value);
+    if (index == -1 || index == named.length - 1) return null;
+    return named[index + 1];
+  }
+
   /// Applies the decision to a pending request (endpoint 9) and re-fetches
   /// the pending list: the turn continues once the service records it.
   Future<void> _reply(PermissionRequest request, PermissionReply reply) async {
@@ -891,6 +1005,463 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
+  /// The `/` menu is open (issue #46): fetch the project's custom commands
+  /// (the service's `GET /api/command`) once and merge them into the menu.
+  /// A failed fetch keeps the static catalog on screen.
+  void _onMenuOpened() {
+    if (_commandsFetched) return;
+    _commandsFetched = true;
+    widget.client
+        .listCommands(widget.sessionId)
+        .then((commands) {
+          if (mounted) {
+            setState(() => _commands = SlashCommands.withCustom(commands));
+          }
+        })
+        .catchError((Object _) {});
+  }
+
+  /// Runs the row the user picked from the `/` menu (issue #46). The bar
+  /// clears the field before calling; the command dispatches by family —
+  /// custom commands are sent to the open session (the service queues them
+  /// with `delivery: steer` mid-turn), service commands hit the bridge's
+  /// command endpoints, local commands run their in-app equivalent.
+  Future<void> _runCommand(SlashCommand command, String argument) async {
+    if (_commandBusy) return;
+    setState(() => _commandBusy = true);
+    try {
+      await _dispatchCommand(command, argument);
+    } finally {
+      if (mounted) setState(() => _commandBusy = false);
+    }
+  }
+
+  Future<void> _dispatchCommand(SlashCommand command, String argument) async {
+    switch (command.family) {
+      case CommandFamily.custom:
+        await _runCustom(command, argument);
+      case CommandFamily.service:
+        await _runService(command.name, argument);
+      case CommandFamily.local:
+        await _runLocal(command.name);
+    }
+  }
+
+  /// A project custom command (issue #46): its name plus the typed argument
+  /// go to the open session's `command` endpoint.
+  Future<void> _runCustom(SlashCommand command, String argument) async {
+    try {
+      await widget.client.runCommand(widget.sessionId, command.name, argument);
+      if (mounted) _snackBar('Sent /${command.name} to the session.');
+    } on SessionsClientError catch (e) {
+      if (mounted) {
+        _snackBar('Could not run /${command.name} (${_describe(e)}).');
+      }
+    } catch (_) {
+      if (mounted) _snackBar('Could not run /${command.name}.');
+    }
+  }
+
+  /// A service command (issue #46): the bridge's command endpoints. The
+  /// session commands that change the session (model, agent, variant,
+  /// directory) normalize afterwards, so the view (and the service's TUIs,
+  /// the single source of truth) show the new state.
+  Future<void> _runService(String name, String argument) async {
+    final id = widget.sessionId;
+    final client = widget.client;
+    try {
+      switch (name) {
+        case 'models':
+          final models = await client.listModels(id);
+          final picked = await _pick(
+            'Switch model',
+            models,
+            (m) => m.name,
+            (m) => m.providerId,
+          );
+          if (picked == null) return;
+          await client.setModel(
+            id,
+            ModelRef(id: picked.id, providerId: picked.providerId),
+          );
+          if (!mounted) return;
+          _snackBar('Model set to ${picked.name}.');
+          _normalize();
+          return;
+        case 'agents':
+          final agents = await client.listAgents(id);
+          final picked = await _pick(
+            'Switch agent',
+            agents,
+            (a) => a.name,
+            (a) => a.description,
+          );
+          if (picked == null) return;
+          await client.setAgent(id, picked.id);
+          if (!mounted) return;
+          _snackBar('Agent set to ${picked.name}.');
+          return;
+        case 'variants':
+          final current = await client.currentModel(id);
+          ModelOption? model;
+          if (current != null) {
+            for (final m in await client.listModels(id)) {
+              if (m.id == current.id && m.providerId == current.providerId) {
+                model = m;
+                break;
+              }
+            }
+          }
+          if (model == null || model.variants.isEmpty) {
+            if (!mounted) return;
+            _snackBar('No variants available.');
+            return;
+          }
+          final variants = model.variants;
+          final variant = await _pick<String>(
+            'Switch variant',
+            variants,
+            (v) => current?.variant == v ? '$v (current)' : v,
+            null,
+          );
+          if (variant == null) return;
+          await client.setModel(
+            id,
+            ModelRef(
+              id: model.id,
+              providerId: model.providerId,
+              variant: variant,
+            ),
+          );
+          if (!mounted) return;
+          _snackBar('Variant set to $variant.');
+          _normalize();
+          return;
+        case 'compact':
+          await client.compact(id);
+          _normalize();
+          return;
+        case 'undo':
+          await client.undo(id);
+          _normalize();
+          return;
+        case 'redo':
+          await client.redo(id);
+          _normalize();
+          return;
+        case 'fork':
+          final forked = await client.fork(id);
+          if (!mounted) return;
+          _snackBar('Forked the session as $forked.');
+          return;
+        case 'rename':
+          await client.rename(id, argument);
+          if (!mounted) return;
+          setState(() => _title = argument);
+          _snackBar('Renamed the session.');
+          return;
+        case 'cd':
+          await client.move(id, argument);
+          if (!mounted) return;
+          _snackBar('Working directory: $argument.');
+          _normalize();
+          return;
+        case 'skills':
+          final skills = await client.listSkills(id);
+          final picked = await _pick(
+            'Activate a skill',
+            skills,
+            (s) => s.name,
+            (s) => s.description,
+          );
+          if (picked == null) return;
+          await client.activateSkill(id, picked.id);
+          if (!mounted) return;
+          _snackBar('Skill activated: ${picked.name}.');
+          return;
+        case 'btw':
+          final answer = await client.btw(id, argument);
+          if (!mounted) return;
+          _dialog('Side answer', answer);
+          return;
+        case 'export':
+          await _payloadDialog('Export', () => client.exportSession(id));
+          return;
+        case 'diff':
+          await _payloadDialog('Diff', () => client.diff(id));
+          return;
+        case 'stats':
+          await _payloadDialog('Usage statistics', () => client.stats(id));
+          return;
+        case 'terminal':
+          await _payloadDialog('Terminal', () => client.newTerminal(id));
+          return;
+        case 'worktrees':
+          await _payloadDialog('Worktrees', () => client.worktrees(id));
+          return;
+        // The menu's navigation commands: the app's existing "new session"
+        // flow (the screen closes and the flow runs behind it).
+        case 'sessions':
+        case 'new':
+        case 'open':
+          await _goNewSession();
+          return;
+        case 'usage':
+          await _payloadDialog('Usage', client.usage);
+          return;
+        case 'mcps':
+          await _payloadDialog('MCP servers', client.mcps);
+          return;
+        case 'connect':
+          await _connectFlow();
+          return;
+        case 'status':
+          await _payloadDialog('Status', client.status);
+          return;
+        case 'pair':
+          await _payloadDialog('Pairing code', client.pair);
+          return;
+        case 'reload':
+          await client.reload();
+          if (!mounted) return;
+          _snackBar('Reloaded the configuration.');
+          return;
+        case 'plugins':
+          await _payloadDialog('Plugins', client.plugins);
+          return;
+      }
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not run /$name (${_describe(e)}).');
+    } catch (_) {
+      if (mounted) _snackBar('Could not run /$name.');
+    }
+  }
+
+  /// The menu's navigation commands (`/new`, `/sessions`, `/open`, and the
+  /// local `/clear`): this view closes and the app's existing "new session"
+  /// flow runs behind it, or a note when the screen has no navigation wired.
+  Future<void> _goNewSession() async {
+    final onNewSession = widget.onNewSession;
+    if (onNewSession == null) {
+      if (!mounted) return;
+      _snackBar('Not available from this screen.');
+      return;
+    }
+    // Close this view first, then run the flow on the tab behind it.
+    Navigator.of(context).pop();
+    await onNewSession();
+  }
+
+  /// `/connect` (issue #46): the service's integrations that carry an OAuth
+  /// method, a pick, then the flow's URL the service hands out.
+  Future<void> _connectFlow() async {
+    final client = widget.client;
+    final payload = await client.integrations();
+    final decoded = jsonDecode(payload);
+    final items = decoded is List<Object?> ? decoded : const <Object?>[];
+    final options = <(String, String, String, String)>[];
+    for (final item in items) {
+      if (item is! Map<String, Object?>) continue;
+      final integrationId = item['id'] is String ? item['id'] as String : '';
+      final integrationName = item['name'] is String
+          ? item['name'] as String
+          : integrationId;
+      final methods = item['methods'];
+      for (final method
+          in methods is List<Object?> ? methods : const <Object?>[]) {
+        if (method is! Map<String, Object?> || method['type'] != 'oauth') {
+          continue;
+        }
+        final methodId = method['id'] is String ? method['id'] as String : '';
+        if (methodId.isEmpty) continue;
+        options.add((
+          integrationId,
+          integrationName,
+          methodId,
+          method['label'] is String
+              ? method['label'] as String
+              : integrationName,
+        ));
+      }
+    }
+    if (options.isEmpty) {
+      if (!mounted) return;
+      _snackBar('No connectable integration.');
+      return;
+    }
+    final picked = await _pick(
+      'Connect an integration',
+      options,
+      (o) => o.$2,
+      (o) => o.$4,
+    );
+    if (picked == null) return;
+    final result = await client.connectIntegration(picked.$1, picked.$3);
+    if (!mounted) return;
+    _dialog('Connect', result);
+  }
+
+  /// The menu's local commands (issue #46): their in-app equivalents; they
+  /// touch no shared-service state.
+  Future<void> _runLocal(String name) async {
+    switch (name) {
+      case 'clear':
+        await _goNewSession();
+        return;
+      case 'timeline':
+        if (!_scroll.hasClients) return;
+        _stick = false;
+        _scroll.position.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+        return;
+      case 'copy':
+        String? text;
+        for (var i = _messages.length - 1; i >= 0; i--) {
+          final message = _messages[i];
+          if (message.role == 'assistant' &&
+              (message.text ?? '').trim().isNotEmpty) {
+            text = message.text;
+            break;
+          }
+        }
+        if (text == null) {
+          if (!mounted) return;
+          _snackBar('No assistant message to copy.');
+          return;
+        }
+        await Clipboard.setData(ClipboardData(text: text));
+        if (!mounted) return;
+        _snackBar('Copied the last assistant message.');
+        return;
+      case 'help':
+        if (!mounted) return;
+        final lines = [
+          for (final command in _commands)
+            '/${command.name}'
+                '${command.aliases.isEmpty ? '' : ' (also ${command.aliases.join(', ')})'}'
+                ' — ${command.subtitle}',
+        ];
+        _dialog('Commands', lines.join('\n'));
+        return;
+      case 'settings':
+        final onOpenSettings = widget.onOpenSettings;
+        if (onOpenSettings == null) {
+          if (!mounted) return;
+          _snackBar('Settings is not available from this screen.');
+          return;
+        }
+        // Close this view, then let the shell land on the Settings tab.
+        Navigator.of(context).pop();
+        await onOpenSettings();
+        return;
+      case 'debug':
+        String service = 'unreachable';
+        try {
+          final payload = await widget.client.status();
+          try {
+            final decoded = jsonDecode(payload);
+            service =
+                decoded is Map<String, Object?> || decoded is List<Object?>
+                ? const JsonEncoder.withIndent('  ').convert(decoded)
+                : payload;
+          } catch (_) {
+            service = payload;
+          }
+        } on SessionsClientError {
+          service = 'unreachable';
+        } catch (_) {
+          service = 'unavailable';
+        }
+        if (!mounted) return;
+        _dialog(
+          'Debug',
+          'App: OpenCode Bridge $kAppVersion\n'
+              'OS: ${Platform.operatingSystem}\n\n'
+              'Service:\n$service',
+        );
+        return;
+      case 'exit':
+        exit(0);
+    }
+  }
+
+  /// A bridge failure in one line, for a snackbar.
+  String _describe(SessionsClientError e) =>
+      e.statusCode == 0 ? 'unreachable' : 'status ${e.statusCode}';
+
+  /// A plain dialog: a title over the (selectable) [text], scrollable.
+  void _dialog(String title, String text, {bool mono = false}) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 420),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: mono
+                  ? const TextStyle(fontFamily: 'monospace', fontSize: 12)
+                  : null,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The menu's "info" commands (export, diff, stats, terminal, worktrees,
+  /// usage, mcps, plugins, status, pair): fetch the service's payload (its
+  /// decoded JSON, as a string) and show it pretty-printed.
+  Future<void> _payloadDialog(
+    String title,
+    Future<String> Function() load,
+  ) async {
+    String payload;
+    try {
+      payload = await load();
+    } on SessionsClientError catch (e) {
+      if (!mounted) return;
+      _snackBar('Could not load (${_describe(e)}).');
+      return;
+    } catch (_) {
+      if (!mounted) return;
+      _snackBar('Could not load.');
+      return;
+    }
+    if (!mounted) return;
+    String text = payload;
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map<String, Object?> || decoded is List<Object?>) {
+        text = const JsonEncoder.withIndent('  ').convert(decoded);
+      }
+    } catch (_) {
+      // A non-JSON payload is shown raw.
+    }
+    _dialog(title, text, mono: true);
+  }
+
+  /// The menu's pickers (models, agents, variants, skills, connect): a
+  /// dialog over a [_PickDialog] listing [items]; resolves the picked item,
+  /// or `null` when the user cancels (or there is nothing to pick).
+  Future<T?> _pick<T extends Object>(
+    String title,
+    List<T> items,
+    String Function(T item) label,
+    String? Function(T item)? hint,
+  ) async {
+    if (!mounted || items.isEmpty) return null;
+    return showDialog<T>(
+      context: context,
+      builder: (dialogContext) =>
+          _PickDialog<T>(title: title, items: items, label: label, hint: hint),
+    );
+  }
+
   void _snackBar(String message) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -900,7 +1471,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(title: Text(_title)),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
@@ -925,72 +1496,226 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                   decode: _decode,
                 ),
                 Expanded(
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        // Lazy, reversed chat list: the newest message is the
-                        // anchor (offset 0, the bottom of the screen), so the
-                        // open lands on the newest for free — no settle, no
-                        // crawl. Only the visible messages build and lay out;
-                        // the earlier ones are pulled in as the user scrolls
-                        // up through the history.
-                        child: ListView.builder(
-                          controller: _scroll,
-                          reverse: true,
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                          itemCount: _messages.isEmpty ? 1 : _messages.length,
-                          itemBuilder: (context, index) {
-                            if (_messages.isEmpty) {
-                              return const _CenteredMessage(
-                                text: 'No messages yet.',
-                              );
-                            }
-                            // The list is reversed (newest at the anchor), so
-                            // map the list index back to the chronological
-                            // history index.
-                            final i = _messages.length - 1 - index;
-                            final message = _messages[i];
-                            if (message.role == 'compaction') {
-                              return _CompactionPane(
-                                message: message,
-                                inFlight: _compacting && i == _compactionIndex,
-                              );
-                            }
-                            final inFlight =
-                                _turnActive &&
-                                message.id != null &&
-                                _liveMessages.containsKey(message.id);
-                            return _MessagePane(
-                              message: message,
-                              inFlight: inFlight,
-                            );
-                          },
-                        ),
-                      ),
-                      // The user scrolled up (or the initial settle hasn't
-                      // reached the end yet): float the jump-to-end button
-                      // over the list, just above the prompt bar.
-                      if (!_atBottom)
-                        Positioned(
-                          right: 12,
-                          bottom: 12,
-                          child: FloatingActionButton.small(
-                            key: const ValueKey('structured-jump-to-end'),
-                            tooltip: 'Go to the end',
-                            onPressed: _jumpToEnd,
-                            child: const Icon(Icons.vertical_align_bottom),
+                  // The chat list and the prompt bar share the height left
+                  // by the banner and the cost bar: with the keyboard up on
+                  // a phone, the open command menu shrinks rather than the
+                  // prompt being pushed off screen. The prompt bar is capped
+                  // at this height so its command menu can flex to fit (a
+                  // non-flex column child otherwise gets unbounded height and
+                  // its inner Flexible would never shrink).
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  // Lazy, reversed chat list: the newest message is the
+                                  // anchor (offset 0, the bottom of the screen), so the
+                                  // open lands on the newest for free — no settle, no
+                                  // crawl. Only the visible messages build and lay out;
+                                  // the earlier ones are pulled in as the user scrolls
+                                  // up through the history.
+                                  child: ListView.builder(
+                                    controller: _scroll,
+                                    reverse: true,
+                                    padding: const EdgeInsets.fromLTRB(
+                                      16,
+                                      8,
+                                      16,
+                                      8,
+                                    ),
+                                    itemCount: _messages.isEmpty
+                                        ? 1
+                                        : _messages.length,
+                                    itemBuilder: (context, index) {
+                                      if (_messages.isEmpty) {
+                                        return const _CenteredMessage(
+                                          text: 'No messages yet.',
+                                        );
+                                      }
+                                      // The list is reversed (newest at the anchor), so
+                                      // map the list index back to the chronological
+                                      // history index.
+                                      final i = _messages.length - 1 - index;
+                                      final message = _messages[i];
+                                      if (message.role == 'compaction') {
+                                        return _CompactionPane(
+                                          message: message,
+                                          inFlight:
+                                              _compacting &&
+                                              i == _compactionIndex,
+                                        );
+                                      }
+                                      final inFlight =
+                                          _turnActive &&
+                                          message.id != null &&
+                                          _liveMessages.containsKey(message.id);
+                                      return _MessagePane(
+                                        message: message,
+                                        inFlight: inFlight,
+                                      );
+                                    },
+                                  ),
+                                ),
+                                // The user scrolled up (or the initial settle hasn't
+                                // reached the end yet): float the jump-to-end button
+                                // over the list, just above the prompt bar.
+                                if (!_atBottom)
+                                  Positioned(
+                                    right: 12,
+                                    bottom: 12,
+                                    child: FloatingActionButton.small(
+                                      key: const ValueKey(
+                                        'structured-jump-to-end',
+                                      ),
+                                      tooltip: 'Go to the end',
+                                      onPressed: _jumpToEnd,
+                                      child: const Icon(
+                                        Icons.vertical_align_bottom,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ),
-                        ),
-                    ],
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxHeight: constraints.maxHeight,
+                            ),
+                            child: _PromptBar(
+                              controller: _prompt,
+                              busy: _promptBusy || _commandBusy,
+                              onSend: _sendPrompt,
+                              commands: _commands,
+                              onCommand: _runCommand,
+                              onMenuOpened: _onMenuOpened,
+                              onToggleMode: _toggleMode,
+                              onCycleVariant: _cycleVariant,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
-                ),
-                _PromptBar(
-                  controller: _prompt,
-                  busy: _promptBusy,
-                  onSend: _sendPrompt,
                 ),
               ],
             ),
+    );
+  }
+}
+
+/// The menu's picker dialog (models, agents, variants, skills, connect): a
+/// title, a search field (keyed `structured-pick-search`) that live-filters
+/// the rows by label and hint, and the filtered rows. A row tap or Enter on
+/// the search field (picking the first filtered row) resolves the item;
+/// closing the dialog resolves `null`.
+class _PickDialog<T extends Object> extends StatefulWidget {
+  const _PickDialog({
+    required this.title,
+    required this.items,
+    required this.label,
+    this.hint,
+  });
+
+  final String title;
+  final List<T> items;
+  final String Function(T item) label;
+
+  /// The row's secondary line (e.g. the model's provider), or `null`.
+  final String? Function(T item)? hint;
+
+  @override
+  State<_PickDialog<T>> createState() => _PickDialogState<T>();
+}
+
+class _PickDialogState<T extends Object> extends State<_PickDialog<T>> {
+  late final TextEditingController _search = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _search.addListener(_searchChanged);
+  }
+
+  @override
+  void dispose() {
+    _search.removeListener(_searchChanged);
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _searchChanged() => setState(() {});
+
+  /// The rows matching the search: the label or the hint contains the query
+  /// (case-insensitive); an empty query matches every row.
+  List<T> get _filtered {
+    final query = _search.text.trim().toLowerCase();
+    if (query.isEmpty) return widget.items;
+    return [
+      for (final item in widget.items)
+        if (widget.label(item).toLowerCase().contains(query) ||
+            (widget.hint?.call(item) ?? '').toLowerCase().contains(query))
+          item,
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _filtered;
+    return AlertDialog(
+      title: Text(widget.title),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 480),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              key: const ValueKey('structured-pick-search'),
+              controller: _search,
+              autofocus: true,
+              decoration: const InputDecoration(hintText: 'Search...'),
+              onSubmitted: (_) {
+                if (filtered.isNotEmpty) {
+                  Navigator.of(context).pop(filtered.first);
+                }
+              },
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (filtered.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text('No match.'),
+                      )
+                    else
+                      for (final item in filtered)
+                        Builder(
+                          builder: (itemContext) {
+                            final sub = widget.hint?.call(item);
+                            return ListTile(
+                              dense: true,
+                              title: Text(widget.label(item)),
+                              subtitle: (sub == null || sub.isEmpty)
+                                  ? null
+                                  : Text(sub),
+                              onTap: () => Navigator.of(itemContext).pop(item),
+                            );
+                          },
+                        ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1056,6 +1781,7 @@ class _CostBar extends StatelessWidget {
                 'Cost \$${detail.cost.toStringAsFixed(4)}',
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
+              ..._identityChips(context, detail),
               if (tokenText != null)
                 Text(
                   tokenText,
@@ -1067,41 +1793,18 @@ class _CostBar extends StatelessWidget {
                   ),
                 ),
               if (used != null)
-                Container(
-                  key: const ValueKey('structured-context'),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainerHighest,
-                  ),
-                  child: Text(
-                    limit == null
-                        ? 'context $used'
-                        : 'context $used / $limit · ${_percent(used, limit)}',
-                    style: const TextStyle(fontSize: 12),
-                  ),
+                _chip(
+                  context,
+                  const ValueKey('structured-context'),
+                  limit == null
+                      ? 'context $used'
+                      : 'context $used / $limit · ${_percent(used, limit)}',
                 ),
               if (detail.outcome != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainerHighest,
-                  ),
-                  child: Text(
-                    detail.outcome!,
-                    style: const TextStyle(fontSize: 12),
-                  ),
+                _chip(
+                  context,
+                  const ValueKey('structured-outcome'),
+                  detail.outcome!,
                 ),
               if (speed != null)
                 Container(
@@ -1136,6 +1839,55 @@ class _CostBar extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+
+  /// The header's identity chips: the session's model
+  /// (`providerID/modelID`), its variant (the reasoning effort) when set,
+  /// and its mode (the agent, e.g. `build` or `plan`) — the session's
+  /// `Session.Info` model/agent, or no chip when the service reports none
+  /// yet.
+  static List<Widget> _identityChips(
+    BuildContext context,
+    SessionDetail detail,
+  ) {
+    final model = detail.model;
+    final chips = <Widget>[];
+    if (model != null) {
+      chips.add(
+        _chip(
+          context,
+          const ValueKey('structured-model'),
+          model.providerId.isEmpty
+              ? model.id
+              : '${model.providerId}/${model.id}',
+        ),
+      );
+      if (model.variant != null) {
+        chips.add(
+          _chip(context, const ValueKey('structured-variant'), model.variant!),
+        );
+      }
+    }
+    if (detail.agent != null) {
+      chips.add(
+        _chip(context, const ValueKey('structured-mode'), detail.agent!),
+      );
+    }
+    return chips;
+  }
+
+  /// One header chip (the rounded, elevated pill the context/outcome/speed
+  /// chips use).
+  static Widget _chip(BuildContext context, Key key, String text) {
+    return Container(
+      key: key,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(4),
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      ),
+      child: Text(text, style: const TextStyle(fontSize: 12)),
     );
   }
 
@@ -1588,50 +2340,393 @@ class _ToolCard extends StatelessWidget {
 /// The prompt input (endpoint 7), enabled at any time: the field is never
 /// disabled and the send button is only busy while a send is in flight.
 /// A mid-turn prompt is queued by the service (`delivery: steer`).
-class _PromptBar extends StatelessWidget {
+///
+/// The `/` command menu (issue #46): typing `/` at the start of the input
+/// opens the command menu above the field, filtered live as the user types
+/// (matching command names and their aliases, exactly like the TUI). Enter
+/// runs the selected row; a command that takes an argument (`takesArg`)
+/// takes the text typed after the name and keeps the menu open until the
+/// argument is typed (the TUI behavior). A prefix that matches no command
+/// stays put on Enter — it is neither run nor sent.
+///
+/// With the menu closed, two keys take on the TUI's mode shortcuts: Tab
+/// toggles the session's mode (`build`/`plan`, the TUI's `agent.cycle`)
+/// and Ctrl+T cycles the current model's variant (the TUI's
+/// `variant.cycle`); both are reported through the screen's handlers.
+class _PromptBar extends StatefulWidget {
   const _PromptBar({
     required this.controller,
     required this.busy,
     required this.onSend,
+    required this.commands,
+    required this.onCommand,
+    required this.onMenuOpened,
+    required this.onToggleMode,
+    required this.onCycleVariant,
   });
 
   final TextEditingController controller;
+
   final bool busy;
+
   final Future<void> Function() onSend;
+
+  /// The full command menu (built-in + the project's custom commands), in
+  /// menu order; the bar filters it by the typed command token.
+  final List<SlashCommand> commands;
+
+  /// Runs [command] with [argument] (the text typed after the command name,
+  /// trimmed). The bar clears the field before calling it.
+  final Future<void> Function(SlashCommand command, String argument) onCommand;
+
+  /// The menu is open; the screen may need to fetch the project's custom
+  /// commands.
+  final VoidCallback onMenuOpened;
+
+  /// Tab (the menu closed): toggles the session's mode, `build` or `plan`.
+  final VoidCallback onToggleMode;
+
+  /// Ctrl+T (the menu closed): cycles the current model's variant (the
+  /// reasoning effort), like the TUI's `variant.cycle`.
+  final VoidCallback onCycleVariant;
+
+  @override
+  State<_PromptBar> createState() => _PromptBarState();
+}
+
+class _PromptBarState extends State<_PromptBar> {
+  /// The menu is open while the input starts with `/` (the TUI trigger).
+  bool get _menuOpen => widget.controller.text.startsWith('/');
+
+  /// The filtered menu rows: the [widget.commands] matching the typed
+  /// command token (name or alias prefix).
+  List<SlashCommand> _matches = const [];
+
+  /// The selected row in [_matches] (`-1` when there is no match).
+  int _selected = -1;
+
+  /// The menu list's scroll position: the keyboard keeps the selected row
+  /// on screen (the TUI does the same).
+  final ScrollController _menuScroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_syncMenu);
+  }
+
+  @override
+  void didUpdateWidget(covariant _PromptBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // The custom commands landed while the menu is open: re-filter (the
+    // synced token is invalidated so the re-filter re-selects the top row,
+    // as a re-typed token would).
+    if (oldWidget.commands != widget.commands && _menuOpen) {
+      _syncedToken = null;
+      _syncMenu();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_syncMenu);
+    _menuScroll.dispose();
+    super.dispose();
+  }
+
+  /// The command token [_syncMenu] last filtered; a selection-only change
+  /// (the cursor moved) re-runs [_syncMenu] without re-selecting the top
+  /// row, so the menu's selection survives cursor moves.
+  String? _syncedToken;
+
+  /// Re-filters the menu from the field's text. The command token is the
+  /// text after the leading slash up to the first space (the TUI's live
+  /// filter); everything after the space is the command's argument. A
+  /// re-typed token re-selects the top row (the TUI does the same); a
+  /// selection-only change (the cursor moved) keeps the current row.
+  void _syncMenu() {
+    final text = widget.controller.text;
+    String? token;
+    var matches = const <SlashCommand>[];
+    if (text.startsWith('/')) {
+      final space = text.indexOf(' ');
+      token = space >= 0 ? text.substring(1, space) : text.substring(1);
+      matches = [
+        for (final c in widget.commands)
+          if (c.matches(token)) c,
+      ];
+    }
+    final tokenChanged = token != _syncedToken;
+    _syncedToken = token;
+    setState(() {
+      _matches = matches;
+      if (tokenChanged) _selected = matches.isEmpty ? -1 : 0;
+    });
+    if (_menuOpen) {
+      // The token changed, so the selection is back on the top row: the
+      // menu scrolls with it.
+      if (tokenChanged && matches.isNotEmpty) _showMenuRow(0);
+      widget.onMenuOpened();
+    }
+  }
+
+  /// Scrolls the menu so the row [index] is visible (the keyboard keeps the
+  /// selection on screen, the TUI does the same). The rows have a uniform
+  /// height, so the row's offset is `index × rowHeight` and the list only
+  /// moves when the row is actually off screen.
+  void _showMenuRow(int index) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_menuScroll.hasClients) return;
+      final position = _menuScroll.position;
+      if (position.maxScrollExtent <= 0) return; // everything fits
+      final content = position.maxScrollExtent + position.viewportDimension;
+      final rowHeight = (content / _matches.length).toDouble();
+      final top = index * rowHeight;
+      final bottom = top + rowHeight;
+      final offset = position.pixels;
+      if (top < offset) {
+        _menuScroll.jumpTo(top);
+      } else if (bottom > offset + position.viewportDimension) {
+        _menuScroll.jumpTo(bottom - position.viewportDimension);
+      }
+    });
+  }
+
+  /// Runs the tapped (or submitted) row: clears the field and hands the
+  /// command plus its typed argument to the screen. A `takesArg` command
+  /// with no argument yet keeps the menu open and waits for the argument.
+  void _activate(SlashCommand command) {
+    final text = widget.controller.text;
+    final space = text.indexOf(' ');
+    final argument = (space >= 0 ? text.substring(space) : '').trim();
+    if (command.takesArg && argument.isEmpty) return;
+    widget.controller.clear();
+    widget.onCommand(command, argument);
+  }
+
+  /// Enter in the field: the menu open runs the selected row (a prefix that
+  /// matches nothing stays put); otherwise it sends the prompt.
+  void _onSubmitted() {
+    if (_menuOpen) {
+      if (_selected >= 0 && _selected < _matches.length) {
+        _activate(_matches[_selected]);
+      }
+      return;
+    }
+    widget.onSend();
+  }
+
+  /// The arrow keys move the menu selection (the TUI parity) and nothing
+  /// else: they are handled here, before the app's text shortcuts can move
+  /// the field's cursor — a cursor move would re-run [_syncMenu] and jump
+  /// the selection back to the top row. Esc closes the menu by clearing the
+  /// field. With the menu closed, Tab toggles the session's mode
+  /// (`build`/`plan`) and Ctrl+T cycles the current model's variant (the
+  /// TUI's `agent.cycle` / `variant.cycle`), without inserting anything in
+  /// the field.
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent) {
+      final key = event.logicalKey;
+      if (key == LogicalKeyboardKey.escape) {
+        widget.controller.clear();
+      }
+      if (_menuOpen) {
+        if (key == LogicalKeyboardKey.arrowDown ||
+            key == LogicalKeyboardKey.arrowUp) {
+          if (_matches.isNotEmpty && _selected >= 0) {
+            if (key == LogicalKeyboardKey.arrowDown) {
+              setState(() {
+                _selected = _selected + 1 < _matches.length
+                    ? _selected + 1
+                    : _selected;
+              });
+            } else {
+              setState(
+                () => _selected = _selected - 1 >= 0 ? _selected - 1 : 0,
+              );
+            }
+            _showMenuRow(_selected);
+          }
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      }
+      if (key == LogicalKeyboardKey.tab) {
+        widget.onToggleMode();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyT &&
+          HardwareKeyboard.instance.isControlPressed) {
+        widget.onCycleVariant();
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      key: const ValueKey('structured-prompt'),
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              key: const ValueKey('structured-prompt-input'),
-              controller: controller,
-              enabled: true,
-              decoration: const InputDecoration(
-                hintText: 'Send a message…',
-                border: OutlineInputBorder(),
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_menuOpen)
+          // The card flexes: on a short screen (the keyboard up) it takes
+          // only the height the prompt bar was given, and the list scrolls
+          // inside it (the rows keep their uniform height, so the keyboard
+          // scroll math still holds).
+          Flexible(
+            child: Container(
+              key: const ValueKey('structured-command-menu-card'),
+              margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerLow,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: scheme.outlineVariant),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color.fromRGBO(0, 0, 0, 0.16),
+                    blurRadius: 12,
+                    offset: Offset(0, 4),
+                  ),
+                ],
               ),
-              onSubmitted: (_) => onSend(),
+              child: ClipRRect(
+                // The rows run edge to edge (the selection highlight is full
+                // width); the clip keeps them inside the card's rounded
+                // corners.
+                borderRadius: BorderRadius.circular(8),
+                child: _matches.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                        child: const Text('No matching command'),
+                      )
+                    : ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 280),
+                        child: ListView.builder(
+                          key: const ValueKey('structured-command-menu'),
+                          controller: _menuScroll,
+                          shrinkWrap: true,
+                          itemCount: _matches.length,
+                          itemBuilder: (context, index) {
+                            final command = _matches[index];
+                            final selected = index == _selected;
+                            return Material(
+                              color: selected
+                                  ? scheme.secondaryContainer
+                                  : Colors.transparent,
+                              child: InkWell(
+                                key: ValueKey(
+                                  'structured-command-row-${command.name}',
+                                ),
+                                onTap: () => _activate(command),
+                                child: Padding(
+                                  // The text keeps its inset now that the row
+                                  // (and its highlight) is full width.
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 16,
+                                    vertical: 8,
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Text(
+                                            '/${command.name}',
+                                            style: TextStyle(
+                                              fontWeight: selected
+                                                  ? FontWeight.bold
+                                                  : FontWeight.w600,
+                                            ),
+                                          ),
+                                          if (command.takesArg &&
+                                              command.argHint != null)
+                                            Text(
+                                              ' ${command.argHint}',
+                                              style: TextStyle(
+                                                color: scheme.outline,
+                                                fontSize: 13,
+                                              ),
+                                            ),
+                                          const Spacer(),
+                                          if (command.family ==
+                                              CommandFamily.custom)
+                                            Text(
+                                              'custom',
+                                              style: const TextStyle(
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      // The subtitle line is always kept so every
+                                      // row has the same height: the keyboard
+                                      // scroll math relies on it.
+                                      Text(
+                                        command.subtitle == command.name
+                                            ? ''
+                                            : command.subtitle,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: scheme.outline,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+              ),
             ),
           ),
-          const SizedBox(width: 8),
-          FilledButton(
-            key: const ValueKey('structured-prompt-send'),
-            onPressed: busy ? null : onSend,
-            child: busy
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('Send'),
+        Padding(
+          key: const ValueKey('structured-prompt'),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Focus(
+            onKeyEvent: _onKeyEvent,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey('structured-prompt-input'),
+                    controller: widget.controller,
+                    enabled: true,
+                    autocorrect: false,
+                    decoration: const InputDecoration(
+                      hintText: 'Send a message… ( / for commands )',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _onSubmitted(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  key: const ValueKey('structured-prompt-send'),
+                  onPressed: widget.busy ? null : widget.onSend,
+                  child: widget.busy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Send'),
+                ),
+              ],
+            ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

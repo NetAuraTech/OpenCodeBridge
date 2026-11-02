@@ -3,6 +3,8 @@
 // is what `GET /api/sessions/{id}` returns (spec section 5, endpoint 5): the
 // session's state plus its costs and token usage.
 
+import 'command.dart';
+
 /// One session's token usage (the service's `TokenUsage.Info`), flattened to
 /// the contract's field names.
 class TokenUsage {
@@ -80,6 +82,8 @@ class SessionDetail {
     required this.tokens,
     this.outcome,
     this.contextLimit,
+    this.model,
+    this.agent,
   });
 
   final String id;
@@ -103,6 +107,15 @@ class SessionDetail {
   /// model. Drives the structured view's context bar.
   final int? contextLimit;
 
+  /// The session's model (the service's `Session.Info` `model`), or `null`
+  /// when the session has none set yet. Drives the cost bar's model chip.
+  final ModelRef? model;
+
+  /// The session's agent id (the service's `agent`, e.g. `build` or `plan`),
+  /// or `null` when the service reports none yet. Drives the cost bar's mode
+  /// chip.
+  final String? agent;
+
   /// This detail with [cost] and [tokens] replaced (the live
   /// `session.usage.updated` refresh keeps the other facts).
   SessionDetail withUsage({required double cost, required TokenUsage tokens}) =>
@@ -114,6 +127,8 @@ class SessionDetail {
         tokens: tokens,
         outcome: outcome,
         contextLimit: contextLimit,
+        model: model,
+        agent: agent,
       );
 
   Map<String, Object?> toJson() => {
@@ -124,10 +139,13 @@ class SessionDetail {
     'tokens': tokens.toJson(),
     'outcome': outcome,
     'contextLimit': contextLimit,
+    'model': model?.toJson(),
+    'agent': agent,
   };
 
   factory SessionDetail.fromJson(Object? json) {
     final map = json is Map<String, Object?> ? json : const {};
+    final model = map['model'];
     return SessionDetail(
       id: map['id'] as String? ?? '',
       title: map['title'] as String? ?? '',
@@ -136,6 +154,8 @@ class SessionDetail {
       tokens: TokenUsage.fromJson(map['tokens']),
       outcome: map['outcome'] is String ? map['outcome'] as String : null,
       contextLimit: (map['contextLimit'] as num?)?.toInt(),
+      model: model is Map<String, Object?> ? ModelRef.fromJson(model) : null,
+      agent: map['agent'] is String ? map['agent'] as String : null,
     );
   }
 
@@ -148,15 +168,26 @@ class SessionDetail {
       other.cost == cost &&
       other.tokens == tokens &&
       other.outcome == outcome &&
-      other.contextLimit == contextLimit;
+      other.contextLimit == contextLimit &&
+      other.model == model &&
+      other.agent == agent;
 
   @override
-  int get hashCode =>
-      Object.hash(id, title, location, cost, tokens, outcome, contextLimit);
+  int get hashCode => Object.hash(
+    id,
+    title,
+    location,
+    cost,
+    tokens,
+    outcome,
+    contextLimit,
+    model,
+    agent,
+  );
 
   @override
   String toString() =>
       'SessionDetail(id: $id, title: $title, location: $location, '
       'cost: $cost, tokens: $tokens, outcome: $outcome, '
-      'contextLimit: $contextLimit)';
+      'contextLimit: $contextLimit, model: $model, agent: $agent)';
 }

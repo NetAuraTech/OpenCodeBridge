@@ -18,6 +18,7 @@ import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/bridge/sessions/session_store.dart';
 import 'package:opencodebridge/bridge/terminal/terminal_window.dart';
 import 'package:opencodebridge/bridge/terminal/window_manager.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session_detail.dart';
@@ -476,6 +477,429 @@ void main() {
         expect(jsonDecode(body), {'error': 'opencode_unreachable'});
       },
     );
+  });
+
+  group('BridgeServer `/` command menu (issue #46)', () {
+    late BridgeServer server;
+    late Uri base;
+    late Directory dir;
+    late _FakeService service;
+    late SessionStore store;
+
+    const detail = SessionDetail(
+      id: 'ses_one',
+      title: 'one',
+      location: '/one',
+      cost: 0,
+      tokens: TokenUsage(
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      ),
+      outcome: null,
+    );
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp(
+        'opencodebridge-srv-commands',
+      );
+      service = _FakeService(detail: detail);
+      store = await SessionStore.load(dir: dir);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service, store: store),
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test(
+      'GET /api/sessions/{id}/commands lists the project commands',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/commands',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), [
+          {'name': 'deploy', 'description': 'ship it'},
+        ]);
+      },
+    );
+
+    test(
+      'POST /api/sessions/{id}/commands/{name} runs the command and is 202',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/commands/deploy',
+          jsonEncode({'text': 'prod'}),
+        );
+        expect(status, 202);
+        expect(body, isEmpty);
+        expect(service.commandsRun, [('ses_one', 'deploy', 'prod')]);
+      },
+    );
+
+    test(
+      'POST .../commands/{name} with a body-less body runs with empty text',
+      () async {
+        final (status, _) = await _postRaw(
+          base,
+          'api/sessions/ses_one/commands/deploy',
+          '',
+        );
+        expect(status, 202);
+        expect(service.commandsRun, [('ses_one', 'deploy', '')]);
+      },
+    );
+
+    test('POST .../commands/{name} is 404 for an unknown session', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_missing/commands/deploy',
+        jsonEncode({'text': 'prod'}),
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      expect(service.commandsRun, isEmpty);
+    });
+
+    test('GET /api/sessions/{id}/models lists the model registry', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_one/models');
+      expect(status, 200);
+      expect(jsonDecode(body), [
+        {
+          'id': 'm1',
+          'providerID': 'prov',
+          'name': 'Model One',
+          'variants': ['high'],
+        },
+      ]);
+    });
+
+    test('GET /api/sessions/{id}/model returns the current model', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_one/model');
+      expect(status, 200);
+      expect(jsonDecode(body), {
+        'model': {'id': 'm1', 'providerID': 'prov'},
+      });
+    });
+
+    test('POST /api/sessions/{id}/models sets the model and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/models',
+        jsonEncode({
+          'model': {'id': 'm2', 'providerID': 'prov2', 'variant': 'high'},
+        }),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.modelsSet, [
+        (
+          'ses_one',
+          const ModelRef(id: 'm2', providerId: 'prov2', variant: 'high'),
+        ),
+      ]);
+    });
+
+    test('POST .../models with no model in the body is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/models',
+        jsonEncode({}),
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(service.modelsSet, isEmpty);
+    });
+
+    test('GET /api/sessions/{id}/agents lists the agent registry', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_one/agents');
+      expect(status, 200);
+      expect(jsonDecode(body), [
+        {'id': 'a1', 'name': 'Agent One', 'description': 'does things'},
+      ]);
+    });
+
+    test('POST /api/sessions/{id}/agents sets the agent and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/agents',
+        jsonEncode({'agent': 'a2'}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.agentsSet, [('ses_one', 'a2')]);
+    });
+
+    test('POST .../agents with no agent in the body is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/agents',
+        jsonEncode({}),
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(service.agentsSet, isEmpty);
+    });
+
+    test('GET /api/sessions/{id}/skills lists the skill registry', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_one/skills');
+      expect(status, 200);
+      expect(jsonDecode(body), [
+        {'id': 'sk1', 'name': 'Skill One', 'description': 'a skill'},
+      ]);
+    });
+
+    test(
+      'POST /api/sessions/{id}/skills/{id} activates the skill and is 204',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/skills/sk2',
+          '',
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+        expect(service.skillsActivated, [('ses_one', 'sk2')]);
+      },
+    );
+
+    test('POST .../compact, /undo, /redo each is 204', () async {
+      for (final sub in const ['compact', 'undo', 'redo']) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/$sub',
+          '',
+        );
+        expect(status, 204, reason: sub);
+        expect(body, isEmpty, reason: sub);
+      }
+      expect(service.compacted, ['ses_one']);
+      expect(service.undos, ['ses_one']);
+      expect(service.redos, ['ses_one']);
+    });
+
+    test('POST .../compact is 502 when the service is down', () async {
+      service.failCompact = true;
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/compact',
+        '',
+      );
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      expect(service.compacted, isEmpty);
+    });
+
+    test('POST .../compact is 404 for an unknown session', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_missing/compact',
+        '',
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test(
+      'POST /api/sessions/{id}/fork returns the forked session id',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/fork',
+          '',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), {'id': 'ses_forked'});
+        expect(service.forks, ['ses_one']);
+      },
+    );
+
+    test('POST .../rename renames the session and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/rename',
+        jsonEncode({'title': 'renamed'}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.renamed, ['renamed']);
+    });
+
+    test('POST .../rename with an empty title is 400', () async {
+      for (final raw in <String>[
+        jsonEncode({}),
+        jsonEncode({'title': ''}),
+        jsonEncode({'title': '   '}),
+      ]) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/rename',
+          raw,
+        );
+        expect(status, 400, reason: raw);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+      }
+      expect(service.renamed, isEmpty);
+    });
+
+    test('POST .../move changes the working directory and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/move',
+        jsonEncode({'directory': '/elsewhere'}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.moved, ['/elsewhere']);
+    });
+
+    test('POST .../move with an empty directory is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/move',
+        jsonEncode({}),
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(service.moved, isEmpty);
+    });
+
+    test('POST .../btw returns the side answer', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/btw',
+        jsonEncode({'prompt': 'why?'}),
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), {'text': 'answer to why?'});
+      expect(service.btws, [('ses_one', 'why?')]);
+    });
+
+    test('POST .../btw with an empty prompt is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/btw',
+        jsonEncode({}),
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(service.btws, isEmpty);
+    });
+
+    test('GET .../export, /diff, /stats return the service payload', () async {
+      for (final (sub, payload) in const [
+        ('export', '{"info":"export"}'),
+        ('diff', '{"diff":true}'),
+        ('stats', '{"stats":true}'),
+      ]) {
+        final (status, body) = await _get(base, 'api/sessions/ses_one/$sub');
+        expect(status, 200, reason: sub);
+        expect(jsonDecode(body), payload, reason: sub);
+      }
+    });
+
+    test('POST .../terminal returns the service payload', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/terminal',
+        '',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), '{"terminal":true}');
+    });
+
+    test('an unknown per-session command subpath is 404', () async {
+      final (status, body) = await _get(base, 'api/sessions/ses_one/nosuch');
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test('the global command payloads are served', () async {
+      for (final (path, payload) in const [
+        ('api/usage', '{"usage":true}'),
+        ('api/mcp', '{"mcps":true}'),
+        ('api/plugins', '{"plugins":true}'),
+        ('api/integrations', '{"integrations":true}'),
+        ('api/status', '{"status":true}'),
+      ]) {
+        final (status, body) = await _get(base, path);
+        expect(status, 200, reason: path);
+        expect(jsonDecode(body), payload, reason: path);
+      }
+    });
+
+    test('GET .../usage is 502 when the service is down', () async {
+      service.failUsage = true;
+      final (status, body) = await _get(base, 'api/usage');
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+    });
+
+    test('POST /api/pair returns the pairing payload', () async {
+      final (status, body) = await _postRaw(base, 'api/pair', '');
+      expect(status, 200);
+      expect(jsonDecode(body), '{"pair":true}');
+    });
+
+    test('POST /api/reload reloads and is 204', () async {
+      final (status, body) = await _postRaw(base, 'api/reload', '');
+      expect(status, 204);
+      expect(body, isEmpty);
+    });
+
+    test(
+      'GET /api/worktrees returns the payload with the session resolved',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/worktrees',
+          query: 'sessionID=ses_one',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), '{"worktrees":true}');
+      },
+    );
+
+    test('GET /api/worktrees without a session id is 400', () async {
+      final (status, body) = await _get(base, 'api/worktrees');
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_request'});
+    });
+
+    test(
+      'POST /api/integrations/{id}/connect starts the flow and is 200',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/integrations/gitlab/connect',
+          jsonEncode({'methodID': 'oauth1'}),
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), '{"connect":true}');
+        expect(service.integrationsConnected, [('gitlab', 'oauth1')]);
+      },
+    );
+
+    test('POST .../connect without a methodID is 400', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/integrations/gitlab/connect',
+        jsonEncode({}),
+      );
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(service.integrationsConnected, isEmpty);
+    });
   });
 
   group('BridgeServer events', () {
@@ -1787,6 +2211,8 @@ class _FakeService implements OpencodeService {
   var failPermissions = false;
   var failPrompt = false;
   var failReply = false;
+  var failCompact = false;
+  var failUsage = false;
 
   /// The session id [createSession] mints, by project id.
   final Map<String, OpencodeSession> created = {
@@ -1906,6 +2332,184 @@ class _FakeService implements OpencodeService {
     }
     replies.add((id, requestID, reply));
   }
+
+  // The structured view's `/` command menu (issue #46): recorded, keyed to
+  // the scripted session like the endpoint 5–9 ops above.
+
+  final List<OpencodeCommand> commands = const [
+    OpencodeCommand(name: 'deploy', description: 'ship it'),
+  ];
+  final List<ModelOption> models = const [
+    ModelOption(
+      id: 'm1',
+      providerId: 'prov',
+      name: 'Model One',
+      variants: ['high'],
+    ),
+  ];
+  final List<AgentOption> agents = const [
+    AgentOption(id: 'a1', name: 'Agent One', description: 'does things'),
+  ];
+  final List<SkillOption> skills = const [
+    SkillOption(id: 'sk1', name: 'Skill One', description: 'a skill'),
+  ];
+  final List<(String, String, String)> commandsRun = [];
+  final List<(String, ModelRef)> modelsSet = [];
+  final List<(String, String)> agentsSet = [];
+  final List<(String, String)> skillsActivated = [];
+  final List<String> compacted = [];
+  final List<String> undos = [];
+  final List<String> redos = [];
+  final List<String> forks = [];
+  final List<String> renamed = [];
+  final List<String> moved = [];
+  final List<(String, String)> btws = [];
+  final List<(String, String)> integrationsConnected = [];
+
+  @override
+  Future<List<OpencodeCommand>> listCommands() async => commands;
+
+  @override
+  Future<void> runCommand(String id, String name, String text) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    commandsRun.add((id, name, text));
+  }
+
+  @override
+  Future<List<ModelOption>> listModels() async => models;
+
+  @override
+  Future<ModelRef?> currentModel(String id) async =>
+      const ModelRef(id: 'm1', providerId: 'prov');
+
+  @override
+  Future<void> setModel(String id, ModelRef model) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    modelsSet.add((id, model));
+  }
+
+  @override
+  Future<List<AgentOption>> listAgents() async => agents;
+
+  @override
+  Future<void> setAgent(String id, String agentId) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    agentsSet.add((id, agentId));
+  }
+
+  @override
+  Future<List<SkillOption>> listSkills() async => skills;
+
+  @override
+  Future<void> activateSkill(String id, String skillId) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    skillsActivated.add((id, skillId));
+  }
+
+  @override
+  Future<void> compact(String id) async {
+    if (failCompact) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    compacted.add(id);
+  }
+
+  @override
+  Future<void> undo(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    undos.add(id);
+  }
+
+  @override
+  Future<void> redo(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    redos.add(id);
+  }
+
+  @override
+  Future<String> fork(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    forks.add(id);
+    return 'ses_forked';
+  }
+
+  @override
+  Future<void> rename(String id, String title) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    renamed.add(title);
+  }
+
+  @override
+  Future<String> exportSession(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return '{"info":"export"}';
+  }
+
+  @override
+  Future<void> move(String id, String directory) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    moved.add(directory);
+  }
+
+  @override
+  Future<String> generate(String id, String prompt) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    btws.add((id, prompt));
+    return 'answer to $prompt';
+  }
+
+  @override
+  Future<String> diff(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return '{"diff":true}';
+  }
+
+  @override
+  Future<String> stats(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return '{"stats":true}';
+  }
+
+  @override
+  Future<String> newTerminal(String id) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return '{"terminal":true}';
+  }
+
+  @override
+  Future<String> worktrees(String projectId) async => '{"worktrees":true}';
+
+  @override
+  Future<String> usage() async {
+    if (failUsage) throw const OpencodeServiceError(0, 'service down');
+    return '{"usage":true}';
+  }
+
+  @override
+  Future<String> mcps() async => '{"mcps":true}';
+
+  @override
+  Future<String> integrations() async => '{"integrations":true}';
+
+  @override
+  Future<String> connectIntegration(
+    String integrationId,
+    String methodId,
+  ) async {
+    integrationsConnected.add((integrationId, methodId));
+    return '{"connect":true}';
+  }
+
+  @override
+  Future<String> status() async => '{"status":true}';
+
+  @override
+  Future<String> pair() async => '{"pair":true}';
+
+  @override
+  Future<void> reload() async {}
+
+  @override
+  Future<String> plugins() async => '{"plugins":true}';
 }
 
 const _one = OpencodeSession(
@@ -1930,10 +2534,10 @@ const _three = OpencodeSession(
   location: '/three',
 );
 
-Future<(int, String)> _get(Uri base, String path) async {
+Future<(int, String)> _get(Uri base, String path, {String? query}) async {
   final client = HttpClient();
   try {
-    final request = await client.getUrl(base.replace(path: path));
+    final request = await client.getUrl(base.replace(path: path, query: query));
     final response = await request.close();
     final body = await response.transform(const Utf8Decoder()).join();
     return (response.statusCode, body);

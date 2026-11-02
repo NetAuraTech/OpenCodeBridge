@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
 void main() {
@@ -68,6 +69,8 @@ void main() {
         ),
         outcome: 'succeeded',
         contextLimit: 200000,
+        model: ModelRef(id: 'flint', providerId: 'opencode', variant: 'high'),
+        agent: 'build',
       );
       expect(detail.toJson(), {
         'id': 'ses_1',
@@ -83,6 +86,8 @@ void main() {
         },
         'outcome': 'succeeded',
         'contextLimit': 200000,
+        'model': {'id': 'flint', 'providerID': 'opencode', 'variant': 'high'},
+        'agent': 'build',
       });
     });
 
@@ -99,8 +104,23 @@ void main() {
           cacheRead: 4,
           cacheWrite: 5,
         ),
+        model: ModelRef(id: 'flint', providerId: 'opencode', variant: 'high'),
+        agent: 'plan',
       );
       expect(SessionDetail.fromJson(detail.toJson()), detail);
+    });
+
+    test('fromJson reads the service model and agent fields', () {
+      final detail = SessionDetail.fromJson({
+        'id': 'ses_1',
+        'model': {'id': 'mod1', 'providerID': 'prov1', 'variant': 'v1'},
+        'agent': 'plan',
+      });
+      expect(
+        detail.model,
+        const ModelRef(id: 'mod1', providerId: 'prov1', variant: 'v1'),
+      );
+      expect(detail.agent, 'plan');
     });
 
     test('fromJson is tolerant of a missing or partial detail', () {
@@ -153,6 +173,8 @@ void main() {
           cacheWrite: 0,
         ),
         outcome: 'succeeded',
+        model: ModelRef(id: 'mod1', providerId: 'prov1'),
+        agent: 'build',
       );
       final refreshed = detail.withUsage(
         cost: 1.5,
@@ -179,6 +201,8 @@ void main() {
             cacheWrite: 6,
           ),
           outcome: 'succeeded',
+          model: ModelRef(id: 'mod1', providerId: 'prov1'),
+          agent: 'build',
         ),
       );
     });

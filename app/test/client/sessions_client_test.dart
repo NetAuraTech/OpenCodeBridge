@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
+import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
@@ -17,6 +18,15 @@ void main() {
   late List<String> windowPaths;
   late List<String> promptBodies;
   late List<String> replyBodies;
+  // The `/` command menu (issue #46) recordings.
+  late List<String> commandBodies;
+  late List<String> setModelBodies;
+  late List<String> setAgentBodies;
+  late List<String> renameBodies;
+  late List<String> moveBodies;
+  late List<String> btwBodies;
+  late List<String> connectBodies;
+  late List<String> worktreesQueries;
   late SessionsClient client;
 
   var failList = false;
@@ -30,6 +40,14 @@ void main() {
     windowPaths = [];
     promptBodies = [];
     replyBodies = [];
+    commandBodies = [];
+    setModelBodies = [];
+    setAgentBodies = [];
+    renameBodies = [];
+    moveBodies = [];
+    btwBodies = [];
+    connectBodies = [];
+    worktreesQueries = [];
     failList = false;
     failDelete = false;
     failProjects = false;
@@ -285,6 +303,275 @@ void main() {
           replyBodies.add(raw);
           response.statusCode = HttpStatus.noContent;
         }
+        // The `/` command menu (issue #46) routes, checked before the 404.
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/commands')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/commands'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.ok;
+          response.write(
+            jsonEncode([
+              {'name': 'deploy', 'description': 'ship it'},
+            ]),
+          );
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.contains('/commands/')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.indexOf('/commands/'),
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          commandBodies.add(raw);
+          response.statusCode = HttpStatus.accepted;
+        }
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/models')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/models'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.ok;
+          response.write(
+            jsonEncode([
+              {
+                'id': 'm1',
+                'providerID': 'prov',
+                'name': 'Model One',
+                'variants': ['high'],
+              },
+            ]),
+          );
+        }
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/model')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/model'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.ok;
+          response.write(
+            jsonEncode({
+              'model': {'id': 'm1', 'providerID': 'prov'},
+            }),
+          );
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/models')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/models'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          setModelBodies.add(raw);
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/agents')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/agents'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.ok;
+          response.write(
+            jsonEncode([
+              {'id': 'a1', 'name': 'Agent One', 'description': 'does things'},
+            ]),
+          );
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/agents')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/agents'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          setAgentBodies.add(raw);
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/skills')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/skills'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.ok;
+          response.write(
+            jsonEncode([
+              {'id': 'sk1', 'name': 'Skill One', 'description': 'a skill'},
+            ]),
+          );
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.contains('/skills/')) {
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.indexOf('/skills/'),
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'POST' &&
+          (request.uri.path.endsWith('/compact') ||
+              request.uri.path.endsWith('/undo') ||
+              request.uri.path.endsWith('/redo'))) {
+        final id = request.uri.path
+            .substring('/api/sessions/'.length)
+            .split('/')
+            .first;
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/fork')) {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode({'id': 'ses_forked'}));
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/rename')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/rename'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          renameBodies.add(raw);
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/move')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/move'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          moveBodies.add(raw);
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/btw')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/btw'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else {
+          btwBodies.add(raw);
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode({'text': 'the side answer'}));
+        }
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/export')) {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"info":"export"}'));
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/diff')) {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"diff":true}'));
+      } else if (request.method == 'GET' &&
+          request.uri.path.endsWith('/stats')) {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"stats":true}'));
+      } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/terminal')) {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"terminal":true}'));
+      } else if (request.method == 'GET' && request.uri.path == '/api/usage') {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"usage":true}'));
+      } else if (request.method == 'GET' && request.uri.path == '/api/mcp') {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"mcps":true}'));
+      } else if (request.method == 'GET' &&
+          request.uri.path == '/api/plugins') {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"plugins":true}'));
+      } else if (request.method == 'GET' &&
+          request.uri.path == '/api/integrations') {
+        response.statusCode = HttpStatus.ok;
+        response.write(
+          jsonEncode(
+            jsonEncode([
+              {
+                'id': 'gitlab',
+                'name': 'GitLab',
+                'methods': [
+                  {'type': 'oauth', 'id': 'oauth1', 'label': 'OAuth'},
+                ],
+              },
+            ]),
+          ),
+        );
+      } else if (request.method == 'POST' &&
+          request.uri.path.contains('/integrations/') &&
+          request.uri.path.endsWith('/connect')) {
+        final raw = await utf8.decodeStream(request);
+        connectBodies.add(raw);
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"url":"https://auth/callback"}'));
+      } else if (request.method == 'GET' && request.uri.path == '/api/status') {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"status":true}'));
+      } else if (request.method == 'POST' && request.uri.path == '/api/pair') {
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"pair":true}'));
+      } else if (request.method == 'POST' &&
+          request.uri.path == '/api/reload') {
+        response.statusCode = HttpStatus.noContent;
+      } else if (request.method == 'GET' &&
+          request.uri.path == '/api/worktrees') {
+        worktreesQueries.add(request.uri.queryParameters['sessionID'] ?? '');
+        response.statusCode = HttpStatus.ok;
+        response.write(jsonEncode('{"worktrees":true}'));
       } else {
         response.statusCode = HttpStatus.notFound;
         response.write(jsonEncode({'error': 'not_found'}));
@@ -563,4 +850,199 @@ void main() {
       }
     },
   );
+
+  group('`/` command menu (issue #46)', () {
+    test('listCommands parses the project commands', () async {
+      expect(await client.listCommands('ses_1'), const [
+        OpencodeCommand(name: 'deploy', description: 'ship it'),
+      ]);
+    });
+
+    test('runCommand posts only the text and accepts 202', () async {
+      await client.runCommand('ses_1', 'deploy', 'prod');
+      expect(commandBodies, [
+        jsonEncode({'text': 'prod'}),
+      ]);
+    });
+
+    test(
+      'runCommand maps the bridge 404 to SessionsClientError(404)',
+      () async {
+        try {
+          await client.runCommand('ses_missing', 'deploy', 'prod');
+          fail('expected SessionsClientError');
+        } on SessionsClientError catch (e) {
+          expect(e.statusCode, HttpStatus.notFound);
+        }
+      },
+    );
+
+    test('listModels parses the model registry', () async {
+      expect(await client.listModels('ses_1'), const [
+        ModelOption(
+          id: 'm1',
+          providerId: 'prov',
+          name: 'Model One',
+          variants: ['high'],
+        ),
+      ]);
+    });
+
+    test('currentModel parses the session model ref', () async {
+      expect(
+        await client.currentModel('ses_1'),
+        const ModelRef(id: 'm1', providerId: 'prov'),
+      );
+    });
+
+    test(
+      'setModel posts the model ref (providerID, variant) and accepts 204',
+      () async {
+        await client.setModel(
+          'ses_1',
+          const ModelRef(id: 'm2', providerId: 'prov2', variant: 'high'),
+        );
+        expect(setModelBodies, [
+          jsonEncode({
+            'model': {'id': 'm2', 'providerID': 'prov2', 'variant': 'high'},
+          }),
+        ]);
+      },
+    );
+
+    test('setModel maps the bridge 404 to SessionsClientError(404)', () async {
+      try {
+        await client.setModel(
+          'ses_missing',
+          const ModelRef(id: 'm1', providerId: 'prov'),
+        );
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    });
+
+    test('listAgents parses the agent registry', () async {
+      expect(await client.listAgents('ses_1'), const [
+        AgentOption(id: 'a1', name: 'Agent One', description: 'does things'),
+      ]);
+    });
+
+    test('setAgent posts the agent id and accepts 204', () async {
+      await client.setAgent('ses_1', 'a2');
+      expect(setAgentBodies, [
+        jsonEncode({'agent': 'a2'}),
+      ]);
+    });
+
+    test('listSkills parses the skill registry', () async {
+      expect(await client.listSkills('ses_1'), const [
+        SkillOption(id: 'sk1', name: 'Skill One', description: 'a skill'),
+      ]);
+    });
+
+    test('activateSkill accepts 204', () async {
+      await client.activateSkill('ses_1', 'sk2');
+    });
+
+    test('compact/undo/redo accept 204', () async {
+      await client.compact('ses_1');
+      await client.undo('ses_1');
+      await client.redo('ses_1');
+    });
+
+    test('compact maps the bridge 404 to SessionsClientError(404)', () async {
+      try {
+        await client.compact('ses_missing');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    });
+
+    test('fork returns the forked session id', () async {
+      expect(await client.fork('ses_1'), 'ses_forked');
+    });
+
+    test('rename posts only the title and accepts 204', () async {
+      await client.rename('ses_1', 'renamed');
+      expect(renameBodies, [
+        jsonEncode({'title': 'renamed'}),
+      ]);
+    });
+
+    test('rename maps the bridge 404 to SessionsClientError(404)', () async {
+      try {
+        await client.rename('ses_missing', 'renamed');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    });
+
+    test('move posts only the directory and accepts 204', () async {
+      await client.move('ses_1', '/elsewhere');
+      expect(moveBodies, [
+        jsonEncode({'directory': '/elsewhere'}),
+      ]);
+    });
+
+    test('the info payloads are returned as their JSON strings', () async {
+      expect(await client.exportSession('ses_1'), '{"info":"export"}');
+      expect(await client.diff('ses_1'), '{"diff":true}');
+      expect(await client.stats('ses_1'), '{"stats":true}');
+      expect(await client.newTerminal('ses_1'), '{"terminal":true}');
+    });
+
+    test('btw posts the prompt and returns the side answer', () async {
+      expect(await client.btw('ses_1', 'why?'), 'the side answer');
+      expect(btwBodies, [
+        jsonEncode({'prompt': 'why?'}),
+      ]);
+    });
+
+    test('the global payloads are returned as their JSON strings', () async {
+      expect(await client.usage(), '{"usage":true}');
+      expect(await client.mcps(), '{"mcps":true}');
+      expect(await client.plugins(), '{"plugins":true}');
+      expect(await client.status(), '{"status":true}');
+      expect(await client.pair(), '{"pair":true}');
+    });
+
+    test('integrations returns the payload string', () async {
+      final payload = await client.integrations();
+      expect(jsonDecode(payload), [
+        {
+          'id': 'gitlab',
+          'name': 'GitLab',
+          'methods': [
+            {'type': 'oauth', 'id': 'oauth1', 'label': 'OAuth'},
+          ],
+        },
+      ]);
+    });
+
+    test(
+      'connectIntegration posts the methodID and returns the flow payload',
+      () async {
+        final payload = await client.connectIntegration('gitlab', 'oauth1');
+        expect(payload, '{"url":"https://auth/callback"}');
+        expect(connectBodies, [
+          jsonEncode({'methodID': 'oauth1'}),
+        ]);
+      },
+    );
+
+    test('reload accepts 204', () async {
+      await client.reload();
+    });
+
+    test(
+      'worktrees sends the session id query and returns the payload',
+      () async {
+        expect(await client.worktrees('ses_1'), '{"worktrees":true}');
+        expect(worktreesQueries, ['ses_1']);
+      },
+    );
+  });
 }

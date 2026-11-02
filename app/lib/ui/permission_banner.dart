@@ -115,13 +115,14 @@ class _PermissionRow extends StatelessWidget {
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : Row(
+                : Wrap(
+                    spacing: 8,
                     children: [
                       for (final (reply, label) in const [
                         (PermissionReply.once, 'Once'),
                         (PermissionReply.always, 'Always'),
                         (PermissionReply.reject, 'Reject'),
-                      ]) ...[
+                      ])
                         TextButton(
                           key: ValueKey(
                             'permission-${reply.wire}-${request.id}',
@@ -129,9 +130,6 @@ class _PermissionRow extends StatelessWidget {
                           onPressed: () => onReply(reply),
                           child: Text(label),
                         ),
-                        if (reply != PermissionReply.reject)
-                          const SizedBox(width: 4),
-                      ],
                     ],
                   ),
           ),

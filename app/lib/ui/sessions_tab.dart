@@ -34,6 +34,7 @@ class SessionsTab extends StatefulWidget {
     this.access,
     this.deepLinkSession,
     this.onDeepLinkSessionConsumed,
+    this.onOpenSettings,
   });
 
   /// The tunnel's Access login (issue #23, client mode); `null` in server
@@ -72,6 +73,11 @@ class SessionsTab extends StatefulWidget {
   /// target, so a later identical link is a new event).
   final String? deepLinkSession;
   final VoidCallback? onDeepLinkSessionConsumed;
+
+  /// Opens the app's Settings tab (the structured view's `/settings`
+  /// command, issue #46); the shell provides it. `null` leaves `/settings`
+  /// a note that it is unavailable.
+  final FutureOr<void> Function()? onOpenSettings;
 
   @override
   State<SessionsTab> createState() => SessionsTabState();
@@ -361,6 +367,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           client: client,
           events: _events?.events,
           gaps: _events?.gaps,
+          onNewSession: _newSession,
+          onOpenSettings: widget.onOpenSettings,
         ),
       ),
     );
