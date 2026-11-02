@@ -777,6 +777,32 @@ class OpencodeHttpService implements OpencodeService {
     );
   }
 
+  /// The files the session's working directory offers for the `@` mention
+  /// menu (issue #58): the service's `GET /api/fs/find` over the session's
+  /// working directory, re-queried per typed token (server-side fuzzy rank,
+  /// the TUI behavior). The working directory is resolved from the session
+  /// on the service, so the app never has to know it.
+  @override
+  Future<List<String>> findFiles(String id, String query) async {
+    final session = await _sessionData(id);
+    final directory = _nestedString(session, 'location', 'directory');
+    final params = <String, String>{'query': query, 'type': 'file'};
+    if (directory.isNotEmpty) {
+      // The `location` query param is a deepObject; its `directory` field is
+      // the bracketed key the service decodes to the deepObject form.
+      params['location[directory]'] = directory;
+    }
+    final body = await _get(
+      _base.replace(path: '/api/fs/find', queryParameters: params),
+    );
+    final list = _dataList(jsonDecode(body));
+    return [
+      for (final item in list)
+        if (item is Map<String, Object?> && item['path'] is String)
+          item['path'] as String,
+    ];
+  }
+
   /// The account's usage limits (the service's
   /// `GET /api/experimental/usage/limits`), as decoded JSON.
   @override

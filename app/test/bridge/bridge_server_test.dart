@@ -945,6 +945,33 @@ void main() {
       },
     );
 
+    test(
+      'GET /api/sessions/{id}/files lists the session files per token',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/files',
+          query: 'query=main',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), ['src/main.dart', 'pubspec.yaml']);
+        expect(service.filesSearched, [('ses_one', 'main')]);
+      },
+    );
+
+    test(
+      'GET /api/sessions/{id}/files is 404 for an unknown session',
+      () async {
+        final (status, _) = await _get(
+          base,
+          'api/sessions/ses_missing/files',
+          query: 'query=main',
+        );
+        expect(status, 404);
+        expect(service.filesSearched, isEmpty);
+      },
+    );
+
     test('POST .../compact, /undo, /redo each is 204', () async {
       for (final sub in const ['compact', 'undo', 'redo']) {
         final (status, body) = await _postRaw(
@@ -2794,6 +2821,19 @@ class _FakeService implements OpencodeService {
 
   @override
   Future<String> worktrees(String projectId) async => '{"worktrees":true}';
+
+  final List<String> filesFound = const [
+    'src/main.dart',
+    'pubspec.yaml',
+  ];
+  final List<(String, String)> filesSearched = [];
+
+  @override
+  Future<List<String>> findFiles(String id, String query) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    filesSearched.add((id, query));
+    return filesFound;
+  }
 
   @override
   Future<String> usage() async {

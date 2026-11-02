@@ -324,6 +324,9 @@ void main() {
   final deletedPaths = <String>[];
   final statsQueries = <String?>[];
   final worktreeQueries = <String?>[];
+  // The `@` menu's file search (issue #58): the recorded `/api/fs/find`
+  // query params, in request order.
+  final fsFindQueries = <Map<String, String>>[];
 
   late HttpServer server;
   late Uri base;
@@ -538,6 +541,19 @@ void main() {
         resp.write(
           jsonEncode({
             'data': {'worktrees': true},
+          }),
+        );
+      } else if (path == '/api/fs/find' && req.method == 'GET') {
+        // The `@` menu's file search (issue #58): the deepObject `location`
+        // param arrives as the bracketed key the client percent-encodes.
+        fsFindQueries.add(Map<String, String>.of(req.uri.queryParameters));
+        resp.write(
+          jsonEncode({
+            'location': {'directory': '/one'},
+            'data': [
+              {'path': 'src/main.dart', 'type': 'file'},
+              {'path': 'pubspec.yaml', 'type': 'file'},
+            ],
           }),
         );
       } else if (path == '/api/experimental/usage/limits') {
@@ -1297,6 +1313,40 @@ void main() {
       // without hitting the worktree endpoint.
       expect(await service.worktrees('ses_3'), '[]');
       expect(worktreeQueries, ['p1']);
+    });
+
+    test(
+      'findFiles resolves the session working dir and lists files',
+      () async {
+        final paths = await service.findFiles('ses_1', 'main');
+        expect(paths, ['src/main.dart', 'pubspec.yaml']);
+        // The service resolves the working directory from the session, so the
+        // request carries it as the deepObject `location[directory]` param
+        // and restricts the search to files.
+        expect(
+          fsFindQueries,
+          [
+            {
+              'query': 'main',
+              'type': 'file',
+              'location[directory]': '/one',
+            },
+          ],
+        );
+      },
+    );
+
+    test('findFiles of an unknown session is a 404', () async {
+      await expectLater(
+        service.findFiles('ses_missing', 'main'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
     });
 
     test('usage returns the unwrapped limits payload', () async {

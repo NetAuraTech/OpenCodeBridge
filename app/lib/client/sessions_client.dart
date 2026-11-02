@@ -650,6 +650,38 @@ class SessionsClient {
     }
   }
 
+  /// The session's files for the `@` mention menu's file rows (issue #58):
+  /// the service's `GET /api/fs/find` through the bridge, re-queried per
+  /// typed token (the TUI re-queries on every keystroke). Returns the
+  /// matched file paths relative to the session's working directory.
+  Future<List<String>> findFiles(String id, String query) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'GET',
+        _base.replace(
+          path: 'api/sessions/${Uri.encodeComponent(id)}/files',
+          queryParameters: {'query': query},
+        ),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) {
+        throw SessionsClientError(response.statusCode, body);
+      }
+      final decoded = jsonDecode(body);
+      final list = decoded is List ? decoded : const <Object?>[];
+      return [for (final item in list) if (item is String) item];
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Activate a skill in the session (the `/` menu's `/skills` pick): the
   /// service's `POST /api/experimental/session/{id}/skill`.
   Future<void> activateSkill(String id, String skillId) async {

@@ -270,6 +270,18 @@ class FakeOpencodeService implements OpencodeService {
     return '{"worktrees":true}';
   }
 
+  final List<(String, String)> filesSearched = [];
+  final List<String> filesFound = const [
+    'src/main.dart',
+    'pubspec.yaml',
+  ];
+
+  @override
+  Future<List<String>> findFiles(String id, String query) async {
+    filesSearched.add((id, query));
+    return filesFound;
+  }
+
   @override
   Future<String> usage() async => '{"usage":true}';
 
@@ -616,6 +628,12 @@ void main() {
       );
       expect(await backend.listAgents(), service.agents);
       expect(await backend.listSkills(), service.skills);
+    });
+
+    test('findFiles passes the session and token through to the service',
+        () async {
+      expect(await backend.findFiles('ses_1', 'main'), service.filesFound);
+      expect(service.filesSearched, const [('ses_1', 'main')]);
     });
 
     test(
