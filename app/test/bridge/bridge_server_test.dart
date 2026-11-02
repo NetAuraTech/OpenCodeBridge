@@ -16,8 +16,6 @@ import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/bridge/sessions/session_store.dart';
-import 'package:opencodebridge/bridge/terminal/terminal_window.dart';
-import 'package:opencodebridge/bridge/terminal/window_manager.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
@@ -1045,16 +1043,6 @@ void main() {
       }
     });
 
-    test('POST .../terminal returns the service payload', () async {
-      final (status, body) = await _postRaw(
-        base,
-        'api/sessions/ses_one/terminal',
-        '',
-      );
-      expect(status, 200);
-      expect(jsonDecode(body), '{"terminal":true}');
-    });
-
     test('an unknown per-session command subpath is 404', () async {
       final (status, body) = await _get(base, 'api/sessions/ses_one/nosuch');
       expect(status, 404);
@@ -1315,66 +1303,25 @@ void main() {
     });
   });
 
-  group('BridgeServer windows', () {
+  group('BridgeServer sessions (create & projects)', () {
     late BridgeServer server;
     late Uri base;
     late Directory dir;
-    late File app;
-    late File emulator;
     late _FakeService service;
     late SessionStore store;
     late SessionsBackend backend;
-    late TerminalWindowManager windows;
     late EventHub hub;
-    late List<String> windowEvents;
-    var launches = 0;
 
     setUp(() async {
-      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-windows');
-      launches = 0;
-      // A "binary" (the attach client) that runs long until killed.
-      app = File('${dir.path}/fake-app');
-      app.writeAsStringSync('#!/bin/sh\nsleep 300\n');
-      _chmod(app.path, '755');
-      // An emulator that runs the attach client (its argv after `--`) as a
-      // child and waits for it, like gnome-terminal --wait.
-      emulator = File('${dir.path}/gnome-terminal');
-      emulator.writeAsStringSync(
-        '#!/bin/sh\n'
-        'echo "\$@" > ${dir.path}/args.txt\n'
-        'while [ \$# -gt 0 ]; do\n'
-        '  if [ "\$1" = "--" ]; then shift; break; fi\n'
-        '  shift\n'
-        'done\n'
-        '"\$@" &\n'
-        'echo \$! > ${dir.path}/pid.txt\n'
-        'wait\n',
-      );
-      _chmod(emulator.path, '755');
+      dir = await Directory.systemTemp.createTemp('opencodebridge-srv-sessions');
       service = _FakeService();
       store = await SessionStore.load(dir: dir);
       backend = SessionsBackend(service: service, store: store);
-      windowEvents = <String>[];
       hub = EventHub(service: _FakeEventUpstream());
-      windows = TerminalWindowManager(
-        liveSessionIds: backend.liveSessionIds,
-        spawner: TerminalWindowSpawner(
-          emulators: (String name) =>
-              name == 'gnome-terminal' ? emulator.path : null,
-          launch: (List<String> argv) {
-            launches++;
-            return Process.start(argv.first, argv.sublist(1));
-          },
-        ),
-        terminalBinary: app.path,
-        windowToken: () => 'tok_1',
-        onEvent: windowEvents.add,
-      );
       server = await BridgeServer.start(
         port: 0,
         sessions: backend,
         events: hub,
-        windows: windows,
       );
       base = server.baseUri;
     });
@@ -1430,8 +1377,6 @@ void main() {
         'active': false,
         'classification': 'app-launched-closed',
       });
-      // The create opens no terminal window.
-      expect(launches, 0);
       expect(backend.liveSessionIds, isEmpty);
       // The persistence "add id" write happened at launch.
       expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
@@ -1443,7 +1388,6 @@ void main() {
         expect(status, 400, reason: raw);
         expect(jsonDecode(body), {'error': 'invalid_body'});
       }
-      expect(launches, 0);
       expect(store.ids(), isEmpty);
     });
 
@@ -1455,7 +1399,6 @@ void main() {
       );
       expect(status, 404);
       expect(jsonDecode(body), {'error': 'not_found'});
-      expect(launches, 0);
       expect(store.ids(), isEmpty);
     });
 
@@ -1468,121 +1411,7 @@ void main() {
       );
       expect(status, 502);
       expect(jsonDecode(body), {'error': 'opencode_unreachable'});
-      expect(launches, 0);
       expect(store.ids(), isEmpty);
-    });
-
-    test('POST /api/sessions succeeds when no terminal window can be '
-        'spawned', () async {
-      final spawnless = TerminalWindowManager(
-        liveSessionIds: backend.liveSessionIds,
-        spawner: TerminalWindowSpawner(emulators: (String name) => null),
-        terminalBinary: app.path,
-        windowToken: () => 'tok_1',
-      );
-      final other = await BridgeServer.start(
-        port: 0,
-        sessions: backend,
-        windows: spawnless,
-      );
-      try {
-        final (status, body) = await _postRaw(
-          other.baseUri,
-          'api/sessions',
-          jsonEncode({'project': 'p1'}),
-        );
-        expect(status, 201);
-        expect(
-          (jsonDecode(body) as Map<String, Object?>)['classification'],
-          'app-launched-closed',
-        );
-      } finally {
-        await other.stop();
-      }
-      expect(launches, 0);
-      expect(backend.liveSessionIds, isEmpty);
-      expect((await SessionStore.load(dir: dir)).has('ses_created'), isTrue);
-    });
-
-    test(
-      'POST /api/sessions/{id}/window is gone (404) and opens nothing',
-      () async {
-        store.add('ses_two');
-        await store.save();
-
-        for (final id in ['ses_one', 'ses_two']) {
-          final (status, body) = await _postRaw(
-            base,
-            'api/sessions/$id/window',
-            '',
-          );
-          expect(status, 404, reason: id);
-          expect(jsonDecode(body), {'error': 'not_found'});
-        }
-        expect(launches, 0);
-        expect(backend.liveSessionIds, isEmpty);
-      },
-    );
-
-    test('a window the user closes unflips live, emits terminal.closed, and '
-        'writes no persistence', () async {
-      // A window that closes on its own (the user closed it).
-      emulator.writeAsStringSync('#!/bin/sh\nexit 0\n');
-      store.add('ses_one');
-      await store.save();
-
-      await windows.openFor('ses_one');
-      await _until(
-        () =>
-            windowEvents.isNotEmpty &&
-            !backend.liveSessionIds.contains('ses_one'),
-      );
-
-      expect(windowEvents, hasLength(1));
-      final frame = jsonDecode(windowEvents.single) as Map<String, Object?>;
-      expect(frame['type'], 'terminal.closed');
-      expect(frame['data'], {'sessionID': 'ses_one'});
-      // Window close is an in-memory transition only: the record stays.
-      expect((await SessionStore.load(dir: dir)).has('ses_one'), isTrue);
-    });
-
-    test('DELETE on an app-launched session deletes, emits session.closed, '
-        'and leaves its window open', () async {
-      store.add('ses_one');
-      await store.save();
-      await windows.openFor('ses_one');
-      await _waitForFile('${dir.path}/pid.txt');
-      final pid = int.parse(
-        File('${dir.path}/pid.txt').readAsStringSync().trim(),
-      );
-      expect(Process.runSync('kill', ['-0', '$pid']).exitCode, 0);
-
-      final tap = await _SseTap.open(base);
-      try {
-        await _until(() => tap.ready);
-        final (status, body) = await _delete(base, 'api/sessions/ses_one');
-        expect(status, 204);
-        expect(body, isEmpty);
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-        expect(
-          Process.runSync('kill', ['-0', '$pid']).exitCode,
-          0,
-          reason: 'the delete must no longer close the session window',
-        );
-        expect(service.deleted, ['ses_one']);
-        expect((await SessionStore.load(dir: dir)).has('ses_one'), isFalse);
-        await _until(
-          () => tap.dataPayloads.any((p) => p.contains('session.closed')),
-          message: 'expected the session.closed frame',
-        );
-        final frame = jsonDecode(
-          tap.dataPayloads.firstWhere((p) => p.contains('session.closed')),
-        ) as Map<String, Object?>;
-        expect(frame['type'], 'session.closed');
-        expect(frame['data'], {'sessionID': 'ses_one'});
-      } finally {
-        await tap.close();
-      }
     });
   });
 
@@ -2680,12 +2509,6 @@ class _FakeService implements OpencodeService {
   }
 
   @override
-  Future<String> newTerminal(String id) async {
-    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
-    return '{"terminal":true}';
-  }
-
-  @override
   Future<String> worktrees(String projectId) async => '{"worktrees":true}';
 
   @override
@@ -2801,14 +2624,6 @@ Future<(int, String)> _postRaw(Uri base, String path, String body) async {
     client.close(force: true);
   }
 }
-
-/// The emulator script writes [path] once the attach client child is up;
-/// the spawn that triggers it resolves before that, so poll for the file.
-Future<void> _waitForFile(String path) async {
-  await _until(() => File(path).existsSync());
-}
-
-void _chmod(String path, String mode) => Process.runSync('chmod', [mode, path]);
 
 /// On a host that publishes a shared opencode service descriptor the bridge
 /// default builds a real sessions backend, so the 503 path is not

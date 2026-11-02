@@ -506,10 +506,6 @@ void main() {
           request.uri.path.endsWith('/stats')) {
         response.statusCode = HttpStatus.ok;
         response.write(jsonEncode('{"stats":true}'));
-      } else if (request.method == 'POST' &&
-          request.uri.path.endsWith('/terminal')) {
-        response.statusCode = HttpStatus.ok;
-        response.write(jsonEncode('{"terminal":true}'));
       } else if (request.method == 'GET' && request.uri.path == '/api/usage') {
         response.statusCode = HttpStatus.ok;
         response.write(jsonEncode('{"usage":true}'));
@@ -959,7 +955,6 @@ void main() {
       expect(await client.exportSession('ses_1'), '{"info":"export"}');
       expect(await client.diff('ses_1'), '{"diff":true}');
       expect(await client.stats('ses_1'), '{"stats":true}');
-      expect(await client.newTerminal('ses_1'), '{"terminal":true}');
     });
 
     test('btw posts the prompt and returns the side answer', () async {

@@ -21,7 +21,7 @@ class Durable {
 /// One event off the bridge's unified `GET /api/events` stream, decoded.
 ///
 /// Both opencode events and bridge-native events ([`session.closed`],
-/// [`terminal.closed`], `docker.*`) arrive on the same stream in the same
+/// `docker.*`) arrive on the same stream in the same
 /// `data: {id, created, type, data[, durable]}` envelope. Bridge-native events
 /// (and opencode's own non-durable ones, e.g. `server.connected`) carry no
 /// [durable], so they never participate in per-session seq gap detection.

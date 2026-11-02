@@ -3,11 +3,11 @@ import 'package:flutter/material.dart';
 import '../model/permission.dart';
 
 /// The approve/deny banner for pending permission requests (spec §6:
-/// "Permissions (both views)"). One row per pending request, each with the
+/// "Permissions"). One row per pending request, each with the
 /// three decisions of `POST /api/sessions/{id}/permissions/{requestID}/reply`
 /// (spec §5, endpoint 9): `once` / `always` / `reject`.
 ///
-/// Rendered by both the structured view and the terminal view; the pending
+/// Rendered by the structured view; the pending
 /// list is the initial state (endpoint 8), kept live by
 /// `permission.asked` / `permission.replied` events (§8).
 class PermissionBanner extends StatelessWidget {

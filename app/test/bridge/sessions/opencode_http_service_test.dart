@@ -321,7 +321,6 @@ void main() {
   final generateBodies = <Map<String, Object?>>[];
   final connectBodies = <Map<String, Object?>>[];
   final renameBodies = <Map<String, Object?>>[];
-  final terminalBodies = <Map<String, Object?>>[];
   final deletedPaths = <String>[];
   final statsQueries = <String?>[];
   final worktreeQueries = <String?>[];
@@ -516,15 +515,6 @@ void main() {
         resp.write(
           jsonEncode({
             'data': {'stats': true},
-          }),
-        );
-      } else if (path == '/api/experimental/session/ses_1/terminal' &&
-          req.method == 'POST') {
-        final body = await utf8.decodeStream(req);
-        terminalBodies.add(jsonDecode(body) as Map<String, Object?>);
-        resp.write(
-          jsonEncode({
-            'data': {'pty': 7},
           }),
         );
       } else if (path == '/api/worktree') {
@@ -1208,19 +1198,6 @@ void main() {
     test('stats sends the sessionID query and returns the payload', () async {
       expect(jsonDecode(await service.stats('ses_1')), {'stats': true});
       expect(statsQueries, ['ses_1']);
-    });
-
-    test('newTerminal posts the persistent-pty create body and returns the payload', () async {
-      expect(jsonDecode(await service.newTerminal('ses_1')), {'pty': 7});
-      expect(terminalBodies, [
-        {
-          'sessionID': 'ses_1',
-          'args': const <Object?>[],
-          'cwd': '/one',
-          'title': 'Terminal',
-          'env': const <String, Object?>{},
-        },
-      ]);
     });
 
     test('worktrees resolves the project from the session', () async {

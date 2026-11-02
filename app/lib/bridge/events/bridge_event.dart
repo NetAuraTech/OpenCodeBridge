@@ -10,10 +10,6 @@ abstract class BridgeEventType {
   /// app drops it from its list.
   static const String sessionClosed = 'session.closed';
 
-  /// A session's attach child exited (its window closed) -> the session is
-  /// Closed. (Wired as the window flow lands.)
-  static const String terminalClosed = 'terminal.closed';
-
   /// A container transitioned to stopped (clean). (Wired as Docker lands.)
   static const String dockerContainerStopped = 'docker.container.stopped';
 

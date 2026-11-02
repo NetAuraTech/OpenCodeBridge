@@ -15,7 +15,7 @@ import 'session_store.dart';
 /// - [list] merges the service session list, the persistence classification,
 ///   and the service's active list, newest first.
 /// - [create] is the new-session flow's service + persistence half (spec §11
-///   write #1); the window half is the [TerminalWindowManager]'s.
+///   write #1).
 /// - [delete] performs the service `DELETE` and, in the same action, removes
 ///   the persistence record.
 /// - [reconcile] is the startup orphan reconciliation.
@@ -29,10 +29,9 @@ class SessionsBackend {
   final OpencodeService service;
   final SessionStore store;
 
-  /// In-process fact (spec §6/§11): the sessions whose attach child is alive
-  /// in this bridge process. "Live is an in-process fact"; the window manager
-  /// flips a session in/out of this set as its terminal window opens/closes,
-  /// after which those sessions classify as [SessionClassification.appLaunchedLive].
+  /// In-process fact (spec §6/§11): the sessions classified live in this
+  /// bridge process. "Live is an in-process fact": a session in this set
+  /// classifies as [SessionClassification.appLaunchedLive].
   final Set<String> liveSessionIds;
 
   /// Startup reconciliation (spec §11 write #3): drops persistence records
@@ -50,9 +49,8 @@ class SessionsBackend {
   /// `POST /api/session` in [projectId]'s project, then the persistence "add
   /// id" write — `store.add` + `store.save`, at launch.
   ///
-  /// The in-process live fact is flipped by the window manager when the
-  /// session's terminal window opens, so the returned row classifies
-  /// [SessionClassification.appLaunchedClosed] until then.
+  /// The in-process live fact is not set here, so the returned row classifies
+  /// [SessionClassification.appLaunchedClosed].
   Future<Session> create(String projectId) async {
     final session = await service.createSession(projectId);
     store.add(session.id);
@@ -66,8 +64,7 @@ class SessionsBackend {
   /// bridge, spec §11).
   bool isAppLaunched(String id) => store.has(id);
 
-  /// Whether the service still has [id] (the reopen guard: a session gone
-  /// from the service has no terminal to open a window on).
+  /// Whether the service still has [id] (the reopen guard).
   Future<bool> exists(String id) async {
     final sessions = await service.listSessions();
     for (final session in sessions) {
@@ -88,9 +85,7 @@ class SessionsBackend {
   }
 
   /// Delete (spec §5 endpoint 4, §11 write #2): the service deletion and the
-  /// persistence-record removal happen in the same action. (Closing the
-  /// window of a live app-launched session first is the bridge server's
-  /// action, over the window manager.)
+  /// persistence-record removal happen in the same action.
   Future<void> delete(String id) async {
     await service.deleteSession(id);
     if (store.remove(id)) {
@@ -177,8 +172,6 @@ class SessionsBackend {
   Future<String> diff(String id) => service.diff(id);
 
   Future<String> stats(String id) => service.stats(id);
-
-  Future<String> newTerminal(String id) => service.newTerminal(id);
 
   Future<String> worktrees(String sessionId) => service.worktrees(sessionId);
 

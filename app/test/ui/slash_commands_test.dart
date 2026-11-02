@@ -21,7 +21,6 @@ void main() {
         'btw',
         'diff',
         'stats',
-        'terminal',
         'worktrees',
         // Service — global scope.
         'sessions',

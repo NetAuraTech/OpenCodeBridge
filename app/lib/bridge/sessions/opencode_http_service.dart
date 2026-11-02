@@ -717,33 +717,6 @@ class OpencodeHttpService implements OpencodeService {
     );
   }
 
-  /// Open a terminal for the session (the service's
-  /// `POST /api/experimental/session/{id}/terminal`), as decoded JSON. The
-  /// body is the TUI's persistent-pty create (`args`, `cwd` the session's
-  /// working directory, `title`, `env`).
-  @override
-  Future<String> newTerminal(String id) async {
-    final session = await _sessionData(id);
-    final location = session['location'];
-    final cwd =
-        location is Map<String, Object?> && location['directory'] is String
-        ? location['directory'] as String
-        : '';
-    final body = await _post(
-      _base.replace(
-        path: '/api/experimental/session/${Uri.encodeComponent(id)}/terminal',
-      ),
-      jsonEncode({
-        'sessionID': id,
-        'args': const <Object?>[],
-        'cwd': cwd,
-        'title': 'Terminal',
-        'env': const <String, Object?>{},
-      }),
-    );
-    return _unwrapData(body);
-  }
-
   /// The session's data from the service (`GET /api/session/{id}`), the
   /// `{location, data}` envelope unwrapped; `null` fields stay absent.
   Future<Map<String, Object?>> _sessionData(String id) async {
