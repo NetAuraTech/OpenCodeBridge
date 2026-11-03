@@ -1840,11 +1840,6 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                PermissionBanner(
-                  pending: _pending,
-                  onReply: _reply,
-                  replyBusyId: _replyBusyId,
-                ),
                 _CostBar(
                   detail: _detail,
                   contextUsed: _contextUsed,
@@ -1853,7 +1848,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                 ),
                 Expanded(
                   // The chat list and the prompt bar share the height left
-                  // by the banner and the cost bar: with the keyboard up on
+                  // by the cost bar: with the keyboard up on
                   // a phone, the open command menu shrinks rather than the
                   // prompt being pushed off screen. The prompt bar is capped
                   // at this height so its command menu can flex to fit (a
@@ -1949,6 +1944,24 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                                       onSubmit: _submitAnswers,
                                       onDismiss: _dismissQuestion,
                                       busyId: _answerBusyId,
+                                    ),
+                                  ),
+                                ),
+                                // The pending permission requests (issue #62)
+                                // float over the list, just above the prompt
+                                // bar — like the TUI prompts above the input,
+                                // so the header and the cost bar never shift.
+                                // The banner scrolls when a pending request is
+                                // taller than the room.
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  bottom: 0,
+                                  child: SingleChildScrollView(
+                                    child: PermissionBanner(
+                                      pending: _pending,
+                                      onReply: _reply,
+                                      replyBusyId: _replyBusyId,
                                     ),
                                   ),
                                 ),
