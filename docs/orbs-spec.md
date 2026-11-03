@@ -287,7 +287,7 @@ There is **no descriptor file to read**: a directly-invoked `opencode serve` wri
 
 - Per-session routing via an in-memory `sessionID → service` table (host shared service + each running orb) ([#83](https://github.com/NetAuraTech/OpenCodeBridge/issues/83)).
 - The shared `Session` contract gains an **optional `orb` field** (present on live orb sessions, absent on host sessions — including moved ones).
-- **Home list**: one group per orb, labeled orb + branch; the orb label navigates to the orb.
+- **Main list**: orb sessions are **flat rows in the existing project groups**, wearing a tappable orb chip that navigates to the orb's card (UI, §9.2 — [#85](https://github.com/NetAuraTech/OpenCodeBridge/issues/85) supersedes the earlier "one group per orb" wording).
 - `active` = merged across live services (`activeSessionIds()` union).
 - **No special permission handling**: in-orb permission requests get the same approve/deny banner as host ones.
 - The **spawn tree** (parent/child agent↔orb links) is bridge-internal state keyed by **session id** (preserved across moves, so the session that spawned an orb keeps control of it after being moved to the host) — used for permissions only, never shown ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)).
@@ -366,7 +366,7 @@ A grid of **workspace cards** (280 px). **The card is the view of the orb — no
 
 ### 9.2 Orb sessions in the main list
 
-**Flat rows, no nesting**: the project groups stay as they are. Orb sessions are plain rows wearing a **tappable orb chip** (state dot + orb name) — tapping the chip **highlights the card** in the Orbs tab (the session → orb navigation). Host sessions wear a muted "host" label. No per-orb subgroups, no filter banner. (Home-list grouping: one group per orb, labeled orb + branch, navigates to the orb — §7.2.)
+**Flat rows, no nesting**: the project groups stay as they are. Orb sessions are plain rows wearing a **tappable orb chip** (state dot + orb name) — tapping the chip **highlights the card** in the Orbs tab (the session → orb navigation). Host sessions wear a muted "host" label. No per-orb subgroups, no filter banner (see also §7.2 — [#85](https://github.com/NetAuraTech/OpenCodeBridge/issues/85)).
 
 ### 9.3 The create-orb flow
 
