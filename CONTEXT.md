@@ -67,7 +67,7 @@ Stopping an orb, without loss: the orb's sessions move to the host first.
 _Avoid_: kill, terminate
 
 **Wake**:
-Bringing a stopped orb back up: workspace and branch untouched, and it starts with no old sessions — they live on the host.
+Bringing a stopped orb back up, workspace and branch untouched: after a clean stop it starts with no old sessions — they live on the host; after a crash the bridge wakes it at startup and it resumes with its in-orb sessions.
 _Avoid_: resume, restart
 
 **Move**:
@@ -77,6 +77,10 @@ _Avoid_: transfer, sync, export/import (those are mechanisms)
 **Seed**:
 The state a new orb's clone starts from: the project's default branch, or the branch tip of another orb of the same project. Committed state only — never the uncommitted working tree.
 _Avoid_: fork, copy, snapshot
+
+**Broken orb**:
+An orb whose container exists but whose workspace volume or state dir is missing. Never repaired: force-deletable, and startable with a fresh state dir only when the workspace volume is intact (its in-orb sessions are lost).
+_Avoid_: orphan, corrupted
 
 ### Views
 
