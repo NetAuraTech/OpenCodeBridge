@@ -37,7 +37,7 @@ _Avoid_: SSO, OAuth login (too generic), cloudflared login
 ### Sessions
 
 **Session**:
-An opencode conversation on the host's shared opencode service.
+An opencode conversation. A session lives on exactly one service at a time: the host's shared service, or one of an orb's.
 _Avoid_: conversation (in UI copy), thread
 
 **Active**:
@@ -51,6 +51,28 @@ _Avoid_: request, exchange
 **Permission**:
 An approval request raised by the opencode agent during a turn; answered once, always, or rejected.
 _Avoid_: prompt, consent
+
+### Orbs
+
+**Orb**:
+A Docker container running its own opencode service on a dedicated clone of one project — the long-lived sandboxed workspace of that project.
+_Avoid_: container (too generic), sandbox, devcontainer
+
+**Orb session**:
+A session hosted on an orb's service, as opposed to a session on the host's shared service.
+_Avoid_: child session, subagent session (those are subagent sessions)
+
+**Stop**:
+Stopping an orb, without loss: the orb's sessions move to the host first.
+_Avoid_: kill, terminate
+
+**Wake**:
+Bringing a stopped orb back up: workspace and branch untouched, and it starts with no old sessions — they live on the host.
+_Avoid_: resume, restart
+
+**Move**:
+Transferring a session between the host and an orb, preserving the session's identity; after a move the session lives on exactly one service.
+_Avoid_: transfer, sync, export/import (those are mechanisms)
 
 ### Views
 
