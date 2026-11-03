@@ -33,6 +33,8 @@ import 'tunnel/tunnel_cli.dart';
 import 'tunnel/tunnel_preconditions.dart';
 import 'tunnel/tunnel_setup.dart';
 import 'tunnel/tunnel_supervisor.dart';
+import 'orb/orb_build_context.dart';
+import 'orb/orb_image_builder.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
@@ -49,6 +51,7 @@ class BridgeServer {
     this._events,
     this._speed,
     this._docker,
+    this._orb,
     this._tunnel,
     this._tunnelSetupService,
     this._dockerLogKeepAlive,
@@ -119,6 +122,11 @@ class BridgeServer {
   /// `~/.cloudflared/`.
   static const String tunnelLoginPath = '/api/tunnel/login';
 
+  /// The explicit shared-base-image rebuild (spec §5.3, §9.5; issue #92):
+  /// always rebuilds the image for the expected tag, the build logs streaming
+  /// onto the unified event stream.
+  static const String orbImageRebuildPath = '/api/orb/image/rebuild';
+
   // The structured view's `/` command menu, global commands (issue #46).
   // Each is a thin pass-through of a shared-service endpoint; the service is
   // the single source of truth, so the effect is reflected live in any
@@ -181,6 +189,12 @@ class BridgeServer {
   /// CLI, in which case the docker endpoints report `docker_unavailable`.
   final DockerBackend? _docker;
 
+  /// The orb shared-base-image pipeline (issue #92): the materialized
+  /// build context plus the docker build of the `orb:<hash>` image; `null`
+  /// when this machine has no docker CLI, in which case the rebuild
+  /// endpoint reports `docker_unavailable`.
+  final OrbImageBuilder? _orb;
+
   /// The tunnel supervisor (issue #22, ADR-0002); `null` when this bridge
   /// does not run a tunnel, in which case the tunnel endpoints report
   /// `not_configured`.
@@ -222,6 +236,10 @@ class BridgeServer {
   /// [docker], when provided, serves the docker endpoints (issue #21,
   /// tests); the default builds a [DockerBackend] over the host docker CLI,
   /// its container exits re-emitted onto the event stream.
+  /// [orb], when provided, serves the explicit image-rebuild endpoint
+  /// (issue #92, tests); the default materializes the embedded build context
+  /// into the app-owned dir (create-if-missing) and builds an
+  /// [OrbImageBuilder] over the host docker CLI.
   /// [tunnel], when provided, is the cloudflared child the bridge
   /// supervises (issue #22); it is started here, after the port is bound,
   /// so a port conflict (a second server-mode instance) fails before any
@@ -254,6 +272,7 @@ class BridgeServer {
     EventHub? events,
     LlamaSpeedFeed? speedFeed,
     DockerBackend? docker,
+    OrbImageBuilder? orb,
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor)? tunnelSetup,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
@@ -269,6 +288,7 @@ class BridgeServer {
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
+    final orbBuilder = orb ?? await BridgeServer._defaultOrb(eventHub?.emit);
     NotifyService? notifyService;
     PushDispatcher? pushDispatcher;
     if (notify != null) {
@@ -298,6 +318,7 @@ class BridgeServer {
       eventHub,
       speed,
       dockerBackend,
+      orbBuilder,
       tunnelSupervisor,
       tunnelSetupService,
       dockerLogKeepAlive,
@@ -324,6 +345,7 @@ class BridgeServer {
       _fs,
       _events,
       _docker,
+      _orb,
       _tunnel,
       _tunnelSetupService,
       _dockerLogKeepAlive,
@@ -479,6 +501,32 @@ class BridgeServer {
     } catch (_) {
       return null;
     }
+  }
+
+  /// The default orb image pipeline (issue #92): the embedded build context
+  /// materialized into the app-owned dir at startup (create-if-missing —
+  /// the on-disk copy is the single source of truth for image content), and
+  /// the image builder over the host docker CLI. Returns `null` when this
+  /// machine has no docker CLI (the rebuild endpoint then reports
+  /// `docker_unavailable`); a materialization failure likewise degrades to
+  /// `null` rather than keeping the bridge from starting.
+  static Future<OrbImageBuilder?> _defaultOrb(
+    void Function(String)? emit,
+  ) async {
+    final context = OrbBuildContext();
+    try {
+      await context.materialize();
+    } catch (_) {
+      return null;
+    }
+    final cli = DockerBackend.hostCli();
+    if (cli == null) return null;
+    return OrbImageBuilder(
+      context: context,
+      run: cli.run,
+      spawn: cli.spawn,
+      emit: emit,
+    );
   }
 
   /// The default tunnel supervisor (issue #22, ADR-0002): the app-managed
@@ -651,6 +699,7 @@ class BridgeServer {
     FsService fs,
     EventHub? events,
     DockerBackend? docker,
+    OrbImageBuilder? orb,
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor) tunnelSetup,
     Duration dockerLogKeepAlive,
@@ -745,6 +794,14 @@ class BridgeServer {
           await BridgeServer._handleComposeAction(request, dir, docker);
           return;
         }
+      }
+      // The orb shared-base-image rebuild (issue #92), checked before the
+      // session matchers (a bare path would otherwise read as a session id
+      // to them).
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbImageRebuildPath) {
+        await BridgeServer._handleOrbImageRebuild(request, orb);
+        return;
       }
       // The tunnel endpoints (issue #22), checked before the session matchers
       // (a bare list path would otherwise read as a session id to them).
@@ -2147,6 +2204,34 @@ class BridgeServer {
     } on DockerUnavailableError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'docker_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The explicit shared-base-image rebuild (spec §5.3, §9.5; issue #92):
+  /// always rebuilds the image for the expected tag, the build logs streaming
+  /// as events. No docker CLI on the host is a 503 `docker_unavailable`; a
+  /// daemon failure or a failed build is a 502 (`docker_unreachable` /
+  /// `docker_build_failed`); success is a 200 with the tag.
+  static Future<void> _handleOrbImageRebuild(
+    HttpRequest request,
+    OrbImageBuilder? orb,
+  ) async {
+    final response = request.response;
+    if (orb == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      final tag = await orb.rebuild();
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode({'tag': tag}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OrbImageBuildError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_build_failed'}));
     }
     await response.close();
   }
