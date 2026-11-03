@@ -74,6 +74,10 @@ _Avoid_: resume, restart
 Transferring a session between the host and an orb, preserving the session's identity; after a move the session lives on exactly one service.
 _Avoid_: transfer, sync, export/import (those are mechanisms)
 
+**Seed**:
+The state a new orb's clone starts from: the project's default branch, or the branch tip of another orb of the same project. Committed state only — never the uncommitted working tree.
+_Avoid_: fork, copy, snapshot
+
 ### Views
 
 **Structured view**:
