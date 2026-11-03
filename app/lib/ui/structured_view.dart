@@ -21,6 +21,129 @@ import 'prompt_menu.dart';
 import 'question_panel.dart';
 import 'slash_commands.dart';
 
+/// An image read from the clipboard (issue #72): its raw bytes and mime type,
+/// sent to the model as a `files` data-URI attachment.
+class ClipboardImage {
+  const ClipboardImage({required this.bytes, required this.mime});
+
+  /// The image's raw bytes.
+  final Uint8List bytes;
+
+  /// The image's mime type (e.g. `image/png`).
+  final String mime;
+}
+
+/// The outcome of a clipboard image read (issue #72): the clipboard's
+/// image, or `null` when there is none — plus, for a read that cannot
+/// produce an image, a user-visible [failureMessage] saying how to get one
+/// (e.g. the read tool is not installed and how to install it).
+class ClipboardImageRead {
+  const ClipboardImageRead({this.image, this.failureMessage});
+
+  /// The clipboard's image, or `null` when there is none.
+  final ClipboardImage? image;
+
+  /// How to get an image read, to show the user (issue #72), or `null` when
+  /// there is nothing to report (a plain "no image").
+  final String? failureMessage;
+}
+
+/// Reads the clipboard's image (issue #72): no image reads as no [image],
+/// and a read that cannot produce one (e.g. the read tool is not installed)
+/// reports how to enable it. Injectable so the screen's tests can fake the
+/// read.
+typedef ClipboardImageReader = Future<ClipboardImageRead> Function();
+
+/// The service's per-attachment decoded image limit (issue #72): the service
+/// materializes inline data URLs up to 20 MiB decoded, so an image over it
+/// would be rejected — the client pre-checks and reports it instead of
+/// leaving a dead token.
+const int _kMaxClipboardImageBytes = 20 * 1024 * 1024;
+
+/// The image targets the default reader looks for, most preferred first
+/// (issue #72); when none of these is offered, any `image/` target is used.
+const List<String> _kPreferredImageTargets = [
+  'image/png',
+  'image/bmp',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+];
+
+/// The default clipboard image reader (issue #72): desktop Linux only, with
+/// no new package dependency — X11 via `xclip`, Wayland via `wl-paste`. The
+/// reader lists the clipboard's targets, picks an image one, and reads its
+/// bytes; any other platform, a failing read, or a clipboard with no image
+/// reads as no image. A missing tool reports how to install it, so the user
+/// can enable image paste.
+Future<ClipboardImageRead> _readClipboardImage() async {
+  if (!Platform.isLinux || Platform.isAndroid) {
+    return const ClipboardImageRead();
+  }
+  final env = Platform.environment;
+  final wayland =
+      env.containsKey('WAYLAND_DISPLAY') ||
+      env['XDG_SESSION_TYPE'] == 'wayland';
+  final tool = wayland ? 'wl-paste' : 'xclip';
+  try {
+    Future<List<int>> run(List<String> args) async {
+      final result = await Process.run(tool, args, stdoutEncoding: null);
+      if (result.exitCode != 0) return const <int>[];
+      return result.stdout as List<int>;
+    }
+
+    final targets = utf8
+        .decode(
+          await run(
+            wayland
+                ? const ['--list']
+                : const ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+          ),
+        )
+        .split('\n')
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+
+    String? target;
+    for (final preferred in _kPreferredImageTargets) {
+      if (targets.contains(preferred)) {
+        target = preferred;
+        break;
+      }
+    }
+    if (target == null) {
+      for (final t in targets) {
+        if (t.startsWith('image/')) {
+          target = t;
+          break;
+        }
+      }
+    }
+    if (target == null) return const ClipboardImageRead();
+
+    final bytes = await run(
+      wayland
+          ? ['--type', target]
+          : ['-selection', 'clipboard', '-t', target, '-o'],
+    );
+    if (bytes.isEmpty) return const ClipboardImageRead();
+    return ClipboardImageRead(
+      image: ClipboardImage(bytes: Uint8List.fromList(bytes), mime: target),
+    );
+  } on ProcessException {
+    // The tool is not installed: report how to enable the read.
+    return ClipboardImageRead(
+      failureMessage: wayland
+          ? 'Clipboard image paste needs wl-paste '
+                '(sudo apt install wl-clipboard).'
+          : 'Clipboard image paste needs xclip (sudo apt install xclip).',
+    );
+  } catch (_) {
+    return const ClipboardImageRead();
+  }
+}
+
 /// The structured view of one session (spec §6: *External* → structured
 /// view): the message history with the tools in flight, the live cost bar,
 /// and the prompt input enabled at any time (spec §5, endpoint 7: a mid-turn
@@ -46,6 +169,7 @@ class StructuredSessionScreen extends StatefulWidget {
     this.onOpenSettings,
     this.settings,
     this.onThemeModeChanged,
+    this.imageReader,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -84,6 +208,11 @@ class StructuredSessionScreen extends StatefulWidget {
   /// (issue #49); `null` leaves the choice persisted but unapplied until a
   /// relaunch.
   final VoidCallback? onThemeModeChanged;
+
+  /// Reads the clipboard's image on Ctrl+V in the prompt bar (issue #72),
+  /// or `null` for the default desktop-Linux reader (`xclip` / `wl-paste`).
+  /// Injectable so the view's tests can fake the read.
+  final ClipboardImageReader? imageReader;
 
   @override
   State<StructuredSessionScreen> createState() =>
@@ -237,6 +366,11 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// field's text carries them as typed (`@<id>` / `@<path>`); each
   /// deletes as one unit and sends as an attachment.
   List<_Mention> _mentions = const [];
+
+  /// The images committed to the prompt by Ctrl+V pastes (issue #72), in
+  /// paste order: the field's text carries their `[Image N]` tokens; each
+  /// deletes as one unit and sends as a `files` data-URI attachment.
+  List<_PendingImage> _images = const [];
 
   /// True while a `/` command runs (the prompt bar is disabled so a command
   /// cannot be double-run).
@@ -1021,20 +1155,42 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     }
   }
 
-  /// The prompt's committed mentions (issue #58), in text order: at each
-  /// position the longest committed text that starts there wins, and every
-  /// occurrence counts (one attachment per mention). File mentions send a
-  /// `file://` uri resolved against the session's working directory; skill
-  /// mentions send the skill id.
+  /// The prompt's committed attachments, in text order: at each position the
+  /// longest committed text that starts there wins, and every occurrence
+  /// counts (one attachment per occurrence). Image tokens (issue #72) send
+  /// a `files` data-URI entry (name `clipboard`); file mentions (issue #58)
+  /// send a `file://` uri resolved against the session's working directory;
+  /// skill mentions send the skill id.
   (List<Map<String, Object?>>?, List<Map<String, Object?>>?) _attachments(
     String text,
   ) {
+    final images = [..._images]
+      ..sort(
+        (a, b) =>
+            b.label.toString().length.compareTo(a.label.toString().length),
+      );
     final mentions = [..._mentions]
       ..sort((a, b) => b.text.length.compareTo(a.text.length));
     final files = <Map<String, Object?>>[];
     final skills = <Map<String, Object?>>[];
     var index = 0;
     while (index < text.length) {
+      _PendingImage? image;
+      for (final pending in images) {
+        final token = '[Image ${pending.label}]';
+        if (text.startsWith(token, index)) {
+          image = pending;
+          break;
+        }
+      }
+      if (image != null) {
+        files.add({
+          'uri': 'data:${image.mime};base64,${base64Encode(image.bytes)}',
+          'name': 'clipboard',
+        });
+        index += '[Image ${image.label}]'.length;
+        continue;
+      }
       _Mention? found;
       for (final mention in mentions) {
         if (text.startsWith(mention.text, index)) {
@@ -1058,11 +1214,107 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   }
 
   /// The prompt was cleared (Esc, a `/` command, a send): its committed
-  /// mentions are gone with it.
+  /// mentions and pending images are gone with it.
   void _onPromptCleared() {
-    if (_prompt.text.isEmpty && _mentions.isNotEmpty) {
-      setState(() => _mentions = const []);
+    if (_prompt.text.isEmpty && (_mentions.isNotEmpty || _images.isNotEmpty)) {
+      setState(() {
+        _mentions = const [];
+        _images = const [];
+      });
     }
+  }
+
+  /// Ctrl+V in the prompt bar (issue #72): the clipboard's image wins — it is
+  /// committed and its atomic `[Image N]` token (plus a space) inserted at
+  /// the caret, the clipboard's text not inserted. With no image (or a failed
+  /// read) the clipboard's text is pasted exactly as before, and a read that
+  /// reports why it produced no image (e.g. the read tool is missing) tells
+  /// the user how to enable it.
+  Future<void> _pasteFromClipboard() async {
+    ClipboardImageRead read;
+    try {
+      read = await (widget.imageReader ?? _readClipboardImage)();
+    } catch (_) {
+      read = const ClipboardImageRead();
+    }
+    final image = read.image;
+    if (image == null) {
+      await _pasteClipboardText();
+      final message = read.failureMessage;
+      if (message != null && mounted) _snackBar(message);
+      return;
+    }
+    if (image.bytes.length > _kMaxClipboardImageBytes) {
+      // Over the service's decoded limit: report it, leave no dead token.
+      if (mounted) _snackBar('The clipboard image is over the 20 MiB limit.');
+      return;
+    }
+    if (!mounted) return;
+    // Re-pasting an identical image reuses its committed label; otherwise
+    // the label is the highest committed one plus one.
+    int? label;
+    for (final pending in _images) {
+      if (_sameBytes(pending.bytes, image.bytes)) {
+        label = pending.label;
+        break;
+      }
+    }
+    if (label == null) {
+      var next = 1;
+      for (final pending in _images) {
+        if (pending.label + 1 > next) next = pending.label + 1;
+      }
+      label = next;
+      final pending = _PendingImage(
+        label: label,
+        bytes: image.bytes,
+        mime: image.mime,
+      );
+      setState(() => _images = [..._images, pending]);
+    }
+    _insertImageToken(label);
+  }
+
+  /// The no-image half of a Ctrl+V paste (issue #72): the clipboard's text is
+  /// pasted at the caret (replacing the selection), the caret after it — the
+  /// standard text paste.
+  Future<void> _pasteClipboardText() async {
+    String? text;
+    try {
+      text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    } catch (_) {
+      text = null;
+    }
+    if (text == null || text.isEmpty || !mounted) return;
+    final value = _prompt.value;
+    final selection = value.selection;
+    _prompt.value = TextEditingValue(
+      text: value.text.replaceRange(selection.start, selection.end, text),
+      selection: TextSelection.collapsed(offset: selection.start + text.length),
+    );
+  }
+
+  /// Inserts a committed image's token at the caret, followed by a space, the
+  /// caret after it (issue #72).
+  void _insertImageToken(int label) {
+    final token = '[Image $label] ';
+    final value = _prompt.value;
+    final offset = value.selection.end;
+    final text = value.text;
+    _prompt.value = TextEditingValue(
+      text: text.replaceRange(offset, offset, token),
+      selection: TextSelection.collapsed(offset: offset + token.length),
+    );
+  }
+
+  /// Whether two image byte lists are identical (issue #72): re-pasting an
+  /// identical image reuses its committed label.
+  bool _sameBytes(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   /// Tab in the prompt (the menu closed): toggles the session's mode,
@@ -1979,10 +2231,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                               menus: _menus,
                               mentions: [
                                 for (final mention in _mentions) mention.text,
+                                for (final image in _images)
+                                  '[Image ${image.label}]',
                               ],
                               onMenuOpened: _onMenuOpened,
                               onToggleMode: _toggleMode,
                               onCycleVariant: _cycleVariant,
+                              onPasteFromClipboard: _pasteFromClipboard,
                             ),
                           ),
                         ],
@@ -2863,6 +3118,7 @@ class _PromptBar extends StatefulWidget {
     required this.onMenuOpened,
     required this.onToggleMode,
     required this.onCycleVariant,
+    required this.onPasteFromClipboard,
   });
 
   final TextEditingController controller;
@@ -2889,6 +3145,11 @@ class _PromptBar extends StatefulWidget {
   /// Ctrl+T (the menu closed): cycles the current model's variant (the
   /// reasoning effort), like the TUI's `variant.cycle`.
   final VoidCallback onCycleVariant;
+
+  /// Ctrl+V (the menu closed): the clipboard's image is committed and its
+  /// `[Image N]` token inserted at the caret (issue #72); with no image the
+  /// clipboard's text is pasted. The screen runs the read and the insertion.
+  final Future<void> Function() onPasteFromClipboard;
 
   @override
   State<_PromptBar> createState() => _PromptBarState();
@@ -3180,6 +3441,14 @@ class _PromptBarState extends State<_PromptBar> {
         widget.onCycleVariant();
         return KeyEventResult.handled;
       }
+      if (key == LogicalKeyboardKey.keyV &&
+          HardwareKeyboard.instance.isControlPressed) {
+        // The image wins over the default text paste: handled here (the read
+        // is async, the insertion lands when it resolves); with no image the
+        // screen pastes the clipboard's text exactly as the default would.
+        widget.onPasteFromClipboard();
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
   }
@@ -3431,4 +3700,26 @@ class _Mention {
 
   /// The skill id, or the file path relative to the working directory.
   final String target;
+}
+
+/// One image committed to the prompt by a Ctrl+V paste (issue #72): the
+/// number that renders as the field's atomic `[Image N]` token, and the
+/// bytes + mime it refers to (sent as a `files` data-URI attachment, name
+/// `clipboard`). Held until the prompt is cleared (a send, Esc, or a `/`
+/// command).
+class _PendingImage {
+  const _PendingImage({
+    required this.label,
+    required this.bytes,
+    required this.mime,
+  });
+
+  /// The image-part number (the `N` of the `[Image N]` token).
+  final int label;
+
+  /// The image's raw bytes.
+  final Uint8List bytes;
+
+  /// The image's mime type (e.g. `image/png`).
+  final String mime;
 }

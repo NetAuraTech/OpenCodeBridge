@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -388,6 +389,7 @@ Future<StreamController<BridgeEvent>> _pump(
   WidgetTester tester, {
   required _FakeClient client,
   Stream<SessionGap>? gaps,
+  ClipboardImageReader? imageReader,
 }) async {
   final events = StreamController<BridgeEvent>.broadcast();
   await tester.pumpWidget(
@@ -398,6 +400,7 @@ Future<StreamController<BridgeEvent>> _pump(
         client: client,
         events: events.stream,
         gaps: gaps,
+        imageReader: imageReader,
       ),
     ),
   );
@@ -499,6 +502,62 @@ Future<void> _pressEnter(WidgetTester tester) async {
 
 String _promptText(WidgetTester tester) =>
     tester.widget<TextField>(find.byKey(_promptInput)).controller!.text;
+
+/// A faked clipboard image reader (issue #72): the n-th read returns the
+/// n-th queued image, the last repeats; [error], when set, is thrown
+/// instead. [failureMessage], when set, is reported on the no-image read.
+/// Pass [read] to the screen as its [ClipboardImageReader].
+class _FakeImageReader {
+  _FakeImageReader(this.images);
+
+  final List<ClipboardImage?> images;
+
+  /// Thrown from the read when set.
+  Object? error;
+
+  /// The no-image read's [ClipboardImageRead.failureMessage] when set.
+  String? failureMessage;
+
+  int calls = 0;
+
+  Future<ClipboardImageRead> read() async {
+    calls++;
+    final error = this.error;
+    if (error is Object) throw error;
+    return ClipboardImageRead(
+      image: images.isEmpty
+          ? null
+          : images[calls - 1 < images.length ? calls - 1 : images.length - 1],
+      failureMessage: failureMessage,
+    );
+  }
+}
+
+/// Mocks the platform clipboard's text (issue #72): `Clipboard.getData`
+/// reads `{'text': text}`; the mock is cleared after the test.
+void _setClipboardText(WidgetTester tester, String text) {
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+    if (call.method == 'Clipboard.getData') {
+      return <String, String>{'text': text};
+    }
+    return null;
+  });
+  addTearDown(
+    () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+  );
+}
+
+/// Ctrl+V on the focused prompt field (issue #72): the screen reads the
+/// clipboard and inserts; the pumps flush the async read and the insertion.
+Future<void> _pasteControlV(WidgetTester tester) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+  await tester.pump();
+  await tester.pump();
+}
 
 void main() {
   group('StructuredSessionScreen', () {
@@ -2960,5 +3019,242 @@ void main() {
       expect(client.setModels, isEmpty);
       expect(find.text('No model set for the session.'), findsOneWidget);
     });
+  });
+
+  group('StructuredSessionScreen Ctrl+V image paste (issue #72)', () {
+    testWidgets('the clipboard image is committed, its token inserted at '
+        'the caret (the clipboard text not inserted), and every occurrence '
+        'sends as a files data-URI named clipboard', (tester) async {
+      final image = ClipboardImage(
+        bytes: Uint8List.fromList(const [1, 2, 3]),
+        mime: 'image/png',
+      );
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(
+        tester,
+        client: client,
+        imageReader: _FakeImageReader([image]).read,
+      );
+      _setClipboardText(tester, 'SENTINEL-TEXT');
+
+      await _typePrompt(tester, 'look ');
+      await tester.pump();
+      await _pasteControlV(tester);
+
+      expect(_promptText(tester), 'look [Image 1] ');
+      expect(_caret(tester), 'look [Image 1] '.length);
+
+      await _pressEnter(tester);
+      await tester.pump();
+
+      final sent = client.prompts.single;
+      expect(sent.$1, 'ses_1');
+      expect(sent.$2, 'look [Image 1]');
+      expect(sent.$3, [
+        {
+          'uri': 'data:image/png;base64,${base64Encode(image.bytes)}',
+          'name': 'clipboard',
+        },
+      ]);
+      expect(sent.$4, isNull);
+      expect(_promptText(tester), isEmpty);
+    });
+
+    testWidgets(
+      're-pasting an image reuses its label, a new image gets the next one, and each occurrence sends its bytes',
+      (tester) async {
+        final a = ClipboardImage(
+          bytes: Uint8List.fromList(const [1]),
+          mime: 'image/png',
+        );
+        final b = ClipboardImage(
+          bytes: Uint8List.fromList(const [2]),
+          mime: 'image/jpeg',
+        );
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(
+          tester,
+          client: client,
+          imageReader: _FakeImageReader([a, b, a]).read,
+        );
+
+        await tester.tap(find.byKey(_promptInput));
+        await tester.pump();
+        await _pasteControlV(tester);
+        expect(_promptText(tester), '[Image 1] ');
+        await _pasteControlV(tester);
+        expect(_promptText(tester), '[Image 1] [Image 2] ');
+        await _pasteControlV(tester);
+        expect(_promptText(tester), '[Image 1] [Image 2] [Image 1] ');
+
+        await _pressEnter(tester);
+        await tester.pump();
+
+        final sent = client.prompts.single;
+        expect(sent.$2, '[Image 1] [Image 2] [Image 1]');
+        expect(sent.$3, [
+          {
+            'uri': 'data:image/png;base64,${base64Encode(a.bytes)}',
+            'name': 'clipboard',
+          },
+          {
+            'uri': 'data:image/jpeg;base64,${base64Encode(b.bytes)}',
+            'name': 'clipboard',
+          },
+          {
+            'uri': 'data:image/png;base64,${base64Encode(a.bytes)}',
+            'name': 'clipboard',
+          },
+        ]);
+      },
+    );
+
+    testWidgets(
+      'the token deletes as one unit: Backspace at its end, Delete at its start',
+      (tester) async {
+        final image = ClipboardImage(
+          bytes: Uint8List.fromList(const [1]),
+          mime: 'image/png',
+        );
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(
+          tester,
+          client: client,
+          imageReader: _FakeImageReader([image]).read,
+        );
+
+        await tester.tap(find.byKey(_promptInput));
+        await tester.pump();
+        await _pasteControlV(tester);
+        expect(_promptText(tester), '[Image 1] ');
+
+        // Backspace at the tail: the trailing space first, then the token
+        // whole, not one char at a time.
+        await tester.showKeyboard(find.byKey(_promptInput));
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+        await tester.pump();
+        expect(_promptText(tester), '[Image 1]');
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+        await tester.pump();
+        expect(_promptText(tester), isEmpty);
+
+        // Delete from before the token removes it forward.
+        await _pasteControlV(tester);
+        _setCaret(tester, 0);
+        await tester.showKeyboard(find.byKey(_promptInput));
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.delete);
+        await tester.pump();
+        expect(_promptText(tester), ' ');
+      },
+    );
+
+    testWidgets(
+      'the token coexists with plain text mid-sentence and deletes as one unit there',
+      (tester) async {
+        final image = ClipboardImage(
+          bytes: Uint8List.fromList(const [1]),
+          mime: 'image/png',
+        );
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(
+          tester,
+          client: client,
+          imageReader: _FakeImageReader([image]).read,
+        );
+
+        await tester.tap(find.byKey(_promptInput));
+        await tester.pump();
+        await _pasteControlV(tester);
+
+        await _typePrompt(tester, 'A [Image 1] B');
+        _setCaret(tester, 11);
+        await tester.showKeyboard(find.byKey(_promptInput));
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+        await tester.pump();
+        expect(_promptText(tester), 'A  B');
+      },
+    );
+
+    testWidgets('Ctrl+V with no clipboard image pastes the clipboard text', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(
+        tester,
+        client: client,
+        imageReader: _FakeImageReader([null]).read,
+      );
+      _setClipboardText(tester, 'hello world');
+
+      await _typePrompt(tester, 'say ');
+      await tester.pump();
+      await _pasteControlV(tester);
+
+      expect(_promptText(tester), 'say hello world');
+      expect(_caret(tester), 'say hello world'.length);
+    });
+
+    testWidgets('a failed image read pastes the clipboard text', (
+      tester,
+    ) async {
+      final reader = _FakeImageReader(const []);
+      reader.error = Exception('the clipboard is unreachable');
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client, imageReader: reader.read);
+      _setClipboardText(tester, 'fallback text');
+
+      await _typePrompt(tester, 'x ');
+      await tester.pump();
+      await _pasteControlV(tester);
+
+      expect(_promptText(tester), 'x fallback text');
+      expect(reader.calls, 1);
+    });
+
+    testWidgets(
+      'a read that cannot produce an image reports how to enable it',
+      (tester) async {
+        final reader = _FakeImageReader(const []);
+        reader.failureMessage = 'Clipboard image paste needs xclip.';
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client, imageReader: reader.read);
+        _setClipboardText(tester, 'fallback text');
+
+        await _typePrompt(tester, 'x ');
+        await tester.pump();
+        await _pasteControlV(tester);
+        await tester.pumpAndSettle();
+
+        expect(_promptText(tester), 'x fallback text');
+        expect(reader.calls, 1);
+        expect(find.text('Clipboard image paste needs xclip.'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'an image over the 20 MiB limit inserts no token and reports it',
+      (tester) async {
+        final big = ClipboardImage(
+          bytes: Uint8List.fromList(List<int>.filled(20 * 1024 * 1024 + 1, 1)),
+          mime: 'image/png',
+        );
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(
+          tester,
+          client: client,
+          imageReader: _FakeImageReader([big]).read,
+        );
+
+        await tester.tap(find.byKey(_promptInput));
+        await tester.pump();
+        await _pasteControlV(tester);
+
+        expect(_promptText(tester), isEmpty);
+        expect(
+          find.text('The clipboard image is over the 20 MiB limit.'),
+          findsOneWidget,
+        );
+      },
+    );
   });
 }

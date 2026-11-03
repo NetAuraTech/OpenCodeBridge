@@ -319,6 +319,9 @@ void main() {
               'source': {'path': '/proj/one/notes.md'},
               'mention': {'start': 0, 'end': 12},
             },
+            // A clipboard image (issue #72): a data-URI entry, forwarded
+            // unchanged to the service.
+            {'uri': 'data:image/png;base64,iVBORw0KGgo=', 'name': 'clipboard'},
           ],
           'skills': [
             {'id': 'orbs'},
@@ -338,6 +341,7 @@ void main() {
           'source': {'path': '/proj/one/notes.md'},
           'mention': {'start': 0, 'end': 12},
         },
+        {'uri': 'data:image/png;base64,iVBORw0KGgo=', 'name': 'clipboard'},
       ]);
       expect(prompt.$4, [
         {'id': 'orbs'},

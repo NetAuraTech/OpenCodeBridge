@@ -843,6 +843,8 @@ void main() {
           'source': {'path': '/proj/one/notes.md'},
           'mention': {'start': 0, 'end': 12},
         },
+        // A clipboard image (issue #72): a data-URI entry, posted as-is.
+        {'uri': 'data:image/png;base64,iVBORw0KGgo=', 'name': 'clipboard'},
       ],
       skills: const [
         {'id': 'orbs'},
@@ -859,6 +861,7 @@ void main() {
             'source': {'path': '/proj/one/notes.md'},
             'mention': {'start': 0, 'end': 12},
           },
+          {'uri': 'data:image/png;base64,iVBORw0KGgo=', 'name': 'clipboard'},
         ],
         'skills': [
           {'id': 'orbs'},
