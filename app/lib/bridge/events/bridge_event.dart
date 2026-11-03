@@ -20,6 +20,12 @@ abstract class BridgeEventType {
   /// (the bridge's [LlamaSpeedFeed]). `data` carries `prefill` and `decode`
   /// (each a tok/s number or `null`); at most one is set at a time.
   static const String llamaSpeed = 'llama.speed';
+
+  /// One line of the orb shared base image's `docker build` output (spec
+  /// §5.3, issue #92): the build's logs stream as events, like container
+  /// logs. `data` carries `tag` (the `orb:<hash>` being built) and `line`
+  /// (one line of the build log).
+  static const String orbImageBuild = 'orb.image.build';
 }
 
 /// Build the wire payload for a bridge-native event: the same `data:` envelope

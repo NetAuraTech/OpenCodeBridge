@@ -166,6 +166,21 @@ class DockerBackend {
     );
   }
 
+  /// The host docker CLI's [DockerRunner]/[DockerSpawner] seams (issue #92):
+  /// the same host invocations [DockerBackend.host] uses, for the components
+  /// that shell out to the docker CLI on their own (the orb image builder).
+  /// `null` when this host has no docker CLI.
+  static ({DockerRunner run, DockerSpawner spawn})? hostCli({String? path}) {
+    final binary = findHostDocker(path: path);
+    if (binary == null) return null;
+    return (
+      run: (argv, {workingDirectory}) =>
+          _hostRun(binary, argv, workingDirectory: workingDirectory),
+      spawn: (argv, {workingDirectory}) =>
+          _hostSpawn(binary, argv, workingDirectory: workingDirectory),
+    );
+  }
+
   /// Stop the event watch and release its child.
   Future<void> close() async {
     if (_closed) return;
