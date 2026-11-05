@@ -557,7 +557,9 @@ class OrbService {
   }
 
   /// The PR of [record]'s branch (issue #96): `gh pr view` for the head ref
-  /// `orb/<id>` in the project's repo. Every absence — no `gh` runner, no
+  /// `orb/<id>` (positional — `gh pr view` has no `--head` flag; that flag
+  /// belongs to `gh pr list`) in the project's repo. Every absence — no `gh`
+  /// runner, no
   /// repo resolver, no resolvable repo, no PR, a failed call — is `null`
   /// (the badge simply does not render).
   Future<OrbPr?> _prFor(OrbRecord record) async {
@@ -577,10 +579,9 @@ class OrbService {
       final result = await runner([
         'pr',
         'view',
+        record.branch,
         '--repo',
         repo,
-        '--head',
-        record.branch,
         '--json',
         'state,url',
       ]);

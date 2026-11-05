@@ -995,14 +995,14 @@ void main() {
 
       final gh = _FakeGh();
       gh.results[
-        'pr view --repo acme/app --head orb/$a --json state,url'
+        'pr view orb/$a --repo acme/app --json state,url'
       ] = const GitCliResult(
         exitCode: 0,
         stdout: '{"state":"OPEN","url":"https://github.com/acme/app/pull/7"}',
         stderr: '',
       );
       gh.results[
-        'pr view --repo acme/app --head orb/$b --json state,url'
+        'pr view orb/$b --repo acme/app --json state,url'
       ] = const GitCliResult(
         exitCode: 1,
         stdout: '',
