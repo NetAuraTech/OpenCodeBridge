@@ -89,8 +89,8 @@ void main() {
         'FLUTTER_VERSION=3.47.8',
         'REDIS_VERSION=7.4.0',
         'POSTGRES_VERSION=16',
-        'TYPESENSE_VERSION=28.1',
-        'MAILHOG_VERSION=1.2.0',
+        'TYPESENSE_VERSION=28.0',
+        'MAILHOG_VERSION=1.0.1',
         'GIT_VERSION=2.43',
         'OPENCODE_VERSION=2.1.4',
       ]) {
@@ -103,11 +103,41 @@ void main() {
       expect(dockerfile, contains(r'@opencode/cli@${OPENCODE_VERSION}'));
     });
 
-    test('the entrypoint is a placeholder that starts opencode', () {
+    test('the typesense source is the official dl.typesense.org release with '
+        'the pinned md5 verified (the former download.typesense.org domain '
+        'is dead — the image must still build)', () {
+      final dockerfile = OrbEmbedded.files['Dockerfile']!;
       expect(
-        OrbEmbedded.files['orb-entrypoint.sh'],
-        contains('exec opencode serve'),
+        dockerfile,
+        contains(r'dl.typesense.org/releases/${TYPESENSE_VERSION}/'),
       );
+      expect(dockerfile, isNot(contains('download.typesense.org')));
+      expect(dockerfile, contains('typesense-server.md5.txt'));
+      expect(dockerfile, contains('md5sum'));
+    });
+
+    test('the entrypoint does the full boot prep and then serves opencode '
+        '(issue #94)', () {
+      final entrypoint = OrbEmbedded.files['orb-entrypoint.sh'];
+      // The installers (spec §6.3).
+      expect(entrypoint, contains('npm ci'));
+      expect(entrypoint, contains('npm install'));
+      expect(entrypoint, contains('composer install'));
+      expect(entrypoint, contains('flutter pub get'));
+      // The local services (spec §6.4), bound to loopback in-container.
+      expect(entrypoint, contains('pg_ctl'));
+      expect(
+        entrypoint,
+        contains('redis-server --daemonize yes --bind 127.0.0.1'),
+      );
+      expect(entrypoint, contains('typesense-server'));
+      expect(entrypoint, contains('mailhog'));
+      // The health gate (spec §6.5) as a named constant.
+      expect(entrypoint, contains('SERVICE_HEALTH_TIMEOUT_SECONDS=30'));
+      // The boot stages (spec §9.3/§9.4).
+      expect(entrypoint, contains('[orb] stage:'));
+      // Serve opencode on the fixed in-container port (spec §2.9).
+      expect(entrypoint, contains('exec opencode serve'));
     });
   });
 }
