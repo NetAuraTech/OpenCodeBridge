@@ -1,0 +1,920 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/docker/docker_backend.dart';
+import 'package:opencodebridge/bridge/orb/orb_build_context.dart';
+import 'package:opencodebridge/bridge/orb/orb_image_builder.dart';
+import 'package:opencodebridge/bridge/orb/orb_service.dart';
+import 'package:opencodebridge/model/orb.dart';
+
+/// A scripted docker CLI child.
+class _FakeProcess {
+  final StreamController<String> stdout = StreamController<String>();
+  final StreamController<String> stderr = StreamController<String>();
+  final Completer<int> _exit = Completer<int>();
+
+  /// Whether [kill] ran (the boot wait kills the log follow at the end).
+  bool killed = false;
+
+  DockerProcess toProcess() => DockerProcess(
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    exitCode: _exit.future,
+    kill: kill,
+  );
+
+  Future<void> kill() async {
+    killed = true;
+    exit(0);
+  }
+
+  void exit(int code) {
+    stdout.close();
+    stderr.close();
+    if (!_exit.isCompleted) _exit.complete(code);
+  }
+}
+
+/// The DockerRunner/DockerSpawner seam, scripted by the argv's first words
+/// (the create flow and the boot loop interleave their commands).
+class _FakeDocker {
+  final List<List<String>> runArgs = [];
+  final List<List<String>> spawnArgs = [];
+  final List<_FakeProcess> spawned = [];
+
+  /// The next children the spawner returns, in order.
+  final List<_FakeProcess> processes = [];
+
+  /// The error the next spawn throws (`null` for none).
+  Object? spawnError;
+
+  DockerCliResult psResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+  );
+
+  DockerCliResult stateResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: 'running\n',
+    stderr: '',
+  );
+
+  /// The `docker logs <container>` full output (the boot wait's password
+  /// source and the failure tail).
+  String logs = '';
+
+  /// The `{{json .NetworkSettings.Ports}}` inspect output (one line per
+  /// container in the multi-arg form).
+  String ports = 'null';
+
+  DockerCliResult containerLabelsResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+  );
+
+  DockerCliResult volumeLsResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+  );
+
+  DockerCliResult volumeInspectResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+  );
+
+  (DockerRunner, DockerSpawner) bind() => (_run, _spawn);
+
+  Future<DockerCliResult> _run(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
+    runArgs.add(List.of(argv));
+    return _dispatch(List.of(argv));
+  }
+
+  DockerCliResult _dispatch(List<String> argv) {
+    final command = argv[0];
+    if (command == 'image') {
+      return const DockerCliResult(exitCode: 0, stdout: '[]', stderr: '');
+    }
+    if (command == 'ps') return psResult;
+    if (command == 'volume') {
+      if (argv[1] == 'create') {
+        return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+      }
+      if (argv[1] == 'ls') return volumeLsResult;
+      if (argv[1] == 'inspect') return volumeInspectResult;
+    }
+    if (command == 'create' || command == 'cp' || command == 'start') {
+      return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+    }
+    if (command == 'logs') {
+      return DockerCliResult(exitCode: 0, stdout: logs, stderr: '');
+    }
+    if (command == 'inspect') {
+      final format = argv[argv.indexOf('--format') + 1];
+      if (format == '{{.State.Status}}') return stateResult;
+      if (format == '{{json .NetworkSettings.Ports}}') {
+        return DockerCliResult(exitCode: 0, stdout: ports, stderr: '');
+      }
+      if (format == '{{json .Config.Labels}}') return containerLabelsResult;
+    }
+    throw StateError('unexpected docker argv: $argv');
+  }
+
+  Future<DockerProcess> _spawn(
+    List<String> argv, {
+    String? workingDirectory,
+  }) async {
+    spawnArgs.add(List.of(argv));
+    final error = spawnError;
+    if (error != null) {
+      spawnError = null;
+      throw error;
+    }
+    final process =
+        processes.isNotEmpty ? processes.removeAt(0) : _FakeProcess();
+    spawned.add(process);
+    return process.toProcess();
+  }
+}
+
+/// The GitRunner seam, scripted by the argv (the remote probe and the
+/// identity read).
+class _FakeGit {
+  final List<List<String>> args = [];
+  final Map<String, GitCliResult> results = {};
+
+  GitRunner get run => (List<String> argv, {String? workingDirectory}) async {
+    args.add(List.of(argv));
+    return results[argv.join(' ')] ??
+        const GitCliResult(exitCode: 0, stdout: '', stderr: '');
+  };
+}
+
+Future<void> _until(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 2),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('timed out waiting for the condition');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+  }
+}
+
+void main() {
+  group('OrbService (issue #93)', () {
+    late Directory root;
+    late Directory home;
+    late Directory checkout;
+    late Directory stateRoot;
+    late OrbBuildContext context;
+    late OrbImageBuilder builder;
+    late _FakeDocker docker;
+    late _FakeGit git;
+
+    setUp(() async {
+      root = await Directory.systemTemp.createTemp('oc-orb-service');
+      home = Directory('${root.path}/home')..createSync();
+      checkout = Directory('${root.path}/checkout')..createSync();
+      stateRoot = Directory('${root.path}/state');
+      context = OrbBuildContext(dir: Directory('${root.path}/ctx'));
+      await context.materialize();
+      git = _FakeGit();
+      git.results['remote get-url origin'] = const GitCliResult(
+        exitCode: 0,
+        stdout: 'https://github.com/acme/app.git\n',
+        stderr: '',
+      );
+      git.results['config user.name'] = const GitCliResult(
+        exitCode: 0,
+        stdout: 'Lhomme Aymeric\n',
+        stderr: '',
+      );
+      git.results['config user.email'] = const GitCliResult(
+        exitCode: 0,
+        stdout: 'aymeric@example.com\n',
+        stderr: '',
+      );
+      docker = _FakeDocker();
+      final (run, spawn) = docker.bind();
+      builder = OrbImageBuilder(context: context, run: run, spawn: spawn);
+    });
+
+    tearDown(() async {
+      await root.delete(recursive: true);
+    });
+
+    OrbService service({
+      Duration? bootTimeout,
+      Duration? pollInterval,
+      void Function(String)? emit,
+    }) {
+      final (run, spawn) = docker.bind();
+      return OrbService(
+        imageBuilder: builder,
+        run: run,
+        spawn: spawn,
+        git: git.run,
+        home: home.path,
+        stateRoot: stateRoot,
+        bridgePort: 48201,
+        emit: emit,
+        hostIp: () async => '10.1.2.3',
+        bootTimeout: bootTimeout ?? const Duration(minutes: 10),
+        pollInterval: pollInterval ?? const Duration(milliseconds: 5),
+      );
+    }
+
+    void hostConfig({bool withPlugins = true}) {
+      final config = Directory('${home.path}/.config/opencode');
+      config.createSync(recursive: true);
+      File('${config.path}/opencode.jsonc').writeAsStringSync(
+        '{\n  "model": "test"\n}\n',
+      );
+      File('${config.path}/service.json').writeAsStringSync('{}\n');
+      if (withPlugins) {
+        Directory('${config.path}/plugins').createSync();
+        File('${config.path}/plugins/p.txt').writeAsStringSync('plugin\n');
+      }
+    }
+
+    void checkoutEnv() {
+      File('${checkout.path}/.env').writeAsStringSync('A=1\n');
+      File('${checkout.path}/.env.local').writeAsStringSync('B=2\n');
+      File('${checkout.path}/.env.example').writeAsStringSync('EXAMPLE\n');
+    }
+
+    test(
+      'create runs the full bridge-owned sequence and returns the descriptor',
+      () async {
+        checkoutEnv();
+        hostConfig();
+
+        // The real local server the descriptor verification hits (the fake
+        // inspect scripts the ephemeral host port at it).
+        const password = 'pw-secret-123';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        var requests = 0;
+        http.listen((request) {
+          requests++;
+          final auth = request.headers.value('authorization') ?? '';
+          request.response.statusCode = auth ==
+                  'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
+              ? 200
+              : 401;
+          unawaited(request.response.close());
+        });
+        final port = http.port;
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+        docker.logs = 'server password $password\nlistening on 0.0.0.0:4096\n';
+
+        final record = await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        );
+        await http.close(force: true);
+
+        // The descriptor verified exactly once, with the Basic auth.
+        expect(requests, 1);
+        expect(record.url, 'http://127.0.0.1:$port');
+        expect(record.state, 'running');
+
+        final create = docker.runArgs.firstWhere((a) => a.first == 'create');
+        final container = create[2];
+        final id = container.substring('orb-'.length);
+        final createdIndex = create.indexWhere(
+          (element) => element.startsWith('ocb.created='),
+        );
+        expect(createdIndex, isNonNegative);
+        final created = create[createdIndex];
+        final actualCreate = List.of(create)
+          ..[createdIndex] = 'ocb.created=*';
+        expect(
+          actualCreate,
+          [
+            'create',
+            '--name',
+            container,
+            '-p',
+            '127.0.0.1:0:${OrbService.inContainerPort}',
+            '--add-host',
+            'host.docker.internal:10.1.2.3',
+            '-v',
+            '${home.path}/.ssh:/root/.ssh:ro',
+            '-v',
+            '${home.path}/.config/gh:/root/.config/gh:ro',
+            '-v',
+            'orb-$id-workspace:/workspace',
+            '-v',
+            'orb-$id-data:/var/lib/orb-data',
+            '-v',
+            '${stateRoot.path}/$id:/root/.local',
+            '-e',
+            'ORB_ID=$id',
+            '-e',
+            'ORB_REPO_URL=https://github.com/acme/app.git',
+            '-e',
+            'ORB_GIT_NAME=Lhomme Aymeric',
+            '-e',
+            'ORB_GIT_EMAIL=aymeric@example.com',
+            '-l',
+            'ocb.orb=true',
+            '-l',
+            'ocb.id=$id',
+            '-l',
+            'ocb.name=dev',
+            '-l',
+            'ocb.project=proj-1',
+            '-l',
+            'ocb.branch=orb/$id',
+            '-l',
+            'ocb.created=*',
+            builder.expectedTag,
+          ],
+        );
+
+        // The state dir exists (the bind mount) and the volumes are labeled.
+        expect(Directory('${stateRoot.path}/$id').existsSync(), isTrue);
+        for (final suffix in const ['workspace', 'data']) {
+          final volume = docker.runArgs.firstWhere(
+            (a) =>
+                a.first == 'volume' && a[3] == 'orb-$id-$suffix',
+          );
+          final volumeCreated = volume.indexWhere(
+            (element) => element.startsWith('ocb.created='),
+          );
+          final actualVolume = List.of(volume)
+            ..[volumeCreated] = 'ocb.created=*';
+          expect(
+            actualVolume,
+            [
+              'volume',
+              'create',
+              '--name',
+              'orb-$id-$suffix',
+              '--label',
+              'ocb.orb=true',
+              '--label',
+              'ocb.id=$id',
+              '--label',
+              'ocb.name=dev',
+              '--label',
+              'ocb.project=proj-1',
+              '--label',
+              'ocb.branch=orb/$id',
+              '--label',
+              'ocb.created=*',
+            ],
+          );
+        }
+
+        // The `.env*` injection: `.env` + `.env.*`, never `*.example`.
+        final copies =
+            docker.runArgs.where((a) => a.first == 'cp').toList();
+        expect(
+          copies,
+          containsAll([
+            [
+              'cp',
+              '${checkout.path}/.env',
+              '$container:/workspace/.env',
+            ],
+            [
+              'cp',
+              '${checkout.path}/.env.local',
+              '$container:/workspace/.env.local',
+            ],
+          ]),
+        );
+        expect(
+          copies.where((a) => a.last.contains('.example')),
+          isEmpty,
+        );
+
+        // The host opencode config, staged outside the per-orb state dir
+        // (the state dir is bind-mounted into the container), the bridge
+        // URL injected, the service descriptor never copied.
+        final staged = '${stateRoot.path}/staged-$id';
+        final stagedConfig = File('$staged/opencode.jsonc');
+        expect(stagedConfig.existsSync(), isTrue);
+        final configText = stagedConfig.readAsStringSync();
+        expect(
+          configText,
+          contains('"bridgeUrl": "http://host.docker.internal:48201"'),
+        );
+        expect(configText, contains('"model": "test"'));
+        expect(File('$staged/service.json').existsSync(), isFalse);
+        expect(File('$staged/plugins/p.txt').existsSync(), isTrue);
+        // The staged entries ride in per TOP-LEVEL entry: a directory copy
+        // (the whole subtree in one `docker cp`) — a per-file copy would
+        // fail in the created (not started) container where the parent
+        // directory does not exist yet.
+        expect(
+          copies,
+          containsAll([
+            [
+              'cp',
+              '$staged/opencode.jsonc',
+              '$container:/root/.config/opencode/opencode.jsonc',
+            ],
+            [
+              'cp',
+              '$staged/plugins',
+              '$container:/root/.config/opencode/plugins',
+            ],
+          ]),
+        );
+        expect(
+          copies.where((a) => a.length > 2 && a[2].contains('plugins/')),
+          isEmpty,
+        );
+        expect(
+          copies.where((a) => a.last.contains('service.json')),
+          isEmpty,
+        );
+        // Copy-if-exists: no host auth.json on this fake host.
+        expect(
+          copies.where((a) => a.last.endsWith('auth.json')),
+          isEmpty,
+        );
+
+        // The start, and the boot wait's follow stream (killed at the end).
+        expect(docker.runArgs, containsAll([['start', container]]));
+        expect(docker.spawnArgs, [['logs', '--follow', container]]);
+        expect(docker.spawned, hasLength(1));
+        expect(docker.spawned[0].killed, isTrue);
+
+        // The record carries the full label set (no password, ADR-0001).
+        expect(record.id, id);
+        expect(record.name, 'dev');
+        expect(record.project, 'proj-1');
+        expect(record.branch, 'orb/$id');
+        expect(record.created, created.substring('ocb.created='.length));
+
+        // The up-front refusals ran before the image ensure: the run order
+        // is ps, image inspect, the two volumes, create, the cps, start.
+        final firstRun = docker.runArgs.take(5).toList();
+        expect(firstRun.first.first, 'ps');
+        expect(firstRun[1], ['image', 'inspect', builder.expectedTag]);
+        expect(
+          firstRun.where((a) => a.first == 'volume').length,
+          2,
+        );
+      },
+    );
+
+    test('the host auth.json is copied in when it exists', () async {
+      hostConfig(withPlugins: false);
+      File('${home.path}/.local/share/opencode/auth.json')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{}\n');
+      const password = 'pw';
+      final http = await HttpServer.bind('127.0.0.1', 0);
+      http.listen((request) {
+        request.response.statusCode = 200;
+        unawaited(request.response.close());
+      });
+      final port = http.port;
+      docker.ports =
+          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+      docker.logs = 'server password $password\n';
+
+      await service().create(
+        project: 'proj-1',
+        name: 'dev',
+        checkout: checkout.path,
+      );
+      await http.close(force: true);
+
+      final container =
+          docker.runArgs.firstWhere((a) => a.first == 'create')[2];
+      expect(
+        docker.runArgs.where((a) => a.first == 'cp'),
+        containsAll([
+          [
+            'cp',
+            '${home.path}/.local/share/opencode/auth.json',
+            '$container:/root/.local/share/opencode/auth.json',
+          ],
+        ]),
+      );
+    });
+
+    test('the boot streams orb.boot events', () async {
+      final events = <Map<String, Object?>>[];
+      hostConfig(withPlugins: false);
+      const password = 'pw';
+      final http = await HttpServer.bind('127.0.0.1', 0);
+      http.listen((request) {
+        request.response.statusCode = 200;
+        unawaited(request.response.close());
+      });
+      final port = http.port;
+      docker.ports =
+          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+      docker.logs = 'server password $password\n';
+      final child = _FakeProcess();
+      docker.processes.add(child);
+
+      final pending = service(
+        emit: (payload) => events
+            .add(jsonDecode(payload) as Map<String, Object?>),
+      ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+      await _until(() => docker.spawnArgs.isNotEmpty);
+      child.stdout.add('cloning the remote');
+      child.stderr.add('fetch origin');
+      child.exit(0);
+      final record = await pending;
+      await http.close(force: true);
+
+      expect(events, isNotEmpty);
+      for (final event in events) {
+        expect(event['type'], 'orb.boot');
+      }
+      expect(
+        events.map((e) => e['data']),
+        containsAll([
+          {'id': record.id, 'line': 'cloning the remote'},
+          {'id': record.id, 'line': 'fetch origin'},
+        ]),
+      );
+    });
+
+    test('a name taken in the project is refused before anything else',
+        () async {
+      docker.psResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'other\ndev\n',
+        stderr: '',
+      );
+
+      await expectLater(
+        service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbNameTakenError>()
+              .having((e) => e.project, 'project', 'proj-1')
+              .having((e) => e.name, 'name', 'dev'),
+        ),
+      );
+      expect(docker.runArgs, [
+        [
+          'ps',
+          '-a',
+          '--filter',
+          'label=ocb.orb=true',
+          '--filter',
+          'label=ocb.project=proj-1',
+          '--format',
+          '{{.Label "ocb.name"}}',
+        ],
+      ]);
+      expect(docker.spawnArgs, isEmpty);
+      expect(git.args, isEmpty);
+    });
+
+    test('a project with no remote is refused', () async {
+      git.results['remote get-url origin'] = const GitCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'error: No remote named origin',
+      );
+
+      await expectLater(
+        service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.noRemote,
+          ),
+        ),
+      );
+      expect(docker.runArgs, hasLength(1)); // The name-taken ps only.
+    });
+
+    test('a non-GitHub remote is refused', () async {
+      git.results['remote get-url origin'] = const GitCliResult(
+        exitCode: 0,
+        stdout: 'https://gitlab.com/acme/app.git\n',
+        stderr: '',
+      );
+
+      await expectLater(
+        service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.nonGithubRemote,
+          ),
+        ),
+      );
+      expect(docker.runArgs, hasLength(1));
+    });
+
+    test('a missing host git identity is refused', () async {
+      git.results['config user.name'] = const GitCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'fatal: no such config',
+      );
+
+      await expectLater(
+        service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.missingGitIdentity,
+          ),
+        ),
+      );
+      expect(docker.runArgs, hasLength(1));
+    });
+
+    test('a container exiting during boot is an OrbBootError with the tail',
+        () async {
+      docker.stateResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'exited\n',
+        stderr: '',
+      );
+      docker.logs = 'cloning the remote\nfatal: repository not found\n';
+
+      await expectLater(
+        service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbBootError>()
+              .having(
+                (e) => e.detail,
+                'detail',
+                'the orb container exited during boot',
+              )
+              .having(
+                (e) => e.logTail,
+                'logTail',
+                ['cloning the remote', 'fatal: repository not found'],
+              ),
+        ),
+      );
+      expect(docker.spawned[0].killed, isTrue);
+    });
+
+    test('a boot that never comes up times out', () async {
+      docker.logs = 'starting...'; // No `server password` line, ever.
+
+      await expectLater(
+        service(
+          bootTimeout: const Duration(milliseconds: 300),
+        ).create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbBootError>().having(
+            (e) => e.detail,
+            'detail',
+            startsWith('the orb did not come up within'),
+          ),
+        ),
+      );
+      expect(docker.spawned[0].killed, isTrue);
+    });
+
+    test('a descriptor that does not accept yet is retried until it does',
+        () async {
+      const password = 'pw';
+      final http = await HttpServer.bind('127.0.0.1', 0);
+      var requests = 0;
+      http.listen((request) {
+        requests++;
+        // The first hit is refused (the server not accepting yet); after
+        // it, the auth verifies.
+        final accept = requests > 1;
+        final auth = request.headers.value('authorization') ?? '';
+        request.response.statusCode =
+            accept &&
+                auth ==
+                    'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
+                ? 200
+                : 401;
+        unawaited(request.response.close());
+      });
+      final port = http.port;
+      docker.ports =
+          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+      docker.logs = 'server password $password\n';
+
+      final record = await service().create(
+        project: 'proj-1',
+        name: 'dev',
+        checkout: checkout.path,
+      );
+      await http.close(force: true);
+
+      expect(requests, greaterThan(1));
+      expect(record.url, 'http://127.0.0.1:$port');
+    });
+
+    test('list composes running, stopped, broken, and orphan rows', () async {
+      const created = '2026-11-04T00:00:00.000Z';
+      String labels(String id, String name) => jsonEncode({
+            'ocb.orb': 'true',
+            'ocb.id': id,
+            'ocb.name': name,
+            'ocb.project': 'p1',
+            'ocb.branch': 'orb/$id',
+            'ocb.created': created,
+          });
+
+      const a = 'aaaaaaaaaaaaaaaa';
+      const b = 'bbbbbbbbbbbbbbbb';
+      const c = 'cccccccccccccccc';
+      const d = 'dddddddddddddddd';
+      const e = 'eeeeeeeeeeeeeeee';
+      docker.psResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-$a\norb-$b\norb-$c\norb-$d\n',
+        stderr: '',
+      );
+      docker.containerLabelsResult = DockerCliResult(
+        exitCode: 0,
+        stdout:
+            '${labels(a, 'dev')}\n${labels(b, 'beta')}\n'
+            '${labels(c, 'gamma')}\n${labels(d, 'delta')}\n',
+        stderr: '',
+      );
+      docker.stateResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'running\nstopped\nstopped\nstopped\n',
+        stderr: '',
+      );
+      docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"39999"}]}\nnull\nnull\nnull\n';
+      // c has no workspace volume (broken:workspace), d has its volumes but
+      // its state dir is removed (broken:state), e's volumes have no
+      // container (orphan), b's state dir exists (clean stopped).
+      docker.volumeLsResult = DockerCliResult(
+        exitCode: 0,
+        stdout:
+            'orb-$a-workspace\norb-$a-data\norb-$b-workspace\norb-$b-data\n'
+            'orb-$d-workspace\norb-$d-data\norb-$e-workspace\norb-$e-data\n',
+        stderr: '',
+      );
+      docker.volumeInspectResult = DockerCliResult(
+        exitCode: 0,
+        stdout: [
+          for (final (id, name) in [
+            (a, 'dev'),
+            (a, 'dev'),
+            (b, 'beta'),
+            (b, 'beta'),
+            (d, 'delta'),
+            (d, 'delta'),
+            (e, 'epsilon'),
+            (e, 'epsilon'),
+          ])
+            labels(id, name),
+        ].join('\n'),
+        stderr: '',
+      );
+      Directory('${stateRoot.path}/$b').createSync(recursive: true);
+
+      final rows = await service().list();
+
+      expect(
+        rows,
+        [
+          OrbRecord(
+            id: a,
+            name: 'dev',
+            project: 'p1',
+            branch: 'orb/$a',
+            state: 'running',
+            created: created,
+            url: 'http://127.0.0.1:39999',
+          ),
+          OrbRecord(
+            id: b,
+            name: 'beta',
+            project: 'p1',
+            branch: 'orb/$b',
+            state: 'stopped',
+            created: created,
+          ),
+          OrbRecord(
+            id: c,
+            name: 'gamma',
+            project: 'p1',
+            branch: 'orb/$c',
+            state: 'broken:workspace',
+            created: created,
+          ),
+          OrbRecord(
+            id: d,
+            name: 'delta',
+            project: 'p1',
+            branch: 'orb/$d',
+            state: 'broken:state',
+            created: created,
+          ),
+          OrbRecord(
+            id: e,
+            name: 'epsilon',
+            project: 'p1',
+            branch: 'orb/$e',
+            state: 'orphan',
+            created: created,
+          ),
+        ],
+      );
+    });
+
+    test('an empty host is an empty list', () async {
+      expect(await service().list(), isEmpty);
+    });
+
+    test('a daemon failure is a DockerUnavailableError', () async {
+      docker.psResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'Cannot connect to the Docker daemon',
+      );
+
+      await expectLater(
+        service().list(),
+        throwsA(isA<DockerUnavailableError>()),
+      );
+    });
+
+    test('lastServerPassword takes the last line, or null', () {
+      expect(
+        OrbService.lastServerPassword(
+          'a\nserver password one\nserver password two\n',
+        ),
+        'two',
+      );
+      expect(OrbService.lastServerPassword('nothing here'), isNull);
+    });
+
+    test('isGitHubRemote accepts the GitHub remote forms only', () {
+      expect(
+        OrbService.isGitHubRemote('https://github.com/acme/app.git'),
+        isTrue,
+      );
+      expect(
+        OrbService.isGitHubRemote('http://github.com/acme/app.git'),
+        isTrue,
+      );
+      expect(
+        OrbService.isGitHubRemote('git@github.com:acme/app.git'),
+        isTrue,
+      );
+      expect(
+        OrbService.isGitHubRemote('ssh://git@github.com/acme/app.git'),
+        isTrue,
+      );
+      expect(
+        OrbService.isGitHubRemote('https://gitlab.com/acme/app.git'),
+        isFalse,
+      );
+      expect(
+        OrbService.isGitHubRemote('git@gitlab.com:acme/app.git'),
+        isFalse,
+      );
+      expect(OrbService.isGitHubRemote(''), isFalse);
+    });
+  });
+}

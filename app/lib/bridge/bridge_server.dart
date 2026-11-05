@@ -35,6 +35,7 @@ import 'tunnel/tunnel_setup.dart';
 import 'tunnel/tunnel_supervisor.dart';
 import 'orb/orb_build_context.dart';
 import 'orb/orb_image_builder.dart';
+import 'orb/orb_service.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
@@ -52,6 +53,7 @@ class BridgeServer {
     this._speed,
     this._docker,
     this._orb,
+    this._orbs,
     this._tunnel,
     this._tunnelSetupService,
     this._dockerLogKeepAlive,
@@ -127,6 +129,11 @@ class BridgeServer {
   /// onto the unified event stream.
   static const String orbImageRebuildPath = '/api/orb/image/rebuild';
 
+  /// The orbs (issue #93): `GET` composes the orb list from the `ocb.*`
+  /// labels (spec §2.2); `POST` creates one — the body is
+  /// `{"project": "<project id>", "name": "<orb name>"}` (spec §2.3).
+  static const String orbsPath = '/api/orbs';
+
   // The structured view's `/` command menu, global commands (issue #46).
   // Each is a thin pass-through of a shared-service endpoint; the service is
   // the single source of truth, so the effect is reflected live in any
@@ -195,6 +202,20 @@ class BridgeServer {
   /// endpoint reports `docker_unavailable`.
   final OrbImageBuilder? _orb;
 
+  /// The orb create/list service (issue #93): the bridge-owned creation
+  /// sequence (spec §2.3) and the label-composed list (spec §2.2); `null`
+  /// when this machine has no docker CLI, no git CLI, or no image builder,
+  /// in which case the orbs endpoints report `docker_unavailable`.
+  final OrbService? _orbs;
+
+  /// The listener on the host's docker-bridge address (spec §8.5): orb
+  /// containers reach the bridge as `http://host.docker.internal:<port>`,
+  /// which `--add-host` maps to that address (not loopback). `null` when
+  /// the bind is unneeded (loopback/0.0.0.0) or failed (degraded mode: the
+  /// loopback app is unaffected, the containers just cannot reach the
+  /// bridge).
+  HttpServer? _hostServer;
+
   /// The tunnel supervisor (issue #22, ADR-0002); `null` when this bridge
   /// does not run a tunnel, in which case the tunnel endpoints report
   /// `not_configured`.
@@ -240,6 +261,9 @@ class BridgeServer {
   /// (issue #92, tests); the default materializes the embedded build context
   /// into the app-owned dir (create-if-missing) and builds an
   /// [OrbImageBuilder] over the host docker CLI.
+  /// [orbs], when provided, serves the orbs create/list endpoints (issue
+  /// #93, tests); the default builds an [OrbService] over the host docker
+  /// and git CLIs, the orb state under `~/.config/opencodebridge/orbs`.
   /// [tunnel], when provided, is the cloudflared child the bridge
   /// supervises (issue #22); it is started here, after the port is bound,
   /// so a port conflict (a second server-mode instance) fails before any
@@ -273,6 +297,7 @@ class BridgeServer {
     LlamaSpeedFeed? speedFeed,
     DockerBackend? docker,
     OrbImageBuilder? orb,
+    OrbService? orbs,
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor)? tunnelSetup,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
@@ -289,6 +314,8 @@ class BridgeServer {
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
     final orbBuilder = orb ?? await BridgeServer._defaultOrb(eventHub?.emit);
+    final orbService =
+        orbs ?? await BridgeServer._defaultOrbs(orbBuilder, eventHub?.emit);
     NotifyService? notifyService;
     PushDispatcher? pushDispatcher;
     if (notify != null) {
@@ -319,6 +346,7 @@ class BridgeServer {
       speed,
       dockerBackend,
       orbBuilder,
+      orbService,
       tunnelSupervisor,
       tunnelSetupService,
       dockerLogKeepAlive,
@@ -330,6 +358,7 @@ class BridgeServer {
       await tunnelSupervisor.start();
     }
     server.listen(bridge._route);
+    await bridge._listenOnHostIp();
     return bridge;
   }
 
@@ -346,11 +375,31 @@ class BridgeServer {
       _events,
       _docker,
       _orb,
+      _orbs,
       _tunnel,
       _tunnelSetupService,
       _dockerLogKeepAlive,
       _notify,
     );
+  }
+
+  /// The host-IP listener (spec §8.5): the bridge additionally listens on
+  /// the host's docker-bridge address (the `docker0` interface's address)
+  /// at the same port, because the orb containers reach it as
+  /// `http://host.docker.internal:<port>` and `--add-host` maps that name
+  /// to this address — the loopback bind never covers it. A bind failure
+  /// is degraded mode: the loopback app is unaffected, the containers just
+  /// cannot reach the bridge.
+  Future<void> _listenOnHostIp() async {
+    final host = await hostDockerHostIp();
+    if (host == loopbackHost || host == '0.0.0.0') return;
+    try {
+      final hostServer = await HttpServer.bind(host, _server.port);
+      _hostServer = hostServer;
+      hostServer.listen(_route);
+    } catch (_) {
+      // Degraded mode: the loopback listener serves the app as usual.
+    }
   }
 
   /// The default push dispatch (issue #24): the Firebase service account
@@ -439,6 +488,7 @@ class BridgeServer {
 
   Future<void> stop() async {
     await _server.close(force: true);
+    await _hostServer?.close(force: true);
     await _events?.close();
     await _speed?.close();
     await _docker?.close();
@@ -525,6 +575,33 @@ class BridgeServer {
       context: context,
       run: cli.run,
       spawn: cli.spawn,
+      emit: emit,
+    );
+  }
+
+  /// The default orb create/list service (issue #93): the host docker CLI
+  /// (the creation sequence's commands) and the host git CLI (the remote
+  /// probe and the identity read), the host user's home (the mounted
+  /// `~/.ssh`/`~/.config/gh`, the opencode config+auth source), and the
+  /// state root `~/.config/opencodebridge/orbs`. Returns `null` when this
+  /// machine has no docker CLI, no git CLI, or no image builder, in which
+  /// case the orbs endpoints report `docker_unavailable`.
+  static Future<OrbService?> _defaultOrbs(
+    OrbImageBuilder? builder,
+    void Function(String)? emit,
+  ) async {
+    final cli = DockerBackend.hostCli();
+    final gitBinary = findHostGit();
+    if (cli == null || gitBinary == null || builder == null) return null;
+    final home = homeDirectory();
+    return OrbService(
+      imageBuilder: builder,
+      run: cli.run,
+      spawn: cli.spawn,
+      git: hostGitRunner(gitBinary),
+      home: home,
+      stateRoot: Directory('$home/.config/opencodebridge/orbs'),
+      bridgePort: defaultPort,
       emit: emit,
     );
   }
@@ -700,6 +777,7 @@ class BridgeServer {
     EventHub? events,
     DockerBackend? docker,
     OrbImageBuilder? orb,
+    OrbService? orbs,
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor) tunnelSetup,
     Duration dockerLogKeepAlive,
@@ -801,6 +879,19 @@ class BridgeServer {
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.orbImageRebuildPath) {
         await BridgeServer._handleOrbImageRebuild(request, orb);
+        return;
+      }
+      // The orbs (issue #93): `POST` creates, `GET` composes the list.
+      // Checked before the session matchers (a bare list path would
+      // otherwise read as a session id to them).
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbsPath) {
+        await BridgeServer._handleOrbCreate(request, sessions, orbs);
+        return;
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == BridgeServer.orbsPath) {
+        await BridgeServer._handleOrbList(request, orbs);
         return;
       }
       // The tunnel endpoints (issue #22), checked before the session matchers
@@ -2232,6 +2323,108 @@ class BridgeServer {
     } on OrbImageBuildError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'docker_build_failed'}));
+    }
+    await response.close();
+  }
+
+  /// The orb create (issue #93, spec §2.3): the body's project id resolves
+  /// to the project's canonical checkout (the `.env*` source and the git
+  /// remote probe), then the full bridge-owned creation sequence runs,
+  /// waiting for the boot. The service password is derived and verified
+  /// internally (ADR-0001 — it never rides the bridge); the 201 record
+  /// carries the ephemeral-URL descriptor.
+  static Future<void> _handleOrbCreate(
+    HttpRequest request,
+    SessionsBackend? sessions,
+    OrbService? orbs,
+  ) async {
+    final response = request.response;
+    if (orbs == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final body = await BridgeServer._jsonBody(request);
+    final projectId = BridgeServer._stringField(body, 'project');
+    final name = BridgeServer._stringField(body, 'name');
+    if (projectId == null || name == null) {
+      await BridgeServer._invalidBody(response);
+      return;
+    }
+    OpencodeProject? project;
+    try {
+      final projects = await sessions.projects();
+      for (final candidate in projects) {
+        if (candidate.id == projectId) {
+          project = candidate;
+          break;
+        }
+      }
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+      await response.close();
+      return;
+    }
+    if (project == null) {
+      BridgeServer._notFound(response);
+      return;
+    }
+    try {
+      final record = await orbs.create(
+        project: projectId,
+        name: name,
+        checkout: project.canonical,
+      );
+      response.statusCode = HttpStatus.created;
+      response.write(jsonEncode(record.toJson()));
+    } on OrbNameTakenError {
+      response.statusCode = HttpStatus.conflict;
+      response.write(jsonEncode({'error': 'name_taken', 'name': name}));
+    } on OrbRefusalError catch (e) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': e.code, 'details': e.message}));
+    } on OrbBootError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({
+        'error': 'orb_boot_failed',
+        'details': e.detail,
+        'logTail': e.logTail,
+      }));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OrbImageBuildError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_build_failed'}));
+    }
+    await response.close();
+  }
+
+  /// The orb list (issue #93, spec §2.2): composed from the `ocb.*` labels
+  /// (no registry file) — the labeled containers (running with their
+  /// ephemeral URL, or stopped/broken) plus the labeled volumes without a
+  /// container (orphans).
+  static Future<void> _handleOrbList(
+    HttpRequest request,
+    OrbService? orbs,
+  ) async {
+    final response = request.response;
+    if (orbs == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      final rows = await orbs.list();
+      response.statusCode = HttpStatus.ok;
+      response.write(
+        jsonEncode([for (final row in rows) row.toJson()]),
+      );
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
     }
     await response.close();
   }

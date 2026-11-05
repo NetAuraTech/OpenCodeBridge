@@ -44,10 +44,13 @@ ARG TYPESENSE_VERSION=28.1
 ARG MAILHOG_VERSION=1.2.0
 ARG GIT_VERSION=2.43
 ARG OPENCODE_VERSION=2.1.4
+ARG GH_VERSION=2.103.3
 
-# --- System packages: build tools + php + git -----------------------------
+# --- System packages: build tools + php + git + ssh ------------------------
 # build-essential/libc6-dev/make back the redis source build (below); the
-# rest are runtime deps of the pinned toolchains.
+# rest are runtime deps of the pinned toolchains. openssh-client backs the
+# entrypoint's git-over-ssh and its `ssh-keyscan` host-key fallback (spec §4,
+# issue #93) — without it an orb cannot authenticate to an ssh remote.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -57,6 +60,7 @@ RUN set -eux; \
         git \
         libc6-dev \
         make \
+        openssh-client \
         php${PHP_VERSION}-cli \
         php${PHP_VERSION}-common \
         php${PHP_VERSION}-mbstring \
@@ -79,6 +83,17 @@ RUN set -eux; \
 RUN set -eux; \
     npm install -g --no-audit --no-fund "@opencode/cli@${OPENCODE_VERSION}"; \
     opencode --version;
+
+# --- gh (GitHub CLI, official release tarball, exact version; issue #93):
+# the container-local credential helper (`gh auth git-credential`) backs the
+# orb's git push — spec §4 — so the orb image needs it like it needs git.
+RUN set -eux; \
+    curl -fsSL -o /tmp/gh.tar.gz \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    install /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz /tmp/gh_${GH_VERSION}_linux_amd64; \
+    gh --version;
 
 # --- flutter (SDK pinned to a git tag) ------------------------------------
 ENV FLUTTER_ROOT=/opt/flutter \
@@ -144,27 +159,90 @@ RUN set -eux; \
     pg_config --version | grep -q "PostgreSQL ${POSTGRES_VERSION}"; \
     typesense-server --version | grep -q "${TYPESENSE_VERSION}"; \
     mailhog -version | grep -qi "${MAILHOG_VERSION}"; \
-    opencode --version | grep -qi "v${OPENCODE_VERSION}\|${OPENCODE_VERSION}";
+    opencode --version | grep -qi "v${OPENCODE_VERSION}\|${OPENCODE_VERSION}"; \
+    gh --version | grep -q "gh version ${GH_VERSION}";
 
 ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
 ''';
 
-  /// The container entrypoint. A placeholder for this ticket: #92 owns the
-  /// image pipeline, and the real boot prep (first-start clone/hook/
-  /// installers, the local services, the health gate — spec §6) is owned by
-  /// #82, which replaces this body in place. Until then it just starts
-  /// opencode's server so an orb can come up.
+  /// The container entrypoint (issue #93, spec §6.1–§6.3): the first-start
+  /// boot prep (clone the project remote into the fresh workspace, install
+  /// the `orb/<id>` post-commit hook, write the container-local gitconfig),
+  /// then start opencode's server on the fixed in-container port
+  /// (spec §2.9 — opencode's default, 4096). The installers, the local
+  /// services, and the health gate are #94's and will extend this file in
+  /// place (scripts-as-config, spec §6.6).
+  ///
+  /// The env the bridge passes at `docker create` (spec §2.3): `ORB_ID`
+  /// (the orb id, which the hook bakes into its push refspec),
+  /// `ORB_REPO_URL` (the project's GitHub remote url, spec §4),
+  /// `ORB_GIT_NAME`/`ORB_GIT_EMAIL` (the host's git identity, copied verbatim
+  /// — ADR-0001, the app never sees the values).
+  ///
+  /// The bridge injects the `.env*` files into the created (not yet started)
+  /// container's workspace before `docker start`, so the first-start clone
+  /// has to tolerate a non-empty `/workspace` (git does, once it owns the
+  /// `.git` directory).
   static const String _entrypoint = r'''
 #!/bin/sh
-# Orb container entrypoint (placeholder — issue #92).
+# Orb container entrypoint (issue #93).
 #
-# #92 delivers the base-image pipeline: the Dockerfile, the materialized
-# build context, the `orb:<hash>` tag, and the build. The real entrypoint —
-# the first-start clone/hook/installers, the local services, and the health
-# gate (spec §6) — is owned by #82 and will replace this file in place
-# (scripts-as-config, spec §6.6). Until then it just starts opencode's
-# server on the fixed in-container port (spec §2.9; opencode's default).
+# Boot prep, in order (spec §6.1–§6.3):
+#   1. first start only: clone the project remote into the workspace and
+#      install the `orb/<id>` post-commit hook;
+#   2. every start: the container-local gitconfig (identity + the gh
+#      credential helper — spec §4), and the SSH known-hosts fallback;
+#   3. serve opencode on the fixed in-container port (spec §2.9).
+# The installers, the local services, and the health gate are #94's: they
+# will extend this file in place (scripts-as-config, spec §6.6).
 set -eu
-exec opencode serve
+
+# --- 1. First start only: clone + hook -----------------------------------
+if [ ! -d /workspace/.git ]; then
+    git init /workspace
+    git -C /workspace remote add origin "$ORB_REPO_URL"
+    git -C /workspace fetch origin
+    git -C /workspace remote set-head origin -a
+    # -f: the bridge may already have injected `.env*` files into the
+    # (non-empty) workspace before the start.
+    git -C /workspace checkout -f "$(git -C /workspace symbolic-ref --short refs/remotes/origin/HEAD)"
+    hook=/workspace/.git/hooks/post-commit
+    printf '%s\n' \
+        '#!/bin/sh' \
+        "git push origin HEAD:refs/heads/orb/${ORB_ID}" \
+        > "$hook"
+    chmod +x "$hook"
+fi
+
+# --- 2. Every start: the container-local gitconfig (spec §4) --------------
+# Container-local only: the host's gitconfig is never copied in, and the
+# values are re-asserted on every start so a restart never carries a stale
+# identity. The credential helper is the host's form (gh is installed in
+# the image), scoped to the GitHub hosts only.
+git config --global user.name "$ORB_GIT_NAME"
+git config --global user.email "$ORB_GIT_EMAIL"
+git config --global --unset-all credential.https://github.com.helper || true
+git config --global --add "credential.https://github.com.helper" '!gh auth git-credential'
+git config --global --unset-all credential.https://gist.github.com.helper || true
+git config --global --add "credential.https://gist.github.com.helper" '!gh auth git-credential'
+
+# --- SSH fallback (spec §4) ------------------------------------------------
+# The mounted `~/.ssh` is read-only, so a `github.com` entry missing there
+# cannot be added in place: seed the container-local copy (in the orb state
+# mount, so it persists) and point git's ssh at it — only when the mounted
+# file lacks github, so entries for other hosts stay usable from the mount.
+state_ssh=/root/.local/orb-ssh
+if ! grep -q "github.com" /root/.ssh/known_hosts 2>/dev/null; then
+    mkdir -p "$state_ssh"
+    if ! grep -q "github.com" "$state_ssh/known_hosts" 2>/dev/null; then
+        ssh-keyscan github.com >> "$state_ssh/known_hosts" 2>/dev/null || true
+    fi
+    export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$state_ssh/known_hosts -o StrictHostKeyChecking=yes"
+fi
+
+# --- 3. Serve opencode (spec §2.9) -----------------------------------------
+# 0.0.0.0: the container is only reachable through the docker port mapping,
+# which binds to the container's network address, never loopback.
+exec opencode serve --hostname 0.0.0.0 --port 4096
 ''';
 }
