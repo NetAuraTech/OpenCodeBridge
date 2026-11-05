@@ -442,7 +442,9 @@ void main() {
       late int status;
       late String body;
       try {
-        final request = await client.getUrl(base.replace(path: 'api/orbs', query: 'pr=1'));
+        final request = await client.getUrl(
+          base.replace(path: 'api/orbs', query: 'pr=1'),
+        );
         final response = await request.close();
         status = response.statusCode;
         body = await response.transform(const Utf8Decoder()).join();
@@ -512,14 +514,16 @@ void main() {
       await server.stop();
     });
 
-    test('204 when the orphan is cleaned; the id is the path segment',
-        () async {
-      final (status, body) = await _delete(base, 'api/orbs/eeee');
+    test(
+      '204 when the orphan is cleaned; the id is the path segment',
+      () async {
+        final (status, body) = await _delete(base, 'api/orbs/eeee');
 
-      expect(status, 204);
-      expect(body, '');
-      expect(orbs.deleteOrphanId, 'eeee');
-    });
+        expect(status, 204);
+        expect(body, '');
+        expect(orbs.deleteOrphanId, 'eeee');
+      },
+    );
 
     test('a live container is 409 orb_exists', () async {
       orbs.deleteOrphanError = const OrbExistsError('eeee');
@@ -540,9 +544,7 @@ void main() {
     });
 
     test('a daemon failure is 502 docker_unreachable', () async {
-      orbs.deleteOrphanError = const DockerUnavailableError(
-        'Cannot connect',
-      );
+      orbs.deleteOrphanError = const DockerUnavailableError('Cannot connect');
 
       final (status, body) = await _delete(base, 'api/orbs/eeee');
 

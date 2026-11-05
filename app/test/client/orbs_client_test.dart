@@ -242,29 +242,31 @@ void main() {
               .having((e) => e.statusCode, 'statusCode', HttpStatus.badGateway)
               .having((e) => e.code, 'code', OrbCreateError.bootFailed)
               .having((e) => e.details, 'details', 'the container exited')
-              .having(
-                (e) => e.logTail,
-                'logTail',
-                ['[orb] stage: cloning', 'fatal: bad url'],
-              ),
+              .having((e) => e.logTail, 'logTail', [
+                '[orb] stage: cloning',
+                'fatal: bad url',
+              ]),
         ),
       );
     });
 
-    test('decodes a 503 refusal as a create error with the wire code', () async {
-      await expectLater(
-        client.create('p1', 'unavailable'),
-        throwsA(
-          isA<OrbCreateError>()
-              .having(
-                (e) => e.statusCode,
-                'statusCode',
-                HttpStatus.serviceUnavailable,
-              )
-              .having((e) => e.code, 'code', 'docker_unavailable'),
-        ),
-      );
-    });
+    test(
+      'decodes a 503 refusal as a create error with the wire code',
+      () async {
+        await expectLater(
+          client.create('p1', 'unavailable'),
+          throwsA(
+            isA<OrbCreateError>()
+                .having(
+                  (e) => e.statusCode,
+                  'statusCode',
+                  HttpStatus.serviceUnavailable,
+                )
+                .having((e) => e.code, 'code', 'docker_unavailable'),
+          ),
+        );
+      },
+    );
   });
 
   group('OrbsClient rebuild', () {

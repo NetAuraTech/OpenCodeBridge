@@ -329,11 +329,7 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
   /// the sheet) so closing the sheet mid-boot keeps the creation alive. The
   /// bridge mints the orb id, so the set of known ids is captured now, at
   /// POST time — the first `orb.boot` event for an unknown id is the new orb.
-  void _startCreation(
-    _OrbCreation creation,
-    String projectId,
-    String name,
-  ) {
+  void _startCreation(_OrbCreation creation, String projectId, String name) {
     final client = _client;
     if (client == null) return;
     final rows = _orbs;
@@ -432,7 +428,9 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
     try {
       final tag = await client.rebuildImage();
       if (mounted) {
-        _snackBar(tag.isEmpty ? 'Image rebuild finished.' : 'Image rebuilt: $tag');
+        _snackBar(
+          tag.isEmpty ? 'Image rebuild finished.' : 'Image rebuilt: $tag',
+        );
       }
     } catch (_) {
       if (mounted) _snackBar('Could not rebuild the image.');
@@ -483,30 +481,32 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: Row(
-                    children: [
-                      TextButton.icon(
-                        key: const ValueKey('orbs-rebuild'),
-                        onPressed: _rebuildBusy ? null : _rebuildImage,
-                        icon: _rebuildBusy
-                            ? const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.system_update_alt, size: 18),
-                        label: _rebuildBusy
-                            ? const Text('Rebuilding…')
-                            : const Text('Rebuild image'),
-                      ),
-                      const Spacer(),
-                      Text(
-                        'Shared base image',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Theme.of(context).colorScheme.outline,
+                      children: [
+                        TextButton.icon(
+                          key: const ValueKey('orbs-rebuild'),
+                          onPressed: _rebuildBusy ? null : _rebuildImage,
+                          icon: _rebuildBusy
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.system_update_alt, size: 18),
+                          label: _rebuildBusy
+                              ? const Text('Rebuilding…')
+                              : const Text('Rebuild image'),
                         ),
-                      ),
-                    ],
+                        const Spacer(),
+                        Text(
+                          'Shared base image',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Theme.of(context).colorScheme.outline,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -517,11 +517,12 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
                   )
                 else
                   SliverPadding(
-                    padding: const EdgeInsets.symmetric(horizontal: _gridPadding),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: _gridPadding,
+                    ),
                     sliver: SliverGrid(
                       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount:
-                            crossAxisCount < 1 ? 1 : crossAxisCount,
+                        crossAxisCount: crossAxisCount < 1 ? 1 : crossAxisCount,
                         crossAxisSpacing: _gridPadding,
                         mainAxisSpacing: _gridPadding,
                         mainAxisExtent: _cardHeight,
@@ -673,9 +674,7 @@ class _OrbCard extends StatelessWidget {
                       orb.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),
                   if (orb.pr?.isOpen == true && orb.pr!.url.isNotEmpty) ...[
@@ -727,9 +726,9 @@ class _OrbCard extends StatelessWidget {
                 spacing: 4,
                 runSpacing: 2,
                 crossAxisAlignment: WrapCrossAlignment.center,
-                children: _actions(orb, scheme).map(
-                  (action) => _ActionButton(action: action, orb: orb),
-                ).toList(),
+                children: _actions(orb, scheme)
+                    .map((action) => _ActionButton(action: action, orb: orb))
+                    .toList(),
               ),
             ],
           ),
@@ -816,10 +815,7 @@ class _ActionButton extends StatelessWidget {
       child: Text(action.label),
     );
     if (action.enabled) return button;
-    return Tooltip(
-      message: 'Lands in ${action.ticket}',
-      child: button,
-    );
+    return Tooltip(message: 'Lands in ${action.ticket}', child: button);
   }
 }
 
@@ -1101,10 +1097,8 @@ class _NewOrbSheetState extends State<_NewOrbSheet> {
                     key: ValueKey('orb-project-${project.id}'),
                     label: Text(project.name),
                     selected: widget.creation.projectId == project.id,
-                    onSelected: (_) => widget.creation.selectProject(
-                      project.id,
-                      project.name,
-                    ),
+                    onSelected: (_) =>
+                        widget.creation.selectProject(project.id, project.name),
                   ),
               ],
             ),
@@ -1188,19 +1182,12 @@ class _NewOrbSheetState extends State<_NewOrbSheet> {
     return Column(
       children: [
         const SizedBox(height: 12),
-        const Icon(
-          Icons.check_circle,
-          size: 40,
-          color: Colors.green,
-        ),
+        const Icon(Icons.check_circle, size: 40, color: Colors.green),
         const SizedBox(height: 12),
         Text(
           '${record?.name ?? creation.name} is up',
           textAlign: TextAlign.center,
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-          ),
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
         ),
         if (record != null) ...[
           const SizedBox(height: 4),
@@ -1231,7 +1218,9 @@ class _NewOrbSheetState extends State<_NewOrbSheet> {
   Widget _failed(_OrbCreation creation) {
     final error = creation.error;
     final message = error?.details ?? creation.failure;
-    final lines = creation.logLines.isEmpty ? error?.logTail ?? const <String>[] : creation.logLines;
+    final lines = creation.logLines.isEmpty
+        ? error?.logTail ?? const <String>[]
+        : creation.logLines;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

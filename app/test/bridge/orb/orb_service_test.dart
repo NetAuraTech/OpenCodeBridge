@@ -814,7 +814,8 @@ void main() {
       docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"39999"}]}\nnull\nnull\nnull\n';
       // a's full log carries the password line, so it is `running` (not
       // `preparing`).
-      docker.containerLogs['orb-$a'] = '[orb] stage: ready\nserver password pw\n';
+      docker.containerLogs['orb-$a'] =
+          '[orb] stage: ready\nserver password pw\n';
       // c has no workspace volume (broken:workspace), d has its volumes but
       // its state dir is removed (broken:state), e's volumes have no
       // container (orphan), b's state dir exists (clean stopped).
@@ -891,69 +892,71 @@ void main() {
       ]);
     });
 
-    test('list marks a not-yet-booted container as preparing with the stage',
-        () async {
-      const created = '2026-11-04T00:00:00.000Z';
-      String labels(String id, String name) => jsonEncode({
-        'ocb.orb': 'true',
-        'ocb.id': id,
-        'ocb.name': name,
-        'ocb.project': 'p1',
-        'ocb.branch': 'orb/$id',
-        'ocb.created': created,
-      });
+    test(
+      'list marks a not-yet-booted container as preparing with the stage',
+      () async {
+        const created = '2026-11-04T00:00:00.000Z';
+        String labels(String id, String name) => jsonEncode({
+          'ocb.orb': 'true',
+          'ocb.id': id,
+          'ocb.name': name,
+          'ocb.project': 'p1',
+          'ocb.branch': 'orb/$id',
+          'ocb.created': created,
+        });
 
-      const a = 'aaaaaaaaaaaaaaaa';
-      const b = 'bbbbbbbbbbbbbbbb';
-      docker.psResult = const DockerCliResult(
-        exitCode: 0,
-        stdout: 'orb-$a\norb-$b\n',
-        stderr: '',
-      );
-      docker.containerLabelsResult = DockerCliResult(
-        exitCode: 0,
-        stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
-        stderr: '',
-      );
-      // a was created but never started; b is running but its boot is
-      // still in flight (no `server password` line yet, last stage
-      // `installing`).
-      docker.stateResult = const DockerCliResult(
-        exitCode: 0,
-        stdout: 'created\nrunning\n',
-        stderr: '',
-      );
-      docker.ports = 'null\nnull\n';
-      docker.containerLogs['orb-$b'] =
-          '[orb] stage: cloning\n[orb] stage: installing\n';
-      docker.volumeLsResult = DockerCliResult(
-        exitCode: 0,
-        stdout:
-            'orb-$a-workspace\norb-$a-data\norb-$b-workspace\norb-$b-data\n',
-        stderr: '',
-      );
+        const a = 'aaaaaaaaaaaaaaaa';
+        const b = 'bbbbbbbbbbbbbbbb';
+        docker.psResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-$a\norb-$b\n',
+          stderr: '',
+        );
+        docker.containerLabelsResult = DockerCliResult(
+          exitCode: 0,
+          stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
+          stderr: '',
+        );
+        // a was created but never started; b is running but its boot is
+        // still in flight (no `server password` line yet, last stage
+        // `installing`).
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'created\nrunning\n',
+          stderr: '',
+        );
+        docker.ports = 'null\nnull\n';
+        docker.containerLogs['orb-$b'] =
+            '[orb] stage: cloning\n[orb] stage: installing\n';
+        docker.volumeLsResult = DockerCliResult(
+          exitCode: 0,
+          stdout:
+              'orb-$a-workspace\norb-$a-data\norb-$b-workspace\norb-$b-data\n',
+          stderr: '',
+        );
 
-      final rows = await service().list();
+        final rows = await service().list();
 
-      expect(rows, [
-        const OrbRecord(
-          id: a,
-          name: 'dev',
-          project: 'p1',
-          branch: 'orb/$a',
-          state: 'preparing',
-          created: created,
-        ),
-        const OrbRecord(
-          id: b,
-          name: 'beta',
-          project: 'p1',
-          branch: 'orb/$b',
-          state: 'preparing:installing',
-          created: created,
-        ),
-      ]);
-    });
+        expect(rows, [
+          const OrbRecord(
+            id: a,
+            name: 'dev',
+            project: 'p1',
+            branch: 'orb/$a',
+            state: 'preparing',
+            created: created,
+          ),
+          const OrbRecord(
+            id: b,
+            name: 'beta',
+            project: 'p1',
+            branch: 'orb/$b',
+            state: 'preparing:installing',
+            created: created,
+          ),
+        ]);
+      },
+    );
 
     test('list with includePr enriches the rows with their PR', () async {
       const created = '2026-11-04T00:00:00.000Z';
@@ -994,20 +997,19 @@ void main() {
       );
 
       final gh = _FakeGh();
-      gh.results[
-        'pr view orb/$a --repo acme/app --json state,url'
-      ] = const GitCliResult(
-        exitCode: 0,
-        stdout: '{"state":"OPEN","url":"https://github.com/acme/app/pull/7"}',
-        stderr: '',
-      );
-      gh.results[
-        'pr view orb/$b --repo acme/app --json state,url'
-      ] = const GitCliResult(
-        exitCode: 1,
-        stdout: '',
-        stderr: 'no pull requests found',
-      );
+      gh.results['pr view orb/$a --repo acme/app --json state,url'] =
+          const GitCliResult(
+            exitCode: 0,
+            stdout:
+                '{"state":"OPEN","url":"https://github.com/acme/app/pull/7"}',
+            stderr: '',
+          );
+      gh.results['pr view orb/$b --repo acme/app --json state,url'] =
+          const GitCliResult(
+            exitCode: 1,
+            stdout: '',
+            stderr: 'no pull requests found',
+          );
 
       final rows = await service(
         gh: gh.run,
@@ -1022,10 +1024,7 @@ void main() {
           branch: 'orb/$a',
           state: 'running',
           created: created,
-          pr: OrbPr(
-            state: 'open',
-            url: 'https://github.com/acme/app/pull/7',
-          ),
+          pr: OrbPr(state: 'open', url: 'https://github.com/acme/app/pull/7'),
         ),
         const OrbRecord(
           id: b,
@@ -1227,10 +1226,7 @@ void main() {
         OrbService.githubRepo('ssh://git@github.com/acme/app.git'),
         'acme/app',
       );
-      expect(
-        OrbService.githubRepo('https://gitlab.com/acme/app.git'),
-        isNull,
-      );
+      expect(OrbService.githubRepo('https://gitlab.com/acme/app.git'), isNull);
       expect(OrbService.githubRepo('https://github.com/'), isNull);
       expect(OrbService.githubRepo('github.com/acme/app'), isNull);
       expect(OrbService.githubRepo(''), isNull);

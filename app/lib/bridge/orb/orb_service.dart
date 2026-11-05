@@ -82,7 +82,8 @@ String? findHostGh({String? path}) {
 
 /// The host gh CLI's [GhRunner] seam: the same host invocation the default
 /// [OrbService] uses for the PR-state read.
-GhRunner hostGhRunner(String binary) => (argv) => _hostGhRun(binary, argv);
+GhRunner hostGhRunner(String binary) =>
+    (argv) => _hostGhRun(binary, argv);
 
 /// The host's docker-bridge address (spec §8.5): the `docker0` interface's
 /// address — the host's endpoint of the default bridge network the orb
@@ -452,9 +453,7 @@ class OrbService {
           i < portLines.length ? portLines[i] : '',
         );
         if (record == null) continue;
-        rows.add(
-          await _withPreparingState(containerNames[i], status, record),
-        );
+        rows.add(await _withPreparingState(containerNames[i], status, record));
         ids.add(record.id);
       }
     }
@@ -527,10 +526,9 @@ class OrbService {
     // row without PR state.
     if (includePr) {
       final prs = await Future.wait([for (final row in rows) _prFor(row)]);
-      rows.setAll(
-        0,
-        [for (var i = 0; i < rows.length; i++) _withPr(rows[i], prs[i])],
-      );
+      rows.setAll(0, [
+        for (var i = 0; i < rows.length; i++) _withPr(rows[i], prs[i]),
+      ]);
     }
     return rows;
   }
@@ -553,7 +551,10 @@ class OrbService {
       if (lastServerPassword(log) != null) return record;
     }
     final stage = lastStage(log);
-    return _replacedState(record, stage == null ? 'preparing' : 'preparing:$stage');
+    return _replacedState(
+      record,
+      stage == null ? 'preparing' : 'preparing:$stage',
+    );
   }
 
   /// The PR of [record]'s branch (issue #96): `gh pr view` for the head ref

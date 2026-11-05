@@ -683,10 +683,11 @@ class BridgeServer {
               }
               if (project == null) return null;
               try {
-                final result = await git(
-                  ['remote', 'get-url', 'origin'],
-                  workingDirectory: project.canonical,
-                );
+                final result = await git([
+                  'remote',
+                  'get-url',
+                  'origin',
+                ], workingDirectory: project.canonical);
                 if (result.exitCode != 0) return null;
                 return OrbService.githubRepo(result.stdout.trim());
               } catch (_) {

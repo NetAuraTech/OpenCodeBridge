@@ -11,11 +11,7 @@ import 'package:opencodebridge/model/project.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/ui/orbs_tab.dart';
 
-const _project = Project(
-  id: 'p1',
-  name: 'app',
-  canonical: '/code/app',
-);
+const _project = Project(id: 'p1', name: 'app', canonical: '/code/app');
 
 const _running = OrbRecord(
   id: 'orb_1',
@@ -267,11 +263,14 @@ class _FakeEventsSource implements EventSource {
   }
 }
 
-Future<({
-  _FakeOrbsClient orbs,
-  _FakeSessionsClient sessions,
-  _FakeEventsSource events,
-})> _pumpTab(
+Future<
+  ({
+    _FakeOrbsClient orbs,
+    _FakeSessionsClient sessions,
+    _FakeEventsSource events,
+  })
+>
+_pumpTab(
   WidgetTester tester, {
   List<OrbRecord> orbs = const [],
   List<Session> sessionRows = const [],
@@ -333,9 +332,12 @@ Future<void> _submitWizard(WidgetTester tester, String name) async {
 /// How many action buttons the card of [orbId] carries.
 int _actionsOf(WidgetTester tester, String orbId) => find
     .byWidgetPredicate(
-      (w) => w.key is ValueKey &&
+      (w) =>
+          w.key is ValueKey &&
           (w.key as ValueKey).value is String &&
-          ((w.key as ValueKey).value as String).startsWith('orb-action-$orbId-'),
+          ((w.key as ValueKey).value as String).startsWith(
+            'orb-action-$orbId-',
+          ),
     )
     .evaluate()
     .length;
@@ -456,8 +458,9 @@ void main() {
         );
       });
 
-      testWidgets('a broken:workspace card carries Force delete', (tester)
-          async {
+      testWidgets('a broken:workspace card carries Force delete', (
+        tester,
+      ) async {
         await _pumpTab(tester, orbs: [_brokenWorkspace]);
         expect(_actionsOf(tester, 'orb_4'), 1);
         expect(
@@ -466,33 +469,30 @@ void main() {
         );
       });
 
-      testWidgets(
-        'a broken:state card carries Force delete and Fresh state',
-        (tester) async {
-          await _pumpTab(tester, orbs: [_brokenState]);
-          expect(_actionsOf(tester, 'orb_5'), 2);
-          expect(
-            find.byKey(const ValueKey('orb-action-orb_5-Force delete')),
-            findsOneWidget,
-          );
-          expect(
-            find.byKey(const ValueKey('orb-action-orb_5-Fresh state')),
-            findsOneWidget,
-          );
-        },
-      );
+      testWidgets('a broken:state card carries Force delete and Fresh state', (
+        tester,
+      ) async {
+        await _pumpTab(tester, orbs: [_brokenState]);
+        expect(_actionsOf(tester, 'orb_5'), 2);
+        expect(
+          find.byKey(const ValueKey('orb-action-orb_5-Force delete')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('orb-action-orb_5-Fresh state')),
+          findsOneWidget,
+        );
+      });
 
-      testWidgets(
-        'preparing and cleanup-pending cards carry no actions',
-        (tester) async {
-          await _pumpTab(tester, orbs: [_preparing, _cleanupPending]);
-          expect(_actionsOf(tester, 'orb_2'), 0);
-          expect(_actionsOf(tester, 'orb_7'), 0);
-        },
-      );
+      testWidgets('preparing and cleanup-pending cards carry no actions', (
+        tester,
+      ) async {
+        await _pumpTab(tester, orbs: [_preparing, _cleanupPending]);
+        expect(_actionsOf(tester, 'orb_2'), 0);
+        expect(_actionsOf(tester, 'orb_7'), 0);
+      });
 
-      testWidgets('an orphan card carries an enabled Clean up', (tester)
-          async {
+      testWidgets('an orphan card carries an enabled Clean up', (tester) async {
         await _pumpTab(tester, orbs: [_orphan]);
         final button = tester.widget<TextButton>(
           find.byKey(const ValueKey('orb-action-orb_6-Clean up')),
@@ -502,28 +502,31 @@ void main() {
     });
 
     group('orphan cleanup', () {
-      testWidgets(
-        'Clean up confirms, then deletes, reloads and reports',
-        (tester) async {
-          final tab = await _pumpTab(tester, orbs: [_orphan]);
+      testWidgets('Clean up confirms, then deletes, reloads and reports', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_orphan]);
 
-          await tester.tap(find.byKey(const ValueKey('orb-action-orb_6-Clean up')));
-          await tester.pumpAndSettle();
-          expect(find.text('Clean up the orphan?'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_6-Clean up')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Clean up the orphan?'), findsOneWidget);
 
-          await tester.tap(find.byKey(const ValueKey('orb-clean-confirm')));
-          await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('orb-clean-confirm')));
+        await tester.pumpAndSettle();
 
-          expect(tab.orbs.deleted, ['orb_6']);
-          expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
-          expect(find.text('Orphan cleaned up.'), findsOneWidget);
-        },
-      );
+        expect(tab.orbs.deleted, ['orb_6']);
+        expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
+        expect(find.text('Orphan cleaned up.'), findsOneWidget);
+      });
 
       testWidgets('cancelling the confirm keeps the orphan', (tester) async {
         final tab = await _pumpTab(tester, orbs: [_orphan]);
 
-        await tester.tap(find.byKey(const ValueKey('orb-action-orb_6-Clean up')));
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_6-Clean up')),
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.text('Cancel'));
         await tester.pumpAndSettle();
@@ -536,7 +539,9 @@ void main() {
         final tab = await _pumpTab(tester, orbs: [_orphan]);
         tab.orbs.deleteError = const OrbsClientError(409, 'orb_exists');
 
-        await tester.tap(find.byKey(const ValueKey('orb-action-orb_6-Clean up')));
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_6-Clean up')),
+        );
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const ValueKey('orb-clean-confirm')));
         await tester.pumpAndSettle();
@@ -571,8 +576,9 @@ void main() {
     });
 
     group('states', () {
-      testWidgets('without a bridge the tab points at Settings', (tester)
-          async {
+      testWidgets('without a bridge the tab points at Settings', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           const MaterialApp(home: OrbsTab(apiBase: null)),
         );
@@ -584,26 +590,27 @@ void main() {
         );
       });
 
-      testWidgets('a bridge that cannot list orbs shows the error with a retry', (
-        tester,
-      ) async {
-        final tab = await _pumpTab(
-          tester,
-          listError: const OrbsClientError(503, 'docker_unavailable'),
-        );
+      testWidgets(
+        'a bridge that cannot list orbs shows the error with a retry',
+        (tester) async {
+          final tab = await _pumpTab(
+            tester,
+            listError: const OrbsClientError(503, 'docker_unavailable'),
+          );
 
-        expect(
-          find.text('The bridge could not list orbs (status 503).'),
-          findsOneWidget,
-        );
+          expect(
+            find.text('The bridge could not list orbs (status 503).'),
+            findsOneWidget,
+          );
 
-        // The bridge is back: the retry reloads the (empty) list.
-        tab.orbs.listError = null;
-        await tester.tap(find.byKey(const ValueKey('orbs-retry')));
-        await tester.pump();
+          // The bridge is back: the retry reloads the (empty) list.
+          tab.orbs.listError = null;
+          await tester.tap(find.byKey(const ValueKey('orbs-retry')));
+          await tester.pump();
 
-        expect(find.text('No orbs yet.'), findsOneWidget);
-      });
+          expect(find.text('No orbs yet.'), findsOneWidget);
+        },
+      );
 
       testWidgets('an empty list shows the empty state', (tester) async {
         await _pumpTab(tester);
@@ -612,8 +619,9 @@ void main() {
     });
 
     group('create-orb wizard (spec §9.3)', () {
-      testWidgets('the FAB opens the form with the project chips', (tester)
-          async {
+      testWidgets('the FAB opens the form with the project chips', (
+        tester,
+      ) async {
         await _pumpTab(tester, projects: [_project]);
 
         await _openWizard(tester);
@@ -653,14 +661,14 @@ void main() {
         );
         await tester.tap(find.byKey(const ValueKey('create-orb')));
         await tester.pump();
-        expect(
-          find.text('Keep the name under 40 characters.'),
-          findsOneWidget,
-        );
+        expect(find.text('Keep the name under 40 characters.'), findsOneWidget);
         expect(tab.orbs.createdRequests, isEmpty);
 
         // A valid name fires the POST and the sheet stays on the boot.
-        await tester.enterText(find.byKey(const ValueKey('orb-name')), 'worker');
+        await tester.enterText(
+          find.byKey(const ValueKey('orb-name')),
+          'worker',
+        );
         await tester.tap(find.byKey(const ValueKey('create-orb')));
         await tester.pump();
         expect(tab.orbs.createdRequests, [('p1', 'worker')]);
@@ -716,8 +724,9 @@ void main() {
         },
       );
 
-      testWidgets('the ready phase lands on the created record', (tester)
-          async {
+      testWidgets('the ready phase lands on the created record', (
+        tester,
+      ) async {
         final tab = await _pumpTab(
           tester,
           orbs: [_running],
@@ -739,60 +748,59 @@ void main() {
         expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
       });
 
-      testWidgets(
-        'a name refusal lands on the failed phase with its details',
-        (tester) async {
-          final tab = await _pumpTab(tester, projects: [_project]);
-          final gate = Completer<void>();
-          tab.orbs.createGate = gate;
-          tab.orbs.createError = const OrbCreateError(
-            statusCode: 409,
-            code: OrbCreateError.nameTaken,
-            details: 'An orb named "worker" already exists.',
-          );
+      testWidgets('a name refusal lands on the failed phase with its details', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, projects: [_project]);
+        final gate = Completer<void>();
+        tab.orbs.createGate = gate;
+        tab.orbs.createError = const OrbCreateError(
+          statusCode: 409,
+          code: OrbCreateError.nameTaken,
+          details: 'An orb named "worker" already exists.',
+        );
 
-          await _openWizard(tester);
-          await _submitWizard(tester, 'worker');
+        await _openWizard(tester);
+        await _submitWizard(tester, 'worker');
 
-          gate.complete();
-          await tester.pumpAndSettle();
+        gate.complete();
+        await tester.pumpAndSettle();
 
-          expect(find.text('The orb could not be created.'), findsOneWidget);
-          expect(
-            find.text('An orb named "worker" already exists.'),
-            findsOneWidget,
-          );
-          expect(find.byKey(const ValueKey('orb-failed-close')), findsOneWidget);
-        },
-      );
+        expect(find.text('The orb could not be created.'), findsOneWidget);
+        expect(
+          find.text('An orb named "worker" already exists.'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('orb-failed-close')), findsOneWidget);
+      });
 
-      testWidgets(
-        'a failed boot lands on the failed phase with its log tail',
-        (tester) async {
-          final tab = await _pumpTab(tester, projects: [_project]);
-          final gate = Completer<void>();
-          tab.orbs.createGate = gate;
-          tab.orbs.createError = const OrbCreateError(
-            statusCode: 502,
-            code: OrbCreateError.bootFailed,
-            details: 'the container exited',
-            logTail: ['[orb] stage: cloning', 'fatal: bad url'],
-          );
+      testWidgets('a failed boot lands on the failed phase with its log tail', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, projects: [_project]);
+        final gate = Completer<void>();
+        tab.orbs.createGate = gate;
+        tab.orbs.createError = const OrbCreateError(
+          statusCode: 502,
+          code: OrbCreateError.bootFailed,
+          details: 'the container exited',
+          logTail: ['[orb] stage: cloning', 'fatal: bad url'],
+        );
 
-          await _openWizard(tester);
-          await _submitWizard(tester, 'worker');
+        await _openWizard(tester);
+        await _submitWizard(tester, 'worker');
 
-          gate.complete();
-          await tester.pumpAndSettle();
+        gate.complete();
+        await tester.pumpAndSettle();
 
-          expect(find.text('The orb could not be created.'), findsOneWidget);
-          expect(find.text('the container exited'), findsOneWidget);
-          expect(find.text('fatal: bad url'), findsOneWidget);
-        },
-      );
+        expect(find.text('The orb could not be created.'), findsOneWidget);
+        expect(find.text('the container exited'), findsOneWidget);
+        expect(find.text('fatal: bad url'), findsOneWidget);
+      });
 
-      testWidgets('closing the sheet mid-boot lets the boot finish', (tester)
-          async {
+      testWidgets('closing the sheet mid-boot lets the boot finish', (
+        tester,
+      ) async {
         final tab = await _pumpTab(
           tester,
           orbs: [_running],
@@ -818,8 +826,7 @@ void main() {
         expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
       });
 
-      testWidgets('a failed project list degrades the picker', (tester)
-          async {
+      testWidgets('a failed project list degrades the picker', (tester) async {
         await _pumpTab(
           tester,
           projects: [_project],

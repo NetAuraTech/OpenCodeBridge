@@ -742,7 +742,11 @@ void main() {
       testWidgets('an orb session row wears a chip with the orb name', (
         tester,
       ) async {
-        await _pumpTab(tester, rows: [_orbOne], orbs: _FakeOrbsClient(orbs: [orb]));
+        await _pumpTab(
+          tester,
+          rows: [_orbOne],
+          orbs: _FakeOrbsClient(orbs: [orb]),
+        );
 
         expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsOneWidget);
         expect(find.text('api-orb'), findsOneWidget);
@@ -751,31 +755,36 @@ void main() {
       testWidgets('a host session row wears a muted host label, no chip', (
         tester,
       ) async {
-        await _pumpTab(tester, rows: [_one], orbs: _FakeOrbsClient(orbs: [orb]));
+        await _pumpTab(
+          tester,
+          rows: [_one],
+          orbs: _FakeOrbsClient(orbs: [orb]),
+        );
 
         expect(find.byKey(const ValueKey('host-ses_1')), findsOneWidget);
         expect(find.text('host'), findsOneWidget);
         expect(find.byKey(const ValueKey('orb-chip-ses_1')), findsNothing);
       });
 
-      testWidgets('tapping the chip reports the orb id and does not open the row', (
-        tester,
-      ) async {
-        final tapped = <String>[];
-        await _pumpTab(
-          tester,
-          rows: [_orbOne],
-          orbs: _FakeOrbsClient(orbs: [orb]),
-          onOrbChipTapped: tapped.add,
-        );
+      testWidgets(
+        'tapping the chip reports the orb id and does not open the row',
+        (tester) async {
+          final tapped = <String>[];
+          await _pumpTab(
+            tester,
+            rows: [_orbOne],
+            orbs: _FakeOrbsClient(orbs: [orb]),
+            onOrbChipTapped: tapped.add,
+          );
 
-        await tester.tap(find.byKey(const ValueKey('orb-chip-orb_1')));
-        await tester.pump();
+          await tester.tap(find.byKey(const ValueKey('orb-chip-orb_1')));
+          await tester.pump();
 
-        expect(tapped, ['orb_1']);
-        // The chip swallows the tap: the structured view did not open.
-        expect(find.text('working in the orb'), findsOneWidget);
-      });
+          expect(tapped, ['orb_1']);
+          // The chip swallows the tap: the structured view did not open.
+          expect(find.text('working in the orb'), findsOneWidget);
+        },
+      );
 
       testWidgets('a chip falls back to the orb id when the orb is gone', (
         tester,
