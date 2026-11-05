@@ -136,7 +136,7 @@ RUN set -eux; \
     [ "$(cat /tmp/typesense-server.md5.txt)" = "$(md5sum /tmp/typesense-server | cut -d' ' -f1)" ]; \
     install /tmp/typesense-server /usr/local/bin/typesense-server; \
     rm -rf /tmp/typesense.tar.gz /tmp/typesense-server /tmp/typesense-server.md5.txt; \
-    typesense-server --version;
+    typesense-server 2>&1 | grep -q "Typesense ${TYPESENSE_VERSION}";
 
 # --- mailhog (official release binary, exact version) ---------------------
 RUN set -eux; \
@@ -163,7 +163,7 @@ RUN set -eux; \
     "${FLUTTER_ROOT}/bin/flutter" --version | grep -q "${FLUTTER_VERSION}"; \
     redis-server --version | grep -q "version=${REDIS_VERSION}"; \
     pg_config --version | grep -q "PostgreSQL ${POSTGRES_VERSION}"; \
-    typesense-server --version | grep -q "${TYPESENSE_VERSION}"; \
+    typesense-server 2>&1 | grep -q "Typesense ${TYPESENSE_VERSION}"; \
     mailhog -version | grep -qi "${MAILHOG_VERSION}"; \
     opencode --version | grep -qi "v${OPENCODE_VERSION}\|${OPENCODE_VERSION}"; \
     gh --version | grep -q "gh version ${GH_VERSION}";
