@@ -972,6 +972,13 @@ class OrbService {
     final staged = await _stageConfig(id);
     await _copyStagedConfig(container, staged);
     await _copyAuth(container);
+    // The in-container service mints a fresh `server password` on every
+    // start (spec §7.1) and the container log keeps the lines of every
+    // previous boot: count them before the start so the boot wait skips
+    // them and verifies only against the password this start mints
+    // (a first poll racing the new line would otherwise pin the stale
+    // one and fail verification for the whole boot timeout).
+    final stalePasswords = countServerPasswords(await _fullLog(container));
     await _runOrThrow(['start', container]);
     // The boot wait: the follow stream (live `orb.boot` events) and the
     // poll loop that re-reads and verifies the descriptor (§7.1).
@@ -979,7 +986,12 @@ class OrbService {
     final tail = <String>[];
     _streamBootLines(id, logProcess, tail);
     try {
-      final (url, password) = await _waitForBoot(id, container, tail);
+      final (url, password) = await _waitForBoot(
+        id,
+        container,
+        tail,
+        skipPasswords: stalePasswords,
+      );
       await _removeStoppedMarker(id);
       return OrbRecord(
         id: id,
@@ -1187,9 +1199,6 @@ class OrbService {
         u.startsWith('ssh://git@github.com/');
   }
 
-  /// The password of the last `server password <pw>` line of [log] (spec
-  /// §7.1: every start/respawn generates a new password — the last line
-  /// wins), or `null` when the log has none.
   /// The current `server password` of orb [id]: the last `server password`
   /// line of its container log (spec §7.1: the password is re-derived at
   /// every start — the last line wins on a respawn). `null` when the
@@ -1202,16 +1211,40 @@ class OrbService {
     }
   }
 
-  static String? lastServerPassword(String log) {
+  /// The password of the last `server password <pw>` line of [log] (spec
+  /// §7.1: every start/respawn generates a new password — the last line
+  /// wins), or `null` when the log has none.
+  static String? lastServerPassword(String log) =>
+      lastServerPasswordAfter(log, 0);
+
+  /// The password of the last `server password <pw>` line of [log] after
+  /// skipping the first [skip] password lines (spec §7.1: every start
+  /// mints a fresh password — a wake re-reads a log that already holds
+  /// the passwords of every previous boot, so the wait for the new boot
+  /// takes only the lines after them), or `null` when none remain.
+  static String? lastServerPasswordAfter(String log, int skip) {
     String? password;
+    var seen = 0;
     for (final line in const LineSplitter().convert(log)) {
       const prefix = 'server password ';
       if (line.startsWith(prefix)) {
+        seen++;
+        if (seen <= skip) continue;
         final pw = line.substring(prefix.length).trim();
         if (pw.isNotEmpty) password = pw;
       }
     }
     return password;
+  }
+
+  /// The number of `server password` lines in [log] (the boots already
+  /// recorded in a container log — the wake skips them).
+  static int countServerPasswords(String log) {
+    var count = 0;
+    for (final line in const LineSplitter().convert(log)) {
+      if (line.startsWith('server password ')) count++;
+    }
+    return count;
   }
 
   /// The last boot stage word of [log] (the entrypoint's
@@ -1469,11 +1502,16 @@ class OrbService {
     process.stderr.listen(line, onError: (Object _) {});
   }
 
+  /// [skipPasswords] is the number of `server password` lines the log
+  /// already held before this boot (a wake re-starts a container whose
+  /// log keeps every previous boot's password — only the line this start
+  /// mints is the one to verify with).
   Future<(String url, String password)> _waitForBoot(
     String id,
     String container,
-    List<String> tail,
-  ) async {
+    List<String> tail, {
+    int skipPasswords = 0,
+  }) async {
     final deadline = DateTime.now().add(bootTimeout);
     String? password;
     int? port;
@@ -1495,7 +1533,10 @@ class OrbService {
         );
       }
       if (state == 'running') {
-        password ??= lastServerPassword(await _fullLog(container));
+        password ??= lastServerPasswordAfter(
+          await _fullLog(container),
+          skipPasswords,
+        );
         if (password != null && port == null) {
           port = await _hostPort(id, container);
         }

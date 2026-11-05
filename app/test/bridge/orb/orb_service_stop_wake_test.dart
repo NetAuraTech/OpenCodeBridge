@@ -72,7 +72,10 @@ class _Row {
   /// the log); `false` scripts a boot that never completes.
   final bool bootable;
 
-  /// The password the boot logs (the move's import picks it up).
+  /// The password the first boot logs; every later `docker start` mints a
+  /// fresh one (`<password>-<boot number>`) — the in-container service
+  /// re-derives the password at every start (spec §7.1), and the log
+  /// keeps the lines of every boot.
   final String password = 'pw-orb-1';
 
   /// The ephemeral port a `docker start` re-maps to (the wake's port
@@ -169,7 +172,19 @@ class _FakeDocker {
         row.state = 'running';
         row.port = row.restartPort ?? row.port ?? 49321;
         if (row.bootable) {
-          row.log += 'server password ${row.password}\n';
+          // The in-container service mints a fresh password on every
+          // start, and the line lands in the log only once the service
+          // is up — after the start returns, so the boot wait's first
+          // poll can race it (the stale-line trap).
+          final bootNumber = OrbService.countServerPasswords(row.log) + 1;
+          final minted = bootNumber == 1
+              ? row.password
+              : '${row.password}-$bootNumber';
+          unawaited(
+            Future<void>.delayed(const Duration(milliseconds: 1), () {
+              row.log += 'server password $minted\n';
+            }),
+          );
         }
         return ok;
       case 'cp':
@@ -966,6 +981,50 @@ void main() {
         expect(docker.spawned, hasLength(1));
         expect(docker.spawned[0].killed, isTrue);
       });
+
+      test(
+        'verifies against the password this start mints, not the stale '
+        'line of a previous boot (a fresh password per start, spec §7.1)',
+        () async {
+          final freshAuth =
+              'Basic ${base64.encode(utf8.encode('opencode:pw-orb-1-2'))}';
+          final auths = <String>[];
+          final http = await HttpServer.bind('127.0.0.1', 0);
+          http.listen((request) {
+            final auth = request.headers.value('authorization') ?? '';
+            auths.add(auth);
+            request.response.statusCode = auth == freshAuth ? 200 : 401;
+            unawaited(request.response.close());
+          });
+          final port = http.port;
+          final row = addOrb(state: 'exited', restartPort: port);
+          // The log already holds the first boot's password line (a real
+          // container log keeps every boot's lines).
+          expect(row.log, 'server password pw-orb-1\n');
+          stateDir();
+          setMarker();
+          hostConfig();
+          File('${home.path}/.local/share/opencode/auth.json')
+            ..createSync(recursive: true)
+            ..writeAsStringSync('{}\n');
+
+          final record = await service(
+            checkoutFor: (projectId) async => checkout.path,
+            bootTimeout: const Duration(seconds: 5),
+          ).wake(orbId);
+          await http.close(force: true);
+
+          expect(record.state, 'running');
+          expect(record.url, 'http://127.0.0.1:$port');
+          expect(markerPresent(), isFalse);
+          // Every descriptor verification authenticated with the fresh
+          // password (boot 2) — never the stale first-boot one, which
+          // the server rejects (a stale pin 401s for the whole boot
+          // timeout: the orb_boot_failed the smoke test hit).
+          expect(auths, isNotEmpty);
+          expect(auths, everyElement(freshAuth));
+        },
+      );
 
       test(
         'is a no-op while the orb is running (no start, no marker work)',
