@@ -40,8 +40,8 @@ ARG PHP_VERSION=8.3
 ARG FLUTTER_VERSION=3.47.8
 ARG REDIS_VERSION=7.4.0
 ARG POSTGRES_VERSION=16
-ARG TYPESENSE_VERSION=28.1
-ARG MAILHOG_VERSION=1.2.0
+ARG TYPESENSE_VERSION=28.0
+ARG MAILHOG_VERSION=1.0.1
 ARG GIT_VERSION=2.43
 ARG OPENCODE_VERSION=2.1.4
 ARG GH_VERSION=2.103.3
@@ -125,12 +125,17 @@ http://apt.postgresql.org/pub/repos/apt noble-pgdg main" \
     rm -rf /var/lib/apt/lists/*;
 
 # --- typesense (official static binary, exact version) --------------------
+# Official release tarball on dl.typesense.org, with the pinned md5
+# verified before install: a tampered or wrong-version binary fails the
+# build.
 RUN set -eux; \
     curl -fsSL -o /tmp/typesense.tar.gz \
-        "https://download.typesense.org/typesense-typesense-v${TYPESENSE_VERSION}-linux-amd64.tar.gz"; \
-    tar -xzf /tmp/typesense.tar.gz -C /usr/local/bin \
-        typesense-server typesense-analyzers; \
-    rm /tmp/typesense.tar.gz; \
+        "https://dl.typesense.org/releases/${TYPESENSE_VERSION}/typesense-server-${TYPESENSE_VERSION}-linux-amd64.tar.gz"; \
+    tar -xzf /tmp/typesense.tar.gz -C /tmp \
+        typesense-server typesense-server.md5.txt; \
+    [ "$(cat /tmp/typesense-server.md5.txt)" = "$(md5sum /tmp/typesense-server | cut -d' ' -f1)" ]; \
+    install /tmp/typesense-server /usr/local/bin/typesense-server; \
+    rm -rf /tmp/typesense.tar.gz /tmp/typesense-server /tmp/typesense-server.md5.txt; \
     typesense-server --version;
 
 # --- mailhog (official release binary, exact version) ---------------------

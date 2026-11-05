@@ -89,8 +89,8 @@ void main() {
         'FLUTTER_VERSION=3.47.8',
         'REDIS_VERSION=7.4.0',
         'POSTGRES_VERSION=16',
-        'TYPESENSE_VERSION=28.1',
-        'MAILHOG_VERSION=1.2.0',
+        'TYPESENSE_VERSION=28.0',
+        'MAILHOG_VERSION=1.0.1',
         'GIT_VERSION=2.43',
         'OPENCODE_VERSION=2.1.4',
       ]) {
@@ -101,6 +101,19 @@ void main() {
     test('installs opencode v2 from @opencode/cli', () {
       final dockerfile = OrbEmbedded.files['Dockerfile']!;
       expect(dockerfile, contains(r'@opencode/cli@${OPENCODE_VERSION}'));
+    });
+
+    test('the typesense source is the official dl.typesense.org release with '
+        'the pinned md5 verified (the former download.typesense.org domain '
+        'is dead — the image must still build)', () {
+      final dockerfile = OrbEmbedded.files['Dockerfile']!;
+      expect(
+        dockerfile,
+        contains(r'dl.typesense.org/releases/${TYPESENSE_VERSION}/'),
+      );
+      expect(dockerfile, isNot(contains('download.typesense.org')));
+      expect(dockerfile, contains('typesense-server.md5.txt'));
+      expect(dockerfile, contains('md5sum'));
     });
 
     test('the entrypoint does the full boot prep and then serves opencode '
