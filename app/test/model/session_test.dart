@@ -34,6 +34,32 @@ void main() {
       expect(Session.fromJson(session.toJson()), session);
     });
 
+    test('toJson omits the optional orb field for a host session', () {
+      const session = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+      );
+      expect(session.toJson().containsKey('orb'), isFalse);
+    });
+
+    test('an orb session round-trips its orb id', () {
+      const session = Session(
+        id: 'ses_2',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+        orb: 'orb_1',
+      );
+      expect(session.toJson()['orb'], 'orb_1');
+      expect(Session.fromJson(session.toJson()), session);
+    });
+
     test('fromJson is tolerant of a missing or partial row', () {
       expect(
         Session.fromJson(null),
@@ -57,6 +83,8 @@ void main() {
           active: false,
         ),
       );
+      // A row carrying the orb id parses it; one without it stays null.
+      expect(Session.fromJson({'id': 'ses_3', 'orb': 'orb_9'}).orb, 'orb_9');
     });
   });
 }
