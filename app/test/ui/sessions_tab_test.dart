@@ -76,10 +76,12 @@ class _FakeSessionsClient extends SessionsClient {
   Object? deleteError;
   Object? createError;
   Object? createDirectoryError;
+  Object? moveError;
 
   final List<String> deleted = [];
   final List<String> created = [];
   final List<String> createdIn = [];
+  final List<(String, String)> moved = [];
   final List<(String, String)> prompts = [];
   final List<(String, String, PermissionReply)> replies = [];
   var listCalls = 0;
@@ -132,6 +134,13 @@ class _FakeSessionsClient extends SessionsClient {
     if (error is Object) throw error;
     deleted.add(id);
     rows.removeWhere((s) => s.id == id);
+  }
+
+  @override
+  Future<void> moveToOrb(String id, String orbName) async {
+    final error = moveError;
+    if (error is Object) throw error;
+    moved.add((id, orbName));
   }
 
   @override
@@ -616,6 +625,128 @@ void main() {
         expect(client.deleted, isEmpty);
         expect(
           find.textContaining('Could not delete the session'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+      });
+    });
+
+    group('move to orb (issue #97)', () {
+      testWidgets('a host row offers Move to orb…; an orb row does not', (
+        tester,
+      ) async {
+        await _pumpTab(tester, rows: [_one, _orbOne]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Move to orb…'), findsOneWidget);
+        expect(find.text('Delete session…'), findsOneWidget);
+        // A tap outside the menu closes it (the barrier).
+        await tester.tapAt(const Offset(5, 5));
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_orb1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Move to orb…'), findsNothing);
+        expect(find.text('Delete session…'), findsOneWidget);
+      });
+
+      testWidgets(
+        'naming the target moves the session, refreshes and reports',
+        (tester) async {
+          final client = await _pumpTab(tester, rows: [_one]);
+
+          await tester.tap(
+            find.byKey(const ValueKey('menu-ses_1')),
+            warnIfMissed: false,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Move to orb…'));
+          await tester.pumpAndSettle();
+          expect(find.text('Move to an orb?'), findsOneWidget);
+
+          await tester.enterText(
+            find.byKey(const ValueKey('move-to-orb-name')),
+            'dev',
+          );
+          await tester.pump();
+          await tester.tap(find.byKey(const ValueKey('move-to-orb-confirm')));
+          await tester.pumpAndSettle();
+
+          expect(client.moved, [('ses_1', 'dev')]);
+          expect(client.listCalls, greaterThanOrEqualTo(2));
+          expect(find.text('Session moved to the orb "dev".'), findsOneWidget);
+        },
+      );
+
+      testWidgets('cancelling the name prompt moves nothing', (tester) async {
+        final client = await _pumpTab(tester, rows: [_one]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Move to orb…'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        expect(client.moved, isEmpty);
+        expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+      });
+
+      testWidgets('an empty name is not a confirmation', (tester) async {
+        final client = await _pumpTab(tester, rows: [_one]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Move to orb…'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('move-to-orb-confirm')));
+        await tester.pump();
+
+        // The prompt stays open; nothing was sent.
+        expect(find.text('Move to an orb?'), findsOneWidget);
+        expect(client.moved, isEmpty);
+      });
+
+      testWidgets('a failed move shows the decoded error and keeps the row', (
+        tester,
+      ) async {
+        final client = await _pumpTab(tester, rows: [_one]);
+        client.moveError = const SessionsClientError(
+          502,
+          'exit 1: import conflict',
+        );
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Move to orb…'));
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byKey(const ValueKey('move-to-orb-name')),
+          'dev',
+        );
+        await tester.pump();
+        await tester.tap(find.byKey(const ValueKey('move-to-orb-confirm')));
+        await tester.pumpAndSettle();
+
+        expect(client.moved, isEmpty);
+        expect(
+          find.text('Could not move the session: exit 1: import conflict'),
           findsOneWidget,
         );
         expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);

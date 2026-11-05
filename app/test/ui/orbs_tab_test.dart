@@ -6,10 +6,15 @@ import 'package:opencodebridge/bridge/events/bridge_event.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/orbs_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
+import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/orb.dart';
+import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/project.dart';
+import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/ui/orbs_tab.dart';
+import 'package:opencodebridge/ui/structured_view.dart';
 
 const _project = Project(id: 'p1', name: 'app', canonical: '/code/app');
 
@@ -148,11 +153,25 @@ class _FakeOrbsClient extends OrbsClient {
   String rebuildTag = 'orb:abc123';
   Object? deleteError;
 
+  /// The (issue #97) lifecycle scripts: errors, gates, and the wake/session
+  /// records.
+  Object? stopError;
+  Completer<void>? stopGate;
+  Object? wakeError;
+  Completer<void>? wakeGate;
+  OrbRecord? wakeRecord;
+  Object? newSessionError;
+  Completer<void>? newSessionGate;
+  Session? newSessionRecord;
+
   var listCalls = 0;
   final List<bool> listIncludePr = [];
   final List<(String, String)> createdRequests = [];
   var rebuildCalls = 0;
   final List<String> deleted = [];
+  final List<String> stopped = [];
+  final List<String> woken = [];
+  final List<String> newSessions = [];
 
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
@@ -196,6 +215,53 @@ class _FakeOrbsClient extends OrbsClient {
     if (error is Object) throw error;
     deleted.add(id);
   }
+
+  @override
+  Future<void> stop(String id) async {
+    final gate = stopGate;
+    if (gate != null) await gate.future;
+    final error = stopError;
+    if (error is Object) throw error;
+    stopped.add(id);
+  }
+
+  @override
+  Future<OrbRecord> wake(String id) async {
+    final gate = wakeGate;
+    if (gate != null) await gate.future;
+    final error = wakeError;
+    if (error is Object) throw error;
+    woken.add(id);
+    final record = wakeRecord;
+    if (record != null) return record;
+    return OrbRecord(
+      id: id,
+      name: 'woken',
+      project: 'p1',
+      branch: 'orb/$id',
+      state: 'running',
+      created: '2025-01-03T00:00:00Z',
+    );
+  }
+
+  @override
+  Future<Session> createSessionOnOrb(String id) async {
+    final gate = newSessionGate;
+    if (gate != null) await gate.future;
+    final error = newSessionError;
+    if (error is Object) throw error;
+    newSessions.add(id);
+    final record = newSessionRecord;
+    if (record != null) return record;
+    return const Session(
+      id: 'ses_orb_new',
+      title: 'new on orb',
+      project: SessionProject(id: 'p1', name: 'app'),
+      created: 300,
+      location: '/workspace',
+      active: false,
+    );
+  }
 }
 
 /// A scripted [SessionsClient] for the tab tests (no real bridge): the
@@ -224,6 +290,29 @@ class _FakeSessionsClient extends SessionsClient {
     final error = projectsError;
     if (error is Object) throw error;
     return projectsResult;
+  }
+
+  // The endpoints the opened structured view fetches (issue #97's New
+  // session): not scripted here — the view's error state stands in for them,
+  // no real bridge is reached.
+  @override
+  Future<SessionDetail> getDetail(String id) async {
+    throw const SessionsClientError(502, 'not scripted');
+  }
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async {
+    throw const SessionsClientError(502, 'not scripted');
+  }
+
+  @override
+  Future<List<PermissionRequest>> getPermissions(String id) async {
+    throw const SessionsClientError(502, 'not scripted');
+  }
+
+  @override
+  Future<List<QuestionForm>> getQuestions(String id) async {
+    throw const SessionsClientError(502, 'not scripted');
   }
 }
 
@@ -421,21 +510,25 @@ void main() {
           find.byKey(const ValueKey('orb-action-orb_1-Update')),
           findsOneWidget,
         );
-        // Every action but the orphan cleanup is disabled…
+        // Stop and New session are wired (issue #97)…
+        for (final label in const ['Stop', 'New session']) {
+          expect(
+            tester
+                .widget<TextButton>(
+                  find.byKey(ValueKey('orb-action-orb_1-$label')),
+                )
+                .onPressed,
+            isNotNull,
+          );
+        }
+        // …and Update stays disabled with the ticket it lands in.
         expect(
           tester
               .widget<TextButton>(
-                find.byKey(const ValueKey('orb-action-orb_1-Stop')),
+                find.byKey(const ValueKey('orb-action-orb_1-Update')),
               )
               .onPressed,
           isNull,
-        );
-        // …with the ticket it lands in as the tooltip.
-        expect(
-          find.byWidgetPredicate(
-            (w) => w is Tooltip && w.message == 'Lands in #97',
-          ),
-          findsNWidgets(2), // Stop, New session
         );
         expect(
           find.byWidgetPredicate(
@@ -455,6 +548,23 @@ void main() {
         expect(
           find.byKey(const ValueKey('orb-action-orb_3-Update')),
           findsOneWidget,
+        );
+        // Wake is wired (issue #97); Update stays disabled.
+        expect(
+          tester
+              .widget<TextButton>(
+                find.byKey(const ValueKey('orb-action-orb_3-Wake')),
+              )
+              .onPressed,
+          isNotNull,
+        );
+        expect(
+          tester
+              .widget<TextButton>(
+                find.byKey(const ValueKey('orb-action-orb_3-Update')),
+              )
+              .onPressed,
+          isNull,
         );
       });
 
@@ -547,6 +657,170 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('Could not clean up the orphan.'), findsOneWidget);
+      });
+    });
+
+    group('lifecycle (issue #97)', () {
+      testWidgets('Stop confirms, then stops, reloads and reports', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_1-Stop')));
+        await tester.pumpAndSettle();
+        expect(find.text('Stop this orb?'), findsOneWidget);
+
+        await tester.tap(find.byKey(const ValueKey('orb-stop-confirm')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.stopped, ['orb_1']);
+        expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
+        expect(find.text('Orb stopped.'), findsOneWidget);
+      });
+
+      testWidgets('cancelling the stop confirm keeps the orb', (tester) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_1-Stop')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.stopped, isEmpty);
+        expect(find.byKey(const ValueKey('orb-orb_1')), findsOneWidget);
+      });
+
+      testWidgets('a failed stop reports the decoded wire error', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        tab.orbs.stopError = const OrbsClientError(503, 'opencode_unavailable');
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_1-Stop')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('orb-stop-confirm')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.stopped, isEmpty);
+        expect(
+          find.text('Could not stop the orb: opencode_unavailable'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('the Stop button carries its busy label over the move', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        final gate = Completer<void>();
+        tab.orbs.stopGate = gate;
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_1-Stop')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('orb-stop-confirm')));
+        await tester.pump();
+
+        expect(find.text('Stopping…'), findsOneWidget);
+        expect(tab.orbs.stopped, isEmpty);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.stopped, ['orb_1']);
+        expect(find.text('Stopping…'), findsNothing);
+      });
+
+      testWidgets('Wake wakes without confirming, then reloads and reports', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_stopped]);
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_3-Wake')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.woken, ['orb_3']);
+        expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
+        expect(find.text('Orb woken.'), findsOneWidget);
+      });
+
+      testWidgets('a failed wake reports the decoded error', (tester) async {
+        final tab = await _pumpTab(tester, orbs: [_stopped]);
+        tab.orbs.wakeError = const OrbCreateError(
+          statusCode: 502,
+          code: 'orb_boot_failed',
+          details: 'the orb did not come up in time',
+          logTail: ['fatal: no go'],
+        );
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_3-Wake')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.woken, isEmpty);
+        expect(
+          find.text('Could not wake the orb: the orb did not come up in time'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('the Wake button carries its busy label over the boot', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_stopped]);
+        final gate = Completer<void>();
+        tab.orbs.wakeGate = gate;
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_3-Wake')));
+        await tester.pump();
+
+        expect(find.text('Waking…'), findsOneWidget);
+        expect(tab.orbs.woken, isEmpty);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.woken, ['orb_3']);
+        expect(find.text('Waking…'), findsNothing);
+      });
+
+      testWidgets(
+        'New session creates on the orb and opens the structured view',
+        (tester) async {
+          final tab = await _pumpTab(tester, orbs: [_running]);
+
+          await tester.tap(
+            find.byKey(const ValueKey('orb-action-orb_1-New session')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(tab.orbs.newSessions, ['orb_1']);
+          expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
+          // The new session's structured view is on top…
+          expect(find.byType(StructuredSessionScreen), findsOneWidget);
+          expect(find.text('new on orb'), findsOneWidget);
+        },
+      );
+
+      testWidgets('a failed New session reports the decoded error', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        tab.orbs.newSessionError = const OrbCreateError(
+          statusCode: 400,
+          code: 'not_running',
+          details: 'the orb is stopped',
+        );
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_1-New session')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.newSessions, isEmpty);
+        expect(
+          find.text('Could not create the session: the orb is stopped'),
+          findsOneWidget,
+        );
+        expect(find.byType(StructuredSessionScreen), findsNothing);
       });
     });
 

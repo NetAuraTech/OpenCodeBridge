@@ -11,6 +11,8 @@ import '../client/orbs_client.dart';
 import '../client/sessions_client.dart';
 import '../model/orb.dart';
 import '../model/project.dart';
+import '../model/session.dart';
+import 'structured_view.dart';
 
 /// The Orbs tab (spec section 9, issue #96): a grid of **workspace cards** —
 /// the card is the view of the orb, there is no detail screen. Each card
@@ -18,10 +20,12 @@ import '../model/project.dart';
 /// `project · branch`, the session count, the PR badge when the PR is open,
 /// and the lifecycle actions on the card itself.
 ///
-/// The actions are gated by state and disabled with an explanatory tooltip
-/// until their tickets land (Wake/Stop and New session: #97, per-orb update
-/// and force-delete: #98) — only the orphan cleanup and the global image
-/// rebuild are wired live here.
+/// The actions are gated by state (spec §9.5): Stop while running (a
+/// confirm, then the bridge's single unguarded death path), Wake while
+/// stopped (lossless — no confirm; the button blocks for the boot), and New
+/// session on a running orb (issue #97). The per-orb update and force-delete
+/// stay disabled with an explanatory tooltip until their ticket lands (#98),
+/// as does the broken-state "Fresh state".
 ///
 /// The FAB opens the create-orb wizard as a bottom sheet (spec §9.3): the
 /// project + the orb name first, then the live staged boot log in the sheet
@@ -118,6 +122,17 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
 
   /// True while the image rebuild is in flight.
   bool _rebuildBusy = false;
+
+  /// The orb ids whose Stop is in flight (issue #97): the card's button
+  /// carries its busy label ("Stopping…") over the whole export/import/stop.
+  final Set<String> _stoppingIds = <String>{};
+
+  /// The orb ids whose Wake is in flight (issue #97): the bridge blocks for
+  /// the whole boot, so the button carries "Waking…" meanwhile.
+  final Set<String> _wakingIds = <String>{};
+
+  /// The orb ids whose New session create is in flight (issue #97).
+  final Set<String> _creatingSessionIds = <String>{};
 
   /// The create in flight, if any (the wizard's sheet renders it; the tab
   /// owns it, so closing the sheet mid-boot keeps the creation alive).
@@ -401,6 +416,128 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
     }
   }
 
+  /// Stop (issue #97, spec §2.5): the single trigger for every orb death
+  /// path, unguarded and lossless — every session is exported to the host
+  /// checkout (same session id) and deleted from the orb only after its
+  /// import, the container stops last. The confirm asks about the action,
+  /// not about a risk. The bridge blocks until the move and the stop are
+  /// done; afterwards the list re-fetches (the card is stopped).
+  Future<void> _confirmStop(OrbRecord orb) async {
+    final client = _client;
+    if (client == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Stop this orb?'),
+        content: Text(
+          '"${orb.name}" will be stopped: its sessions are moved to the '
+          'host as plain sessions first, and the container is stopped last. '
+          'The workspace and branch are untouched.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const ValueKey('orb-stop-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Stop'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _stop(orb, client);
+  }
+
+  Future<void> _stop(OrbRecord orb, OrbsClient client) async {
+    if (_stoppingIds.contains(orb.id)) return; // re-issue: safe no-op
+    setState(() => _stoppingIds.add(orb.id));
+    try {
+      await client.stop(orb.id);
+      if (mounted) _snackBar('Orb stopped.');
+      unawaited(_load());
+    } on OrbsClientError catch (e) {
+      if (mounted) _snackBar('Could not stop the orb: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not stop the orb.');
+    } finally {
+      if (mounted) setState(() => _stoppingIds.remove(orb.id));
+    }
+  }
+
+  /// Wake (issue #97, spec §2.4): re-runs the full start path — the `.env*`
+  /// re-injection, the config/auth re-copy, `docker start`, the boot wait —
+  /// and removes the stop marker on success. Lossless: no confirm; the
+  /// button blocks ("Waking…") for the whole boot.
+  Future<void> _wake(OrbRecord orb) async {
+    final client = _client;
+    if (client == null || _wakingIds.contains(orb.id)) return; // no-op
+    setState(() => _wakingIds.add(orb.id));
+    try {
+      await client.wake(orb.id);
+      if (mounted) _snackBar('Orb woken.');
+      unawaited(_load());
+    } on OrbCreateError catch (e) {
+      if (mounted) {
+        _snackBar('Could not wake the orb: ${e.details ?? e.code}');
+      }
+    } on OrbsClientError catch (e) {
+      if (mounted) _snackBar('Could not wake the orb: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not wake the orb.');
+    } finally {
+      if (mounted) setState(() => _wakingIds.remove(orb.id));
+    }
+  }
+
+  /// New session on the orb (issue #97, spec §9.1/§9.5): the bridge creates
+  /// the session in the orb's workspace (`/workspace`) on the running
+  /// service; the new session's structured view opens directly.
+  Future<void> _newSession(OrbRecord orb) async {
+    final client = _client;
+    if (client == null || _creatingSessionIds.contains(orb.id)) return;
+    setState(() => _creatingSessionIds.add(orb.id));
+    try {
+      final session = await client.createSessionOnOrb(orb.id);
+      unawaited(_load());
+      if (!mounted) return;
+      await _openSession(session);
+    } on OrbCreateError catch (e) {
+      if (mounted) {
+        _snackBar('Could not create the session: ${e.details ?? e.code}');
+      }
+    } on OrbsClientError catch (e) {
+      if (mounted) _snackBar('Could not create the session: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not create the session.');
+    } finally {
+      if (mounted) {
+        setState(() => _creatingSessionIds.remove(orb.id));
+      }
+    }
+  }
+
+  /// Opens [session] in the structured view (the same view the Sessions tab
+  /// opens); when the view closes, the list re-loads.
+  Future<void> _openSession(Session session) async {
+    final client = _sessions;
+    if (client == null) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (context) => StructuredSessionScreen(
+          sessionId: session.id,
+          title: session.title.isNotEmpty ? session.title : session.location,
+          client: client,
+          events: _events?.events,
+          gaps: _events?.gaps,
+        ),
+      ),
+    );
+    if (mounted) unawaited(_load());
+  }
+
   /// The tap on a card (spec §9.1: the card is the view — no detail screen):
   /// the only effect is clearing the highlight when the card carries it.
   void _cardTap(OrbRecord orb) {
@@ -532,8 +669,16 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
                           orb: orbs[index],
                           sessionCount: _sessionCounts[orbs[index].id] ?? 0,
                           highlighted: _highlight == orbs[index].id,
+                          stopping: _stoppingIds.contains(orbs[index].id),
+                          waking: _wakingIds.contains(orbs[index].id),
+                          creatingSession: _creatingSessionIds.contains(
+                            orbs[index].id,
+                          ),
                           onTap: () => _cardTap(orbs[index]),
                           onOpenPr: _openPr,
+                          onStop: _confirmStop,
+                          onWake: _wake,
+                          onNewSession: _newSession,
                           onCleanOrphan: _confirmCleanOrphan,
                         ),
                         childCount: orbs.length,
@@ -624,14 +769,30 @@ class _OrbCard extends StatelessWidget {
     required this.highlighted,
     required this.onTap,
     required this.onOpenPr,
+    required this.onStop,
+    required this.onWake,
+    required this.onNewSession,
     required this.onCleanOrphan,
+    this.stopping = false,
+    this.waking = false,
+    this.creatingSession = false,
   });
 
   final OrbRecord orb;
   final int sessionCount;
   final bool highlighted;
+
+  /// The card's lifecycle action is in flight (issue #97): its button
+  /// carries its busy label ("Stopping…", "Waking…", "Creating…").
+  final bool stopping;
+  final bool waking;
+  final bool creatingSession;
+
   final VoidCallback onTap;
   final ValueChanged<String> onOpenPr;
+  final ValueChanged<OrbRecord> onStop;
+  final ValueChanged<OrbRecord> onWake;
+  final ValueChanged<OrbRecord> onNewSession;
   final ValueChanged<OrbRecord> onCleanOrphan;
 
   @override
@@ -737,39 +898,52 @@ class _OrbCard extends StatelessWidget {
     );
   }
 
-  /// The card's lifecycle actions (spec §9.5), gated by state: every action
-  /// but the orphan cleanup is disabled until its ticket lands (Wake/Stop
-  /// and New session: #97, per-orb update and force-delete: #98) — the
-  /// tooltip says which.
+  /// The card's lifecycle actions (spec §9.5), gated by state: Stop and New
+  /// session while running, Wake while stopped (issue #97, enabled); the
+  /// per-orb update and force-delete stay disabled until #98, and the
+  /// broken-state "Fresh state" until it lands — the tooltip says which.
+  /// A re-issued action in the same state is a safe no-op (the handler
+  /// guards on the busy flag).
   List<_CardAction> _actions(OrbRecord orb, ColorScheme scheme) {
-    final disabled = <_CardAction>[
-      const _CardAction(label: 'Stop', ticket: '#97'),
-      const _CardAction(label: 'New session', ticket: '#97'),
-      const _CardAction(label: 'Update', ticket: '#98'),
-      const _CardAction(label: 'Wake', ticket: '#97'),
-      const _CardAction(label: 'Force delete', ticket: '#98'),
-      const _CardAction(label: 'Fresh state', ticket: '#97'),
-    ];
-    final cleanUp = _CardAction(
-      label: 'Clean up',
-      enabled: true,
-      onPressed: () => onCleanOrphan(orb),
-    );
+    final update = const _CardAction(label: 'Update', ticket: '#98');
+    final forceDelete = const _CardAction(label: 'Force delete', ticket: '#98');
+    final freshState = const _CardAction(label: 'Fresh state', ticket: '#97');
     switch (orb.state) {
       case 'running':
         return [
-          disabled[0], // Stop
-          disabled[1], // New session
-          disabled[2], // Update
+          _CardAction(
+            label: stopping ? 'Stopping…' : 'Stop',
+            enabled: true,
+            onPressed: () => onStop(orb),
+          ),
+          _CardAction(
+            label: creatingSession ? 'Creating…' : 'New session',
+            enabled: true,
+            onPressed: () => onNewSession(orb),
+          ),
+          update,
         ];
       case 'stopped':
-        return [disabled[3], disabled[2]]; // Wake, Update
+        return [
+          _CardAction(
+            label: waking ? 'Waking…' : 'Wake',
+            enabled: true,
+            onPressed: () => onWake(orb),
+          ),
+          update,
+        ];
       case 'broken:workspace':
-        return [disabled[4]]; // Force delete
+        return [forceDelete];
       case 'broken:state':
-        return [disabled[4], disabled[5]]; // Force delete, Fresh state
+        return [forceDelete, freshState];
       case 'orphan':
-        return [cleanUp];
+        return [
+          _CardAction(
+            label: 'Clean up',
+            enabled: true,
+            onPressed: () => onCleanOrphan(orb),
+          ),
+        ];
       default:
         return const []; // preparing, cleanup_pending
     }

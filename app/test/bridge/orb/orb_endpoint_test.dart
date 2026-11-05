@@ -10,6 +10,7 @@ import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/model/orb.dart';
+import 'package:opencodebridge/model/session.dart';
 
 Future<(int, String)> _get(Uri base, String path) async {
   final client = HttpClient();
@@ -141,6 +142,55 @@ class _FakeOrbs implements OrbService {
   Future<void> deleteOrphan(String id) async {
     deleteOrphanId = id;
     final error = deleteOrphanError;
+    if (error != null) throw error;
+  }
+
+  String? stopId;
+  Object? stopError;
+
+  @override
+  Future<void> stop(String id) async {
+    stopId = id;
+    final error = stopError;
+    if (error != null) throw error;
+  }
+
+  String? wakeId;
+  OrbRecord? wakeRecord;
+  Object? wakeError;
+
+  @override
+  Future<OrbRecord> wake(String id) async {
+    wakeId = id;
+    final error = wakeError;
+    if (error != null) throw error;
+    return wakeRecord!;
+  }
+
+  String? sessionOrbId;
+  Session? sessionRecord;
+  Object? sessionError;
+
+  @override
+  Future<Session> createSessionOnOrb(String id) async {
+    sessionOrbId = id;
+    final error = sessionError;
+    if (error != null) throw error;
+    return sessionRecord!;
+  }
+
+  String? moveToOrbSession;
+  String? moveToOrbName;
+  Object? moveToOrbError;
+
+  @override
+  Future<void> moveSessionToOrb({
+    required String session,
+    required String orbName,
+  }) async {
+    moveToOrbSession = session;
+    moveToOrbName = orbName;
+    final error = moveToOrbError;
     if (error != null) throw error;
   }
 
@@ -584,5 +634,487 @@ void main() {
         await bare.stop();
       }
     });
+  });
+
+  group('POST /api/orbs/<id>/<action> (issue #97)', () {
+    late BridgeServer server;
+    late _FakeService service;
+    late _FakeOrbs orbs;
+    late Uri base;
+
+    const record = OrbRecord(
+      id: 'aaaa',
+      name: 'dev',
+      project: 'p1',
+      branch: 'orb/aaaa',
+      state: 'running',
+      created: '2026-11-04T00:00:00.000Z',
+      url: 'http://127.0.0.1:39999',
+    );
+
+    const session = Session(
+      id: 's-1',
+      title: 'hello',
+      project: SessionProject(id: 'p1', name: 'proj-one'),
+      created: 1762252800000,
+      location: '/workspace',
+      active: false,
+      orb: 'aaaa',
+    );
+
+    setUp(() async {
+      service = _FakeService();
+      orbs = _FakeOrbs();
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+        orbs: orbs,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('stop is a 204 with no body', () async {
+      final (status, body) = await _postRaw(base, 'api/orbs/aaaa/stop', '');
+
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(orbs.stopId, 'aaaa');
+    });
+
+    test('wake is a 200 with the running record', () async {
+      orbs.wakeRecord = record;
+
+      final (status, body) = await _postRaw(base, 'api/orbs/aaaa/wake', '');
+
+      expect(status, 200);
+      expect(jsonDecode(body), {
+        'id': 'aaaa',
+        'name': 'dev',
+        'project': 'p1',
+        'branch': 'orb/aaaa',
+        'state': 'running',
+        'created': '2026-11-04T00:00:00.000Z',
+        'url': 'http://127.0.0.1:39999',
+      });
+      expect(orbs.wakeId, 'aaaa');
+    });
+
+    test('sessions is a 201 with the row (stamped with the orb)', () async {
+      orbs.sessionRecord = session;
+
+      final (status, body) = await _postRaw(base, 'api/orbs/aaaa/sessions', '');
+
+      expect(status, 201);
+      expect(jsonDecode(body), {
+        'id': 's-1',
+        'title': 'hello',
+        'project': {'id': 'p1', 'name': 'proj-one'},
+        'created': 1762252800000,
+        'location': '/workspace',
+        'active': false,
+        'orb': 'aaaa',
+      });
+      expect(orbs.sessionOrbId, 'aaaa');
+    });
+
+    test('an unknown id is a 404 for each action', () async {
+      orbs.stopError = const OrbNotFoundError('nope');
+      orbs.wakeError = const OrbNotFoundError('nope');
+      orbs.sessionError = const OrbNotFoundError('nope');
+
+      for (final action in const ['stop', 'wake', 'sessions']) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/orbs/nope/$action',
+          '',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      }
+    });
+
+    test('a named refusal is a 400 with its code and details', () async {
+      for (final refusal in const [
+        OrbRefusalError(OrbRefusalError.notWakeable, 'the orb is not stopped'),
+        OrbRefusalError(
+          OrbRefusalError.missingCheckout,
+          'no checkout for the project',
+        ),
+        OrbRefusalError(OrbRefusalError.notRunning, 'the orb is stopped'),
+      ]) {
+        orbs.stopError = refusal;
+        orbs.wakeError = refusal;
+        orbs.sessionError = refusal;
+
+        for (final action in const ['stop', 'wake', 'sessions']) {
+          final (status, body) = await _postRaw(
+            base,
+            'api/orbs/aaaa/$action',
+            '',
+          );
+          expect(status, 400);
+          expect(jsonDecode(body), {
+            'error': refusal.code,
+            'details': refusal.message,
+          });
+        }
+      }
+    });
+
+    test('a failed boot is a 502 orb_boot_failed with the log tail', () async {
+      const boot = OrbBootError('aaaa', 'the orb did not come up in time', [
+        'server listening',
+        'fatal: no go',
+      ]);
+      orbs.wakeError = boot;
+      orbs.stopError = boot;
+      orbs.sessionError = boot;
+
+      for (final action in const ['stop', 'wake', 'sessions']) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/orbs/aaaa/$action',
+          '',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {
+          'error': 'orb_boot_failed',
+          'details': 'the orb did not come up in time',
+          'logTail': ['server listening', 'fatal: no go'],
+        });
+      }
+    });
+
+    test(
+      'a missing session prerequisite is a 503 opencode_unavailable',
+      () async {
+        const unavailable = OrbSessionsUnavailableError('no host opencode CLI');
+        orbs.stopError = unavailable;
+        orbs.wakeError = unavailable;
+        orbs.sessionError = unavailable;
+
+        for (final action in const ['stop', 'wake', 'sessions']) {
+          final (status, body) = await _postRaw(
+            base,
+            'api/orbs/aaaa/$action',
+            '',
+          );
+          expect(status, 503);
+          expect(jsonDecode(body), {'error': 'opencode_unavailable'});
+        }
+      },
+    );
+
+    test('a failed session move is a 502 session_move_failed', () async {
+      const move = OrbSessionMoveError('s-1', 'exit 1: cannot find session');
+      orbs.stopError = move;
+      orbs.sessionError = move;
+
+      for (final action in const ['stop', 'sessions']) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/orbs/aaaa/$action',
+          '',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {
+          'error': 'session_move_failed',
+          'session': 's-1',
+          'details': 'exit 1: cannot find session',
+        });
+      }
+    });
+
+    test('a daemon failure is a 502 docker_unreachable', () async {
+      const daemon = DockerUnavailableError('Cannot connect to the daemon');
+      orbs.stopError = daemon;
+      orbs.wakeError = daemon;
+      orbs.sessionError = daemon;
+
+      for (final action in const ['stop', 'wake', 'sessions']) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/orbs/aaaa/$action',
+          '',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'docker_unreachable'});
+      }
+    });
+
+    test('a service error is the service mapping', () async {
+      service.projectsError = null;
+      final serviceFail = const OpencodeServiceError(500, 'boom');
+      orbs.stopError = serviceFail;
+      orbs.wakeError = serviceFail;
+      orbs.sessionError = serviceFail;
+
+      for (final action in const ['stop', 'wake', 'sessions']) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/orbs/aaaa/$action',
+          '',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      }
+    });
+
+    test('503 docker_unavailable when the host has no docker CLI', () async {
+      if (_hostHasDockerCli()) return;
+      final bare = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+      );
+      try {
+        final (status, body) = await _postRaw(
+          bare.baseUri,
+          'api/orbs/a/stop',
+          '',
+        );
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'docker_unavailable'});
+      } finally {
+        await bare.stop();
+      }
+    });
+
+    test('an unknown action word is a 404 (not an orb action)', () async {
+      final (status, body) = await _postRaw(base, 'api/orbs/aaaa/nuke', '');
+
+      expect(status, 404);
+      expect(orbs.stopId, isNull);
+      expect(orbs.wakeId, isNull);
+    });
+  });
+
+  group('POST /api/sessions/<id>/move-to-orb (issue #97)', () {
+    late BridgeServer server;
+    late _FakeService service;
+    late _FakeOrbs orbs;
+    late Uri base;
+
+    setUp(() async {
+      service = _FakeService();
+      orbs = _FakeOrbs();
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+        orbs: orbs,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('204; the session id and the orb name reach the service', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({'orb': 'dev'}),
+      );
+
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(orbs.moveToOrbSession, 's-1');
+      expect(orbs.moveToOrbName, 'dev');
+    });
+
+    test('a missing orb field is a 400 invalid_body', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({}),
+      );
+
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(orbs.moveToOrbSession, isNull);
+    });
+
+    test('a non-JSON body is a 400 invalid_body', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        'not json{',
+      );
+
+      expect(status, 400);
+      expect(jsonDecode(body), {'error': 'invalid_body'});
+      expect(orbs.moveToOrbSession, isNull);
+    });
+
+    test('a named refusal is a 400 with its code and details', () async {
+      for (final refusal in const [
+        OrbRefusalError(OrbRefusalError.missingCheckout, 'no checkout'),
+        OrbRefusalError(OrbRefusalError.nonGithubRemote, 'not a GitHub remote'),
+      ]) {
+        orbs.moveToOrbError = refusal;
+
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/s-1/move-to-orb',
+          jsonEncode({'orb': 'dev'}),
+        );
+
+        expect(status, 400);
+        expect(jsonDecode(body), {
+          'error': refusal.code,
+          'details': refusal.message,
+        });
+      }
+    });
+
+    test('a taken name is a 409 name_taken', () async {
+      orbs.moveToOrbError = const OrbNameTakenError('p1', 'dev');
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({'orb': 'dev'}),
+      );
+
+      expect(status, 409);
+      expect(jsonDecode(body), {'error': 'name_taken', 'name': 'dev'});
+    });
+
+    test('a failed boot is a 502 orb_boot_failed with the log tail', () async {
+      orbs.moveToOrbError = const OrbBootError(
+        'bbbb',
+        'the orb did not come up in time',
+        ['fatal: no go'],
+      );
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({'orb': 'fresh'}),
+      );
+
+      expect(status, 502);
+      expect(jsonDecode(body), {
+        'error': 'orb_boot_failed',
+        'details': 'the orb did not come up in time',
+        'logTail': ['fatal: no go'],
+      });
+    });
+
+    test('a failed image build is a 502 docker_build_failed', () async {
+      orbs.moveToOrbError = const OrbImageBuildError('orb:abc', 1);
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({'orb': 'fresh'}),
+      );
+
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_build_failed'});
+    });
+
+    test(
+      'a missing session prerequisite is a 503 opencode_unavailable',
+      () async {
+        orbs.moveToOrbError = const OrbSessionsUnavailableError('no host CLI');
+
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/s-1/move-to-orb',
+          jsonEncode({'orb': 'dev'}),
+        );
+
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'opencode_unavailable'});
+      },
+    );
+
+    test('a failed move is a 502 session_move_failed', () async {
+      orbs.moveToOrbError = const OrbSessionMoveError(
+        's-1',
+        'exit 1: import conflict',
+      );
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({'orb': 'dev'}),
+      );
+
+      expect(status, 502);
+      expect(jsonDecode(body), {
+        'error': 'session_move_failed',
+        'session': 's-1',
+        'details': 'exit 1: import conflict',
+      });
+    });
+
+    test('a daemon failure is a 502 docker_unreachable', () async {
+      orbs.moveToOrbError = const DockerUnavailableError('no daemon');
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/s-1/move-to-orb',
+        jsonEncode({'orb': 'dev'}),
+      );
+
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_unreachable'});
+    });
+
+    test('503 docker_unavailable when the host has no docker CLI', () async {
+      if (_hostHasDockerCli()) return;
+      final bare = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+      );
+      try {
+        final (status, body) = await _postRaw(
+          bare.baseUri,
+          'api/sessions/s-1/move-to-orb',
+          jsonEncode({'orb': 'dev'}),
+        );
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'docker_unavailable'});
+      } finally {
+        await bare.stop();
+      }
+    });
+
+    test('503 opencode_unavailable without a sessions backend', () async {
+      if (_hostHasServiceDescriptor()) return;
+      final bare = await BridgeServer.start(port: 0, orbs: orbs);
+      try {
+        final (status, body) = await _postRaw(
+          bare.baseUri,
+          'api/sessions/s-1/move-to-orb',
+          jsonEncode({'orb': 'dev'}),
+        );
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'opencode_unavailable'});
+        expect(orbs.moveToOrbSession, isNull);
+      } finally {
+        await bare.stop();
+      }
+    });
+
+    test(
+      'an unknown session subpath other than move-to-orb is not caught',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/s-1/move-to-orbx',
+          jsonEncode({'orb': 'dev'}),
+        );
+
+        expect(status, 404);
+        expect(orbs.moveToOrbSession, isNull);
+      },
+    );
   });
 }

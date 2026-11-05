@@ -152,6 +152,10 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// True while a session create (the new-session flow) is in flight.
   bool _newSessionBusy = false;
 
+  /// The id whose host→orb move (issue #97) is in flight: its row shows
+  /// progress over the whole blocking move (a target-orb boot included).
+  String? _movingId;
+
   /// The deep-link session awaiting a loaded list (issue #24): set when the
   /// target arrives before the rows; a failed load leaves it for the next
   /// successful one.
@@ -519,8 +523,10 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                   _SessionRow(
                     session: s,
                     deleting: _deletingId == s.id,
+                    moving: _movingId == s.id,
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
+                    onMoveToOrb: _moveToOrb,
                     orb: _orbOf(s.orb),
                     onOrbChipTapped: widget.onOrbChipTapped,
                   ),
@@ -529,6 +535,33 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         ],
       ),
     );
+  }
+
+  /// The host → orb move (issue #97, spec §2.6): one action, entirely
+  /// through the bridge — the target orb is woken (or created, the full
+  /// boot) before the move, and the bridge blocks for the whole move. The
+  /// session id is preserved, so a re-run over an already-moved session is
+  /// the idempotent success; the row shows progress meanwhile.
+  Future<void> _moveToOrb(Session session) async {
+    final client = _client;
+    if (client == null || _movingId != null) return;
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => _MoveToOrbDialog(sessionTitle: session.title),
+    );
+    if (name == null || name.isEmpty || !mounted) return;
+    setState(() => _movingId = session.id);
+    try {
+      await client.moveToOrb(session.id, name);
+      if (mounted) _snackBar('Session moved to the orb "$name".');
+      unawaited(_load());
+    } on SessionsClientError catch (e) {
+      if (mounted) _snackBar('Could not move the session: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not move the session.');
+    } finally {
+      if (mounted) setState(() => _movingId = null);
+    }
   }
 
   /// The tap target of a row: the structured view, every row (spec §6); the
@@ -681,9 +714,11 @@ class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.session,
     required this.deleting,
+    required this.moving,
     required this.onDelete,
     required this.orb,
     this.onTap,
+    this.onMoveToOrb,
     this.onOrbChipTapped,
   });
 
@@ -700,7 +735,16 @@ class _SessionRow extends StatelessWidget {
   final VoidCallback? onTap;
 
   final bool deleting;
+
+  /// True while the row's host→orb move (issue #97) is in flight: the row
+  /// shows progress, and the menu is gone for the whole blocking move.
+  final bool moving;
+
   final ValueChanged<Session> onDelete;
+
+  /// The host → orb move (issue #97): the menu's "Move to orb…" item,
+  /// offered to host sessions only (`session.orb == null`).
+  final ValueChanged<Session>? onMoveToOrb;
 
   /// The session → orb navigation (spec §9.2): called with the orb id when
   /// the chip is tapped.
@@ -812,7 +856,7 @@ class _SessionRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              deleting
+              deleting || moving
                   ? const SizedBox(
                       width: 20,
                       height: 20,
@@ -822,10 +866,22 @@ class _SessionRow extends StatelessWidget {
                       key: ValueKey('menu-${session.id}'),
                       tooltip: 'More actions',
                       onSelected: (action) {
-                        if (action == 'delete') onDelete(session);
+                        switch (action) {
+                          case 'delete':
+                            onDelete(session);
+                          case 'move-to-orb':
+                            onMoveToOrb?.call(session);
+                        }
                       },
-                      itemBuilder: (context) => const [
-                        PopupMenuItem(
+                      itemBuilder: (context) => [
+                        // Host sessions only (issue #97): an orb session
+                        // already lives on its orb.
+                        if (session.orb == null)
+                          const PopupMenuItem(
+                            value: 'move-to-orb',
+                            child: Text('Move to orb…'),
+                          ),
+                        const PopupMenuItem(
                           value: 'delete',
                           child: Text('Delete session…'),
                         ),
@@ -835,6 +891,72 @@ class _SessionRow extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The "Move to orb…" name prompt (issue #97): the target orb's name —
+/// created with the full boot when absent, since the bridge blocks for the
+/// whole move. Pops the trimmed name, or `null` when cancelled (an empty
+/// name is not a confirmation).
+class _MoveToOrbDialog extends StatefulWidget {
+  const _MoveToOrbDialog({required this.sessionTitle});
+
+  /// The title of the session being moved (the dialog's copy).
+  final String sessionTitle;
+
+  @override
+  State<_MoveToOrbDialog> createState() => _MoveToOrbDialogState();
+}
+
+class _MoveToOrbDialogState extends State<_MoveToOrbDialog> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Move to an orb?'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '"${widget.sessionTitle}" will be moved onto the orb named '
+            'below. The orb is created with a full boot when absent, and '
+            'the move runs to completion before the list refreshes.',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('move-to-orb-name'),
+            controller: _controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Orb name',
+              hintText: 'e.g. dev',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const ValueKey('move-to-orb-confirm'),
+          onPressed: () {
+            final name = _controller.text.trim();
+            if (name.isEmpty) return;
+            Navigator.of(context).pop(name);
+          },
+          child: const Text('Move'),
+        ),
+      ],
     );
   }
 }
