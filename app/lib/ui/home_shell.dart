@@ -10,11 +10,12 @@ import '../notify/deep_link.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
 import 'docker_tab.dart';
+import 'orbs_tab.dart';
 import 'sessions_tab.dart';
 import 'settings_tab.dart';
 
-/// The 3-tab information architecture (spec: section 13):
-/// Sessions (default), Docker, Settings — with the discreet connection
+/// The 4-tab information architecture (spec: section 13, section 9):
+/// Sessions (default), Orbs, Docker, Settings — with the discreet connection
 /// indicator in the app bar.
 class HomeShell extends StatefulWidget {
   const HomeShell({
@@ -90,6 +91,13 @@ class _HomeShellState extends State<HomeShell> {
   String? _sessionTarget;
   String? _containerTarget;
 
+  /// The one-shot orb highlight (the session → orb navigation, spec §9.2):
+  /// the orb id whose card the Orbs tab should highlight, set when the
+  /// Sessions tab's chip is tapped; consumed by the Orbs tab (which reports
+  /// back through `onHighlightConsumed` to clear it, so a later identical
+  /// tap is a new event).
+  String? _orbHighlight;
+
   /// Subscribes to the deep links when the push flow comes up (the service
   /// is created after the client entry, once the login is restored).
   void _setDeepLinks(Stream<DeepLink>? stream) {
@@ -111,7 +119,7 @@ class _HomeShellState extends State<HomeShell> {
       } else {
         _sessionTarget = null;
         _containerTarget = link.id;
-        _tab = 1;
+        _tab = 2; // Docker sits behind the Orbs tab.
       }
     });
   }
@@ -179,7 +187,26 @@ class _HomeShellState extends State<HomeShell> {
           // The structured view's `/settings` command (issue #46): the view
           // closes itself, and the shell lands on the Settings tab.
           onOpenSettings: () {
-            if (mounted) setState(() => _tab = 2);
+            if (mounted) setState(() => _tab = 3);
+          },
+          // The session → orb navigation (spec §9.2): the chip reports the
+          // orb id, the shell switches to the Orbs tab and highlights it.
+          onOrbChipTapped: (orbId) {
+            if (mounted) {
+              setState(() {
+                _orbHighlight = orbId;
+                _tab = 1;
+              });
+            }
+          },
+        ),
+        OrbsTab(
+          apiBase: _apiBase,
+          auth: widget.auth,
+          access: widget.access,
+          highlight: _orbHighlight,
+          onHighlightConsumed: () {
+            if (mounted) setState(() => _orbHighlight = null);
           },
         ),
         DockerTab(
@@ -213,6 +240,11 @@ class _HomeShellState extends State<HomeShell> {
           icon: Icon(Icons.chat_bubble_outline),
           selectedIcon: Icon(Icons.chat_bubble),
           label: 'Sessions',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.public_outlined),
+          selectedIcon: Icon(Icons.public),
+          label: 'Orbs',
         ),
         NavigationDestination(
           icon: Icon(Icons.inventory_2_outlined),

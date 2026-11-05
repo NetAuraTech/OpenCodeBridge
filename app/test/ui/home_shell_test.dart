@@ -4,11 +4,12 @@ import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/client/connection_monitor.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:opencodebridge/ui/home_shell.dart';
+import 'package:opencodebridge/ui/orbs_tab.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('HomeShell', () {
-    testWidgets('shows the 3-tab IA with Sessions default', (tester) async {
+    testWidgets('shows the 4-tab IA with Sessions default', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final settings = await AppSettings.load();
       final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
@@ -25,10 +26,16 @@ void main() {
       );
       await tester.pump();
 
-      // The three tab labels.
+      // The four tab labels.
       expect(find.text('Sessions'), findsWidgets);
+      expect(find.text('Orbs'), findsWidgets);
       expect(find.text('Docker'), findsWidgets);
       expect(find.text('Settings'), findsWidgets);
+
+      // The Orbs tab (issue #96) sits in the stack behind the Sessions
+      // tab; the IndexedStack keeps the unselected tabs offstage, so the
+      // finder looks past the Offstage.
+      expect(find.byType(OrbsTab, skipOffstage: false), findsOneWidget);
 
       // The Sessions tab is the default body; without a tunnel URL it
       // points at Settings.

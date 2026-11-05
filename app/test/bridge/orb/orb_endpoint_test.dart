@@ -23,6 +23,18 @@ Future<(int, String)> _get(Uri base, String path) async {
   }
 }
 
+Future<(int, String)> _delete(Uri base, String path) async {
+  final client = HttpClient();
+  try {
+    final request = await client.deleteUrl(base.replace(path: path));
+    final response = await request.close();
+    final body = await response.transform(const Utf8Decoder()).join();
+    return (response.statusCode, body);
+  } finally {
+    client.close(force: true);
+  }
+}
+
 Future<(int, String)> _postRaw(Uri base, String path, String body) async {
   final client = HttpClient();
   try {
@@ -97,6 +109,9 @@ class _FakeOrbs implements OrbService {
   List<OrbRecord> listResult = const [];
   Object? listError;
 
+  /// The `includePr` flag the last `list` call carried (issue #96).
+  bool? listIncludePr;
+
   @override
   Future<OrbRecord> create({
     required String project,
@@ -112,10 +127,21 @@ class _FakeOrbs implements OrbService {
   }
 
   @override
-  Future<List<OrbRecord>> list() async {
+  Future<List<OrbRecord>> list({bool includePr = false}) async {
+    listIncludePr = includePr;
     final error = listError;
     if (error != null) throw error;
     return listResult;
+  }
+
+  String? deleteOrphanId;
+  Object? deleteOrphanError;
+
+  @override
+  Future<void> deleteOrphan(String id) async {
+    deleteOrphanId = id;
+    final error = deleteOrphanError;
+    if (error != null) throw error;
   }
 
   @override
@@ -409,6 +435,34 @@ void main() {
       ]);
     });
 
+    test('?pr=1 asks the service for the PR state', () async {
+      orbs.listResult = const [];
+
+      final client = HttpClient();
+      late int status;
+      late String body;
+      try {
+        final request = await client.getUrl(base.replace(path: 'api/orbs', query: 'pr=1'));
+        final response = await request.close();
+        status = response.statusCode;
+        body = await response.transform(const Utf8Decoder()).join();
+      } finally {
+        client.close(force: true);
+      }
+
+      expect(status, 200);
+      expect(body, '[]');
+      expect(orbs.listIncludePr, isTrue);
+    });
+
+    test('without ?pr the service is not asked for the PR state', () async {
+      orbs.listResult = const [];
+
+      await _get(base, 'api/orbs');
+
+      expect(orbs.listIncludePr, isFalse);
+    });
+
     test('a daemon failure is 502 docker_unreachable', () async {
       orbs.listError = const DockerUnavailableError('Cannot connect');
 
@@ -426,6 +480,84 @@ void main() {
       );
       try {
         final (status, body) = await _get(bare.baseUri, 'api/orbs');
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'docker_unavailable'});
+      } finally {
+        await bare.stop();
+      }
+    });
+  });
+
+  group('DELETE /api/orbs/<id> (issue #96)', () {
+    late BridgeServer server;
+    late _FakeService service;
+    late _FakeOrbs orbs;
+    late Uri base;
+
+    setUp(() async {
+      service = _FakeService();
+      service.projectsResult = const [
+        OpencodeProject(id: 'p1', name: 'proj-one', canonical: '/proj/one'),
+      ];
+      orbs = _FakeOrbs();
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+        orbs: orbs,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('204 when the orphan is cleaned; the id is the path segment',
+        () async {
+      final (status, body) = await _delete(base, 'api/orbs/eeee');
+
+      expect(status, 204);
+      expect(body, '');
+      expect(orbs.deleteOrphanId, 'eeee');
+    });
+
+    test('a live container is 409 orb_exists', () async {
+      orbs.deleteOrphanError = const OrbExistsError('eeee');
+
+      final (status, body) = await _delete(base, 'api/orbs/eeee');
+
+      expect(status, 409);
+      expect(jsonDecode(body), {'error': 'orb_exists', 'id': 'eeee'});
+    });
+
+    test('a missing orphan is 404 not_found', () async {
+      orbs.deleteOrphanError = const OrbOrphanNotFoundError('eeee');
+
+      final (status, body) = await _delete(base, 'api/orbs/eeee');
+
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test('a daemon failure is 502 docker_unreachable', () async {
+      orbs.deleteOrphanError = const DockerUnavailableError(
+        'Cannot connect',
+      );
+
+      final (status, body) = await _delete(base, 'api/orbs/eeee');
+
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'docker_unreachable'});
+    });
+
+    test('503 docker_unavailable when the host has no docker CLI', () async {
+      if (_hostHasDockerCli()) return;
+      final bare = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+      );
+      try {
+        final (status, body) = await _delete(bare.baseUri, 'api/orbs/eeee');
         expect(status, 503);
         expect(jsonDecode(body), {'error': 'docker_unavailable'});
       } finally {

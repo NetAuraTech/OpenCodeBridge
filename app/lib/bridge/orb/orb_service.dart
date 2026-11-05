@@ -56,6 +56,34 @@ GitRunner hostGitRunner(String binary) =>
     (argv, {workingDirectory}) =>
         _hostGitRun(binary, argv, workingDirectory: workingDirectory);
 
+/// Runs one gh CLI argv and waits for it to exit (the short commands: the
+/// PR-state read, issue #96).
+typedef GhRunner = Future<GitCliResult> Function(List<String> argv);
+
+/// Resolves the gh CLI on this host's PATH, or `null` when it is not
+/// found. [path] overrides `PATH` (tests). Mirrors [findHostGit].
+String? findHostGh({String? path}) {
+  final pathValue = path ?? Platform.environment['PATH'] ?? '';
+  for (final dir in pathValue.split(':')) {
+    if (dir.isEmpty) continue;
+    try {
+      final candidate = File('$dir/gh');
+      final stat = candidate.statSync();
+      if (stat.type != FileSystemEntityType.file) continue;
+      if ((stat.mode & 0x49) == 0) continue; // No exec bit (u/g/o).
+      return candidate.path;
+    } on FileSystemException {
+      // Missing file or broken symlink: not this entry.
+      continue;
+    }
+  }
+  return null;
+}
+
+/// The host gh CLI's [GhRunner] seam: the same host invocation the default
+/// [OrbService] uses for the PR-state read.
+GhRunner hostGhRunner(String binary) => (argv) => _hostGhRun(binary, argv);
+
 /// The host's docker-bridge address (spec §8.5): the `docker0` interface's
 /// address — the host's endpoint of the default bridge network the orb
 /// containers are created on (they get no `--network` flag), the one they
@@ -138,6 +166,29 @@ class OrbBootError implements Exception {
   String toString() => 'OrbBootError($id: $detail)';
 }
 
+/// There is nothing to clean for [id]: no orphan volumes exist (issue #96,
+/// spec §2.2 — the explicit orphan cleanup found no orphan).
+class OrbOrphanNotFoundError implements Exception {
+  const OrbOrphanNotFoundError(this.id);
+
+  final String id;
+
+  @override
+  String toString() => 'OrbOrphanNotFoundError($id)';
+}
+
+/// A container exists for [id]: a live (running, stopped, or broken) orb,
+/// not an orphan (issue #96) — the orphan cleanup refuses to touch it; a
+/// live orb's force-delete lands with the lifecycle actions.
+class OrbExistsError implements Exception {
+  const OrbExistsError(this.id);
+
+  final String id;
+
+  @override
+  String toString() => 'OrbExistsError($id)';
+}
+
 /// The bridge-side orb creation and list (issue #93, spec §2.3/§2.2):
 /// [create] is the full bridge-owned creation sequence (refusals up front,
 /// image ensure, labeled volumes + state dir, `docker create` with all the
@@ -155,6 +206,8 @@ class OrbService {
     required this.bridgePort,
     this.emit,
     this.hostIp,
+    this.gh,
+    this.repoFor,
     this.bootTimeout = const Duration(minutes: 10),
     this.pollInterval = const Duration(milliseconds: 500),
   });
@@ -198,6 +251,16 @@ class OrbService {
   /// The host's docker-bridge address for `--add-host=host.docker.internal`
   /// (spec §8.5); the default reads the default route's gateway.
   final Future<String> Function()? hostIp;
+
+  /// The host gh CLI runner (the PR-state read, issue #96); `null` when this
+  /// machine has no `gh` on its PATH, in which case `list` never carries the
+  /// PR state even when asked for it.
+  final GhRunner? gh;
+
+  /// Resolves the `owner/repo` of a project id for the PR query (issue #96):
+  /// the project's `origin` remote, parsed to `owner/repo`. `null` when the
+  /// bridge cannot resolve projects (no PR state then either).
+  final Future<String?> Function(String projectId)? repoFor;
 
   /// How long the boot wait runs before it fails the create.
   final Duration bootTimeout;
@@ -328,8 +391,13 @@ class OrbService {
   /// The orb list composed from the labels (spec §2.2): the labeled
   /// containers (running with their ephemeral URL, or stopped/broken) plus
   /// the labeled volumes without a container (orphans, surfaced for
-  /// explicit cleanup — never auto-deleted).
-  Future<List<OrbRecord>> list() async {
+  /// explicit cleanup — never auto-deleted). A container whose boot has not
+  /// completed is `preparing`, with the current boot stage as sub-state
+  /// (issue #96, spec §9.3); [includePr] enriches each row with the PR of
+  /// its branch, resolved through the host `gh` CLI (off by default — the
+  /// composite services' hot path pays nothing, and the Orbs tab refreshes
+  /// on foreground-return, not on a poll).
+  Future<List<OrbRecord>> list({bool includePr = false}) async {
     final ps = await run([
       'ps',
       '-a',
@@ -377,15 +445,17 @@ class OrbService {
       final statusLines = _lines(statuses.stdout);
       final portLines = _lines(ports.stdout);
       for (var i = 0; i < containerNames.length; i++) {
+        final status = statusLines[i].trim();
         final record = _containerRecord(
           labelLines[i],
-          statusLines[i].trim(),
+          status,
           i < portLines.length ? portLines[i] : '',
         );
-        if (record != null) {
-          rows.add(record);
-          ids.add(record.id);
-        }
+        if (record == null) continue;
+        rows.add(
+          await _withPreparingState(containerNames[i], status, record),
+        );
+        ids.add(record.id);
       }
     }
 
@@ -450,7 +520,134 @@ class OrbService {
       );
       ids.add(id);
     }
+
+    // The PR enrichment (issue #96, spec §9.1): one `gh pr view` per row,
+    // in parallel (the list is a cold path; the badge shows when the PR is
+    // open). A failure of any kind — no `gh`, no repo, no PR — leaves the
+    // row without PR state.
+    if (includePr) {
+      final prs = await Future.wait([for (final row in rows) _prFor(row)]);
+      rows.setAll(
+        0,
+        [for (var i = 0; i < rows.length; i++) _withPr(rows[i], prs[i])],
+      );
+    }
     return rows;
+  }
+
+  /// The preparing derivation (issue #96, spec §9.3): a container that has
+  /// not finished booting yet — docker status `created` (the first start has
+  /// not begun) or `running` whose log carries no `server password` line yet
+  /// — is `preparing`, with the last `[orb] stage: <word>` line of its log as
+  /// sub-state. The full log is read (a `--tail` window is unsafe: the
+  /// password line sinks as opencode logs grow); the list is a cold path.
+  Future<OrbRecord> _withPreparingState(
+    String container,
+    String status,
+    OrbRecord record,
+  ) async {
+    if (status != 'created' && status != 'running') return record;
+    var log = '';
+    if (status == 'running') {
+      log = await _fullLog(container);
+      if (lastServerPassword(log) != null) return record;
+    }
+    final stage = lastStage(log);
+    return _replacedState(record, stage == null ? 'preparing' : 'preparing:$stage');
+  }
+
+  /// The PR of [record]'s branch (issue #96): `gh pr view` for the head ref
+  /// `orb/<id>` in the project's repo. Every absence — no `gh` runner, no
+  /// repo resolver, no resolvable repo, no PR, a failed call — is `null`
+  /// (the badge simply does not render).
+  Future<OrbPr?> _prFor(OrbRecord record) async {
+    final runner = gh;
+    final resolver = repoFor;
+    if (runner == null || resolver == null) return null;
+    String? repo;
+    try {
+      repo = await resolver(record.project);
+    } catch (_) {
+      // The project list is unreachable (opencode down, project gone):
+      // no PR state.
+      return null;
+    }
+    if (repo == null) return null;
+    try {
+      final result = await runner([
+        'pr',
+        'view',
+        '--repo',
+        repo,
+        '--head',
+        record.branch,
+        '--json',
+        'state,url',
+      ]);
+      if (result.exitCode != 0) return null; // No PR for the head ref.
+      final decoded = jsonDecode(result.stdout);
+      if (decoded is! Map<String, Object?>) return null;
+      final state = (decoded['state'] as String? ?? '').toLowerCase();
+      final url = decoded['url'] as String? ?? '';
+      if (state.isEmpty || url.isEmpty) return null;
+      return OrbPr(state: state, url: url);
+    } on FormatException {
+      return null; // Malformed output: treat as no PR.
+    } catch (_) {
+      return null; // A gh failure (auth, network) degrades to no PR.
+    }
+  }
+
+  OrbRecord _withPr(OrbRecord record, OrbPr? pr) => OrbRecord(
+    id: record.id,
+    name: record.name,
+    project: record.project,
+    branch: record.branch,
+    state: record.state,
+    created: record.created,
+    url: record.url,
+    pr: pr,
+  );
+
+  /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
+  /// never auto-deleted; issue #96): removes the orphan's labeled volumes
+  /// (`orb-<id>-workspace`, `orb-<id>-data` — either or both) and its state
+  /// dir. [OrbExistsError] when a container still exists for the id (a live
+  /// orb is not an orphan — its force-delete lands with the lifecycle
+  /// actions, #98); [OrbOrphanNotFoundError] when neither volume exists.
+  Future<void> deleteOrphan(String id) async {
+    final container = await run(['inspect', 'orb-$id', '--format', '{{.Id}}']);
+    if (container.exitCode == 0) {
+      throw OrbExistsError(id);
+    }
+    if (container.exitCode != 1) {
+      // `docker inspect` exits 1 for a missing container; anything else is
+      // a daemon failure.
+      throw DockerUnavailableError(container.stderr.trim());
+    }
+    final volumes = await run([
+      'volume',
+      'ls',
+      '--filter',
+      'name=orb-$id-',
+      '--format',
+      '{{.Name}}',
+    ]);
+    if (volumes.exitCode != 0) {
+      throw DockerUnavailableError(volumes.stderr.trim());
+    }
+    final present = [
+      for (final name in _lines(volumes.stdout))
+        if (name == 'orb-$id-workspace' || name == 'orb-$id-data') name,
+    ];
+    if (present.isEmpty) throw OrbOrphanNotFoundError(id);
+    for (final name in present) {
+      await _runOrThrow(['volume', 'rm', name]);
+    }
+    final stateDir = Directory('${stateRoot.path}/$id');
+    if (stateDir.existsSync()) {
+      stateDir.deleteSync(recursive: true);
+    }
   }
 
   /// Whether [url] is a GitHub remote url — `https://`, `http://`, the
@@ -489,6 +686,47 @@ class OrbService {
       }
     }
     return password;
+  }
+
+  /// The last boot stage word of [log] (the entrypoint's
+  /// `[orb] stage: <word>` lines — spec §9.3), or `null` when the log has
+  /// none (a boot that has not reached its first stage yet).
+  static String? lastStage(String log) {
+    String? stage;
+    const prefix = '[orb] stage: ';
+    for (final line in const LineSplitter().convert(log)) {
+      if (line.startsWith(prefix)) {
+        final word = line.substring(prefix.length).trim();
+        if (word.isNotEmpty) stage = word;
+      }
+    }
+    return stage;
+  }
+
+  /// The `owner/repo` a GitHub remote url encodes — the four forms
+  /// [isGitHubRemote] accepts (https, http, scp-like, ssh://), with or
+  /// without the `.git` suffix — or `null` when the url is not one of them
+  /// (issue #96: the repo for the PR query).
+  static String? githubRepo(String url) {
+    final u = url.trim();
+    String? rest;
+    if (u.startsWith('https://github.com/')) {
+      rest = u.substring('https://github.com/'.length);
+    } else if (u.startsWith('http://github.com/')) {
+      rest = u.substring('http://github.com/'.length);
+    } else if (u.startsWith('git@github.com:')) {
+      rest = u.substring('git@github.com:'.length);
+    } else if (u.startsWith('ssh://git@github.com/')) {
+      rest = u.substring('ssh://git@github.com/'.length);
+    } else {
+      return null;
+    }
+    if (rest.endsWith('.git')) {
+      rest = rest.substring(0, rest.length - '.git'.length);
+    }
+    final parts = rest.split('/');
+    if (parts.length != 2 || parts.any((p) => p.isEmpty)) return null;
+    return '${parts[0]}/${parts[1]}';
   }
 
   // ------------------------------------------------------------------------
@@ -892,6 +1130,7 @@ class OrbService {
     state: state,
     created: record.created,
     url: null,
+    pr: record.pr,
   );
 
   /// The orb id a labeled volume name encodes (`orb-<id>-workspace` /
@@ -925,6 +1164,20 @@ Future<GitCliResult> _hostGitRun(
     binary,
     argv,
     workingDirectory: workingDirectory,
+    stdoutEncoding: utf8,
+    stderrEncoding: utf8,
+  );
+  return GitCliResult(
+    exitCode: result.exitCode,
+    stdout: result.stdout as String,
+    stderr: result.stderr as String,
+  );
+}
+
+Future<GitCliResult> _hostGhRun(String binary, List<String> argv) async {
+  final result = await Process.run(
+    binary,
+    argv,
     stdoutEncoding: utf8,
     stderrEncoding: utf8,
   );

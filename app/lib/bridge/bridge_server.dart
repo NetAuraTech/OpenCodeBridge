@@ -319,17 +319,24 @@ class BridgeServer {
     void Function(String)? orbEmit;
     final orbBuilder =
         orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
+    // The backend the orb service's PR repo resolver (issue #96) reaches:
+    // it does not exist yet when the orbs default is built, so it is a
+    // getter — the caller-provided [sessions] up front, the built default
+    // once [backend] is assigned (the resolver runs only on the HTTP
+    // surface, after [start] returns).
+    SessionsBackend? orbBackend;
     final orbService =
         orbs ??
         await BridgeServer._defaultOrbs(orbBuilder, (line) {
           orbEmit?.call(line);
-        });
+        }, () => orbBackend ?? sessions);
     Future<List<OrbRecord>> orbList() =>
         orbService?.list() ?? Future.value(const []);
     Future<String?> orbPassword(String id) =>
         orbService?.lastPassword(id) ?? Future.value(null);
     final backend =
         sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
+    orbBackend = backend;
     final fsService = fs ?? const LinuxFsService();
     final eventHub =
         events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
@@ -627,26 +634,66 @@ class BridgeServer {
   /// (the creation sequence's commands) and the host git CLI (the remote
   /// probe and the identity read), the host user's home (the mounted
   /// `~/.ssh`/`~/.config/gh`, the opencode config+auth source), and the
-  /// state root `~/.config/opencodebridge/orbs`. Returns `null` when this
+  /// state root `~/.config/opencodebridge/orbs`. The host gh CLI, when
+  /// present on the PATH, backs the PR-state read of `list(includePr: true)`
+  /// (issue #96): [projectBackend] resolves the project's repo — the
+  /// backend does not exist yet when this runs, so it is a getter that
+  /// answers `null` until [start] has built it. Returns `null` when this
   /// machine has no docker CLI, no git CLI, or no image builder, in which
   /// case the orbs endpoints report `docker_unavailable`.
   static Future<OrbService?> _defaultOrbs(
     OrbImageBuilder? builder,
     void Function(String)? emit,
+    SessionsBackend? Function()? projectBackend,
   ) async {
     final cli = DockerBackend.hostCli();
     final gitBinary = findHostGit();
     if (cli == null || gitBinary == null || builder == null) return null;
+    final ghBinary = findHostGh();
     final home = homeDirectory();
+    final git = hostGitRunner(gitBinary);
     return OrbService(
       imageBuilder: builder,
       run: cli.run,
       spawn: cli.spawn,
-      git: hostGitRunner(gitBinary),
+      git: git,
       home: home,
       stateRoot: Directory('$home/.config/opencodebridge/orbs'),
       bridgePort: defaultPort,
       emit: emit,
+      gh: ghBinary == null ? null : hostGhRunner(ghBinary),
+      repoFor: ghBinary == null || projectBackend == null
+          ? null
+          : (projectId) async {
+              final backend = projectBackend();
+              if (backend == null) return null;
+              OpencodeProject? project;
+              try {
+                final projects = await backend.projects();
+                for (final candidate in projects) {
+                  if (candidate.id == projectId) {
+                    project = candidate;
+                    break;
+                  }
+                }
+              } catch (_) {
+                // The opencode service is down, or the project list cannot
+                // be read: no PR state (it degrades to a missing badge).
+                return null;
+              }
+              if (project == null) return null;
+              try {
+                final result = await git(
+                  ['remote', 'get-url', 'origin'],
+                  workingDirectory: project.canonical,
+                );
+                if (result.exitCode != 0) return null;
+                return OrbService.githubRepo(result.stdout.trim());
+              } catch (_) {
+                // The checkout is gone from the host: no PR state.
+                return null;
+              }
+            },
     );
   }
 
@@ -925,9 +972,10 @@ class BridgeServer {
         await BridgeServer._handleOrbImageRebuild(request, orb);
         return;
       }
-      // The orbs (issue #93): `POST` creates, `GET` composes the list.
-      // Checked before the session matchers (a bare list path would
-      // otherwise read as a session id to them).
+      // The orbs (issue #93): `POST` creates, `GET` composes the list,
+      // `DELETE /api/orbs/<id>` cleans up an orphan (issue #96). Checked
+      // before the session matchers (a bare list path would otherwise read
+      // as a session id to them).
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.orbsPath) {
         await BridgeServer._handleOrbCreate(request, sessions, orbs);
@@ -937,6 +985,13 @@ class BridgeServer {
           request.uri.path == BridgeServer.orbsPath) {
         await BridgeServer._handleOrbList(request, orbs);
         return;
+      }
+      if (request.method == 'DELETE') {
+        final orbId = BridgeServer._orbIdIn(request.uri.path);
+        if (orbId != null) {
+          await BridgeServer._handleOrbOrphanDelete(request, orbId, orbs);
+          return;
+        }
       }
       // The tunnel endpoints (issue #22), checked before the session matchers
       // (a bare list path would otherwise read as a session id to them).
@@ -2452,7 +2507,9 @@ class BridgeServer {
   /// The orb list (issue #93, spec §2.2): composed from the `ocb.*` labels
   /// (no registry file) — the labeled containers (running with their
   /// ephemeral URL, or stopped/broken) plus the labeled volumes without a
-  /// container (orphans).
+  /// container (orphans). `?pr=1` asks for the PR state of each row's branch
+  /// (issue #96, spec §9.1 — the Orbs tab's badge); without it the list
+  /// costs nothing for the PR (the composite services' hot path).
   static Future<void> _handleOrbList(
     HttpRequest request,
     OrbService? orbs,
@@ -2462,8 +2519,9 @@ class BridgeServer {
       BridgeServer._dockerUnavailable(response);
       return;
     }
+    final includePr = request.uri.queryParameters['pr'] == '1';
     try {
-      final rows = await orbs.list();
+      final rows = await orbs.list(includePr: includePr);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode([for (final row in rows) row.toJson()]));
     } on DockerUnavailableError {
@@ -2471,6 +2529,49 @@ class BridgeServer {
       response.write(jsonEncode({'error': 'docker_unreachable'}));
     }
     await response.close();
+  }
+
+  /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
+  /// never auto-deleted; issue #96): `DELETE /api/orbs/<id>` removes the
+  /// orphan's labeled volumes and its state dir. A container still existing
+  /// for the id is a 409 `orb_exists` (a live orb is not an orphan — its
+  /// force-delete lands with the lifecycle actions, #98); neither volume
+  /// existing is a 404; a daemon failure is a 502.
+  static Future<void> _handleOrbOrphanDelete(
+    HttpRequest request,
+    String id,
+    OrbService? orbs,
+  ) async {
+    final response = request.response;
+    if (orbs == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      await orbs.deleteOrphan(id);
+      response.statusCode = HttpStatus.noContent;
+    } on OrbExistsError {
+      response.statusCode = HttpStatus.conflict;
+      response.write(jsonEncode({'error': 'orb_exists', 'id': id}));
+    } on OrbOrphanNotFoundError {
+      await BridgeServer._notFound(response);
+      return;
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    }
+    await response.close();
+  }
+
+  /// The orb id behind an orb-detail path (`/api/orbs/<id>`), or `null`
+  /// when [path] is not one (the bare list path has no id segment, and a
+  /// multi-segment path is not an orb detail either).
+  static String? _orbIdIn(String path) {
+    const prefix = '/api/orbs/';
+    if (!path.startsWith(prefix)) return null;
+    final id = path.substring(prefix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return id;
   }
 
   /// The project directory behind a compose action path, or `null` when

@@ -66,6 +66,11 @@ class _FakeDocker {
   /// source and the failure tail).
   String logs = '';
 
+  /// Per-container full logs (the list's preparing derivation): the
+  /// container name is the key; [logs] is the fallback when the map has no
+  /// entry for the container.
+  final Map<String, String> containerLogs = {};
+
   /// The `{{json .NetworkSettings.Ports}}` inspect output (one line per
   /// container in the multi-arg form).
   String ports = 'null';
@@ -86,6 +91,24 @@ class _FakeDocker {
     exitCode: 0,
     stdout: '',
     stderr: '',
+  );
+
+  /// The `volume rm <name>` result (the orphan cleanup).
+  DockerCliResult volumeRmResult = const DockerCliResult(
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+  );
+
+  /// The names passed to `volume rm`, in order (the orphan cleanup).
+  final List<String> volumeRmNames = [];
+
+  /// The `docker inspect orb-<id> --format {{.Id}}` result (the orphan
+  /// cleanup's container probe).
+  DockerCliResult inspectIdResult = const DockerCliResult(
+    exitCode: 1,
+    stdout: '',
+    stderr: 'no such container',
   );
 
   (DockerRunner, DockerSpawner) bind() => (_run, _spawn);
@@ -110,16 +133,28 @@ class _FakeDocker {
       }
       if (argv[1] == 'ls') return volumeLsResult;
       if (argv[1] == 'inspect') return volumeInspectResult;
+      if (argv[1] == 'rm') {
+        volumeRmNames.add(argv[2]);
+        return volumeRmResult;
+      }
     }
     if (command == 'create' || command == 'cp' || command == 'start') {
       return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
     }
     if (command == 'logs') {
-      return DockerCliResult(exitCode: 0, stdout: logs, stderr: '');
+      // `docker logs <container>` (the full log): per-container when the
+      // test scripted one, the shared [logs] otherwise.
+      final container = argv[argv.length - 1];
+      return DockerCliResult(
+        exitCode: 0,
+        stdout: containerLogs[container] ?? logs,
+        stderr: '',
+      );
     }
     if (command == 'inspect') {
       final format = argv[argv.indexOf('--format') + 1];
       if (format == '{{.State.Status}}') return stateResult;
+      if (format == '{{.Id}}') return inspectIdResult;
       if (format == '{{json .NetworkSettings.Ports}}') {
         return DockerCliResult(exitCode: 0, stdout: ports, stderr: '');
       }
@@ -153,6 +188,18 @@ class _FakeGit {
   final Map<String, GitCliResult> results = {};
 
   GitRunner get run => (List<String> argv, {String? workingDirectory}) async {
+    args.add(List.of(argv));
+    return results[argv.join(' ')] ??
+        const GitCliResult(exitCode: 0, stdout: '', stderr: '');
+  };
+}
+
+/// The GhRunner seam, scripted by the argv (the PR-state read, issue #96).
+class _FakeGh {
+  final List<List<String>> args = [];
+  final Map<String, GitCliResult> results = {};
+
+  GhRunner get run => (List<String> argv) async {
     args.add(List.of(argv));
     return results[argv.join(' ')] ??
         const GitCliResult(exitCode: 0, stdout: '', stderr: '');
@@ -219,6 +266,8 @@ void main() {
       Duration? bootTimeout,
       Duration? pollInterval,
       void Function(String)? emit,
+      GhRunner? gh,
+      Future<String?> Function(String projectId)? repoFor,
     }) {
       final (run, spawn) = docker.bind();
       return OrbService(
@@ -231,6 +280,8 @@ void main() {
         bridgePort: 48201,
         emit: emit,
         hostIp: () async => '10.1.2.3',
+        gh: gh,
+        repoFor: repoFor,
         bootTimeout: bootTimeout ?? const Duration(minutes: 10),
         pollInterval: pollInterval ?? const Duration(milliseconds: 5),
       );
@@ -761,6 +812,9 @@ void main() {
         stderr: '',
       );
       docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"39999"}]}\nnull\nnull\nnull\n';
+      // a's full log carries the password line, so it is `running` (not
+      // `preparing`).
+      docker.containerLogs['orb-$a'] = '[orb] stage: ready\nserver password pw\n';
       // c has no workspace volume (broken:workspace), d has its volumes but
       // its state dir is removed (broken:state), e's volumes have no
       // container (orphan), b's state dir exists (clean stopped).
@@ -837,6 +891,268 @@ void main() {
       ]);
     });
 
+    test('list marks a not-yet-booted container as preparing with the stage',
+        () async {
+      const created = '2026-11-04T00:00:00.000Z';
+      String labels(String id, String name) => jsonEncode({
+        'ocb.orb': 'true',
+        'ocb.id': id,
+        'ocb.name': name,
+        'ocb.project': 'p1',
+        'ocb.branch': 'orb/$id',
+        'ocb.created': created,
+      });
+
+      const a = 'aaaaaaaaaaaaaaaa';
+      const b = 'bbbbbbbbbbbbbbbb';
+      docker.psResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-$a\norb-$b\n',
+        stderr: '',
+      );
+      docker.containerLabelsResult = DockerCliResult(
+        exitCode: 0,
+        stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
+        stderr: '',
+      );
+      // a was created but never started; b is running but its boot is
+      // still in flight (no `server password` line yet, last stage
+      // `installing`).
+      docker.stateResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'created\nrunning\n',
+        stderr: '',
+      );
+      docker.ports = 'null\nnull\n';
+      docker.containerLogs['orb-$b'] =
+          '[orb] stage: cloning\n[orb] stage: installing\n';
+      docker.volumeLsResult = DockerCliResult(
+        exitCode: 0,
+        stdout:
+            'orb-$a-workspace\norb-$a-data\norb-$b-workspace\norb-$b-data\n',
+        stderr: '',
+      );
+
+      final rows = await service().list();
+
+      expect(rows, [
+        const OrbRecord(
+          id: a,
+          name: 'dev',
+          project: 'p1',
+          branch: 'orb/$a',
+          state: 'preparing',
+          created: created,
+        ),
+        const OrbRecord(
+          id: b,
+          name: 'beta',
+          project: 'p1',
+          branch: 'orb/$b',
+          state: 'preparing:installing',
+          created: created,
+        ),
+      ]);
+    });
+
+    test('list with includePr enriches the rows with their PR', () async {
+      const created = '2026-11-04T00:00:00.000Z';
+      String labels(String id, String name) => jsonEncode({
+        'ocb.orb': 'true',
+        'ocb.id': id,
+        'ocb.name': name,
+        'ocb.project': 'p1',
+        'ocb.branch': 'orb/$id',
+        'ocb.created': created,
+      });
+
+      const a = 'aaaaaaaaaaaaaaaa';
+      const b = 'bbbbbbbbbbbbbbbb';
+      docker.psResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-$a\norb-$b\n',
+        stderr: '',
+      );
+      docker.containerLabelsResult = DockerCliResult(
+        exitCode: 0,
+        stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
+        stderr: '',
+      );
+      docker.stateResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'running\nrunning\n',
+        stderr: '',
+      );
+      docker.ports = 'null\nnull\n';
+      final log = 'server password pw\n';
+      docker.containerLogs['orb-$a'] = log;
+      docker.containerLogs['orb-$b'] = log;
+      docker.volumeLsResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+      );
+
+      final gh = _FakeGh();
+      gh.results[
+        'pr view --repo acme/app --head orb/$a --json state,url'
+      ] = const GitCliResult(
+        exitCode: 0,
+        stdout: '{"state":"OPEN","url":"https://github.com/acme/app/pull/7"}',
+        stderr: '',
+      );
+      gh.results[
+        'pr view --repo acme/app --head orb/$b --json state,url'
+      ] = const GitCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'no pull requests found',
+      );
+
+      final rows = await service(
+        gh: gh.run,
+        repoFor: (projectId) async => projectId == 'p1' ? 'acme/app' : null,
+      ).list(includePr: true);
+
+      expect(rows, [
+        const OrbRecord(
+          id: a,
+          name: 'dev',
+          project: 'p1',
+          branch: 'orb/$a',
+          state: 'running',
+          created: created,
+          pr: OrbPr(
+            state: 'open',
+            url: 'https://github.com/acme/app/pull/7',
+          ),
+        ),
+        const OrbRecord(
+          id: b,
+          name: 'beta',
+          project: 'p1',
+          branch: 'orb/$b',
+          state: 'running',
+          created: created,
+        ),
+      ]);
+      expect(gh.args, hasLength(2));
+    });
+
+    test('list without includePr never queries gh', () async {
+      const created = '2026-11-04T00:00:00.000Z';
+      const a = 'aaaaaaaaaaaaaaaa';
+      docker.psResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-$a\n',
+        stderr: '',
+      );
+      docker.containerLabelsResult = DockerCliResult(
+        exitCode: 0,
+        stdout: jsonEncode({
+          'ocb.orb': 'true',
+          'ocb.id': a,
+          'ocb.name': 'dev',
+          'ocb.project': 'p1',
+          'ocb.branch': 'orb/$a',
+          'ocb.created': created,
+        }),
+        stderr: '',
+      );
+      docker.stateResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'running\n',
+        stderr: '',
+      );
+      docker.ports = 'null\n';
+      docker.containerLogs['orb-$a'] = 'server password pw\n';
+      docker.volumeLsResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+      );
+
+      final gh = _FakeGh();
+
+      final rows = await service(
+        gh: gh.run,
+        repoFor: (projectId) async => 'acme/app',
+      ).list();
+
+      expect(gh.args, isEmpty);
+      expect(rows.single.pr, isNull);
+    });
+
+    test('deleteOrphan removes the orphan volumes and the state dir', () async {
+      const id = 'eeeeeeeeeeeeeeee';
+      // No container: the inspect probe exits 1.
+      docker.inspectIdResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'no such container',
+      );
+      docker.volumeLsResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-$id-workspace\norb-$id-data\n',
+        stderr: '',
+      );
+      final stateDir = Directory('${stateRoot.path}/$id')
+        ..createSync(recursive: true);
+
+      await service().deleteOrphan(id);
+
+      expect(docker.volumeRmNames, ['orb-$id-workspace', 'orb-$id-data']);
+      expect(stateDir.existsSync(), isFalse);
+    });
+
+    test('deleteOrphan refuses a live container', () async {
+      const id = 'eeeeeeeeeeeeeeee';
+      docker.inspectIdResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'cid',
+        stderr: '',
+      );
+
+      await expectLater(
+        service().deleteOrphan(id),
+        throwsA(isA<OrbExistsError>()),
+      );
+      expect(docker.volumeRmNames, isEmpty);
+    });
+
+    test('deleteOrphan reports a missing orphan', () async {
+      const id = 'eeeeeeeeeeeeeeee';
+      docker.inspectIdResult = const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'no such container',
+      );
+      docker.volumeLsResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+      );
+
+      await expectLater(
+        service().deleteOrphan(id),
+        throwsA(isA<OrbOrphanNotFoundError>()),
+      );
+    });
+
+    test('deleteOrphan surfaces the daemon failure', () async {
+      const id = 'eeeeeeeeeeeeeeee';
+      docker.inspectIdResult = const DockerCliResult(
+        exitCode: 2,
+        stdout: '',
+        stderr: 'Cannot connect to the Docker daemon',
+      );
+
+      await expectLater(
+        service().deleteOrphan(id),
+        throwsA(isA<DockerUnavailableError>()),
+      );
+    });
+
     test('an empty host is an empty list', () async {
       expect(await service().list(), isEmpty);
     });
@@ -884,6 +1200,40 @@ void main() {
       );
       expect(OrbService.isGitHubRemote('git@gitlab.com:acme/app.git'), isFalse);
       expect(OrbService.isGitHubRemote(''), isFalse);
+    });
+
+    test('lastStage takes the last stage word, or null', () {
+      expect(
+        OrbService.lastStage(
+          '[orb] stage: cloning\n[orb] stage: installing\n[orb] other\n',
+        ),
+        'installing',
+      );
+      expect(
+        OrbService.lastStage('[orb] stage: services\n[orb] stage: health\n'),
+        'health',
+      );
+      expect(OrbService.lastStage('no stage lines here'), isNull);
+    });
+
+    test('githubRepo parses the four GitHub remote forms', () {
+      expect(
+        OrbService.githubRepo('https://github.com/acme/app.git'),
+        'acme/app',
+      );
+      expect(OrbService.githubRepo('http://github.com/acme/app'), 'acme/app');
+      expect(OrbService.githubRepo('git@github.com:acme/app.git'), 'acme/app');
+      expect(
+        OrbService.githubRepo('ssh://git@github.com/acme/app.git'),
+        'acme/app',
+      );
+      expect(
+        OrbService.githubRepo('https://gitlab.com/acme/app.git'),
+        isNull,
+      );
+      expect(OrbService.githubRepo('https://github.com/'), isNull);
+      expect(OrbService.githubRepo('github.com/acme/app'), isNull);
+      expect(OrbService.githubRepo(''), isNull);
     });
   });
 }
