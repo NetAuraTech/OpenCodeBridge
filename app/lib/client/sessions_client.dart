@@ -733,6 +733,51 @@ class SessionsClient {
     await _postField(id, 'move', 'directory', directory);
   }
 
+  /// Move the session onto the orb [orbName] (issue #97): one action,
+  /// entirely through the bridge — the target orb is woken (or created)
+  /// before the session's export/import/delete. The bridge blocks for the
+  /// whole move (a boot included) and answers 204; the session id is
+  /// preserved, so a re-run over an already-moved session is the
+  /// 409-idempotent success. A failure surfaces as a [SessionsClientError]
+  /// whose message carries the wire `details` (the named refusal, the
+  /// failed boot's log tail, the failed move's detail) or its error code.
+  Future<void> moveToOrb(String id, String orbName) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(
+          path: 'api/sessions/${Uri.encodeComponent(id)}/move-to-orb',
+        ),
+        body: jsonEncode({'orb': orbName}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.noContent) {
+        throw SessionsClientError(response.statusCode, _moveDetail(body));
+      }
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// The user-facing text of a move wire error body: its `details` field,
+  /// its `error` code when there are none, or the raw body.
+  static String _moveDetail(String body) {
+    final decoded = const JsonDecoder().convert(body);
+    final map = decoded is Map<String, Object?> ? decoded : const {};
+    final details = map['details'] is String ? map['details'] as String : null;
+    if (details != null) return details;
+    final code = map['error'] is String ? map['error'] as String : null;
+    return code ?? body;
+  }
+
   /// The session's transcript (the `/` menu's `/export`): the service's
   /// `GET /api/experimental/session/{id}/export`, as its decoded JSON.
   Future<String> exportSession(String id) => _payload(id, 'export');

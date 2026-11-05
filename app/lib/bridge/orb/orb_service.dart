@@ -4,8 +4,12 @@ import 'dart:io';
 import 'dart:math';
 
 import '../../model/orb.dart';
+import '../../model/session.dart';
 import '../docker/docker_backend.dart';
 import '../events/bridge_event.dart';
+import '../sessions/opencode_cli.dart';
+import '../sessions/opencode_http_service.dart';
+import '../sessions/opencode_service.dart';
 import 'orb_image_builder.dart';
 
 /// The result of one short git CLI invocation.
@@ -137,8 +141,20 @@ class OrbRefusalError implements Exception {
   /// as the host's `user.name`/`user.email`).
   static const String missingGitIdentity = 'missing_git_identity';
 
+  /// The orb is not wakeable: its state is not `stopped` (issue #97, spec
+  /// §2.4).
+  static const String notWakeable = 'not_wakeable';
+
+  /// The project checkout cannot be resolved on the host (the move-to-orb's
+  /// create, issue #97).
+  static const String missingCheckout = 'missing_checkout';
+
+  /// The orb is not running (the per-orb session create, issue #97).
+  static const String notRunning = 'not_running';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
-  /// `missing_git_identity`).
+  /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
+  /// `not_running`).
   final String code;
 
   /// The clear message for the app.
@@ -190,6 +206,58 @@ class OrbExistsError implements Exception {
   String toString() => 'OrbExistsError($id)';
 }
 
+/// The orb id has no record — no labeled container (issue #97): the
+/// lifecycle endpoints answer 404.
+class OrbNotFoundError implements Exception {
+  const OrbNotFoundError(this.id);
+
+  final String id;
+
+  @override
+  String toString() => 'OrbNotFoundError($id)';
+}
+
+/// A single session could not be moved (its export or its import failed,
+/// issue #97): [detail] is the CLI's error output.
+class OrbSessionMoveError implements Exception {
+  const OrbSessionMoveError(this.session, this.detail);
+
+  /// The session id the move failed on.
+  final String session;
+
+  /// The CLI's error detail (the stderr, or the stdout when the stderr is
+  /// empty).
+  final String detail;
+
+  @override
+  String toString() => 'OrbSessionMoveError($session: $detail)';
+}
+
+/// The stop or a move cannot run: the host opencode CLI, the host sessions
+/// service, the project checkout lookup, or the orb's password (issue #97)
+/// is not available.
+class OrbSessionsUnavailableError implements Exception {
+  const OrbSessionsUnavailableError(this.detail);
+
+  final String detail;
+
+  @override
+  String toString() => 'OrbSessionsUnavailableError($detail)';
+}
+
+/// One endpoint the opencode CLI talks to during a session move (issue
+/// #97): the service the session is deleted from, and the CLI's
+/// `--server` / `OPENCODE_PASSWORD` overlay for reaching it. Both `null`
+/// is the host endpoint — no `--server` flag, no password environment (the
+/// host CLI finds the shared opencode service by default).
+class OpencodeEndpoint {
+  const OpencodeEndpoint({required this.service, this.server, this.password});
+
+  final OpencodeService service;
+  final String? server;
+  final String? password;
+}
+
 /// The bridge-side orb creation and list (issue #93, spec §2.3/§2.2):
 /// [create] is the full bridge-owned creation sequence (refusals up front,
 /// image ensure, labeled volumes + state dir, `docker create` with all the
@@ -209,6 +277,10 @@ class OrbService {
     this.hostIp,
     this.gh,
     this.repoFor,
+    this.opencodeCli,
+    this.checkoutFor,
+    this.hostSessions,
+    this.orbServiceFor,
     this.bootTimeout = const Duration(minutes: 10),
     this.pollInterval = const Duration(milliseconds: 500),
   });
@@ -262,6 +334,30 @@ class OrbService {
   /// the project's `origin` remote, parsed to `owner/repo`. `null` when the
   /// bridge cannot resolve projects (no PR state then either).
   final Future<String?> Function(String projectId)? repoFor;
+
+  /// The host opencode CLI runner (the stop/wake session export and import,
+  /// issue #97). `null` when this machine has no opencode CLI on its PATH —
+  /// the stop and the moves then refuse with [OrbSessionsUnavailableError].
+  final OpencodeCliRunner? opencodeCli;
+
+  /// Resolves a project id to its host checkout (the stop's import
+  /// `--directory` and the wake's `.env*` source, issue #97). `null` when
+  /// the bridge cannot resolve projects — the stop then refuses with
+  /// [OrbSessionsUnavailableError] and the move-to-orb's create with
+  /// [OrbRefusalError.missingCheckout].
+  final Future<String?> Function(String projectId)? checkoutFor;
+
+  /// The host's shared opencode service (the stop's import target, the
+  /// move-to-orb's source, issue #97). `null` when this machine has no
+  /// shared service — the stop and the moves then refuse with
+  /// [OrbSessionsUnavailableError].
+  final OpencodeService? hostSessions;
+
+  /// Builds the per-orb opencode service (the move's orb side and the
+  /// per-orb session create, issue #97). The default is a plain
+  /// [OpencodeHttpService] for the given url and password (tests inject a
+  /// fake).
+  final OpencodeService Function(String url, String password)? orbServiceFor;
 
   /// How long the boot wait runs before it fails the create.
   final Duration bootTimeout;
@@ -650,6 +746,434 @@ class OrbService {
     if (stateDir.existsSync()) {
       stateDir.deleteSync(recursive: true);
     }
+  }
+
+  // ------------------------------------------------------------------------
+  // The orb lifecycle: stop (move to host), wake, session moves
+  // (issue #97, spec §2.4/§2.5).
+
+  /// Whether [id] has the `ocb.stopped` marker (a stopped orb, issue #97):
+  /// the card's state gate (Stop while running, Wake while stopped).
+  /// Container labels are immutable at runtime, so the marker is a file in
+  /// the per-orb state dir (`<stateRoot>/<id>/stopped`): created at the end
+  /// of a successful stop, removed at the end of a successful wake.
+  bool isStopped(String id) => _stoppedMarker(id).existsSync();
+
+  File _stoppedMarker(String id) => File('${stateRoot.path}/$id/stopped');
+
+  Future<void> _setStoppedMarker(String id) async {
+    final marker = _stoppedMarker(id);
+    await marker.parent.create(recursive: true);
+    await marker.writeAsString(DateTime.now().toUtc().toIso8601String());
+  }
+
+  Future<void> _removeStoppedMarker(String id) async {
+    final marker = _stoppedMarker(id);
+    if (marker.existsSync()) {
+      await marker.delete();
+    }
+  }
+
+  /// The record of the orb [id] (from the label-composed list), or `null`
+  /// when the id has no labeled container.
+  Future<OrbRecord?> _record(String id) async {
+    for (final record in await list()) {
+      if (record.id == id) return record;
+    }
+    return null;
+  }
+
+  /// The per-orb opencode service for [url]/[password]: the injected
+  /// factory's build, or a plain [OpencodeHttpService].
+  OpencodeService _orbService(String url, String password) {
+    final factory = orbServiceFor;
+    if (factory != null) return factory(url, password);
+    return OpencodeHttpService(baseUrl: Uri.parse(url), password: password);
+  }
+
+  /// The orb's service url: the descriptor's ephemeral url from the list,
+  /// re-read from the container's port mapping when the list carried none.
+  Future<String> _orbUrl(String id, OrbRecord record) async {
+    final url = record.url;
+    if (url != null && url.isNotEmpty) return url;
+    return 'http://127.0.0.1:${await _hostPort(id, 'orb-$id')}';
+  }
+
+  /// The CLI's `--server <url>` args for [server] (none for the host).
+  List<String> _serverArgs(String? server) =>
+      server == null ? const <String>[] : ['--server', server];
+
+  /// The CLI's environment overlay for [password] (none for the host).
+  Map<String, String>? _passwordEnv(String? password) =>
+      password == null ? null : {'OPENCODE_PASSWORD': password};
+
+  /// The detail to surface from a failed CLI call: the stderr (the CLI's
+  /// error channel), or the stdout when the stderr is empty.
+  String _cliDetail(OpencodeCliResult result) {
+    final detail = result.stderr.trim();
+    if (detail.isNotEmpty) return detail;
+    return result.stdout.trim();
+  }
+
+  /// Whether a failed session import is the idempotent 409 (the session
+  /// already exists on the target — a move re-run, issue #97).
+  bool _isImport409(OpencodeCliResult result) {
+    if (result.exitCode == 0) return false;
+    return RegExp(
+      r'409|conflict',
+      caseSensitive: false,
+    ).hasMatch('${result.stdout}\n${result.stderr}');
+  }
+
+  /// The orb stop (issue #97, spec §2.5): the single trigger for every orb
+  /// death path. It is unguarded (lossless — the guard exists only on
+  /// delete): it exports every session on the orb (top-level plus
+  /// child/subagent, one by one — an in-flight session as its history up to
+  /// now), imports each into the host checkout (idempotent — a 409 is the
+  /// session already there), deletes it from the orb only after its import
+  /// succeeded, then `docker stop`s the container last and sets the
+  /// `ocb.stopped` marker (the wake's gate). A re-issue while stopped is a
+  /// safe no-op.
+  Future<void> stop(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state != 'running') return;
+    final cli = opencodeCli;
+    final host = hostSessions;
+    final resolve = checkoutFor;
+    if (cli == null || host == null || resolve == null) {
+      throw OrbSessionsUnavailableError(
+        'the host opencode CLI, the host sessions service, or the project '
+        'checkout lookup is not available on this bridge',
+      );
+    }
+    final password = await lastPassword(id);
+    if (password == null) {
+      throw OrbSessionsUnavailableError(
+        'the orb service password cannot be read from the orb logs',
+      );
+    }
+    // Every session on the orb shares its project: the host checkout they
+    // move into, resolved up front so a missing checkout fails before any
+    // export.
+    final checkoutPath = await resolve(record.project);
+    if (checkoutPath == null || checkoutPath.trim().isEmpty) {
+      throw OrbSessionsUnavailableError(
+        'the project checkout is not available on the host',
+      );
+    }
+    final url = await _orbUrl(id, record);
+    final service = _orbService(url, password);
+    final all = await service.listSessions();
+    // Phase 1: export every session (top-level plus child/subagent), one
+    // by one, into a temp file. The export is a full snapshot — a partial
+    // turn becomes history, and the session is continuable from the host.
+    // Staged in the system temp, never in the per-orb state dir (that dir
+    // is bind-mounted into the container as /root/.local).
+    final files = <String, File>{};
+    try {
+      for (final session in all) {
+        final file = File(
+          '${Directory.systemTemp.path}/ocb-stop-$id-${session.id}.json',
+        )..createSync();
+        try {
+          final export = await cli([
+            'session',
+            'export',
+            session.id,
+            ..._serverArgs(url),
+          ], env: _passwordEnv(password));
+          if (export.exitCode != 0) {
+            throw OrbSessionMoveError(session.id, _cliDetail(export));
+          }
+          await file.writeAsString(export.stdout);
+          files[session.id] = file;
+        } catch (_) {
+          if (file.existsSync()) await file.delete();
+          rethrow;
+        }
+      }
+      // Phase 2: per session, import into the host checkout (409 = already
+      // there, idempotent), then delete it from the orb only after its
+      // import succeeded.
+      for (final session in all) {
+        final file = files[session.id]!;
+        final import = await cli([
+          'session',
+          'import',
+          file.path,
+          '--directory',
+          checkoutPath,
+        ]);
+        if (import.exitCode != 0 && !_isImport409(import)) {
+          throw OrbSessionMoveError(session.id, _cliDetail(import));
+        }
+        try {
+          await service.deleteSession(session.id);
+        } catch (error) {
+          throw OrbSessionMoveError(
+            session.id,
+            'the session import succeeded but the deletion from the orb '
+            'failed: $error',
+          );
+        }
+      }
+      // `docker stop` last — only after every session has moved to the
+      // host.
+      await _runOrThrow(['stop', 'orb-$id']);
+      // The wake's gate (issue #97, spec §2.4).
+      await _setStoppedMarker(id);
+    } finally {
+      for (final file in files.values) {
+        if (file.existsSync()) await file.delete();
+      }
+    }
+  }
+
+  /// The orb wake (issue #97, spec §2.4): re-runs the full start path on
+  /// the same container/volumes/state — the `.env*` re-injection and the
+  /// config/auth re-copy (host-authoritative, §6), `docker start`, the boot
+  /// wait (entrypoint services + health gate — the first-start path is
+  /// skipped, the clone exists), the ephemeral port re-read and the
+  /// password re-read (the descriptor read back and verified, §7.1) — and
+  /// removes the `ocb.stopped` marker only on success. It is lossless by
+  /// construction: after a clean stop the orb holds no sessions, and after
+  /// a crash its own are re-attached by the composite services. A
+  /// re-issue while running is a safe no-op.
+  Future<OrbRecord> wake(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state == 'running') return record;
+    if (record.state != 'stopped') {
+      throw const OrbRefusalError(
+        OrbRefusalError.notWakeable,
+        'only a stopped orb can be woken',
+      );
+    }
+    final container = 'orb-$id';
+    // The `.env*` re-injection (host-authoritative, §6.1): the same copy
+    // as the create. A missing checkout is non-fatal — the orb keeps the
+    // env files of its last start.
+    final resolve = checkoutFor;
+    if (resolve != null) {
+      final checkoutPath = await resolve(record.project);
+      if (checkoutPath != null && checkoutPath.isNotEmpty) {
+        for (final file in _envFiles(checkoutPath)) {
+          await _runOrThrow([
+            'cp',
+            file.path,
+            '$container:/workspace/${file.path.split('/').last}',
+          ]);
+        }
+      }
+    }
+    // The config/auth re-copy (host-authoritative, §6.2): `docker cp`
+    // works on the stopped container, as on the create.
+    final staged = await _stageConfig(id);
+    await _copyStagedConfig(container, staged);
+    await _copyAuth(container);
+    await _runOrThrow(['start', container]);
+    // The boot wait: the follow stream (live `orb.boot` events) and the
+    // poll loop that re-reads and verifies the descriptor (§7.1).
+    final logProcess = await spawn(['logs', '--follow', container]);
+    final tail = <String>[];
+    _streamBootLines(id, logProcess, tail);
+    try {
+      final (url, password) = await _waitForBoot(id, container, tail);
+      await _removeStoppedMarker(id);
+      return OrbRecord(
+        id: id,
+        name: record.name,
+        project: record.project,
+        branch: record.branch,
+        state: 'running',
+        created: record.created,
+        url: url,
+      );
+    } finally {
+      await logProcess.kill();
+    }
+  }
+
+  /// The generic session move primitive (issue #97, spec §2.5): exports
+  /// [session] from [source], imports it into [target] at [directory]
+  /// (idempotent — a 409 is the session already there), and deletes it from
+  /// [source] only after the import succeeded. Both directions (orb→host
+  /// and host→orb) run through it; the target service must be running —
+  /// the caller guarantees it (a wake or a create).
+  Future<void> moveSession({
+    required String session,
+    required OpencodeEndpoint source,
+    required OpencodeEndpoint target,
+    required String directory,
+  }) async {
+    final cli = opencodeCli;
+    if (cli == null) {
+      throw OrbSessionsUnavailableError(
+        'the host opencode CLI is not available on this bridge',
+      );
+    }
+    final file = File(
+      '${Directory.systemTemp.path}/ocb-move-$session-${DateTime.now().millisecondsSinceEpoch}.json',
+    );
+    try {
+      final export = await cli([
+        'session',
+        'export',
+        session,
+        ..._serverArgs(source.server),
+      ], env: _passwordEnv(source.password));
+      if (export.exitCode != 0) {
+        throw OrbSessionMoveError(session, _cliDetail(export));
+      }
+      await file.writeAsString(export.stdout);
+      final import = await cli([
+        'session',
+        'import',
+        file.path,
+        '--directory',
+        directory,
+        ..._serverArgs(target.server),
+      ], env: _passwordEnv(target.password));
+      if (import.exitCode != 0 && !_isImport409(import)) {
+        throw OrbSessionMoveError(session, _cliDetail(import));
+      }
+      try {
+        await source.service.deleteSession(session);
+      } catch (error) {
+        throw OrbSessionMoveError(
+          session,
+          'the session import succeeded but the deletion from the source '
+          'failed: $error',
+        );
+      }
+    } finally {
+      if (file.existsSync()) await file.delete();
+    }
+  }
+
+  /// The host→orb move (issue #97, spec §2.5): one action, entirely through
+  /// the bridge. [session] must live on the host service; the target orb is
+  /// resolved by [orbName] within the session's project — woken when
+  /// stopped, created (the full spec §2.3 sequence) when absent (its
+  /// checkout resolved through [checkoutFor]), otherwise refused. The
+  /// import's `--directory` is the orb's workspace (`/workspace`).
+  Future<void> moveSessionToOrb({
+    required String session,
+    required String orbName,
+  }) async {
+    final cli = opencodeCli;
+    final host = hostSessions;
+    if (cli == null || host == null) {
+      throw OrbSessionsUnavailableError(
+        'the host opencode CLI and the host sessions service are not '
+        'available on this bridge',
+      );
+    }
+    OpencodeSession? source;
+    for (final candidate in await host.listSessions()) {
+      if (candidate.id == session) {
+        source = candidate;
+        break;
+      }
+    }
+    if (source == null) {
+      throw OrbSessionMoveError(
+        session,
+        'the session is not on the host service — it cannot be moved to an '
+        'orb',
+      );
+    }
+    OrbRecord? orb;
+    for (final record in await list()) {
+      if (record.project == source.projectId && record.name == orbName) {
+        orb = record;
+        break;
+      }
+    }
+    if (orb == null) {
+      // No such orb in the project: create it (spec §2.3) — the checkout
+      // is the create's `.env*` source and the remote probe.
+      final resolve = checkoutFor;
+      final checkoutPath = resolve == null
+          ? null
+          : await resolve(source.projectId);
+      if (checkoutPath == null || checkoutPath.trim().isEmpty) {
+        throw const OrbRefusalError(
+          OrbRefusalError.missingCheckout,
+          'the project checkout is not available on the host — the orb '
+          'cannot be created',
+        );
+      }
+      orb = await create(
+        project: source.projectId,
+        name: orbName,
+        checkout: checkoutPath,
+      );
+    } else if (orb.state == 'stopped') {
+      orb = await wake(orb.id);
+    } else if (orb.state != 'running') {
+      throw const OrbRefusalError(
+        OrbRefusalError.notWakeable,
+        'the orb is not running and cannot be woken',
+      );
+    }
+    final password = await lastPassword(orb.id);
+    if (password == null) {
+      throw OrbSessionsUnavailableError(
+        'the orb service password cannot be read from the orb logs',
+      );
+    }
+    final url = await _orbUrl(orb.id, orb);
+    await moveSession(
+      session: session,
+      source: OpencodeEndpoint(service: host),
+      target: OpencodeEndpoint(
+        service: _orbService(url, password),
+        server: url,
+        password: password,
+      ),
+      directory: '/workspace',
+    );
+  }
+
+  /// Create a session on the running orb [id] (issue #97, spec §9.5): the
+  /// orb's workspace (`/workspace`) is the new session's working directory.
+  /// The returned row is the home-list row as the orb service reports it —
+  /// its `orb` is the orb id. A stopped orb refuses with
+  /// [OrbRefusalError.notRunning] (wake it first).
+  Future<Session> createSessionOnOrb(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state != 'running') {
+      throw const OrbRefusalError(
+        OrbRefusalError.notRunning,
+        'only a running orb can create a session',
+      );
+    }
+    final password = await lastPassword(id);
+    if (password == null) {
+      throw OrbSessionsUnavailableError(
+        'the orb service password cannot be read from the orb logs',
+      );
+    }
+    final url = await _orbUrl(id, record);
+    final service = _orbService(url, password);
+    final session = await service.createSessionInDirectory('/workspace');
+    final names = await service.projectNames();
+    final active = await service.activeSessionIds();
+    return Session(
+      id: session.id,
+      title: session.title,
+      project: SessionProject(
+        id: session.projectId,
+        name: names[session.projectId] ?? '',
+      ),
+      created: session.created,
+      location: session.location,
+      active: active.contains(session.id),
+      orb: id,
+    );
   }
 
   /// Whether [url] is a GitHub remote url — `https://`, `http://`, the

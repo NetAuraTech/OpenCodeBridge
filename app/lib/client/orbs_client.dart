@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:opencodebridge/client/authenticated_http.dart';
 import 'package:opencodebridge/model/orb.dart';
+import 'package:opencodebridge/model/session.dart';
 
 /// The app-side client of the bridge's orb endpoints (issue #93, #96):
 /// the orb list (with the optional PR state), the creation (which blocks
@@ -137,6 +138,111 @@ class OrbsClient {
     } finally {
       client.close(force: true);
     }
+  }
+
+  /// The orb stop (issue #97, spec §2.5): the single trigger for every orb
+  /// death path — every session exported to the host checkout and deleted
+  /// from the orb only after its import, the container stopped last, the
+  /// `ocb.stopped` marker set. The bridge blocks until the move and the
+  /// stop are done (the card keeps its "stopping" state open over the
+  /// wait); a re-issue while stopped is a safe no-op 204. A failure
+  /// surfaces as an [OrbsClientError] (the 503 `opencode_unavailable` when
+  /// the host CLI or service is missing, the 502 `session_move_failed`
+  /// with its detail, the 502 `docker_unreachable`, or the 404 of an
+  /// unknown id).
+  Future<void> stop(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/orbs/$id/stop'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.noContent) {
+        throw OrbsClientError(response.statusCode, _detail(body));
+      }
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// The orb wake (issue #97, spec §2.4): re-runs the full start path on
+  /// the same container/volumes/state — the `.env*` re-injection, the
+  /// config/auth re-copy, `docker start`, the boot wait — and removes the
+  /// `ocb.stopped` marker only on success. The bridge blocks for the whole
+  /// boot before answering 200 with the running record. A failure surfaces
+  /// as an [OrbCreateError] (the 400 `not_wakeable` refusal and the 502
+  /// `orb_boot_failed` with its log tail) or an [OrbsClientError].
+  Future<OrbRecord> wake(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/orbs/$id/wake'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode == HttpStatus.ok) {
+        return OrbRecord.fromJson(jsonDecode(body));
+      }
+      throw _createError(response.statusCode, body);
+    } on OrbCreateError {
+      rethrow;
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Create a session on the running orb [id] (issue #97, spec §9.5): the
+  /// new session's working directory is the orb's workspace
+  /// (`/workspace`), and the returned row is stamped with the orb. A
+  /// stopped orb refuses with the 400 `not_running` (an [OrbCreateError])
+  /// — wake it first.
+  Future<Session> createSessionOnOrb(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/orbs/$id/sessions'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode == HttpStatus.created) {
+        return Session.fromJson(jsonDecode(body));
+      }
+      throw _createError(response.statusCode, body);
+    } on OrbCreateError {
+      rethrow;
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// The user-facing text of a wire error body: its `details` field, its
+  /// `error` code when there are none, or the raw body.
+  static String _detail(String body) {
+    final decoded = const JsonDecoder().convert(body);
+    final map = decoded is Map<String, Object?> ? decoded : const {};
+    final details = map['details'] is String ? map['details'] as String : null;
+    if (details != null) return details;
+    final code = map['error'] is String ? map['error'] as String : null;
+    return code ?? body;
   }
 
   /// The wire error of a failed create, decoded to [OrbCreateError]:

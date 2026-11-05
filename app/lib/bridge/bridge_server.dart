@@ -27,6 +27,7 @@ import 'events/opencode_http_event_service.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
 import 'sessions/composite_service.dart';
+import 'sessions/opencode_cli.dart';
 import 'sessions/opencode_http_service.dart';
 import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
@@ -652,6 +653,20 @@ class BridgeServer {
     final ghBinary = findHostGh();
     final home = homeDirectory();
     final git = hostGitRunner(gitBinary);
+    // The session-move dependencies (issue #97): the host opencode CLI, the
+    // host sessions service (the shared-service descriptor), and the
+    // project-checkout lookup. Each degrades to `null` — the lifecycle
+    // endpoints then answer 503 `opencode_unavailable` — so a host missing
+    // one of them still gets the orb list/create/delete.
+    final opencodeBinary = findHostOpencode();
+    OpencodeService? hostService;
+    try {
+      hostService = await OpencodeHttpService.fromHost();
+    } catch (_) {
+      // No shared-service descriptor on this host: the host sessions
+      // service is unreachable (the stop and the move-to-orb refuse with
+      // 503).
+    }
     return OrbService(
       imageBuilder: builder,
       run: cli.run,
@@ -661,6 +676,29 @@ class BridgeServer {
       stateRoot: Directory('$home/.config/opencodebridge/orbs'),
       bridgePort: defaultPort,
       emit: emit,
+      opencodeCli: opencodeBinary == null
+          ? null
+          : hostOpencodeRunner(opencodeBinary),
+      hostSessions: hostService,
+      checkoutFor: projectBackend == null
+          ? null
+          : (projectId) async {
+              final backend = projectBackend();
+              if (backend == null) return null;
+              try {
+                final projects = await backend.projects();
+                for (final candidate in projects) {
+                  if (candidate.id == projectId) {
+                    return candidate.canonical;
+                  }
+                }
+              } catch (_) {
+                // The opencode service is down, or the project list cannot
+                // be read: no checkout (the stop and the move's create
+                // refuse with 503).
+              }
+              return null;
+            },
       gh: ghBinary == null ? null : hostGhRunner(ghBinary),
       repoFor: ghBinary == null || projectBackend == null
           ? null
@@ -994,6 +1032,25 @@ class BridgeServer {
           return;
         }
       }
+      // The orb lifecycle actions (issue #97): `POST /api/orbs/<id>/stop`
+      // (the single trigger for every orb death path — the sessions moved
+      // to the host, the container stopped last, the `ocb.stopped` marker
+      // set), `POST /api/orbs/<id>/wake` (the full start path re-run, the
+      // marker off), `POST /api/orbs/<id>/sessions` (a new session in the
+      // orb workspace). Checked before the session matchers (a bare path
+      // would otherwise read as a session id to them).
+      if (request.method == 'POST') {
+        final orbAction = BridgeServer._orbActionIn(request.uri.path);
+        if (orbAction != null) {
+          await BridgeServer._handleOrbAction(
+            request,
+            orbAction.$1,
+            orbAction.$2,
+            orbs,
+          );
+          return;
+        }
+      }
       // The tunnel endpoints (issue #22), checked before the session matchers
       // (a bare list path would otherwise read as a session id to them).
       if (request.method == 'GET' &&
@@ -1174,6 +1231,17 @@ class BridgeServer {
         final id = BridgeServer._sessionIdIn(request.uri.path);
         if (id != null) {
           await BridgeServer._deleteSession(request, id, sessions, events);
+          return;
+        }
+      }
+      // The host→orb session move (issue #97): one action, entirely through
+      // the bridge — the target orb is woken (or created) before the move.
+      // Checked before the command-menu fallthrough (its subpath would
+      // otherwise read as a `/` command to it).
+      if (request.method == 'POST') {
+        final moveId = BridgeServer._moveToOrbIn(request.uri.path);
+        if (moveId != null) {
+          await BridgeServer._handleMoveToOrb(request, moveId, sessions, orbs);
           return;
         }
       }
@@ -2564,6 +2632,156 @@ class BridgeServer {
     await response.close();
   }
 
+  /// The orb lifecycle actions (issue #97): `stop` (the single trigger for
+  /// every orb death path — every session exported to the host and deleted
+  /// from the orb only after its import, the container stopped last, the
+  /// `ocb.stopped` marker set; a re-issue while stopped is a safe no-op)
+  /// answers 204; `wake` (the full start path re-run, the marker off)
+  /// answers 200 with the running record; `sessions` (a new session in the
+  /// orb workspace, its row stamped with the orb) answers 201 with the row.
+  /// The error mapping: a missing orb a 404; a named refusal a 400 with its
+  /// code and message; a failed boot a 502 `orb_boot_failed` with the log
+  /// tail; a missing session prerequisite (no host CLI, no host service,
+  /// no checkout, no orb password) a 503 `opencode_unavailable`; a failed
+  /// session move a 502 `session_move_failed`; a service error the
+  /// [_serviceError] mapping; a daemon failure a 502 `docker_unreachable`.
+  static Future<void> _handleOrbAction(
+    HttpRequest request,
+    String id,
+    String action,
+    OrbService? orbs,
+  ) async {
+    final response = request.response;
+    if (orbs == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    try {
+      switch (action) {
+        case 'stop':
+          await orbs.stop(id);
+          response.statusCode = HttpStatus.noContent;
+          break;
+        case 'wake':
+          final record = await orbs.wake(id);
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode(record.toJson()));
+          break;
+        default: // 'sessions'
+          final session = await orbs.createSessionOnOrb(id);
+          response.statusCode = HttpStatus.created;
+          response.write(jsonEncode(session.toJson()));
+      }
+    } on OrbNotFoundError {
+      await BridgeServer._notFound(response);
+      return;
+    } on OrbRefusalError catch (e) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': e.code, 'details': e.message}));
+    } on OrbBootError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(
+        jsonEncode({
+          'error': 'orb_boot_failed',
+          'details': e.detail,
+          'logTail': e.logTail,
+        }),
+      );
+    } on OrbSessionsUnavailableError {
+      BridgeServer._unavailable(response);
+      return;
+    } on OrbSessionMoveError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(
+        jsonEncode({
+          'error': 'session_move_failed',
+          'session': e.session,
+          'details': e.detail,
+        }),
+      );
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The host→orb session move (issue #97): one action, entirely through
+  /// the bridge. The body is `{"orb": "<name>"}`; the target orb is resolved
+  /// in the session's project — woken when stopped, created (the full
+  /// spec §2.3 sequence) when absent, otherwise refused — and the session
+  /// moves onto its workspace. A 204 on the move (a re-run over an already
+  /// moved session is the 409-idempotent success); the error mapping is the
+  /// lifecycle actions' plus the create's (a taken name is a 409
+  /// `name_taken`, a build failure a 502 `docker_build_failed`).
+  static Future<void> _handleMoveToOrb(
+    HttpRequest request,
+    String session,
+    SessionsBackend? sessions,
+    OrbService? orbs,
+  ) async {
+    final response = request.response;
+    if (orbs == null) {
+      BridgeServer._dockerUnavailable(response);
+      return;
+    }
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final body = await BridgeServer._jsonBody(request);
+    final orbName = BridgeServer._stringField(body, 'orb');
+    if (orbName == null) {
+      await BridgeServer._invalidBody(response);
+      return;
+    }
+    try {
+      await orbs.moveSessionToOrb(session: session, orbName: orbName);
+      response.statusCode = HttpStatus.noContent;
+    } on OrbNotFoundError {
+      await BridgeServer._notFound(response);
+      return;
+    } on OrbRefusalError catch (e) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': e.code, 'details': e.message}));
+    } on OrbNameTakenError {
+      response.statusCode = HttpStatus.conflict;
+      response.write(jsonEncode({'error': 'name_taken', 'name': orbName}));
+    } on OrbBootError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(
+        jsonEncode({
+          'error': 'orb_boot_failed',
+          'details': e.detail,
+          'logTail': e.logTail,
+        }),
+      );
+    } on OrbImageBuildError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_build_failed'}));
+    } on OrbSessionsUnavailableError {
+      BridgeServer._unavailable(response);
+      return;
+    } on OrbSessionMoveError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(
+        jsonEncode({
+          'error': 'session_move_failed',
+          'session': e.session,
+          'details': e.detail,
+        }),
+      );
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
   /// The orb id behind an orb-detail path (`/api/orbs/<id>`), or `null`
   /// when [path] is not one (the bare list path has no id segment, and a
   /// multi-segment path is not an orb detail either).
@@ -2573,6 +2791,37 @@ class BridgeServer {
     final id = path.substring(prefix.length);
     if (id.isEmpty || id.contains('/')) return null;
     return id;
+  }
+
+  /// The (orb id, action) behind an orb lifecycle path
+  /// `/api/orbs/<id>/<action>` (issue #97), or `null` when [path] is not one
+  /// (the bare orb-detail path has no action segment, and any word other
+  /// than `stop`, `wake`, or `sessions` is not an action).
+  static (String, String)? _orbActionIn(String path) {
+    const prefix = '/api/orbs/';
+    if (!path.startsWith(prefix)) return null;
+    final rest = path.substring(prefix.length);
+    final slash = rest.indexOf('/');
+    if (slash <= 0) return null;
+    final id = rest.substring(0, slash);
+    final action = rest.substring(slash + 1);
+    if (id.isEmpty || id.contains('/') || action.contains('/')) return null;
+    if (action != 'stop' && action != 'wake' && action != 'sessions') {
+      return null;
+    }
+    return (id, action);
+  }
+
+  /// The session id in a move-to-orb path `/api/sessions/{id}/move-to-orb`
+  /// (issue #97), or `null` when [path] is not one (the body carries the
+  /// target orb name).
+  static String? _moveToOrbIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/move-to-orb';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
   }
 
   /// The project directory behind a compose action path, or `null` when
