@@ -140,9 +140,10 @@ RUN set -eux; \
     chmod +x /usr/local/bin/mailhog; \
     mailhog -version;
 
-# --- Boot scripts (spec §6.6): the entrypoint is part of the build context
-# and therefore of the image; the boot-prep ticket (#82) replaces the
-# placeholder body in place (edit-the-files model, no app/bridge knob).
+# --- Boot scripts (spec §6.6): the entrypoint (clone, installers, local
+# services, health gate, serve — issues #93/#94) is part of the build
+# context and therefore of the image (edit-the-files model, no app/bridge
+# knob).
 COPY orb-entrypoint.sh /usr/local/bin/orb-entrypoint
 RUN chmod +x /usr/local/bin/orb-entrypoint
 
@@ -165,13 +166,30 @@ RUN set -eux; \
 ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
 ''';
 
-  /// The container entrypoint (issue #93, spec §6.1–§6.3): the first-start
-  /// boot prep (clone the project remote into the fresh workspace, install
-  /// the `orb/<id>` post-commit hook, write the container-local gitconfig),
-  /// then start opencode's server on the fixed in-container port
-  /// (spec §2.9 — opencode's default, 4096). The installers, the local
-  /// services, and the health gate are #94's and will extend this file in
-  /// place (scripts-as-config, spec §6.6).
+  /// The container entrypoint (issues #93 + #94, spec §6). Boot prep, in
+  /// order:
+  ///   1. first start only: clone the project remote into the fresh
+  ///      workspace and install the `orb/<id>` post-commit hook (spec §6.1);
+  ///   2. every start: the container-local gitconfig (identity + the gh
+  ///      credential helper — spec §4) and the SSH known-hosts fallback;
+  ///   3. first start only: the installers (spec §6.3) — `npm ci` when the
+  ///      lockfile is present else `npm install`, `composer install`,
+  ///      `flutter pub get` — triggered by file presence, non-fatal;
+  ///   4. every start: the local services (spec §6.4) — postgres, redis,
+  ///      typesense, mailhog — started only when the project's `.env*`
+  ///      files declare a local host (127.0.0.1/localhost/::1), bound to
+  ///      127.0.0.1 in-container on the `.env` port else the conventional
+  ///      default, data on the data volume (never the workspace),
+  ///      health-checked before start (idempotent), provisioned from the
+  ///      `.env`;
+  ///   5. every start: the health gate (spec §6.5) — wait for every
+  ///      declared service to become healthy (SERVICE_HEALTH_TIMEOUT_SECONDS,
+  ///      ~30 s) before serving; a timeout exits non-zero and the bridge
+  ///      surfaces the failure with the boot log tail (issue #93);
+  ///   6. serve opencode on the fixed in-container port (spec §2.9).
+  /// Each boot stage streams as a `[orb] stage: <word>` line (cloning,
+  /// installing, services, health, ready) so the preparing state can show
+  /// the stage (spec §9.3/§9.4).
   ///
   /// The env the bridge passes at `docker create` (spec §2.3): `ORB_ID`
   /// (the orb id, which the hook bakes into its push refspec),
@@ -180,33 +198,74 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   /// — ADR-0001, the app never sees the values).
   ///
   /// The bridge injects the `.env*` files into the created (not yet started)
-  /// container's workspace before `docker start`, so the first-start clone
-  /// has to tolerate a non-empty `/workspace` (git does, once it owns the
-  /// `.git` directory).
+  /// container's workspace before `docker start`; the entrypoint reads them
+  /// — merged in filename order, later files win, `*.example` skipped — for
+  /// the service declarations and the postgres/typesense provisioning. The
+  /// first-start clone tolerates the non-empty workspace (git does, once it
+  /// owns the `.git` directory).
+  ///
+  /// Scripts-as-config (spec §6.6): this file lives in the app-owned build
+  /// context and is baked into the image — there is no app/bridge knob.
+  /// `ORB_WORKSPACE`/`ORB_DATA_DIR`/`ORB_SSH_DIR`/`ORB_STATE_DIR` exist for
+  /// tests; their defaults are the container layout.
   static const String _entrypoint = r'''
 #!/bin/sh
-# Orb container entrypoint (issue #93).
+# Orb container entrypoint (issues #93 + #94).
 #
-# Boot prep, in order (spec §6.1–§6.3):
-#   1. first start only: clone the project remote into the workspace and
-#      install the `orb/<id>` post-commit hook;
+# Boot prep, in order (spec §6.1–§6.5):
+#   1. first start only: clone the project remote into the fresh workspace
+#      and install the `orb/<id>` post-commit hook (spec §6.1);
 #   2. every start: the container-local gitconfig (identity + the gh
 #      credential helper — spec §4), and the SSH known-hosts fallback;
-#   3. serve opencode on the fixed in-container port (spec §2.9).
-# The installers, the local services, and the health gate are #94's: they
-# will extend this file in place (scripts-as-config, spec §6.6).
+#   3. first start only: the installers (spec §6.3), triggered by file
+#      presence, non-fatal (log + continue);
+#   4. every start: the local services (spec §6.4) — postgres, redis,
+#      typesense, mailhog — started only when the project's `.env*` files
+#      declare a local host (127.0.0.1, localhost, ::1), bound to
+#      127.0.0.1 inside the container, data on the data volume,
+#      health-checked before start, provisioned from the `.env`;
+#   5. every start: the health gate (spec §6.5) — wait for every declared
+#      service to become healthy (SERVICE_HEALTH_TIMEOUT_SECONDS) before
+#      serving; a timeout exits non-zero, the bridge surfaces the failure
+#      with the boot log tail (issue #93);
+#   6. serve opencode on the fixed in-container port (spec §2.9).
+#
+# Scripts-as-config (spec §6.6): this file lives in the app-owned build
+# context and is baked into the image — there is no app/bridge knob. The
+# ORB_WORKSPACE / ORB_DATA_DIR / ORB_SSH_DIR / ORB_STATE_DIR env exist for
+# tests; their defaults are the container layout.
+#
+# Every boot stage streams as a `[orb] stage: <word>` line so the preparing
+# state can show it (spec §9.3/§9.4).
 set -eu
 
-# --- 1. First start only: clone + hook -----------------------------------
-if [ ! -d /workspace/.git ]; then
-    git init /workspace
-    git -C /workspace remote add origin "$ORB_REPO_URL"
-    git -C /workspace fetch origin
-    git -C /workspace remote set-head origin -a
+# --- Named constants (spec §2.9, §6.5) ------------------------------------
+OPENCODE_PORT=4096
+SERVICE_HEALTH_TIMEOUT_SECONDS=30
+
+# --- Container paths (defaults = the container layout) --------------------
+WORKSPACE=${ORB_WORKSPACE:-/workspace}
+DATA=${ORB_DATA_DIR:-/var/lib/orb-data}
+SSH_DIR=${ORB_SSH_DIR:-/root/.ssh}
+STATE_DIR=${ORB_STATE_DIR:-/root/.local}
+
+log() {
+    printf '[orb] %s\n' "$*"
+}
+
+# --- 1. First start only: clone + hook (spec §6.1) -------------------------
+first_start=0
+if [ ! -d "$WORKSPACE/.git" ]; then
+    first_start=1
+    log "stage: cloning"
+    git init "$WORKSPACE"
+    git -C "$WORKSPACE" remote add origin "$ORB_REPO_URL"
+    git -C "$WORKSPACE" fetch origin
+    git -C "$WORKSPACE" remote set-head origin -a
     # -f: the bridge may already have injected `.env*` files into the
     # (non-empty) workspace before the start.
-    git -C /workspace checkout -f "$(git -C /workspace symbolic-ref --short refs/remotes/origin/HEAD)"
-    hook=/workspace/.git/hooks/post-commit
+    git -C "$WORKSPACE" checkout -f "$(git -C "$WORKSPACE" symbolic-ref --short refs/remotes/origin/HEAD)"
+    hook="$WORKSPACE/.git/hooks/post-commit"
     printf '%s\n' \
         '#!/bin/sh' \
         "git push origin HEAD:refs/heads/orb/${ORB_ID}" \
@@ -231,8 +290,8 @@ git config --global --add "credential.https://gist.github.com.helper" '!gh auth 
 # cannot be added in place: seed the container-local copy (in the orb state
 # mount, so it persists) and point git's ssh at it — only when the mounted
 # file lacks github, so entries for other hosts stay usable from the mount.
-state_ssh=/root/.local/orb-ssh
-if ! grep -q "github.com" /root/.ssh/known_hosts 2>/dev/null; then
+state_ssh="$STATE_DIR/orb-ssh"
+if ! grep -q "github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then
     mkdir -p "$state_ssh"
     if ! grep -q "github.com" "$state_ssh/known_hosts" 2>/dev/null; then
         ssh-keyscan github.com >> "$state_ssh/known_hosts" 2>/dev/null || true
@@ -240,9 +299,229 @@ if ! grep -q "github.com" /root/.ssh/known_hosts 2>/dev/null; then
     export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=$state_ssh/known_hosts -o StrictHostKeyChecking=yes"
 fi
 
-# --- 3. Serve opencode (spec §2.9) -----------------------------------------
+# --- 3. First start only: the installers (spec §6.3) -----------------------
+# Run once, at create — a wake never re-runs them. Triggered purely by file
+# presence; a failure is non-fatal (log and continue): a missing dependency
+# must not brick the orb, opencode starts anyway and reports what it needs.
+if [ "$first_start" -eq 1 ]; then
+    log "stage: installing"
+    if [ -f "$WORKSPACE/package.json" ]; then
+        if [ -f "$WORKSPACE/package-lock.json" ]; then
+            (cd "$WORKSPACE" && npm ci) || log "npm ci failed (non-fatal)"
+        else
+            (cd "$WORKSPACE" && npm install) || log "npm install failed (non-fatal)"
+        fi
+    fi
+    if [ -f "$WORKSPACE/composer.json" ]; then
+        (cd "$WORKSPACE" && composer install) || log "composer install failed (non-fatal)"
+    fi
+    if [ -f "$WORKSPACE/pubspec.yaml" ]; then
+        (cd "$WORKSPACE" && flutter pub get) || log "flutter pub get failed (non-fatal)"
+    fi
+fi
+
+# --- 4. Every start: the local services (spec §6.4) ------------------------
+# Declared by the project's `.env*` files (merged in filename order, later
+# files win; `*.example` are documentation, never declarations). Only a
+# local host is served in-container; a non-local host is logged and ignored.
+# Data lives on the data volume, never the workspace. Every service is
+# health-checked before start, so a wake of an orb whose data volume
+# persists is idempotent.
+log "stage: services"
+
+# Print the value of $1 across the merged `.env*` files (later files win).
+env_value() {
+    ev_val=""
+    for ev_f in "$WORKSPACE"/.env*; do
+        [ -f "$ev_f" ] || continue
+        case "$ev_f" in
+            *.example) continue ;;
+        esac
+        ev_line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$ev_f" 2>/dev/null | tail -n 1) || continue
+        [ -n "$ev_line" ] || continue
+        ev_val=${ev_line#*=}
+    done
+    ev_val=$(printf '%s' "$ev_val" | sed -e 's/[[:space:]]*$//')
+    case "$ev_val" in
+        \"*\") ev_val=${ev_val#\"}; ev_val=${ev_val%\"} ;;
+        \'*\') ev_val=${ev_val#\'}; ev_val=${ev_val%\'} ;;
+    esac
+    printf '%s' "$ev_val"
+}
+
+is_local_host() {
+    case "$1" in
+        127.0.0.1 | localhost | ::1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+PG_BIN=$(pg_config --bindir 2>/dev/null) || PG_BIN=/usr/lib/postgresql/16/bin
+
+healthy_postgres() {
+    "$PG_BIN/pg_isready" -h 127.0.0.1 -p "$pg_port" -U postgres >/dev/null 2>&1
+}
+
+healthy_redis() {
+    redis-cli -h 127.0.0.1 -p "$redis_port" ping >/dev/null 2>&1
+}
+
+healthy_typesense() {
+    curl -fsS "http://127.0.0.1:$ts_port/health" >/dev/null 2>&1
+}
+
+healthy_mailhog() {
+    curl -fsS "http://127.0.0.1:$mh_port/api/v2/info" >/dev/null 2>&1
+}
+
+declared=""
+
+# --- postgres ---------------------------------------------------------------
+pg_host=$(env_value PG_HOST)
+[ -n "$pg_host" ] || pg_host=$(env_value PGHOST)
+if [ -n "$pg_host" ]; then
+    if is_local_host "$pg_host"; then
+        pg_port=$(env_value PG_PORT)
+        [ -n "$pg_port" ] || pg_port=$(env_value PGPORT)
+        [ -n "$pg_port" ] || pg_port=5432
+        declared="$declared postgres"
+        if healthy_postgres; then
+            log "postgres: already healthy"
+        else
+            log "postgres: starting on 127.0.0.1:$pg_port"
+            pg_data="$DATA/postgres"
+            pg_sock="$DATA/pg-sock"
+            mkdir -p "$pg_data" "$pg_sock"
+            chown -R postgres:postgres "$pg_data" "$pg_sock"
+            if [ ! -f "$pg_data/PG_VERSION" ]; then
+                runuser -u postgres -- "$PG_BIN/initdb" -D "$pg_data" -U postgres
+            fi
+            runuser -u postgres -- "$PG_BIN/pg_ctl" -D "$pg_data" \
+                -o "listen_addresses='127.0.0.1' -k $pg_sock" \
+                -p "$pg_port" -l "$pg_data/pg.log" -w start
+            # Provision the role + database the `.env` names (idempotent:
+            # created only when missing, the password re-asserted).
+            pg_user=$(env_value PG_USER)
+            pg_db=$(env_value PG_DB_NAME)
+            pg_pass=$(env_value PG_PASSWORD)
+            if [ -n "$pg_user" ] && [ -n "$pg_db" ]; then
+                log "postgres: provisioning role $pg_user / database $pg_db"
+                runuser -u postgres -- "$PG_BIN/psql" -h "$pg_sock" -p "$pg_port" \
+                    -U postgres -v ON_ERROR_STOP=1 -d postgres <<ORB_PG_PROVISION
+SELECT 'CREATE ROLE "$pg_user" LOGIN'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$pg_user')\gexec
+SELECT 'CREATE DATABASE "$pg_db" OWNER "$pg_user"'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$pg_db')\gexec
+ALTER ROLE "$pg_user" WITH PASSWORD '$pg_pass';
+ORB_PG_PROVISION
+            fi
+        fi
+    else
+        log "postgres: host $pg_host is not local to the orb — ignored (only 127.0.0.1, localhost and ::1 are served in-container)"
+    fi
+fi
+
+# --- redis -------------------------------------------------------------------
+redis_host=$(env_value REDIS_HOST)
+if [ -n "$redis_host" ]; then
+    if is_local_host "$redis_host"; then
+        redis_port=$(env_value REDIS_PORT)
+        [ -n "$redis_port" ] || redis_port=6379
+        declared="$declared redis"
+        if healthy_redis; then
+            log "redis: already healthy"
+        else
+            log "redis: starting on 127.0.0.1:$redis_port"
+            mkdir -p "$DATA/redis"
+            redis-server --daemonize yes --bind 127.0.0.1 --port "$redis_port" \
+                --dir "$DATA/redis" --pidfile "$DATA/redis/redis.pid" \
+                --logfile "$DATA/redis/redis.log"
+        fi
+    else
+        log "redis: host $redis_host is not local to the orb — ignored"
+    fi
+fi
+
+# --- typesense ---------------------------------------------------------------
+ts_host=$(env_value TYPESENSE_HOST)
+if [ -n "$ts_host" ]; then
+    if is_local_host "$ts_host"; then
+        ts_port=$(env_value TYPESENSE_PORT)
+        [ -n "$ts_port" ] || ts_port=8108
+        declared="$declared typesense"
+        if healthy_typesense; then
+            log "typesense: already healthy"
+        else
+            log "typesense: starting on 127.0.0.1:$ts_port"
+            mkdir -p "$DATA/typesense"
+            ts_args="--data-dir=$DATA/typesense --bind=127.0.0.1 --port=$ts_port --log-dir=$DATA/typesense/log"
+            ts_key=$(env_value TYPESENSE_API_KEY)
+            if [ -n "$ts_key" ]; then
+                ts_args="$ts_args --api-key=$ts_key"
+            fi
+            nohup typesense-server $ts_args >/dev/null 2>&1 &
+        fi
+    else
+        log "typesense: host $ts_host is not local to the orb — ignored"
+    fi
+fi
+
+# --- mailhog -----------------------------------------------------------------
+mh_host=$(env_value MAILHOG_HOST)
+if [ -n "$mh_host" ]; then
+    if is_local_host "$mh_host"; then
+        mh_port=$(env_value MAILHOG_PORT)
+        [ -n "$mh_port" ] || mh_port=8025
+        declared="$declared mailhog"
+        if healthy_mailhog; then
+            log "mailhog: already healthy"
+        else
+            log "mailhog: starting on 127.0.0.1:$mh_port"
+            nohup mailhog --api "127.0.0.1:$mh_port" --smtp 127.0.0.1:1025 >/dev/null 2>&1 &
+        fi
+    else
+        log "mailhog: host $mh_host is not local to the orb — ignored"
+    fi
+fi
+
+# --- 5. Every start: the health gate (spec §6.5) ----------------------------
+# opencode starts only after every declared service is healthy. A service
+# that is not healthy within SERVICE_HEALTH_TIMEOUT_SECONDS fails the boot
+# with a non-zero exit: the bridge surfaces the failure with the boot log
+# tail (issue #93), so the orb shows broken:boot with the reason.
+if [ -n "$declared" ]; then
+    log "stage: health"
+    log "waiting for $declared (up to ${SERVICE_HEALTH_TIMEOUT_SECONDS}s)"
+    deadline=$(( $(date +%s) + SERVICE_HEALTH_TIMEOUT_SECONDS ))
+    while :; do
+        all_healthy=1
+        for svc in $declared; do
+            case "$svc" in
+                postgres) healthy_postgres ;;
+                redis) healthy_redis ;;
+                typesense) healthy_typesense ;;
+                mailhog) healthy_mailhog ;;
+            esac || all_healthy=0
+        done
+        if [ "$all_healthy" -eq 1 ]; then
+            for svc in $declared; do
+                log "$svc: healthy"
+            done
+            break
+        fi
+        now=$(date +%s)
+        if [ "$now" -ge "$deadline" ]; then
+            log "FATAL: $declared not healthy after ${SERVICE_HEALTH_TIMEOUT_SECONDS}s — the boot fails"
+            exit 1
+        fi
+        sleep 1
+    done
+fi
+
+# --- 6. Serve opencode (spec §2.9) -------------------------------------------
+log "stage: ready"
 # 0.0.0.0: the container is only reachable through the docker port mapping,
 # which binds to the container's network address, never loopback.
-exec opencode serve --hostname 0.0.0.0 --port 4096
+exec opencode serve --hostname 0.0.0.0 --port "$OPENCODE_PORT"
 ''';
 }

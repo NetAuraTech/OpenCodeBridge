@@ -103,11 +103,28 @@ void main() {
       expect(dockerfile, contains(r'@opencode/cli@${OPENCODE_VERSION}'));
     });
 
-    test('the entrypoint is a placeholder that starts opencode', () {
+    test('the entrypoint does the full boot prep and then serves opencode '
+        '(issue #94)', () {
+      final entrypoint = OrbEmbedded.files['orb-entrypoint.sh'];
+      // The installers (spec §6.3).
+      expect(entrypoint, contains('npm ci'));
+      expect(entrypoint, contains('npm install'));
+      expect(entrypoint, contains('composer install'));
+      expect(entrypoint, contains('flutter pub get'));
+      // The local services (spec §6.4), bound to loopback in-container.
+      expect(entrypoint, contains('pg_ctl'));
       expect(
-        OrbEmbedded.files['orb-entrypoint.sh'],
-        contains('exec opencode serve'),
+        entrypoint,
+        contains('redis-server --daemonize yes --bind 127.0.0.1'),
       );
+      expect(entrypoint, contains('typesense-server'));
+      expect(entrypoint, contains('mailhog'));
+      // The health gate (spec §6.5) as a named constant.
+      expect(entrypoint, contains('SERVICE_HEALTH_TIMEOUT_SECONDS=30'));
+      // The boot stages (spec §9.3/§9.4).
+      expect(entrypoint, contains('[orb] stage:'));
+      // Serve opencode on the fixed in-container port (spec §2.9).
+      expect(entrypoint, contains('exec opencode serve'));
     });
   });
 }
