@@ -6,13 +6,16 @@ import '../access/access_session.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/fs_client.dart';
+import '../client/orbs_client.dart';
 import '../client/sessions_client.dart';
+import '../model/orb.dart';
 import '../model/session.dart';
 import '../settings/app_settings.dart';
 import 'new_project_dialog.dart';
 import 'structured_view.dart';
 
-/// The Sessions tab: the home list (spec section 5 endpoint 1, section 6).
+/// The Sessions tab: the home list (spec section 5 endpoint 1, section 6,
+/// orbs section 9.2).
 ///
 /// Shows every session of the shared opencode service, grouped by project
 /// (collapsible), newest first, with the active indicator and a per-session
@@ -21,12 +24,19 @@ import 'structured_view.dart';
 /// creates a session at the directory you pick; each project group carries a
 /// New session button of its own that creates in that project directly. Both
 /// create the session on the shared service and open its structured view.
+///
+/// The rows stay flat: orb sessions are plain rows wearing a **tappable orb
+/// chip** (state dot + orb name) — tapping the chip reports the orb id
+/// through [onOrbChipTapped] so the Orbs tab can highlight the card (the
+/// session → orb navigation, spec §9.2). Host sessions (no orb) wear a muted
+/// "host" label. No per-orb subgroups, no filter banner.
 class SessionsTab extends StatefulWidget {
   const SessionsTab({
     super.key,
     required this.apiBase,
     this.client,
     this.fs,
+    this.orbs,
     this.events,
     this.auth,
     this.access,
@@ -35,6 +45,7 @@ class SessionsTab extends StatefulWidget {
     this.onOpenSettings,
     this.settings,
     this.onThemeModeChanged,
+    this.onOrbChipTapped,
   });
 
   /// The tunnel's Access login (issue #23, client mode); `null` in server
@@ -55,6 +66,11 @@ class SessionsTab extends StatefulWidget {
   /// The client for the bridge's filesystem API (issue #54's "New project"
   /// picker). Defaults to a real [FsClient] at [apiBase]; tests inject a fake.
   final FsClient? fs;
+
+  /// The client for the bridge's orb API (spec §9.2: the rows' orb chips).
+  /// Defaults to a real [OrbsClient] at [apiBase]; tests inject a fake. The
+  /// list is fetched without the PR enrichment (the badge is the Orbs tab's).
+  final OrbsClient? orbs;
 
   /// The Access login's header provider (issue #23, client mode); `null` in
   /// server mode.
@@ -88,6 +104,11 @@ class SessionsTab extends StatefulWidget {
   /// persisted.
   final VoidCallback? onThemeModeChanged;
 
+  /// The session → orb navigation (spec §9.2): called with the orb id when
+  /// the user taps an orb chip on a session row, so the caller (the shell)
+  /// can switch to the Orbs tab and highlight that orb's card.
+  final ValueChanged<String>? onOrbChipTapped;
+
   @override
   State<SessionsTab> createState() => SessionsTabState();
 }
@@ -98,6 +119,15 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// The bridge's filesystem API (issue #54's "New project" picker), `null`
   /// when there is no bridge to browse.
   FsClient? _fs;
+
+  /// The bridge's orb API (spec §9.2: the rows' orb chips), `null` when
+  /// there is no bridge to look up orb names against.
+  OrbsClient? _orbs;
+
+  /// The orb list (without PR enrichment) the chip names and state dots come
+  /// from; `null` until it has loaded. A row whose orb is absent (deleted in
+  /// the meantime) falls back to the raw orb id.
+  List<OrbRecord>? _orbRecords;
 
   /// The event stream source (spec §8) the tab's views listen to, `null`
   /// when there is no bridge to listen on.
@@ -135,6 +165,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     if (base != null) {
       _client = widget.client ?? SessionsClient(base, auth: widget.auth);
       _fs = widget.fs ?? FsClient(base, auth: widget.auth);
+      _orbs = widget.orbs ?? OrbsClient(base, auth: widget.auth);
       _setupEvents(base);
       widget.access?.addListener(_onAccessState);
       _load();
@@ -180,6 +211,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _client =
           widget.client ?? SessionsClient(widget.apiBase!, auth: widget.auth);
       _fs = widget.fs ?? FsClient(widget.apiBase!, auth: widget.auth);
+      _orbs = widget.orbs ?? OrbsClient(widget.apiBase!, auth: widget.auth);
       _setupEvents(widget.apiBase!);
       _load();
     }
@@ -265,6 +297,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         _loading = false;
       });
       if (pending != null) _openDeepLinkRow(pending, rows);
+      unawaited(_loadOrbs());
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       setState(() {
@@ -280,6 +313,33 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         _loading = false;
       });
     }
+  }
+
+  /// The orb list for the rows' chips (spec §9.2): the orb names and state
+  /// dots, fetched without the PR enrichment (that is the Orbs tab's badge).
+  /// Decorative — a failure leaves the chips on the raw orb id.
+  Future<void> _loadOrbs() async {
+    final client = _orbs;
+    if (client == null) return;
+    try {
+      final orbs = await client.list();
+      if (!mounted) return;
+      setState(() => _orbRecords = orbs);
+    } catch (_) {
+      // The chips degrade to the raw orb id.
+    }
+  }
+
+  /// The record of the orb a row belongs to, or `null` when the orb is
+  /// absent from the list (deleted in the meantime).
+  OrbRecord? _orbOf(String? orbId) {
+    if (orbId == null) return null;
+    final records = _orbRecords;
+    if (records == null) return null;
+    for (final record in records) {
+      if (record.id == orbId) return record;
+    }
+    return null;
   }
 
   /// The global new-project flow (issue #54): browse the host's filesystem
@@ -461,6 +521,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     deleting: _deletingId == s.id,
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
+                    orb: _orbOf(s.orb),
+                    onOrbChipTapped: widget.onOrbChipTapped,
                   ),
               ],
             ),
@@ -600,15 +662,38 @@ class _ErrorState extends StatelessWidget {
   );
 }
 
+/// The chip's state dot (spec §9.2): green running, amber preparing, red
+/// broken, grey otherwise (stopped, orphaned, unknown).
+Color _orbDotColor(String state) {
+  switch (state.split(':').first) {
+    case 'running':
+      return Colors.green;
+    case 'preparing':
+      return Colors.orange;
+    case 'broken':
+      return Colors.red;
+    default:
+      return Colors.grey;
+  }
+}
+
 class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.session,
     required this.deleting,
     required this.onDelete,
+    required this.orb,
     this.onTap,
+    this.onOrbChipTapped,
   });
 
   final Session session;
+
+  /// The orb the session lives on (spec §9.2): the chip's name and state
+  /// dot. `null` when the orb is absent from the list (deleted in the
+  /// meantime) — the chip then falls back to the raw orb id. `session.orb`
+  /// being `null` means a host session (the muted "host" label).
+  final OrbRecord? orb;
 
   /// Opens the session's structured view; `null` when the row has nothing
   /// to open.
@@ -616,6 +701,56 @@ class _SessionRow extends StatelessWidget {
 
   final bool deleting;
   final ValueChanged<Session> onDelete;
+
+  /// The session → orb navigation (spec §9.2): called with the orb id when
+  /// the chip is tapped.
+  final ValueChanged<String>? onOrbChipTapped;
+
+  /// The chip (an orb session) or the muted "host" label (a host session).
+  Widget _orbIdentity(BuildContext context) {
+    final orbId = session.orb;
+    final scheme = Theme.of(context).colorScheme;
+    if (orbId == null) {
+      return Text(
+        'host',
+        key: ValueKey('host-${session.id}'),
+        style: TextStyle(fontSize: 12, color: scheme.outline),
+      );
+    }
+    final record = orb;
+    return InkWell(
+      onTap: () => onOrbChipTapped?.call(orbId),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        key: ValueKey('orb-chip-$orbId'),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: scheme.outlineVariant,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: _orbDotColor(record?.state ?? ''),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              record?.name ?? orbId,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -656,14 +791,22 @@ class _SessionRow extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      session.location,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.outline,
-                      ),
+                    Row(
+                      children: [
+                        _orbIdentity(context),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            session.location,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context).colorScheme.outline,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),

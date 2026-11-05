@@ -6,8 +6,10 @@ import 'package:opencodebridge/access/access_session.dart';
 import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/fs_client.dart';
+import 'package:opencodebridge/client/orbs_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/message.dart';
+import 'package:opencodebridge/model/orb.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
@@ -47,6 +49,18 @@ const _four = Session(
   created: 400,
   location: '/code/app',
   active: false,
+);
+
+/// A session living on a running orb (spec §9.2): the row wears its orb's
+/// chip.
+const _orbOne = Session(
+  id: 'ses_orb1',
+  title: 'working in the orb',
+  project: SessionProject(id: 'p1', name: 'app'),
+  created: 100,
+  location: '/code/app',
+  active: false,
+  orb: 'orb_1',
 );
 
 /// A scripted [SessionsClient] for the tab tests.
@@ -257,6 +271,8 @@ Future<_FakeSessionsClient> _pumpTab(
   _FakeEventsSource? events,
   AccessSession? access,
   _FakeFsClient? fs,
+  _FakeOrbsClient? orbs,
+  ValueChanged<String>? onOrbChipTapped,
 }) async {
   final client = _FakeSessionsClient(rows: List<Session>.of(rows));
   await tester.pumpWidget(
@@ -266,14 +282,34 @@ Future<_FakeSessionsClient> _pumpTab(
           apiBase: Uri.parse('http://bridge.test/'),
           client: client,
           fs: fs ?? _FakeFsClient(),
+          orbs: orbs ?? _FakeOrbsClient(),
           events: events ?? _FakeEventsSource(),
           access: access,
+          onOrbChipTapped: onOrbChipTapped,
         ),
       ),
     ),
   );
   await tester.pump();
   return client;
+}
+
+/// A scripted [OrbsClient] for the tab tests (no real bridge).
+class _FakeOrbsClient extends OrbsClient {
+  _FakeOrbsClient({this.orbs = const []})
+    : super(Uri.parse('http://bridge.test/'));
+
+  final List<OrbRecord> orbs;
+  Object? listError;
+  var listCalls = 0;
+
+  @override
+  Future<List<OrbRecord>> list({bool includePr = false}) async {
+    listCalls++;
+    final error = listError;
+    if (error is Object) throw error;
+    return orbs;
+  }
 }
 
 void main() {
@@ -690,6 +726,85 @@ void main() {
 
         expect(client.listCalls, 2);
         expect(events.reconnectCalls, 1);
+      });
+    });
+
+    group('orb chip and host label (spec §9.2)', () {
+      const orb = OrbRecord(
+        id: 'orb_1',
+        name: 'api-orb',
+        project: 'p1',
+        branch: 'orb/orb_1',
+        state: 'running',
+        created: '2025-01-01T00:00:00Z',
+      );
+
+      testWidgets('an orb session row wears a chip with the orb name', (
+        tester,
+      ) async {
+        await _pumpTab(
+          tester,
+          rows: [_orbOne],
+          orbs: _FakeOrbsClient(orbs: [orb]),
+        );
+
+        expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsOneWidget);
+        expect(find.text('api-orb'), findsOneWidget);
+      });
+
+      testWidgets('a host session row wears a muted host label, no chip', (
+        tester,
+      ) async {
+        await _pumpTab(
+          tester,
+          rows: [_one],
+          orbs: _FakeOrbsClient(orbs: [orb]),
+        );
+
+        expect(find.byKey(const ValueKey('host-ses_1')), findsOneWidget);
+        expect(find.text('host'), findsOneWidget);
+        expect(find.byKey(const ValueKey('orb-chip-ses_1')), findsNothing);
+      });
+
+      testWidgets(
+        'tapping the chip reports the orb id and does not open the row',
+        (tester) async {
+          final tapped = <String>[];
+          await _pumpTab(
+            tester,
+            rows: [_orbOne],
+            orbs: _FakeOrbsClient(orbs: [orb]),
+            onOrbChipTapped: tapped.add,
+          );
+
+          await tester.tap(find.byKey(const ValueKey('orb-chip-orb_1')));
+          await tester.pump();
+
+          expect(tapped, ['orb_1']);
+          // The chip swallows the tap: the structured view did not open.
+          expect(find.text('working in the orb'), findsOneWidget);
+        },
+      );
+
+      testWidgets('a chip falls back to the orb id when the orb is gone', (
+        tester,
+      ) async {
+        await _pumpTab(tester, rows: [_orbOne], orbs: _FakeOrbsClient());
+
+        expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsOneWidget);
+        expect(find.text('orb_1'), findsOneWidget);
+      });
+
+      testWidgets('a failed orb list degrades to the id, rows stay', (
+        tester,
+      ) async {
+        final orbs = _FakeOrbsClient();
+        orbs.listError = OrbsClientError(0, 'no bridge');
+        await _pumpTab(tester, rows: [_orbOne], orbs: orbs);
+
+        expect(find.text('working in the orb'), findsOneWidget);
+        expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsOneWidget);
+        expect(find.text('orb_1'), findsOneWidget);
       });
     });
   });
