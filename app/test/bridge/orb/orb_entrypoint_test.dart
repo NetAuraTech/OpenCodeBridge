@@ -304,7 +304,7 @@ case "$url" in
     */health)
         [ -f "$FAKE_STATE/typesense-up" ] && exit 0 || exit 1
         ;;
-    */api/v2/info)
+    */api/v2/messages)
         [ -f "$FAKE_STATE/mailhog-up" ] && exit 0 || exit 1
         ;;
 esac
@@ -502,8 +502,23 @@ void main() {
       expect(r.exitCode, 0);
       expect(r.lastCallTo('pg_ctl'), contains('-p 5432'));
       expect(r.lastCallTo('redis-server'), contains('--port 6379'));
-      expect(r.lastCallTo('typesense-server'), contains('--port=8108'));
-      expect(r.lastCallTo('mailhog'), contains('--api 127.0.0.1:8025'));
+      expect(r.lastCallTo('typesense-server'), contains('--api-port=8108'));
+      expect(
+        r.lastCallTo('typesense-server'),
+        contains('--api-address=127.0.0.1'),
+      );
+      expect(
+        r.lastCallTo('mailhog'),
+        contains('--api-bind-addr 127.0.0.1:8025'),
+      );
+      expect(
+        r.lastCallTo('mailhog'),
+        contains('--ui-bind-addr 127.0.0.1:8025'),
+      );
+      expect(
+        r.lastCallTo('mailhog'),
+        contains('--smtp-bind-addr 127.0.0.1:1025'),
+      );
     });
 
     test('a non-local host is logged and ignored', () async {

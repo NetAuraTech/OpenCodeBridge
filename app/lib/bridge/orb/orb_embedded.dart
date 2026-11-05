@@ -376,7 +376,7 @@ healthy_typesense() {
 }
 
 healthy_mailhog() {
-    curl -fsS "http://127.0.0.1:$mh_port/api/v2/info" >/dev/null 2>&1
+    curl -fsS "http://127.0.0.1:$mh_port/api/v2/messages" >/dev/null 2>&1
 }
 
 declared=""
@@ -401,6 +401,13 @@ if [ -n "$pg_host" ]; then
             if [ ! -f "$pg_data/PG_VERSION" ]; then
                 runuser -u postgres -- "$PG_BIN/initdb" -D "$pg_data" -U postgres
             fi
+            # The data volume outlives the processes: a postmaster.pid left by
+            # a previous container life names a pid from a dead PID namespace,
+            # and the new namespace can reuse that number for an unrelated
+            # process — which makes postmaster refuse to start. We only reach
+            # this branch when nothing answers on the port, so no live
+            # postmaster of ours can exist: the file is stale.
+            rm -f "$pg_data/postmaster.pid"
             # The port goes in the -o string (the postmaster's own -p flag):
             # pg_ctl's -p option is the postmaster binary's path, not a port
             # (a numeric -p makes pg_ctl try to exec it). GUCs in that string
@@ -463,8 +470,15 @@ if [ -n "$ts_host" ]; then
             log "typesense: already healthy"
         else
             log "typesense: starting on 127.0.0.1:$ts_port"
-            mkdir -p "$DATA/typesense"
-            ts_args="--data-dir=$DATA/typesense --bind=127.0.0.1 --port=$ts_port --log-dir=$DATA/typesense/log"
+            # The log directory must already exist: typesense refuses to
+            # start without it.
+            mkdir -p "$DATA/typesense/log"
+            # 28.0 flags: the API service binds via --api-address/--api-port.
+            # --bind/--port do not exist in 28.0 and unknown flags are
+            # silently ignored — typesense would fall back to 0.0.0.0:8108,
+            # ignoring the configured port, and the health gate would never
+            # pass.
+            ts_args="--data-dir=$DATA/typesense --api-address=127.0.0.1 --api-port=$ts_port --log-dir=$DATA/typesense/log"
             ts_key=$(env_value TYPESENSE_API_KEY)
             if [ -n "$ts_key" ]; then
                 ts_args="$ts_args --api-key=$ts_key"
@@ -487,7 +501,14 @@ if [ -n "$mh_host" ]; then
             log "mailhog: already healthy"
         else
             log "mailhog: starting on 127.0.0.1:$mh_port"
-            nohup mailhog --api "127.0.0.1:$mh_port" --smtp 127.0.0.1:1025 >/dev/null 2>&1 &
+            # 1.0.1 flags: there is no --api/--smtp. UI and API on the same
+            # address: MailHog serves both on one listener only when the two
+            # bind addresses are equal — on different addresses they fight
+            # over the port and the API never comes up.
+            nohup mailhog \
+                --api-bind-addr "127.0.0.1:$mh_port" \
+                --ui-bind-addr "127.0.0.1:$mh_port" \
+                --smtp-bind-addr "127.0.0.1:1025" >/dev/null 2>&1 &
         fi
     else
         log "mailhog: host $mh_host is not local to the orb — ignored"
