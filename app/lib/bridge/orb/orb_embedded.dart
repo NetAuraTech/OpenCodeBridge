@@ -99,7 +99,7 @@ RUN set -eux; \
 ENV FLUTTER_ROOT=/opt/flutter \
     PATH="/opt/flutter/bin:${PATH}"
 RUN set -eux; \
-    git clone --depth 1 --branch "v${FLUTTER_VERSION}" \
+    git clone --depth 1 --branch "${FLUTTER_VERSION}" \
         https://github.com/flutter/flutter "${FLUTTER_ROOT}"; \
     "${FLUTTER_ROOT}/bin/flutter" --version;
 
