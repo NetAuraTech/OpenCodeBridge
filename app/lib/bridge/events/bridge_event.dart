@@ -26,6 +26,13 @@ abstract class BridgeEventType {
   /// logs. `data` carries `tag` (the `orb:<hash>` being built) and `line`
   /// (one line of the build log).
   static const String orbImageBuild = 'orb.image.build';
+
+  /// One line of an orb's container output during its boot (issue #93):
+  /// the staged boot log the create flow streams as the entrypoint runs
+  /// (clone, hook, gitconfig — spec §6.3) and `opencode serve` starts.
+  /// `data` carries `id` (the orb id) and `line` (one line of the
+  /// container log).
+  static const String orbBoot = 'orb.boot';
 }
 
 /// Build the wire payload for a bridge-native event: the same `data:` envelope
