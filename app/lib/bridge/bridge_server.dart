@@ -320,9 +320,10 @@ class BridgeServer {
     final orbBuilder =
         orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
     final orbService =
-        orbs ?? await BridgeServer._defaultOrbs(orbBuilder, (line) {
-      orbEmit?.call(line);
-    });
+        orbs ??
+        await BridgeServer._defaultOrbs(orbBuilder, (line) {
+          orbEmit?.call(line);
+        });
     Future<List<OrbRecord>> orbList() =>
         orbService?.list() ?? Future.value(const []);
     Future<String?> orbPassword(String id) =>

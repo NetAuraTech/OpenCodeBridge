@@ -17,9 +17,9 @@ class FakeService implements OpencodeService {
     Map<String, String>? names,
     Set<String>? active,
     this.listError,
-  })  : sessions = sessions ?? [],
-        names = names ?? {},
-        active = active ?? {};
+  }) : sessions = sessions ?? [],
+       names = names ?? {},
+       active = active ?? {};
 
   List<OpencodeSession> sessions;
   Map<String, String> names;
@@ -287,25 +287,27 @@ Future<void> swallow(Future<Object?> Function() call) async {
 
 void main() {
   group('CompositeOpencodeService.listSessions', () {
-    test('merges host + orb sessions; orb rows are stamped, host rows are not',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final orb1 = FakeService(sessions: [orbSession]);
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => [runningOrb('orb1')],
-        passwords: (_) async => 'pw1',
-        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
-      );
+    test(
+      'merges host + orb sessions; orb rows are stamped, host rows are not',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
 
-      final all = await composite.listSessions();
+        final all = await composite.listSessions();
 
-      expect(all.map((s) => s.id), containsAll(['ses_host', 'ses_orb']));
-      final orbRow = all.firstWhere((s) => s.id == 'ses_orb');
-      expect(orbRow.orb, 'orb1');
-      final hostRow = all.firstWhere((s) => s.id == 'ses_host');
-      expect(hostRow.orb, isNull);
-    });
+        expect(all.map((s) => s.id), containsAll(['ses_host', 'ses_orb']));
+        final orbRow = all.firstWhere((s) => s.id == 'ses_orb');
+        expect(orbRow.orb, 'orb1');
+        final hostRow = all.firstWhere((s) => s.id == 'ses_host');
+        expect(hostRow.orb, isNull);
+      },
+    );
 
     test('a stopped orb (no url) gets no upstream and no rows', () async {
       final host = FakeService(sessions: [hostSession]);
@@ -345,8 +347,7 @@ void main() {
       final host = FakeService(sessions: [hostSession]);
       final composite = makeComposite(
         host: host,
-        orbs: () async =>
-            throw const DockerUnavailableError('docker is down'),
+        orbs: () async => throw const DockerUnavailableError('docker is down'),
       );
 
       final all = await composite.listSessions();
@@ -415,11 +416,7 @@ void main() {
 
       final names = await composite.projectNames();
 
-      expect(names, {
-        'p1': 'host-name',
-        'p2': 'host-only',
-        'p3': 'orb-only',
-      });
+      expect(names, {'p1': 'host-name', 'p2': 'host-only', 'p3': 'orb-only'});
     });
   });
 
@@ -458,59 +455,65 @@ void main() {
       expect(orb1.detailCalls, isEmpty);
     });
 
-    test('an unknown session id falls back to the host after a refresh',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final composite = makeComposite(host: host);
+    test(
+      'an unknown session id falls back to the host after a refresh',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final composite = makeComposite(host: host);
 
-      await swallow(() => composite.getDetail('ses_unknown'));
+        await swallow(() => composite.getDetail('ses_unknown'));
 
-      expect(host.detailCalls, ['ses_unknown']);
-    });
+        expect(host.detailCalls, ['ses_unknown']);
+      },
+    );
 
-    test('a session on a newly started orb routes after the on-miss refresh',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final orb1 = FakeService(sessions: [orbSession]);
-      final orbs = <OrbRecord>[]; // nothing running at first
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => orbs,
-        passwords: (_) async => 'pw1',
-        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
-      );
+    test(
+      'a session on a newly started orb routes after the on-miss refresh',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final orbs = <OrbRecord>[]; // nothing running at first
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => orbs,
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
 
-      // Before the orb exists: the host is consulted.
-      await swallow(() => composite.getDetail('ses_orb'));
-      expect(host.detailCalls, ['ses_orb']);
-      expect(orb1.detailCalls, isEmpty);
+        // Before the orb exists: the host is consulted.
+        await swallow(() => composite.getDetail('ses_orb'));
+        expect(host.detailCalls, ['ses_orb']);
+        expect(orb1.detailCalls, isEmpty);
 
-      // The orb starts: the next on-miss refresh discovers it.
-      orbs.add(runningOrb('orb1'));
-      await swallow(() => composite.getDetail('ses_orb'));
-      expect(orb1.detailCalls, ['ses_orb']);
-    });
+        // The orb starts: the next on-miss refresh discovers it.
+        orbs.add(runningOrb('orb1'));
+        await swallow(() => composite.getDetail('ses_orb'));
+        expect(orb1.detailCalls, ['ses_orb']);
+      },
+    );
 
-    test('deleteSession routes to the orb and clears the table entry',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final orb1 = FakeService(sessions: [orbSession]);
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => [runningOrb('orb1')],
-        passwords: (_) async => 'pw1',
-        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
-      );
-      await composite.listSessions();
+    test(
+      'deleteSession routes to the orb and clears the table entry',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        await composite.listSessions();
 
-      await composite.deleteSession('ses_orb');
+        await composite.deleteSession('ses_orb');
 
-      expect(orb1.deleted, ['ses_orb']);
-      // The fake dropped the session from its list: the entry must now fall
-      // through to the host.
-      await swallow(() => composite.getDetail('ses_orb'));
-      expect(host.detailCalls, ['ses_orb']);
-    });
+        expect(orb1.deleted, ['ses_orb']);
+        // The fake dropped the session from its list: the entry must now fall
+        // through to the host.
+        await swallow(() => composite.getDetail('ses_orb'));
+        expect(host.detailCalls, ['ses_orb']);
+      },
+    );
 
     test('a host deleteSession routes to the host', () async {
       final host = FakeService(sessions: [hostSession]);
@@ -554,89 +557,95 @@ void main() {
       expect(host.detailCalls, ['fork_of_ses_host']);
     });
 
-    test('a password rotation replaces the upstream (new url|password key)',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final orb1a = FakeService(sessions: [orbSession]);
-      final orb1b = FakeService(sessions: [orbSession]);
-      String password = 'pw1';
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => [runningOrb('orb1')],
-        passwords: (_) async => password,
-        upstreams: {
-          'http://127.0.0.1:41234|pw1': orb1a,
-          'http://127.0.0.1:41234|pw2': orb1b,
-        },
-      );
-      await composite.listSessions();
-      expect(orb1a.sessions, [orbSession]); // first upstream wired up
-      expect(orb1a.detailCalls, isEmpty);
+    test(
+      'a password rotation replaces the upstream (new url|password key)',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1a = FakeService(sessions: [orbSession]);
+        final orb1b = FakeService(sessions: [orbSession]);
+        String password = 'pw1';
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => password,
+          upstreams: {
+            'http://127.0.0.1:41234|pw1': orb1a,
+            'http://127.0.0.1:41234|pw2': orb1b,
+          },
+        );
+        await composite.listSessions();
+        expect(orb1a.sessions, [orbSession]); // first upstream wired up
+        expect(orb1a.detailCalls, isEmpty);
 
-      // The orb respawns: same port, new password (last log line wins).
-      password = 'pw2';
-      await swallow(() => composite.getDetail('ses_orb'));
+        // The orb respawns: same port, new password (last log line wins).
+        password = 'pw2';
+        await swallow(() => composite.getDetail('ses_orb'));
 
-      expect(orb1b.detailCalls, ['ses_orb']);
-      expect(orb1a.detailCalls, isEmpty);
-    });
+        expect(orb1b.detailCalls, ['ses_orb']);
+        expect(orb1a.detailCalls, isEmpty);
+      },
+    );
 
-    test('a stopped orb drops its upstream; its sessions route to the host',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final orb1 = FakeService(sessions: [orbSession]);
-      final orbs = [runningOrb('orb1')];
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => orbs,
-        passwords: (_) async => 'pw1',
-        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
-      );
-      await composite.listSessions();
-      await swallow(() => composite.getDetail('ses_orb'));
-      expect(orb1.detailCalls, ['ses_orb']);
+    test(
+      'a stopped orb drops its upstream; its sessions route to the host',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final orbs = [runningOrb('orb1')];
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => orbs,
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        await composite.listSessions();
+        await swallow(() => composite.getDetail('ses_orb'));
+        expect(orb1.detailCalls, ['ses_orb']);
 
-      // The orb stops.
-      orbs.clear();
-      await swallow(() => composite.getDetail('ses_orb'));
+        // The orb stops.
+        orbs.clear();
+        await swallow(() => composite.getDetail('ses_orb'));
 
-      expect(host.detailCalls, ['ses_orb']);
-    });
+        expect(host.detailCalls, ['ses_orb']);
+      },
+    );
   });
 
   group('CompositeOpencodeService host-only surface', () {
-    test('projects, creation, registries, and global commands go to the host',
-        () async {
-      final host = FakeService(sessions: [hostSession]);
-      final orb1 = FakeService(sessions: [orbSession]);
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => [runningOrb('orb1')],
-        passwords: (_) async => 'pw1',
-        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
-      );
-      await composite.listSessions();
+    test(
+      'projects, creation, registries, and global commands go to the host',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        await composite.listSessions();
 
-      await composite.projects();
-      await swallow(() => composite.createSession('p1'));
-      await swallow(() => composite.createSessionInDirectory('/dir'));
-      await composite.listModels();
-      await composite.listAgents();
-      await composite.listSkills();
-      await composite.listCommands();
-      await composite.usage();
+        await composite.projects();
+        await swallow(() => composite.createSession('p1'));
+        await swallow(() => composite.createSessionInDirectory('/dir'));
+        await composite.listModels();
+        await composite.listAgents();
+        await composite.listSkills();
+        await composite.listCommands();
+        await composite.usage();
 
-      expect(host.projectsCalls, 1);
-      expect(host.createCalls, 1);
-      expect(host.createInCalls, 1);
-      expect(host.modelsCalls, 1);
-      expect(host.agentsCalls, 1);
-      expect(host.skillsCalls, 1);
-      expect(host.commandsCalls, 1);
-      expect(host.usageCalls, 1);
-      expect(orb1.projectsCalls, 0);
-      expect(orb1.createCalls, 0);
-      expect(orb1.modelsCalls, 0);
-    });
+        expect(host.projectsCalls, 1);
+        expect(host.createCalls, 1);
+        expect(host.createInCalls, 1);
+        expect(host.modelsCalls, 1);
+        expect(host.agentsCalls, 1);
+        expect(host.skillsCalls, 1);
+        expect(host.commandsCalls, 1);
+        expect(host.usageCalls, 1);
+        expect(orb1.projectsCalls, 0);
+        expect(orb1.createCalls, 0);
+        expect(orb1.modelsCalls, 0);
+      },
+    );
   });
 }

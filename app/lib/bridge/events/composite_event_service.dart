@@ -39,8 +39,7 @@ class CompositeOpencodeEventService implements OpencodeEventService {
   static OpencodeEventService _defaultUpstreamFactory(
     Uri baseUrl,
     String password,
-  ) =>
-      OpencodeHttpEventService(baseUrl: baseUrl, password: password);
+  ) => OpencodeHttpEventService(baseUrl: baseUrl, password: password);
 
   final OpencodeEventService host;
 
@@ -129,9 +128,8 @@ class CompositeOpencodeEventService implements OpencodeEventService {
         subscription: upstream.events.listen(_reemit),
       );
     }
-    for (final gone in _upstreams.keys
-        .where((id) => !live.contains(id))
-        .toList()) {
+    for (final gone
+        in _upstreams.keys.where((id) => !live.contains(id)).toList()) {
       final entry = _upstreams.remove(gone)!;
       await entry.subscription.cancel();
       await entry.upstream.close();

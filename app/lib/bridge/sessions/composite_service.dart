@@ -40,8 +40,10 @@ class CompositeOpencodeService implements OpencodeService {
   /// The per-orb client: the same HTTP service as the host, pointed at the
   /// orb's ephemeral URL with the orb's derived password (Basic
   /// `opencode:<password>`, spec §7.1).
-  static OpencodeService _defaultUpstreamFactory(Uri baseUrl, String password) =>
-      OpencodeHttpService(baseUrl: baseUrl, password: password);
+  static OpencodeService _defaultUpstreamFactory(
+    Uri baseUrl,
+    String password,
+  ) => OpencodeHttpService(baseUrl: baseUrl, password: password);
 
   final OpencodeService host;
 
@@ -55,8 +57,7 @@ class CompositeOpencodeService implements OpencodeService {
 
   /// Builds the per-orb client from its ephemeral URL + derived password
   /// (injectable for tests; the default is the same HTTP client as the host).
-  final OpencodeService Function(Uri baseUrl, String password)
-  upstreamFactory;
+  final OpencodeService Function(Uri baseUrl, String password) upstreamFactory;
 
   /// The live per-orb services, keyed by orb id.
   final Map<String, _OrbUpstream> _upstreams = {};
@@ -137,8 +138,7 @@ class CompositeOpencodeService implements OpencodeService {
     String text, {
     List<Map<String, Object?>>? files,
     List<Map<String, Object?>>? skills,
-  }) async =>
-      (await _route(id)).prompt(id, text, files: files, skills: skills);
+  }) async => (await _route(id)).prompt(id, text, files: files, skills: skills);
 
   @override
   Future<List<PermissionRequest>> pendingPermissions(String id) async =>
@@ -149,8 +149,7 @@ class CompositeOpencodeService implements OpencodeService {
     String id,
     String requestID,
     PermissionReply reply,
-  ) async =>
-      (await _route(id)).replyPermission(id, requestID, reply);
+  ) async => (await _route(id)).replyPermission(id, requestID, reply);
 
   @override
   Future<List<QuestionForm>> pendingQuestions(String id) async =>
@@ -161,8 +160,7 @@ class CompositeOpencodeService implements OpencodeService {
     String id,
     String formID,
     List<List<String>> answers,
-  ) async =>
-      (await _route(id)).answerQuestion(id, formID, answers);
+  ) async => (await _route(id)).answerQuestion(id, formID, answers);
 
   @override
   Future<void> dismissQuestion(String id, String formID) async =>
@@ -361,9 +359,8 @@ class CompositeOpencodeService implements OpencodeService {
       final service = upstreamFactory(Uri.parse(url), password);
       _upstreams[record.id] = _OrbUpstream(key: key, service: service);
     }
-    for (final gone in _upstreams.keys
-        .where((id) => !live.contains(id))
-        .toList()) {
+    for (final gone
+        in _upstreams.keys.where((id) => !live.contains(id)).toList()) {
       _upstreams.remove(gone);
       for (final sessionId in _owner.keys.toList()) {
         if (_owner[sessionId] == gone) _owner.remove(sessionId);

@@ -11,7 +11,8 @@ import 'package:opencodebridge/model/orb.dart';
 /// A scripted [OpencodeEventService]: an emittable broadcast stream plus a
 /// [closed] flag (close semantics).
 class FakeEventService implements OpencodeEventService {
-  FakeEventService() : _controller = StreamController<OpencodeEvent>.broadcast();
+  FakeEventService()
+    : _controller = StreamController<OpencodeEvent>.broadcast();
 
   final StreamController<OpencodeEvent> _controller;
   bool closed = false;
@@ -99,10 +100,7 @@ void main() {
 
       host.emit(event('session.idle', aggregateID: 'ses_host'));
 
-      await _until(
-        () => seen.length == 1,
-        message: 'expected the host event',
-      );
+      await _until(() => seen.length == 1, message: 'expected the host event');
       expect(seen.single.type, 'session.idle');
       expect(
         seen.single.raw,
@@ -128,10 +126,7 @@ void main() {
 
       orb1.emit(event('session.idle', aggregateID: 'ses_orb'));
 
-      await _until(
-        () => seen.length == 1,
-        message: 'expected the orb event',
-      );
+      await _until(() => seen.length == 1, message: 'expected the orb event');
       expect(seen.single.raw, '{"type":"session.idle"}');
       await subscription.cancel();
       await composite.close();
@@ -191,41 +186,43 @@ void main() {
       await composite.close();
     });
 
-    test('a password rotation closes the old upstream and opens the new one',
-        () async {
-      final host = FakeEventService();
-      final orb1a = FakeEventService();
-      final orb1b = FakeEventService();
-      String password = 'pw1';
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => [runningOrb('orb1')],
-        passwords: (_) async => password,
-        upstreams: {
-          'http://127.0.0.1:41234|pw1': orb1a,
-          'http://127.0.0.1:41234|pw2': orb1b,
-        },
-      );
-      final seen = <OpencodeEvent>[];
-      final subscription = composite.events.listen(seen.add);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+    test(
+      'a password rotation closes the old upstream and opens the new one',
+      () async {
+        final host = FakeEventService();
+        final orb1a = FakeEventService();
+        final orb1b = FakeEventService();
+        String password = 'pw1';
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => password,
+          upstreams: {
+            'http://127.0.0.1:41234|pw1': orb1a,
+            'http://127.0.0.1:41234|pw2': orb1b,
+          },
+        );
+        final seen = <OpencodeEvent>[];
+        final subscription = composite.events.listen(seen.add);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      // The orb respawns: new password.
-      password = 'pw2';
-      await _until(
-        () => orb1b.hasListener,
-        message: 'the rotated upstream to subscribe',
-      );
-      orb1b.emit(event('session.idle', aggregateID: 'ses_orb'));
+        // The orb respawns: new password.
+        password = 'pw2';
+        await _until(
+          () => orb1b.hasListener,
+          message: 'the rotated upstream to subscribe',
+        );
+        orb1b.emit(event('session.idle', aggregateID: 'ses_orb'));
 
-      await _until(
-        () => orb1a.closed && seen.length == 1,
-        message: 'expected the rotated upstream to take over',
-      );
-      expect(seen.single.raw, '{"type":"session.idle"}');
-      await subscription.cancel();
-      await composite.close();
-    });
+        await _until(
+          () => orb1a.closed && seen.length == 1,
+          message: 'expected the rotated upstream to take over',
+        );
+        expect(seen.single.raw, '{"type":"session.idle"}');
+        await subscription.cancel();
+        await composite.close();
+      },
+    );
 
     test('an orb-list failure keeps the host flowing', () async {
       final host = FakeEventService();
@@ -247,30 +244,32 @@ void main() {
       await composite.close();
     });
 
-    test('close() closes the host, every upstream, and completes the stream',
-        () async {
-      final host = FakeEventService();
-      final orb1 = FakeEventService();
-      final composite = makeComposite(
-        host: host,
-        orbs: () async => [runningOrb('orb1')],
-        passwords: (_) async => 'pw1',
-        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
-      );
-      var done = false;
-      final subscription = composite.events.listen(
-        (_) {},
-        onDone: () => done = true,
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+    test(
+      'close() closes the host, every upstream, and completes the stream',
+      () async {
+        final host = FakeEventService();
+        final orb1 = FakeEventService();
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        var done = false;
+        final subscription = composite.events.listen(
+          (_) {},
+          onDone: () => done = true,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      await composite.close();
+        await composite.close();
 
-      expect(host.closed, isTrue);
-      expect(orb1.closed, isTrue);
-      expect(done, isTrue, reason: 'the events stream completes on close');
-      await subscription.cancel();
-    });
+        expect(host.closed, isTrue);
+        expect(orb1.closed, isTrue);
+        expect(done, isTrue, reason: 'the events stream completes on close');
+        await subscription.cancel();
+      },
+    );
 
     test(
       'the default factory wires a real SSE upstream: orb events flow',
@@ -299,9 +298,7 @@ void main() {
 
         final composite = CompositeOpencodeEventService(
           host: FakeEventService(),
-          orbList: () async => [
-            runningOrb('orb1', url: base.toString()),
-          ],
+          orbList: () async => [runningOrb('orb1', url: base.toString())],
           orbPassword: (_) async => password,
           refreshInterval: const Duration(milliseconds: 5),
         );
