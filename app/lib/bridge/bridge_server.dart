@@ -2388,11 +2388,13 @@ class BridgeServer {
       response.write(jsonEncode({'error': e.code, 'details': e.message}));
     } on OrbBootError catch (e) {
       response.statusCode = HttpStatus.badGateway;
-      response.write(jsonEncode({
-        'error': 'orb_boot_failed',
-        'details': e.detail,
-        'logTail': e.logTail,
-      }));
+      response.write(
+        jsonEncode({
+          'error': 'orb_boot_failed',
+          'details': e.detail,
+          'logTail': e.logTail,
+        }),
+      );
     } on DockerUnavailableError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'docker_unreachable'}));
@@ -2419,9 +2421,7 @@ class BridgeServer {
     try {
       final rows = await orbs.list();
       response.statusCode = HttpStatus.ok;
-      response.write(
-        jsonEncode([for (final row in rows) row.toJson()]),
-      );
+      response.write(jsonEncode([for (final row in rows) row.toJson()]));
     } on DockerUnavailableError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'docker_unreachable'}));

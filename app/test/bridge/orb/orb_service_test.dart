@@ -138,8 +138,9 @@ class _FakeDocker {
       spawnError = null;
       throw error;
     }
-    final process =
-        processes.isNotEmpty ? processes.removeAt(0) : _FakeProcess();
+    final process = processes.isNotEmpty
+        ? processes.removeAt(0)
+        : _FakeProcess();
     spawned.add(process);
     return process.toProcess();
   }
@@ -238,9 +239,8 @@ void main() {
     void hostConfig({bool withPlugins = true}) {
       final config = Directory('${home.path}/.config/opencode');
       config.createSync(recursive: true);
-      File('${config.path}/opencode.jsonc').writeAsStringSync(
-        '{\n  "model": "test"\n}\n',
-      );
+      File('${config.path}/opencode.jsonc')
+          .writeAsStringSync('{\n  "model": "test"\n}\n');
       File('${config.path}/service.json').writeAsStringSync('{}\n');
       if (withPlugins) {
         Directory('${config.path}/plugins').createSync();
@@ -268,7 +268,8 @@ void main() {
         http.listen((request) {
           requests++;
           final auth = request.headers.value('authorization') ?? '';
-          request.response.statusCode = auth ==
+          request.response.statusCode =
+              auth ==
                   'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
               ? 200
               : 401;
@@ -299,98 +300,85 @@ void main() {
         );
         expect(createdIndex, isNonNegative);
         final created = create[createdIndex];
-        final actualCreate = List.of(create)
-          ..[createdIndex] = 'ocb.created=*';
-        expect(
-          actualCreate,
-          [
-            'create',
-            '--name',
-            container,
-            '-p',
-            '127.0.0.1:0:${OrbService.inContainerPort}',
-            '--add-host',
-            'host.docker.internal:10.1.2.3',
-            '-v',
-            '${home.path}/.ssh:/root/.ssh:ro',
-            '-v',
-            '${home.path}/.config/gh:/root/.config/gh:ro',
-            '-v',
-            'orb-$id-workspace:/workspace',
-            '-v',
-            'orb-$id-data:/var/lib/orb-data',
-            '-v',
-            '${stateRoot.path}/$id:/root/.local',
-            '-e',
-            'ORB_ID=$id',
-            '-e',
-            'ORB_REPO_URL=https://github.com/acme/app.git',
-            '-e',
-            'ORB_GIT_NAME=Lhomme Aymeric',
-            '-e',
-            'ORB_GIT_EMAIL=aymeric@example.com',
-            '-l',
-            'ocb.orb=true',
-            '-l',
-            'ocb.id=$id',
-            '-l',
-            'ocb.name=dev',
-            '-l',
-            'ocb.project=proj-1',
-            '-l',
-            'ocb.branch=orb/$id',
-            '-l',
-            'ocb.created=*',
-            builder.expectedTag,
-          ],
-        );
+        final actualCreate = List.of(create)..[createdIndex] = 'ocb.created=*';
+        expect(actualCreate, [
+          'create',
+          '--name',
+          container,
+          '-p',
+          '127.0.0.1:0:${OrbService.inContainerPort}',
+          '--add-host',
+          'host.docker.internal:10.1.2.3',
+          '-v',
+          '${home.path}/.ssh:/root/.ssh:ro',
+          '-v',
+          '${home.path}/.config/gh:/root/.config/gh:ro',
+          '-v',
+          'orb-$id-workspace:/workspace',
+          '-v',
+          'orb-$id-data:/var/lib/orb-data',
+          '-v',
+          '${stateRoot.path}/$id:/root/.local',
+          '-e',
+          'ORB_ID=$id',
+          '-e',
+          'ORB_REPO_URL=https://github.com/acme/app.git',
+          '-e',
+          'ORB_GIT_NAME=Lhomme Aymeric',
+          '-e',
+          'ORB_GIT_EMAIL=aymeric@example.com',
+          '-l',
+          'ocb.orb=true',
+          '-l',
+          'ocb.id=$id',
+          '-l',
+          'ocb.name=dev',
+          '-l',
+          'ocb.project=proj-1',
+          '-l',
+          'ocb.branch=orb/$id',
+          '-l',
+          'ocb.created=*',
+          builder.expectedTag,
+        ]);
 
         // The state dir exists (the bind mount) and the volumes are labeled.
         expect(Directory('${stateRoot.path}/$id').existsSync(), isTrue);
         for (final suffix in const ['workspace', 'data']) {
           final volume = docker.runArgs.firstWhere(
-            (a) =>
-                a.first == 'volume' && a[3] == 'orb-$id-$suffix',
+            (a) => a.first == 'volume' && a[3] == 'orb-$id-$suffix',
           );
           final volumeCreated = volume.indexWhere(
             (element) => element.startsWith('ocb.created='),
           );
           final actualVolume = List.of(volume)
             ..[volumeCreated] = 'ocb.created=*';
-          expect(
-            actualVolume,
-            [
-              'volume',
-              'create',
-              '--name',
-              'orb-$id-$suffix',
-              '--label',
-              'ocb.orb=true',
-              '--label',
-              'ocb.id=$id',
-              '--label',
-              'ocb.name=dev',
-              '--label',
-              'ocb.project=proj-1',
-              '--label',
-              'ocb.branch=orb/$id',
-              '--label',
-              'ocb.created=*',
-            ],
-          );
+          expect(actualVolume, [
+            'volume',
+            'create',
+            '--name',
+            'orb-$id-$suffix',
+            '--label',
+            'ocb.orb=true',
+            '--label',
+            'ocb.id=$id',
+            '--label',
+            'ocb.name=dev',
+            '--label',
+            'ocb.project=proj-1',
+            '--label',
+            'ocb.branch=orb/$id',
+            '--label',
+            'ocb.created=*',
+          ]);
         }
 
         // The `.env*` injection: `.env` + `.env.*`, never `*.example`.
-        final copies =
-            docker.runArgs.where((a) => a.first == 'cp').toList();
+        final copies = docker.runArgs.where((a) => a.first == 'cp').toList();
         expect(
           copies,
           containsAll([
-            [
-              'cp',
-              '${checkout.path}/.env',
-              '$container:/workspace/.env',
-            ],
+            ['cp', '${checkout.path}/.env', '$container:/workspace/.env'],
             [
               'cp',
               '${checkout.path}/.env.local',
@@ -398,10 +386,7 @@ void main() {
             ],
           ]),
         );
-        expect(
-          copies.where((a) => a.last.contains('.example')),
-          isEmpty,
-        );
+        expect(copies.where((a) => a.last.contains('.example')), isEmpty);
 
         // The host opencode config, staged outside the per-orb state dir
         // (the state dir is bind-mounted into the container), the bridge
@@ -440,19 +425,20 @@ void main() {
           copies.where((a) => a.length > 2 && a[2].contains('plugins/')),
           isEmpty,
         );
-        expect(
-          copies.where((a) => a.last.contains('service.json')),
-          isEmpty,
-        );
+        expect(copies.where((a) => a.last.contains('service.json')), isEmpty);
         // Copy-if-exists: no host auth.json on this fake host.
-        expect(
-          copies.where((a) => a.last.endsWith('auth.json')),
-          isEmpty,
-        );
+        expect(copies.where((a) => a.last.endsWith('auth.json')), isEmpty);
 
         // The start, and the boot wait's follow stream (killed at the end).
-        expect(docker.runArgs, containsAll([['start', container]]));
-        expect(docker.spawnArgs, [['logs', '--follow', container]]);
+        expect(
+          docker.runArgs,
+          containsAll([
+            ['start', container],
+          ]),
+        );
+        expect(docker.spawnArgs, [
+          ['logs', '--follow', container],
+        ]);
         expect(docker.spawned, hasLength(1));
         expect(docker.spawned[0].killed, isTrue);
 
@@ -468,10 +454,7 @@ void main() {
         final firstRun = docker.runArgs.take(5).toList();
         expect(firstRun.first.first, 'ps');
         expect(firstRun[1], ['image', 'inspect', builder.expectedTag]);
-        expect(
-          firstRun.where((a) => a.first == 'volume').length,
-          2,
-        );
+        expect(firstRun.where((a) => a.first == 'volume').length, 2);
       },
     );
 
@@ -487,8 +470,7 @@ void main() {
         unawaited(request.response.close());
       });
       final port = http.port;
-      docker.ports =
-          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+      docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
       docker.logs = 'server password $password\n';
 
       await service().create(
@@ -498,8 +480,9 @@ void main() {
       );
       await http.close(force: true);
 
-      final container =
-          docker.runArgs.firstWhere((a) => a.first == 'create')[2];
+      final container = docker.runArgs.firstWhere(
+        (a) => a.first == 'create',
+      )[2];
       expect(
         docker.runArgs.where((a) => a.first == 'cp'),
         containsAll([
@@ -522,15 +505,14 @@ void main() {
         unawaited(request.response.close());
       });
       final port = http.port;
-      docker.ports =
-          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+      docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
       docker.logs = 'server password $password\n';
       final child = _FakeProcess();
       docker.processes.add(child);
 
       final pending = service(
-        emit: (payload) => events
-            .add(jsonDecode(payload) as Map<String, Object?>),
+        emit: (payload) =>
+            events.add(jsonDecode(payload) as Map<String, Object?>),
       ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
       await _until(() => docker.spawnArgs.isNotEmpty);
       child.stdout.add('cloning the remote');
@@ -552,41 +534,43 @@ void main() {
       );
     });
 
-    test('a name taken in the project is refused before anything else',
-        () async {
-      docker.psResult = const DockerCliResult(
-        exitCode: 0,
-        stdout: 'other\ndev\n',
-        stderr: '',
-      );
+    test(
+      'a name taken in the project is refused before anything else',
+      () async {
+        docker.psResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'other\ndev\n',
+          stderr: '',
+        );
 
-      await expectLater(
-        service().create(
-          project: 'proj-1',
-          name: 'dev',
-          checkout: checkout.path,
-        ),
-        throwsA(
-          isA<OrbNameTakenError>()
-              .having((e) => e.project, 'project', 'proj-1')
-              .having((e) => e.name, 'name', 'dev'),
-        ),
-      );
-      expect(docker.runArgs, [
-        [
-          'ps',
-          '-a',
-          '--filter',
-          'label=ocb.orb=true',
-          '--filter',
-          'label=ocb.project=proj-1',
-          '--format',
-          '{{.Label "ocb.name"}}',
-        ],
-      ]);
-      expect(docker.spawnArgs, isEmpty);
-      expect(git.args, isEmpty);
-    });
+        await expectLater(
+          service().create(
+            project: 'proj-1',
+            name: 'dev',
+            checkout: checkout.path,
+          ),
+          throwsA(
+            isA<OrbNameTakenError>()
+                .having((e) => e.project, 'project', 'proj-1')
+                .having((e) => e.name, 'name', 'dev'),
+          ),
+        );
+        expect(docker.runArgs, [
+          [
+            'ps',
+            '-a',
+            '--filter',
+            'label=ocb.orb=true',
+            '--filter',
+            'label=ocb.project=proj-1',
+            '--format',
+            '{{.Label "ocb.name"}}',
+          ],
+        ]);
+        expect(docker.spawnArgs, isEmpty);
+        expect(git.args, isEmpty);
+      },
+    );
 
     test('a project with no remote is refused', () async {
       git.results['remote get-url origin'] = const GitCliResult(
@@ -660,49 +644,45 @@ void main() {
       expect(docker.runArgs, hasLength(1));
     });
 
-    test('a container exiting during boot is an OrbBootError with the tail',
-        () async {
-      docker.stateResult = const DockerCliResult(
-        exitCode: 0,
-        stdout: 'exited\n',
-        stderr: '',
-      );
-      docker.logs = 'cloning the remote\nfatal: repository not found\n';
+    test(
+      'a container exiting during boot is an OrbBootError with the tail',
+      () async {
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'exited\n',
+          stderr: '',
+        );
+        docker.logs = 'cloning the remote\nfatal: repository not found\n';
 
-      await expectLater(
-        service().create(
-          project: 'proj-1',
-          name: 'dev',
-          checkout: checkout.path,
-        ),
-        throwsA(
-          isA<OrbBootError>()
-              .having(
-                (e) => e.detail,
-                'detail',
-                'the orb container exited during boot',
-              )
-              .having(
-                (e) => e.logTail,
-                'logTail',
-                ['cloning the remote', 'fatal: repository not found'],
-              ),
-        ),
-      );
-      expect(docker.spawned[0].killed, isTrue);
-    });
+        await expectLater(
+          service().create(
+            project: 'proj-1',
+            name: 'dev',
+            checkout: checkout.path,
+          ),
+          throwsA(
+            isA<OrbBootError>()
+                .having(
+                  (e) => e.detail,
+                  'detail',
+                  'the orb container exited during boot',
+                )
+                .having((e) => e.logTail, 'logTail', [
+                  'cloning the remote',
+                  'fatal: repository not found',
+                ]),
+          ),
+        );
+        expect(docker.spawned[0].killed, isTrue);
+      },
+    );
 
     test('a boot that never comes up times out', () async {
       docker.logs = 'starting...'; // No `server password` line, ever.
 
       await expectLater(
-        service(
-          bootTimeout: const Duration(milliseconds: 300),
-        ).create(
-          project: 'proj-1',
-          name: 'dev',
-          checkout: checkout.path,
-        ),
+        service(bootTimeout: const Duration(milliseconds: 300))
+            .create(project: 'proj-1', name: 'dev', checkout: checkout.path),
         throwsA(
           isA<OrbBootError>().having(
             (e) => e.detail,
@@ -714,8 +694,7 @@ void main() {
       expect(docker.spawned[0].killed, isTrue);
     });
 
-    test('a descriptor that does not accept yet is retried until it does',
-        () async {
+    test('a descriptor that does not accept yet is retried until it does', () async {
       const password = 'pw';
       final http = await HttpServer.bind('127.0.0.1', 0);
       var requests = 0;
@@ -729,13 +708,12 @@ void main() {
             accept &&
                 auth ==
                     'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
-                ? 200
-                : 401;
+            ? 200
+            : 401;
         unawaited(request.response.close());
       });
       final port = http.port;
-      docker.ports =
-          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+      docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
       docker.logs = 'server password $password\n';
 
       final record = await service().create(
@@ -752,13 +730,13 @@ void main() {
     test('list composes running, stopped, broken, and orphan rows', () async {
       const created = '2026-11-04T00:00:00.000Z';
       String labels(String id, String name) => jsonEncode({
-            'ocb.orb': 'true',
-            'ocb.id': id,
-            'ocb.name': name,
-            'ocb.project': 'p1',
-            'ocb.branch': 'orb/$id',
-            'ocb.created': created,
-          });
+        'ocb.orb': 'true',
+        'ocb.id': id,
+        'ocb.name': name,
+        'ocb.project': 'p1',
+        'ocb.branch': 'orb/$id',
+        'ocb.created': created,
+      });
 
       const a = 'aaaaaaaaaaaaaaaa';
       const b = 'bbbbbbbbbbbbbbbb';
@@ -814,52 +792,49 @@ void main() {
 
       final rows = await service().list();
 
-      expect(
-        rows,
-        [
-          OrbRecord(
-            id: a,
-            name: 'dev',
-            project: 'p1',
-            branch: 'orb/$a',
-            state: 'running',
-            created: created,
-            url: 'http://127.0.0.1:39999',
-          ),
-          OrbRecord(
-            id: b,
-            name: 'beta',
-            project: 'p1',
-            branch: 'orb/$b',
-            state: 'stopped',
-            created: created,
-          ),
-          OrbRecord(
-            id: c,
-            name: 'gamma',
-            project: 'p1',
-            branch: 'orb/$c',
-            state: 'broken:workspace',
-            created: created,
-          ),
-          OrbRecord(
-            id: d,
-            name: 'delta',
-            project: 'p1',
-            branch: 'orb/$d',
-            state: 'broken:state',
-            created: created,
-          ),
-          OrbRecord(
-            id: e,
-            name: 'epsilon',
-            project: 'p1',
-            branch: 'orb/$e',
-            state: 'orphan',
-            created: created,
-          ),
-        ],
-      );
+      expect(rows, [
+        OrbRecord(
+          id: a,
+          name: 'dev',
+          project: 'p1',
+          branch: 'orb/$a',
+          state: 'running',
+          created: created,
+          url: 'http://127.0.0.1:39999',
+        ),
+        OrbRecord(
+          id: b,
+          name: 'beta',
+          project: 'p1',
+          branch: 'orb/$b',
+          state: 'stopped',
+          created: created,
+        ),
+        OrbRecord(
+          id: c,
+          name: 'gamma',
+          project: 'p1',
+          branch: 'orb/$c',
+          state: 'broken:workspace',
+          created: created,
+        ),
+        OrbRecord(
+          id: d,
+          name: 'delta',
+          project: 'p1',
+          branch: 'orb/$d',
+          state: 'broken:state',
+          created: created,
+        ),
+        OrbRecord(
+          id: e,
+          name: 'epsilon',
+          project: 'p1',
+          branch: 'orb/$e',
+          state: 'orphan',
+          created: created,
+        ),
+      ]);
     });
 
     test('an empty host is an empty list', () async {
@@ -898,10 +873,7 @@ void main() {
         OrbService.isGitHubRemote('http://github.com/acme/app.git'),
         isTrue,
       );
-      expect(
-        OrbService.isGitHubRemote('git@github.com:acme/app.git'),
-        isTrue,
-      );
+      expect(OrbService.isGitHubRemote('git@github.com:acme/app.git'), isTrue);
       expect(
         OrbService.isGitHubRemote('ssh://git@github.com/acme/app.git'),
         isTrue,
@@ -910,10 +882,7 @@ void main() {
         OrbService.isGitHubRemote('https://gitlab.com/acme/app.git'),
         isFalse,
       );
-      expect(
-        OrbService.isGitHubRemote('git@gitlab.com:acme/app.git'),
-        isFalse,
-      );
+      expect(OrbService.isGitHubRemote('git@gitlab.com:acme/app.git'), isFalse);
       expect(OrbService.isGitHubRemote(''), isFalse);
     });
   });

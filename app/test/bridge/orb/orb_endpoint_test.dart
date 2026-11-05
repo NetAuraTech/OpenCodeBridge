@@ -82,8 +82,7 @@ class _FakeService extends OpencodeService {
   }
 
   @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// The [OrbService] seam: `create`/`list` record their arguments and return
@@ -120,8 +119,7 @@ class _FakeOrbs implements OrbService {
   }
 
   @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
@@ -153,28 +151,27 @@ void main() {
       await server.stop();
     });
 
-    test('201 with the record; the checkout resolves to the canonical',
-        () async {
-      orbs.createRecord = const OrbRecord(
-        id: 'aaaa',
-        name: 'dev',
-        project: 'p1',
-        branch: 'orb/aaaa',
-        state: 'running',
-        created: '2026-11-04T00:00:00.000Z',
-        url: 'http://127.0.0.1:39999',
-      );
+    test(
+      '201 with the record; the checkout resolves to the canonical',
+      () async {
+        orbs.createRecord = const OrbRecord(
+          id: 'aaaa',
+          name: 'dev',
+          project: 'p1',
+          branch: 'orb/aaaa',
+          state: 'running',
+          created: '2026-11-04T00:00:00.000Z',
+          url: 'http://127.0.0.1:39999',
+        );
 
-      final (status, body) = await _postRaw(
-        base,
-        'api/orbs',
-        jsonEncode({'project': 'p1', 'name': 'dev'}),
-      );
+        final (status, body) = await _postRaw(
+          base,
+          'api/orbs',
+          jsonEncode({'project': 'p1', 'name': 'dev'}),
+        );
 
-      expect(status, 201);
-      expect(
-        jsonDecode(body),
-        {
+        expect(status, 201);
+        expect(jsonDecode(body), {
           'id': 'aaaa',
           'name': 'dev',
           'project': 'p1',
@@ -182,12 +179,12 @@ void main() {
           'state': 'running',
           'created': '2026-11-04T00:00:00.000Z',
           'url': 'http://127.0.0.1:39999',
-        },
-      );
-      expect(orbs.createProject, 'p1');
-      expect(orbs.createName, 'dev');
-      expect(orbs.createCheckout, '/proj/one');
-    });
+        });
+        expect(orbs.createProject, 'p1');
+        expect(orbs.createName, 'dev');
+        expect(orbs.createCheckout, '/proj/one');
+      },
+    );
 
     test('a missing field is 400 invalid_body', () async {
       final (status, body) = await _postRaw(
@@ -222,14 +219,10 @@ void main() {
       expect(jsonDecode(body), {'error': 'name_taken', 'name': 'dev'});
     });
 
-    test('each up-front refusal is a 400 with its code and details',
-        () async {
+    test('each up-front refusal is a 400 with its code and details', () async {
       for (final refusal in const [
         OrbRefusalError(OrbRefusalError.noRemote, 'no origin remote'),
-        OrbRefusalError(
-          OrbRefusalError.nonGithubRemote,
-          'not a GitHub remote',
-        ),
+        OrbRefusalError(OrbRefusalError.nonGithubRemote, 'not a GitHub remote'),
         OrbRefusalError(
           OrbRefusalError.missingGitIdentity,
           'no host git identity',
@@ -242,10 +235,10 @@ void main() {
           jsonEncode({'project': 'p1', 'name': 'dev'}),
         );
         expect(status, 400);
-        expect(
-          jsonDecode(body),
-          {'error': refusal.code, 'details': refusal.message},
-        );
+        expect(jsonDecode(body), {
+          'error': refusal.code,
+          'details': refusal.message,
+        });
       }
     });
 
@@ -295,14 +288,11 @@ void main() {
       );
 
       expect(status, 502);
-      expect(
-        jsonDecode(body),
-        {
-          'error': 'orb_boot_failed',
-          'details': 'the orb did not come up within 10:00.000000',
-          'logTail': ['cloning', 'fatal: repository not found'],
-        },
-      );
+      expect(jsonDecode(body), {
+        'error': 'orb_boot_failed',
+        'details': 'the orb did not come up within 10:00.000000',
+        'logTail': ['cloning', 'fatal: repository not found'],
+      });
     });
 
     test('a daemon failure is 502 docker_unreachable', () async {
@@ -398,28 +388,25 @@ void main() {
       final (status, body) = await _get(base, 'api/orbs');
 
       expect(status, 200);
-      expect(
-        jsonDecode(body),
-        [
-          {
-            'id': 'aaaa',
-            'name': 'dev',
-            'project': 'p1',
-            'branch': 'orb/aaaa',
-            'state': 'running',
-            'created': '2026-11-04T00:00:00.000Z',
-            'url': 'http://127.0.0.1:39999',
-          },
-          {
-            'id': 'bbbb',
-            'name': 'beta',
-            'project': 'p1',
-            'branch': 'orb/bbbb',
-            'state': 'stopped',
-            'created': '2026-11-04T00:00:00.000Z',
-          },
-        ],
-      );
+      expect(jsonDecode(body), [
+        {
+          'id': 'aaaa',
+          'name': 'dev',
+          'project': 'p1',
+          'branch': 'orb/aaaa',
+          'state': 'running',
+          'created': '2026-11-04T00:00:00.000Z',
+          'url': 'http://127.0.0.1:39999',
+        },
+        {
+          'id': 'bbbb',
+          'name': 'beta',
+          'project': 'p1',
+          'branch': 'orb/bbbb',
+          'state': 'stopped',
+          'created': '2026-11-04T00:00:00.000Z',
+        },
+      ]);
     });
 
     test('a daemon failure is 502 docker_unreachable', () async {
@@ -450,10 +437,7 @@ void main() {
   group('opencode_unavailable (issue #93)', () {
     test('503 without a sessions backend', () async {
       if (_hostHasServiceDescriptor()) return;
-      final bare = await BridgeServer.start(
-        port: 0,
-        orbs: _FakeOrbs(),
-      );
+      final bare = await BridgeServer.start(port: 0, orbs: _FakeOrbs());
       try {
         final (status, body) = await _postRaw(
           bare.baseUri,

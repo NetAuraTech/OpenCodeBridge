@@ -52,8 +52,9 @@ String? findHostGit({String? path}) {
 
 /// The host git CLI's [GitRunner] seam (like [DockerBackend.hostCli] is for
 /// docker): the same host invocation the default [OrbService] uses.
-GitRunner hostGitRunner(String binary) => (argv, {workingDirectory}) =>
-    _hostGitRun(binary, argv, workingDirectory: workingDirectory);
+GitRunner hostGitRunner(String binary) =>
+    (argv, {workingDirectory}) =>
+        _hostGitRun(binary, argv, workingDirectory: workingDirectory);
 
 /// The host's docker-bridge address (spec §8.5): the `docker0` interface's
 /// address — the host's endpoint of the default bridge network the orb
@@ -226,9 +227,17 @@ class OrbService {
     final branch = 'orb/$id';
 
     // The workspace + data volumes (labeled, §2.1) and the state dir.
-    await _createVolume('orb-$id-workspace', id, name, project, branch, created);
+    await _createVolume(
+      'orb-$id-workspace',
+      id,
+      name,
+      project,
+      branch,
+      created,
+    );
     await _createVolume('orb-$id-data', id, name, project, branch, created);
-    final stateDir = Directory('${stateRoot.path}/$id')..createSync(recursive: true);
+    final stateDir = Directory('${stateRoot.path}/$id')
+      ..createSync(recursive: true);
 
     // `docker create` first, with every flag (spec §2.3 step 5): the orb is
     // fully described before any file moves into it.
@@ -493,8 +502,11 @@ class OrbService {
   }
 
   Future<String> _remoteUrl(String checkout) async {
-    final result = await git(['remote', 'get-url', 'origin'],
-        workingDirectory: checkout);
+    final result = await git([
+      'remote',
+      'get-url',
+      'origin',
+    ], workingDirectory: checkout);
     if (result.exitCode != 0) {
       throw const OrbRefusalError(
         OrbRefusalError.noRemote,
@@ -652,24 +664,15 @@ class OrbService {
   List<File> _envFiles(String checkout) {
     final dir = Directory(checkout);
     if (!dir.existsSync()) return const [];
-    final files = dir
-        .listSync(followLinks: false)
-        .whereType<File>()
-        .where((f) {
-          final name = f.path.split('/').last;
-          if (name == '.env') return true;
-          return name.startsWith('.env.') && !name.endsWith('.example');
-        })
-        .toList()
-      ..sort((a, b) => a.path.compareTo(b.path));
+    final files = dir.listSync(followLinks: false).whereType<File>().where((f) {
+      final name = f.path.split('/').last;
+      if (name == '.env') return true;
+      return name.startsWith('.env.') && !name.endsWith('.example');
+    }).toList()..sort((a, b) => a.path.compareTo(b.path));
     return files;
   }
 
-  void _streamBootLines(
-    String id,
-    DockerProcess process,
-    List<String> tail,
-  ) {
+  void _streamBootLines(String id, DockerProcess process, List<String> tail) {
     void line(String l) {
       tail.add(l);
       if (tail.length > OrbService.maxTailLines) tail.removeAt(0);
@@ -816,8 +819,7 @@ class OrbService {
 
   String _mintId() {
     final random = Random.secure();
-    return List.generate(8, (_) => random.nextInt(16).toRadixString(16))
-        .join();
+    return List.generate(8, (_) => random.nextInt(16).toRadixString(16)).join();
   }
 
   // ------------------------------------------------------------------------
@@ -860,10 +862,7 @@ class OrbService {
     );
   }
 
-  OrbRecord _withBrokenState(
-    OrbRecord record,
-    List<String> volumeNames,
-  ) {
+  OrbRecord _withBrokenState(OrbRecord record, List<String> volumeNames) {
     if (!volumeNames.contains('orb-${record.id}-workspace')) {
       return _replacedState(record, 'broken:workspace');
     }
@@ -891,9 +890,9 @@ class OrbService {
   }
 
   List<String> _lines(String output) => [
-        for (final line in const LineSplitter().convert(output))
-          if (line.trim().isNotEmpty) line.trim(),
-      ];
+    for (final line in const LineSplitter().convert(output))
+      if (line.trim().isNotEmpty) line.trim(),
+  ];
 
   static List<String> _logTail(String log) {
     final lines = const LineSplitter()
@@ -903,7 +902,6 @@ class OrbService {
     final n = lines.length > maxTailLines ? maxTailLines : lines.length;
     return lines.sublist(lines.length - n);
   }
-
 }
 
 Future<GitCliResult> _hostGitRun(
