@@ -161,7 +161,7 @@ RUN set -eux; \
     npm --version | grep -q "^${NPM_VERSION}$"; \
     php --version | grep -q "^PHP ${PHP_VERSION}"; \
     "${FLUTTER_ROOT}/bin/flutter" --version | grep -q "${FLUTTER_VERSION}"; \
-    redis-server --version | grep -q "version=${REDIS_VERSION}"; \
+    redis-server --version | grep -q "v=${REDIS_VERSION}"; \
     pg_config --version | grep -q "PostgreSQL ${POSTGRES_VERSION}"; \
     typesense-server 2>&1 | grep -q "Typesense ${TYPESENSE_VERSION}"; \
     mailhog -version | grep -qi "${MAILHOG_VERSION}"; \
