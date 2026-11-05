@@ -42,6 +42,7 @@ class Session {
     required this.created,
     required this.location,
     required this.active,
+    this.orb,
   });
 
   final String id;
@@ -57,6 +58,10 @@ class Session {
   /// True when the session is in the service's active list (agent working).
   final bool active;
 
+  /// The orb id when the session lives on a running orb, else `null` (host
+  /// sessions, including sessions moved onto the host from an orb).
+  final String? orb;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'title': title,
@@ -64,6 +69,7 @@ class Session {
     'created': created,
     'location': location,
     'active': active,
+    if (orb != null) 'orb': orb,
   };
 
   factory Session.fromJson(Object? json) {
@@ -75,6 +81,7 @@ class Session {
       created: (map['created'] as num?)?.toInt() ?? 0,
       location: map['location'] as String? ?? '',
       active: map['active'] as bool? ?? false,
+      orb: map['orb'] as String?,
     );
   }
 
@@ -86,13 +93,14 @@ class Session {
       other.project == project &&
       other.created == created &&
       other.location == location &&
-      other.active == active;
+      other.active == active &&
+      other.orb == orb;
 
   @override
   int get hashCode =>
-      Object.hash(id, title, project, created, location, active);
+      Object.hash(id, title, project, created, location, active, orb);
 
   @override
   String toString() =>
-      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active)';
+      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb)';
 }

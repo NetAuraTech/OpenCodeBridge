@@ -5,12 +5,14 @@ import 'dart:io';
 import '../model/command.dart';
 import '../model/compose_project.dart';
 import '../model/container.dart';
+import '../model/orb.dart';
 import '../model/permission.dart';
 import '../model/question.dart';
 import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
+import 'events/composite_event_service.dart';
 import 'events/event_hub.dart';
 import 'fs/fs_service.dart';
 import 'fs/linux_fs_service.dart';
@@ -24,6 +26,7 @@ import 'events/llama_speed_feed.dart';
 import 'events/opencode_http_event_service.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
+import 'sessions/composite_service.dart';
 import 'sessions/opencode_http_service.dart';
 import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
@@ -306,16 +309,35 @@ class BridgeServer {
     Future<FcmSender> Function(FirebaseServiceAccount)? notifySenderFactory,
   }) async {
     final server = await HttpServer.bind(host, port);
-    final backend = sessions ?? await BridgeServer._defaultSessions();
+    // The orbs are built before the backend and the event hub: the
+    // composite sessions/event services (issue #95) reach the orb service
+    // through these closures, and the orb defaults need only the image
+    // builder and the host CLIs. The orb service's boot-log [emit] is
+    // deferred: the event hub does not exist yet, so it forwards to
+    // [orbEmit] once the hub is built (any orb creation happens on the HTTP
+    // surface, after [start] returns).
+    void Function(String)? orbEmit;
+    final orbBuilder =
+        orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
+    final orbService =
+        orbs ??
+        await BridgeServer._defaultOrbs(orbBuilder, (line) {
+          orbEmit?.call(line);
+        });
+    Future<List<OrbRecord>> orbList() =>
+        orbService?.list() ?? Future.value(const []);
+    Future<String?> orbPassword(String id) =>
+        orbService?.lastPassword(id) ?? Future.value(null);
+    final backend =
+        sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
     final fsService = fs ?? const LinuxFsService();
-    final eventHub = events ?? await BridgeServer._defaultEvents();
+    final eventHub =
+        events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
+    orbEmit = eventHub?.emit;
     final speed =
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
-    final orbBuilder = orb ?? await BridgeServer._defaultOrb(eventHub?.emit);
-    final orbService =
-        orbs ?? await BridgeServer._defaultOrbs(orbBuilder, eventHub?.emit);
     NotifyService? notifyService;
     PushDispatcher? pushDispatcher;
     if (notify != null) {
@@ -496,28 +518,50 @@ class BridgeServer {
     await _notify?.close();
   }
 
-  /// The default sessions backend: the real shared opencode service. Returns
-  /// `null` when this machine has no shared opencode service (no service
-  /// descriptor), in which case the sessions endpoints report
-  /// `opencode_unavailable`.
-  static Future<SessionsBackend?> _defaultSessions() async {
+  /// The default sessions backend: the aggregate [CompositeOpencodeService]
+  /// (issue #95, spec §7.2) over the real shared opencode service and every
+  /// running orb (reached through [orbList]/[orbPassword]). Returns `null`
+  /// when this machine has no shared opencode service (no service
+  /// descriptor — the orbs cannot replace the host), in which case the
+  /// sessions endpoints report `opencode_unavailable`.
+  static Future<SessionsBackend?> _defaultSessions(
+    Future<List<OrbRecord>> Function() orbList,
+    Future<String?> Function(String) orbPassword,
+  ) async {
     try {
-      final service = await OpencodeHttpService.fromHost();
-      return SessionsBackend(service: service);
+      final host = await OpencodeHttpService.fromHost();
+      return SessionsBackend(
+        service: CompositeOpencodeService(
+          host: host,
+          orbList: orbList,
+          orbPassword: orbPassword,
+        ),
+      );
     } catch (_) {
       return null;
     }
   }
 
-  /// The default event hub (endpoint 14): the bridge's single upstream
-  /// `GET /api/event` subscription over the shared opencode service, fanned
+  /// The default event hub (endpoint 14): the aggregate
+  /// [CompositeOpencodeEventService] (issue #95, spec §7.3) — one
+  /// self-healing upstream `GET /api/event` per live service (the host plus
+  /// every running orb, reached through [orbList]/[orbPassword]) — fanned
   /// out to the app SSE connections. Returns `null` when this machine has no
   /// shared opencode service (no descriptor), in which case endpoint 14
   /// reports `opencode_unavailable`.
-  static Future<EventHub?> _defaultEvents() async {
+  static Future<EventHub?> _defaultEvents(
+    Future<List<OrbRecord>> Function() orbList,
+    Future<String?> Function(String) orbPassword,
+  ) async {
     try {
-      final service = await OpencodeHttpEventService.fromHost();
-      return EventHub(service: service);
+      final host = await OpencodeHttpEventService.fromHost();
+      return EventHub(
+        service: CompositeOpencodeEventService(
+          host: host,
+          orbList: orbList,
+          orbPassword: orbPassword,
+        ),
+      );
     } catch (_) {
       return null;
     }

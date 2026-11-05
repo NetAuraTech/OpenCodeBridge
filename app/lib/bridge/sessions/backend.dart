@@ -195,6 +195,7 @@ class SessionsBackend {
       created: s.created,
       location: s.location,
       active: active.contains(s.id),
+      orb: s.orb,
     );
   }
 }

@@ -28,6 +28,7 @@ class OpencodeSession {
     required this.projectId,
     required this.created,
     required this.location,
+    this.orb,
   });
 
   final String id;
@@ -41,6 +42,10 @@ class OpencodeSession {
 
   /// The working directory, the service's session `location.directory`.
   final String location;
+
+  /// The orb id when this session lives on a running orb (stamped by the
+  /// aggregate), else `null` (host sessions).
+  final String? orb;
 }
 
 /// One project as the shared opencode service reports it (`GET /api/project`):

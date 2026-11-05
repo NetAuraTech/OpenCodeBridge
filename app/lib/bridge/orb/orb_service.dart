@@ -467,6 +467,18 @@ class OrbService {
   /// The password of the last `server password <pw>` line of [log] (spec
   /// §7.1: every start/respawn generates a new password — the last line
   /// wins), or `null` when the log has none.
+  /// The current `server password` of orb [id]: the last `server password`
+  /// line of its container log (spec §7.1: the password is re-derived at
+  /// every start — the last line wins on a respawn). `null` when the
+  /// container log cannot be read (the orb is gone or docker is down).
+  Future<String?> lastPassword(String id) async {
+    try {
+      return lastServerPassword(await _fullLog('orb-$id'));
+    } on DockerUnavailableError {
+      return null;
+    }
+  }
+
   static String? lastServerPassword(String log) {
     String? password;
     for (final line in const LineSplitter().convert(log)) {
