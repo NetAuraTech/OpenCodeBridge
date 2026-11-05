@@ -401,9 +401,14 @@ if [ -n "$pg_host" ]; then
             if [ ! -f "$pg_data/PG_VERSION" ]; then
                 runuser -u postgres -- "$PG_BIN/initdb" -D "$pg_data" -U postgres
             fi
+            # The port goes in the -o string (the postmaster's own -p flag):
+            # pg_ctl's -p option is the postmaster binary's path, not a port
+            # (a numeric -p makes pg_ctl try to exec it). GUCs in that string
+            # carry their -- prefix: a bare listen_addresses=... is not a
+            # postmaster command-line argument.
             runuser -u postgres -- "$PG_BIN/pg_ctl" -D "$pg_data" \
-                -o "listen_addresses='127.0.0.1' -k $pg_sock" \
-                -p "$pg_port" -l "$pg_data/pg.log" -w start
+                -o "--listen_addresses='127.0.0.1' -k $pg_sock -p $pg_port" \
+                -l "$pg_data/pg.log" -w start
             # Provision the role + database the `.env` names (idempotent:
             # created only when missing, the password re-asserted).
             pg_user=$(env_value PG_USER)
