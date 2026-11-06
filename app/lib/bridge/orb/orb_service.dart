@@ -2351,6 +2351,7 @@ class OrbService {
       _copyTree(source, staged);
     }
     _injectBridgeUrl(staged);
+    _rewriteLoopbackUrls(staged);
     return staged;
   }
 
@@ -2400,6 +2401,34 @@ class OrbService {
         : text.replaceFirst(RegExp(r'\{'), '{\n  "bridgeUrl": "$url",');
     file.writeAsStringSync(updated);
   }
+
+  /// Rewrites host-loopback URLs to `host.docker.internal` in the staged
+  /// config (#117): a provider `baseURL` (or MCP server URL) pointing at
+  /// `localhost` / `127.0.0.1` / `0.0.0.0` addresses the container itself
+  /// inside an orb — nothing listens there, so the provider is dead. The
+  /// containers already carry `--add-host=host.docker.internal:<host IP>`
+  /// (§8.5), so swapping the host part — port and path kept — makes the
+  /// host service reachable. Textual like [_injectBridgeUrl] (the config is
+  /// JSONC — `//` comments make parsing unsafe); remote URLs and the rest of
+  /// the config pass through untouched, and the host config file is never
+  /// modified (host-authoritative, §6.2).
+  void _rewriteLoopbackUrls(Directory staged) {
+    for (final name in const ['opencode.jsonc', 'opencode.json']) {
+      final file = File('${staged.path}/$name');
+      if (!file.existsSync()) continue;
+      final text = file.readAsStringSync();
+      final updated = rewriteLoopbackUrls(text);
+      if (updated != text) file.writeAsStringSync(updated);
+    }
+  }
+
+  /// The textual rewrite behind [_rewriteLoopbackUrls]: every
+  /// `http(s)://<loopback>` URL becomes `http(s)://host.docker.internal`,
+  /// port and path kept. Exposed for tests.
+  static String rewriteLoopbackUrls(String text) => text.replaceAllMapped(
+    RegExp(r'(https?://)(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?=["/:]|$)'),
+    (match) => '${match[1]}host.docker.internal',
+  );
 
   Future<void> _copyStagedConfig(String container, Directory staged) async {
     // Per TOP-LEVEL entry, never per file: the container is created, not

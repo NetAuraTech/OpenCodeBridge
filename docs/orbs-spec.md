@@ -241,6 +241,8 @@ Before `docker start`, the bridge copies the host project checkout's `.env*` fil
 
 The host's opencode **config + auth** are **copied to a container-local config dir** at every start (host-authoritative; no concurrent-write contention) ([#83](https://github.com/NetAuraTech/OpenCodeBridge/issues/83)). The bridge additionally writes its **URL** into that config at every copy — the address orbs use to reach the bridge via `host.docker.internal` (§8.5).
 
+The staged copy is **rewritten for container networking** ([#117](https://github.com/NetAuraTech/OpenCodeBridge/issues/117)): every `http(s)` URL whose host is the loopback (`localhost`, `127.0.0.1`, `0.0.0.0`) — provider `baseURL`, MCP server URLs — becomes `host.docker.internal` on the same port/path: inside the container `localhost` is the container itself, so a host-local provider (llama.cpp/llama-swap…) would be dead in every orb. Remote URLs pass through untouched; the **host config file is never modified** (host-authoritative — the rewrite lives only in the staged copy).
+
 ### 6.3 First start — clone, hook, installers — entrypoint, create only
 
 On the container's first start (the workspace volume holds only the injected `.env*`):
