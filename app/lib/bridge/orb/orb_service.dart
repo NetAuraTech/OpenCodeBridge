@@ -814,10 +814,10 @@ class OrbService {
     for (final name in present) {
       await _runOrThrow(['volume', 'rm', name]);
     }
-    final stateDir = Directory('${stateRoot.path}/$id');
-    if (stateDir.existsSync()) {
-      stateDir.deleteSync(recursive: true);
-    }
+    // Same root-owned content as the guarded deletion (spec §2.7): the
+    // orphan's container is gone, so the throwaway clean runs on the
+    // current shared image.
+    await _removeStateDir(id, await imageBuilder.ensureImage());
   }
 
   // ------------------------------------------------------------------------
@@ -1398,13 +1398,48 @@ class OrbService {
     if (!force && !guard.canDelete) {
       throw OrbDeletionRefusedError(id, guard);
     }
+    // The container's image, read before the removal: the state dir's
+    // cleaner may need a throwaway container (below).
+    final image = await _containerImage(id);
     await _runOrThrow(['rm', '-f', 'orb-$id']);
+    // The state dir before the volumes: if its container-side clean fails,
+    // the volumes still mark the orb and a retry re-enters through the
+    // orphan cleanup — nothing left dangling.
+    await _removeStateDir(id, image ?? await imageBuilder.ensureImage());
     await _removeVolume('orb-$id-workspace');
     await _removeVolume('orb-$id-data');
+  }
+
+  /// Removes the orb's state dir. The dir itself is bridge-owned, but the
+  /// container writes through its `/root/.local` bind mount **as root**:
+  /// root-owned files the host user cannot unlink (the boot's config, the
+  /// opencode data). When the host-side recursive delete hits them, a
+  /// throwaway container over the same mount deletes the contents as root,
+  /// and the host removes the now-empty dir. [image] is any image present
+  /// on the host for the throwaway run.
+  Future<void> _removeStateDir(String id, String image) async {
     final stateDir = Directory('${stateRoot.path}/$id');
-    if (stateDir.existsSync()) {
+    if (!stateDir.existsSync()) return;
+    try {
       stateDir.deleteSync(recursive: true);
+      return;
+    } on FileSystemException {
+      // Root-owned content (the container wrote it): clean through docker.
+      // A partial host-side delete may have taken some entries already —
+      // the container-side clean is idempotent over the rest.
     }
+    await _runOrThrow([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'sh',
+      '-v',
+      '${stateDir.path}:/ocb-state',
+      image,
+      '-c',
+      'find /ocb-state -mindepth 1 -delete',
+    ]);
+    stateDir.deleteSync();
   }
 
   /// Removes the volume [name], tolerating an already-absent volume

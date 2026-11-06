@@ -919,6 +919,51 @@ void main() {
         expect(docker.rows, isEmpty);
       });
 
+      test('force delete cleans a root-owned state dir through a throwaway '
+          'container over the same mount', () async {
+        addOrb(port: 49101);
+        // The state dir as the container leaves it: content the host user
+        // cannot unlink (a directory the recursive delete cannot enter).
+        final dir = Directory('${stateRoot.path}/$orbId')
+          ..createSync(recursive: true);
+        final sub = Directory('${dir.path}/state')..createSync();
+        File('${sub.path}/data').writeAsStringSync('x');
+        Process.runSync('chmod', ['555', sub.path]);
+        docker.execRespond = (argv) => argv.last == '--porcelain'
+            ? const DockerCliResult(
+                exitCode: 0,
+                stdout: ' M src/app.dart\n',
+                stderr: '',
+              )
+            : const DockerCliResult(exitCode: 0, stdout: '2\n', stderr: '');
+        // The container-side clean, as root over the same mount: unlock
+        // the simulated root-owned content, then wipe it.
+        docker.runRespond = (argv) {
+          final mount = argv[argv.indexOf('-v') + 1].split(':').first;
+          Process.runSync('chmod', ['-R', 'u+rwx', mount]);
+          for (final entry in Directory(mount).listSync()) {
+            entry.deleteSync(recursive: true);
+          }
+          return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+        };
+
+        await service().delete(orbId, force: true);
+
+        final clean = docker.runArgs.indexWhere(
+          (a) =>
+              a.length > 1 &&
+              a[0] == 'run' &&
+              a[1] == '--rm' &&
+              a.contains('find /ocb-state -mindepth 1 -delete'),
+        );
+        expect(clean, isNonNegative);
+        expect(
+          docker.runArgs[clean].join(' '),
+          contains('${stateRoot.path}/$orbId:/ocb-state'),
+        );
+        expect(dir.existsSync(), isFalse);
+      });
+
       test(
         'volume rm tolerates an already-absent volume (idempotent)',
         () async {
