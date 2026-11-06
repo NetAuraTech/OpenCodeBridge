@@ -28,8 +28,10 @@ import 'structured_view.dart';
 /// no confirm; the button blocks for the re-boot of a running orb), and the
 /// force delete on a running, stopped, or broken orb (issue #98, spec §2.7 —
 /// its confirm explains what force discards; the bridge's guard refusal is
-/// overridden by the explicit force). The broken-state "Fresh state" stays
-/// disabled with an explanatory tooltip until it lands.
+/// overridden by the explicit force). On a `broken:state` card: the Fresh
+/// state start (issue #102, spec §9.4 — a wake over a recreated state dir,
+/// with the stated confirmation: the workspace is kept, the in-orb sessions
+/// are lost).
 ///
 /// The FAB opens the create-orb wizard as a bottom sheet (spec §9.3): the
 /// project + the orb name first, then the live staged boot log in the sheet
@@ -144,6 +146,10 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
 
   /// The orb ids whose force delete is in flight (issue #98).
   final Set<String> _deletingIds = <String>{};
+
+  /// The orb ids whose fresh-state start is in flight (issue #102): the
+  /// button blocks for the boot like the Wake.
+  final Set<String> _freshStatingIds = <String>{};
 
   /// The create in flight, if any (the wizard's sheet renders it; the tab
   /// owns it, so closing the sheet mid-boot keeps the creation alive).
@@ -503,6 +509,57 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
     }
   }
 
+  /// The broken orb's start-with-fresh-state (issue #102, spec §9.4): a
+  /// normal wake over a fresh opencode state db. The confirmation states
+  /// the trade: the workspace (uncommitted work included) is kept, the
+  /// in-orb sessions are lost.
+  Future<void> _confirmFreshState(OrbRecord orb) async {
+    final client = _client;
+    if (client == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Start with fresh state?'),
+        content: Text(
+          '"${orb.name}" starts over with a fresh opencode state. Its '
+          'workspace is kept — uncommitted work included — but its in-orb '
+          'sessions are lost.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const ValueKey('orb-fresh-state-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Start'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _freshState(orb, client);
+  }
+
+  Future<void> _freshState(OrbRecord orb, OrbsClient client) async {
+    if (_freshStatingIds.contains(orb.id)) return; // re-issue: safe no-op
+    setState(() => _freshStatingIds.add(orb.id));
+    try {
+      await client.startWithFreshState(orb.id);
+      if (mounted) _snackBar('Orb started with fresh state.');
+      unawaited(_load());
+    } on OrbsClientError catch (e) {
+      if (mounted) {
+        _snackBar('Could not start with fresh state: ${e.message}');
+      }
+    } catch (_) {
+      if (mounted) _snackBar('Could not start with fresh state.');
+    } finally {
+      if (mounted) setState(() => _freshStatingIds.remove(orb.id));
+    }
+  }
+
   /// New session on the orb (issue #97, spec §9.1/§9.5): the bridge creates
   /// the session in the orb's workspace (`/workspace`) on the running
   /// service; the new session's structured view opens directly.
@@ -775,6 +832,10 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
                           onUpdate: _update,
                           onForceDelete: _confirmForceDelete,
                           onCleanOrphan: _confirmCleanOrphan,
+                          onFreshState: _confirmFreshState,
+                          freshStating: _freshStatingIds.contains(
+                            orbs[index].id,
+                          ),
                         ),
                         childCount: orbs.length,
                       ),
@@ -870,25 +931,28 @@ class _OrbCard extends StatelessWidget {
     required this.onUpdate,
     required this.onForceDelete,
     required this.onCleanOrphan,
+    required this.onFreshState,
     this.stopping = false,
     this.waking = false,
     this.creatingSession = false,
     this.updating = false,
     this.deleting = false,
+    this.freshStating = false,
   });
 
   final OrbRecord orb;
   final int sessionCount;
   final bool highlighted;
 
-  /// The card's lifecycle action is in flight (issue #97, #98): its button
-  /// carries its busy label ("Stopping…", "Waking…", "Creating…",
-  /// "Updating…", "Deleting…").
+  /// The card's lifecycle action is in flight (issue #97, #98, #102): its
+  /// button carries its busy label ("Stopping…", "Waking…", "Creating…",
+  /// "Updating…", "Deleting…", "Starting…").
   final bool stopping;
   final bool waking;
   final bool creatingSession;
   final bool updating;
   final bool deleting;
+  final bool freshStating;
 
   final VoidCallback onTap;
   final ValueChanged<String> onOpenPr;
@@ -898,6 +962,7 @@ class _OrbCard extends StatelessWidget {
   final ValueChanged<OrbRecord> onUpdate;
   final ValueChanged<OrbRecord> onForceDelete;
   final ValueChanged<OrbRecord> onCleanOrphan;
+  final ValueChanged<OrbRecord> onFreshState;
 
   @override
   Widget build(BuildContext context) {
@@ -1006,12 +1071,12 @@ class _OrbCard extends StatelessWidget {
   /// session while running, Wake while stopped (issue #97); the per-orb
   /// Update on a running or stopped orb (issue #98, spec §2.8) and the Force
   /// delete on a running, stopped, or broken orb (issue #98, spec §2.7); the
-  /// broken-state "Fresh state" stays disabled until it lands — the tooltip
-  /// says which. A cleanup-pending orb (issue #101, spec §2.10.2) is a
-  /// stopped orb under the badge: it carries the stopped card's actions —
-  /// the human's force-delete is the documented exit for a leaked variant
-  /// (§2.10.4). A re-issued action in the same state is a safe no-op (the
-  /// handler guards on the busy flag).
+  /// Fresh state on a `broken:state` orb (issue #102, spec §9.4 — with the
+  /// stated confirmation). A cleanup-pending orb (issue #101, spec §2.10.2)
+  /// is a stopped orb under the badge: it carries the stopped card's
+  /// actions — the human's force-delete is the documented exit for a leaked
+  /// variant (§2.10.4). A re-issued action in the same state is a safe no-op
+  /// (the handler guards on the busy flag).
   List<_CardAction> _actions(OrbRecord orb, ColorScheme scheme) {
     final update = _CardAction(
       label: updating ? 'Updating…' : 'Update',
@@ -1023,7 +1088,11 @@ class _OrbCard extends StatelessWidget {
       enabled: true,
       onPressed: () => onForceDelete(orb),
     );
-    final freshState = const _CardAction(label: 'Fresh state', ticket: '#97');
+    final freshState = _CardAction(
+      label: freshStating ? 'Starting…' : 'Fresh state',
+      enabled: !freshStating,
+      onPressed: () => onFreshState(orb),
+    );
     // A cleanup-pending orb (`cleanup_pending:<reason>`) is a stopped orb
     // under the badge (issue #101): the same actions, including the human's
     // force-delete — the documented exit for a leaked variant (§2.10.4).
@@ -1072,26 +1141,21 @@ class _OrbCard extends StatelessWidget {
   }
 }
 
-/// One card action: the label, whether it is wired, and — when it is not —
-/// the ticket it lands in (the disabled button's tooltip).
+/// One card action: the label, whether it is wired, and its handler.
 class _CardAction {
   const _CardAction({
     required this.label,
-    this.ticket,
     this.enabled = false,
     this.onPressed,
   });
 
   final String label;
 
-  /// The ticket the action lands in (shown in the disabled tooltip).
-  final String? ticket;
   final bool enabled;
   final VoidCallback? onPressed;
 }
 
-/// The card's action button: a small text button, disabled (with its
-/// explanatory tooltip) until its ticket lands.
+/// The card's action button: a small text button.
 class _ActionButton extends StatelessWidget {
   const _ActionButton({required this.action, required this.orb});
 
@@ -1100,7 +1164,7 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final button = TextButton(
+    return TextButton(
       key: ValueKey('orb-action-${orb.id}-${action.label}'),
       style: TextButton.styleFrom(
         textStyle: const TextStyle(fontSize: 12),
@@ -1110,8 +1174,6 @@ class _ActionButton extends StatelessWidget {
       onPressed: action.enabled ? action.onPressed : null,
       child: Text(action.label),
     );
-    if (action.enabled) return button;
-    return Tooltip(message: 'Lands in ${action.ticket}', child: button);
   }
 }
 

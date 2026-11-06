@@ -1050,6 +1050,91 @@ class OrbService {
     }
   }
 
+  /// The startup auto-wake (issue #102, spec §2.11): the bridge owns every
+  /// start — no Docker restart policy. After the label-composed enumeration
+  /// ([list]), every stopped orb without the `ocb.stopped` marker was
+  /// running at crash/reboot time and is auto-woken through the full start
+  /// path ([wake]); a marked orb had its move-to-host complete and stays
+  /// stopped. The in-orb sessions of an auto-woken orb stay in the orb
+  /// (re-attached by the composite services) — no move at recovery.
+  /// Then the startup reconciliation ([_reconcileSessions]).
+  Future<void> recover() async {
+    for (final record in await list()) {
+      if (record.state != 'stopped') continue;
+      if (isStopped(record.id)) continue;
+      try {
+        await wake(record.id);
+      } catch (_) {
+        // Boot failure of an auto-wake = the existing boot-failure state
+        // (spec §2.11): the orb stays as it is (unmarked — the next
+        // startup re-tries) and the rest of the fleet recovers.
+      }
+    }
+    await _reconcileSessions();
+  }
+
+  /// The startup reconciliation (issue #102, spec §2.11): for every session
+  /// id present on **both** the host and a running orb, the in-orb copy is
+  /// deleted (the host is canonical — the import is 409-idempotent, so the
+  /// surviving copy is always the host's). This completes a stop the crash
+  /// interrupted between the import and the orb-side delete (every session
+  /// ends up exactly once, no direction recorded) and reverts a host→orb
+  /// move the crash interrupted after the import (the session stays on the
+  /// host; the user re-issues the move). A host or per-orb read failure
+  /// skips it — never a silent delete on uncertain ground.
+  Future<void> _reconcileSessions() async {
+    final host = hostSessions;
+    if (host == null) return;
+    List<OpencodeSession> hostRows;
+    try {
+      hostRows = await host.listSessions();
+    } catch (_) {
+      return; // The host is unreachable: nothing is reconciled this pass.
+    }
+    final hostIds = {for (final session in hostRows) session.id};
+    if (hostIds.isEmpty) return;
+    for (final record in await list()) {
+      final url = record.url;
+      if (record.state != 'running' || url == null) continue;
+      final password = await lastPassword(record.id);
+      if (password == null) continue; // Still booting: nothing to reconcile.
+      final service = _orbService(url, password);
+      try {
+        final orbSessions = await service.listSessions();
+        for (final session in orbSessions) {
+          if (!hostIds.contains(session.id)) continue;
+          await service.deleteSession(session.id);
+        }
+      } catch (_) {
+        // A degraded orb is skipped for this pass; the next bridge
+        // startup re-tries.
+      }
+    }
+  }
+
+  /// The broken orb's start-with-fresh-state (issue #102, spec §9.4): a
+  /// normal [wake] over a recreated state dir — a fresh `opencode.db` —
+  /// which keeps the workspace volume (uncommitted work included) and
+  /// loses the in-orb sessions (the app's confirmation states it). Only a
+  /// `broken:state` orb (workspace present, state dir missing) is
+  /// wakeable this way; anything else refuses — never a silent repair.
+  Future<OrbRecord> startWithFreshState(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state != 'broken:state') {
+      throw const OrbRefusalError(
+        OrbRefusalError.notWakeable,
+        'only a broken orb whose state dir is missing can start with fresh '
+        'state',
+      );
+    }
+    // The fresh state dir: what `_withBrokenState` found missing; the wake
+    // then runs its full start path over it (and `_stageConfig` finds the
+    // per-orb dir it needs).
+    Directory('${stateRoot.path}/$id').createSync(recursive: true);
+    return wake(id);
+  }
+
   /// The orb wake (issue #97, spec §2.4): re-runs the full start path on
   /// the same container/volumes/state — the `.env*` re-injection and the
   /// config/auth re-copy (host-authoritative, §6), `docker start`, the boot

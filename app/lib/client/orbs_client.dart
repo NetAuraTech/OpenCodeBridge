@@ -330,6 +330,37 @@ class OrbsClient {
     }
   }
 
+  /// The broken orb's start-with-fresh-state (issue #102, spec §9.4): the
+  /// full wake over a recreated state dir — keeps the workspace (the
+  /// uncommitted work included), loses the in-orb sessions. Only a
+  /// `broken:state` orb answers; anything else is the 400 refusal (an
+  /// [OrbCreateError]), a failed boot the 502 `orb_boot_failed` with its
+  /// log tail.
+  Future<OrbRecord> startWithFreshState(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/orbs/$id/fresh-state'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode == HttpStatus.ok) {
+        return OrbRecord.fromJson(jsonDecode(body));
+      }
+      throw _createError(response.statusCode, body);
+    } on OrbCreateError {
+      rethrow;
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// The user-facing text of a wire error body: its `details` field, its
   /// `error` code when there are none, or the raw body.
   static String _detail(String body) {

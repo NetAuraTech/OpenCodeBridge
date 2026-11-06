@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -249,6 +250,31 @@ class _FakeOrbs implements OrbService {
 
   @override
   bool get lifecyclePassRunning => lifecycleArmed > 0 && !lifecycleStopped;
+
+  /// The startup recovery (issue #102): records that `recover` ran.
+  int recoverCalls = 0;
+  final recovered = Completer<void>();
+  Object? recoverError;
+
+  @override
+  Future<void> recover() async {
+    recoverCalls++;
+    if (!recovered.isCompleted) recovered.complete();
+    final error = recoverError;
+    if (error != null) throw error;
+  }
+
+  String? freshStateId;
+  OrbRecord? freshStateRecord;
+  Object? freshStateError;
+
+  @override
+  Future<OrbRecord> startWithFreshState(String id) async {
+    freshStateId = id;
+    final error = freshStateError;
+    if (error != null) throw error;
+    return freshStateRecord!;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -1300,5 +1326,115 @@ void main() {
         expect(orbs.moveToOrbSession, isNull);
       },
     );
+  });
+
+  group('the broken-orb actions (issue #102)', () {
+    late BridgeServer server;
+    late _FakeService service;
+    late _FakeOrbs orbs;
+    late Uri base;
+
+    const record = OrbRecord(
+      id: 'aaaa',
+      name: 'dev',
+      project: 'p1',
+      branch: 'orb/aaaa',
+      state: 'running',
+      created: '2026-11-04T00:00:00.000Z',
+      url: 'http://127.0.0.1:39999',
+    );
+
+    setUp(() async {
+      service = _FakeService();
+      orbs = _FakeOrbs();
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+        orbs: orbs,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+    });
+
+    test('fresh-state is a 200 with the running record', () async {
+      orbs.freshStateRecord = record;
+
+      final (status, body) = await _postRaw(
+        base,
+        'api/orbs/aaaa/fresh-state',
+        '',
+      );
+
+      expect(status, 200);
+      expect(jsonDecode(body)['state'], 'running');
+      expect(orbs.freshStateId, 'aaaa');
+    });
+
+    test(
+      'fresh-state maps the refusal and the failed boot like wake',
+      () async {
+        orbs.freshStateError = const OrbRefusalError(
+          OrbRefusalError.notWakeable,
+          'only a broken orb whose state dir is missing can start with fresh '
+          'state',
+        );
+        final (refused, refusalBody) = await _postRaw(
+          base,
+          'api/orbs/aaaa/fresh-state',
+          '',
+        );
+        expect(refused, 400);
+        expect(jsonDecode(refusalBody)['error'], 'not_wakeable');
+
+        orbs.freshStateError = const OrbBootError('aaaa', 'exited', ['boom']);
+        final (failed, failedBody) = await _postRaw(
+          base,
+          'api/orbs/aaaa/fresh-state',
+          '',
+        );
+        expect(failed, 502);
+        expect(jsonDecode(failedBody)['error'], 'orb_boot_failed');
+      },
+    );
+
+    test('fresh-state maps a 404 for an unknown id', () async {
+      orbs.freshStateError = const OrbNotFoundError('aaaa');
+
+      final (status, _) = await _postRaw(base, 'api/orbs/aaaa/fresh-state', '');
+
+      expect(status, 404);
+    });
+  });
+
+  group('the startup recovery (issue #102, spec §2.11)', () {
+    test('the bridge runs the orb recovery once it is listening', () async {
+      final orbs = _FakeOrbs();
+      final server = await BridgeServer.start(port: 0, orbs: orbs);
+      try {
+        await orbs.recovered.future.timeout(const Duration(seconds: 5));
+        expect(orbs.recoverCalls, 1);
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('a failing recovery does not take the bridge down', () async {
+      final orbs = _FakeOrbs();
+      orbs.recoverError = const OrbBootError('aaaa', 'boot failed', ['boom']);
+      final server = await BridgeServer.start(port: 0, orbs: orbs);
+      try {
+        await orbs.recovered.future.timeout(const Duration(seconds: 5));
+        // The recovery threw (the OrbBootError rides the unawaited path's
+        // own catch — an uncaught async error would fail the test): the
+        // HTTP surface keeps serving.
+        final (status, _) = await _get(server.baseUri, 'api/orbs');
+        expect(status, 200);
+      } finally {
+        await server.stop();
+      }
+    });
   });
 }
