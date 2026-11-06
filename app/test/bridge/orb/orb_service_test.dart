@@ -700,6 +700,185 @@ void main() {
     });
 
     test(
+      'a seeded create passes ORB_BASE_BRANCH and the ocb.base label',
+      () async {
+        checkoutEnv();
+        hostConfig();
+        const password = 'pw-seed-123';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          final auth = request.headers.value('authorization') ?? '';
+          request.response.statusCode =
+              auth ==
+                  'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
+              ? 200
+              : 401;
+          unawaited(request.response.close());
+        });
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+        docker.logs = 'server password $password\n';
+
+        final record = await service().create(
+          project: 'proj-1',
+          name: 'variant',
+          checkout: checkout.path,
+          base: 'orb/seedid',
+        );
+        await http.close(force: true);
+
+        expect(record.base, 'orb/seedid');
+        final create = docker.runArgs.firstWhere((a) => a.first == 'create');
+        expect(
+          create,
+          containsAllInOrder(['-e', 'ORB_BASE_BRANCH=orb/seedid']),
+        );
+        expect(create, containsAllInOrder(['-l', 'ocb.base=orb/seedid']));
+        for (final suffix in const ['workspace', 'data']) {
+          final volume = docker.runArgs.firstWhere(
+            (a) => a.first == 'volume' && a[3] == 'orb-${record.id}-$suffix',
+          );
+          expect(volume, contains('--label'));
+          expect(volume, contains('ocb.base=orb/seedid'));
+        }
+      },
+    );
+
+    test(
+      'seedBranch: a stopped seed with a pushed branch resolves its branch',
+      () async {
+        // The seed's row: a stopped orb of the project.
+        docker.psResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-seed9\n',
+          stderr: '',
+        );
+        docker.containerLabelsResult = DockerCliResult(
+          exitCode: 0,
+          stdout: jsonEncode({
+            'ocb.orb': 'true',
+            'ocb.id': 'seed9',
+            'ocb.name': 'parent',
+            'ocb.project': 'proj-1',
+            'ocb.branch': 'orb/seed9',
+            'ocb.created': '2026-11-04T00:00:00.000Z',
+          }),
+          stderr: '',
+        );
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'exited\n',
+          stderr: '',
+        );
+        docker.volumeLsResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-seed9-workspace\norb-seed9-data\n',
+          stderr: '',
+        );
+        docker.volumeInspectResult = DockerCliResult(
+          exitCode: 0,
+          stdout: [
+            for (final _ in [0, 1])
+              jsonEncode({
+                'ocb.orb': 'true',
+                'ocb.id': 'seed9',
+                'ocb.name': 'parent',
+                'ocb.project': 'proj-1',
+                'ocb.branch': 'orb/seed9',
+                'ocb.created': '2026-11-04T00:00:00.000Z',
+              }),
+          ].join('\n'),
+          stderr: '',
+        );
+        // ls-remote finds the branch on the remote (the parent may be
+        // stopped — the probe never touches the container).
+        git.results['ls-remote --heads origin orb/seed9'] = const GitCliResult(
+          exitCode: 0,
+          stdout: 'deadbeef\trefs/heads/orb/seed9\n',
+          stderr: '',
+        );
+
+        final base = await service().seedBranch(
+          project: 'proj-1',
+          seed: 'parent',
+          checkout: checkout.path,
+        );
+        expect(base, 'orb/seed9');
+        // The probe ran from the project checkout, against origin.
+        expect(git.args.last, ['ls-remote', '--heads', 'origin', 'orb/seed9']);
+      },
+    );
+
+    test('seedBranch: a branch never pushed is refused', () async {
+      docker.psResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-seed9\n',
+        stderr: '',
+      );
+      docker.containerLabelsResult = DockerCliResult(
+        exitCode: 0,
+        stdout: jsonEncode({
+          'ocb.orb': 'true',
+          'ocb.id': 'seed9',
+          'ocb.name': 'parent',
+          'ocb.project': 'proj-1',
+          'ocb.branch': 'orb/seed9',
+          'ocb.created': '2026-11-04T00:00:00.000Z',
+        }),
+        stderr: '',
+      );
+      docker.stateResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'exited\n',
+        stderr: '',
+      );
+      docker.volumeLsResult = const DockerCliResult(
+        exitCode: 0,
+        stdout: 'orb-seed9-workspace\norb-seed9-data\n',
+        stderr: '',
+      );
+      docker.volumeInspectResult = DockerCliResult(
+        exitCode: 0,
+        stdout:
+            '${jsonEncode({'ocb.orb': 'true', 'ocb.id': 'seed9', 'ocb.name': 'parent', 'ocb.project': 'proj-1', 'ocb.branch': 'orb/seed9', 'ocb.created': '2026-11-04T00:00:00.000Z'})}\n'
+            '${jsonEncode({'ocb.orb': 'true', 'ocb.id': 'seed9', 'ocb.name': 'parent', 'ocb.project': 'proj-1', 'ocb.branch': 'orb/seed9', 'ocb.created': '2026-11-04T00:00:00.000Z'})}',
+        stderr: '',
+      );
+      // The remote has no such branch (no commits pushed): empty output.
+      git.results['ls-remote --heads origin orb/seed9'] = const GitCliResult(
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+      );
+
+      await expectLater(
+        service().seedBranch(
+          project: 'proj-1',
+          seed: 'parent',
+          checkout: checkout.path,
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.seedNotPushed,
+          ),
+        ),
+      );
+    });
+
+    test('seedBranch: no orb with that name resolves null', () async {
+      final base = await service().seedBranch(
+        project: 'proj-1',
+        seed: 'ghost',
+        checkout: checkout.path,
+      );
+      expect(base, isNull);
+      // No remote probe ran for a nonexistent seed.
+      expect(git.args.where((a) => a.first == 'ls-remote'), isEmpty);
+    });
+
+    test(
       'a container exiting during boot is an OrbBootError with the tail',
       () async {
         docker.stateResult = const DockerCliResult(

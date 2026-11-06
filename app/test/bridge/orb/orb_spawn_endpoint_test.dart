@@ -100,6 +100,24 @@ class _FakeBackend extends SessionsBackend {
 class _FakeOrbs implements OrbService {
   List<OrbRecord> listResult = [_runningOrb()];
 
+  OrbRecord? wakeResult;
+  String? wokenId;
+
+  OrbRecord? createResult;
+  String? createName;
+  String? createBase;
+
+  String? seedBranchResult;
+  Object? seedBranchError;
+  String? seedRequested;
+
+  String? stoppedId;
+  Object? stopError;
+  String? deletedId;
+  bool? deleteForce;
+  String exportResult = '/home/dev/shop/orb-worker-a1b2c3.tar.gz';
+  String? exportedId;
+
   Session? createSessionResult = Session(
     id: 'ses_task',
     title: 'task',
@@ -112,6 +130,55 @@ class _FakeOrbs implements OrbService {
 
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async => listResult;
+
+  @override
+  Future<OrbRecord> wake(String id) async {
+    wokenId = id;
+    return wakeResult!;
+  }
+
+  @override
+  Future<OrbRecord> create({
+    required String project,
+    required String name,
+    required String checkout,
+    String? base,
+  }) async {
+    createName = name;
+    createBase = base;
+    return createResult!;
+  }
+
+  @override
+  Future<String?> seedBranch({
+    required String project,
+    required String seed,
+    required String checkout,
+  }) async {
+    seedRequested = seed;
+    final error = seedBranchError;
+    if (error != null) throw error;
+    return seedBranchResult;
+  }
+
+  @override
+  Future<void> stop(String id) async {
+    final error = stopError;
+    if (error != null) throw error;
+    stoppedId = id;
+  }
+
+  @override
+  Future<void> delete(String id, {bool force = false}) async {
+    deletedId = id;
+    deleteForce = force;
+  }
+
+  @override
+  Future<String> export(String id) async {
+    exportedId = id;
+    return exportResult;
+  }
 
   @override
   Future<Session> createSessionOnOrb(String id) async => createSessionResult!;
@@ -428,5 +495,203 @@ void main() {
         }
       },
     );
+
+    test('a task of another agent is a 403 (tree-scoped wait right)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        // ses_caller dispatches the task (no orb existed → its tree).
+        final (_, spawnBody) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the thing", "wait": false, "session": "ses_caller"}',
+        );
+        final id = jsonDecode(spawnBody)['id'] as String;
+        // Another agent (no relation to the tree) waits it: refused.
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/wait',
+          jsonEncode({'id': id, 'session': 'ses_other'}),
+        );
+        expect(status, 403);
+        expect(jsonDecode(body)['error'], 'permission_denied');
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test(
+      'the task owner always waits their own task (spawned orb tree)',
+      () async {
+        final tasks = OrbTaskService(
+          orbs: orbs,
+          sessions: backend,
+          file: tasksFile,
+          pollInterval: const Duration(milliseconds: 5),
+        );
+        orbs.listResult = const [];
+        orbs.createResult = _runningOrb();
+        backend.opencode.detailOf = (id) => _detail(id, outcome: 'succeeded');
+        final server = await serverWith(tasks: tasks);
+        try {
+          final (_, spawnBody) = await _postRaw(
+            server.baseUri,
+            '/api/orb/spawn',
+            '{"task": "do it", "wait": false, "session": "ses_caller"}',
+          );
+          final id = jsonDecode(spawnBody)['id'] as String;
+          final (status, body) = await _postRaw(
+            server.baseUri,
+            '/api/orb/wait',
+            jsonEncode({'id': id, 'session': 'ses_caller'}),
+          );
+          expect(status, 200);
+          expect(jsonDecode(body)['status'], 'succeeded');
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+  });
+
+  group('POST /api/orb/stop|delete|export (issue #100)', () {
+    OrbTaskService tasksService() =>
+        OrbTaskService(orbs: orbs, sessions: backend, file: tasksFile);
+
+    test('an unknown orb reference is a 404', () async {
+      final server = await serverWith(tasks: tasksService());
+      try {
+        final (status, _) = await _postRaw(
+          server.baseUri,
+          '/api/orb/stop',
+          '{"orb": "nope", "session": "ses_caller"}',
+        );
+        expect(status, 404);
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('the human (no session) stops an orb by name', () async {
+      final server = await serverWith(tasks: tasksService());
+      try {
+        final (status, _) = await _postRaw(
+          server.baseUri,
+          '/api/orb/stop',
+          '{"orb": "worker"}',
+        );
+        expect(status, 204);
+        expect(orbs.stoppedId, 'a1b2c3');
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('an agent stops an orb it created (its tree)', () async {
+      final tasks = tasksService();
+      // The caller creates the orb first (the spawn attaches the tree edge).
+      orbs.listResult = const [];
+      orbs.createResult = _runningOrb();
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do it", "wait": false, "session": "ses_caller"}',
+        );
+        orbs.listResult = [_runningOrb()];
+        orbs.stoppedId = null;
+        final (status, _) = await _postRaw(
+          server.baseUri,
+          '/api/orb/stop',
+          '{"orb": "worker", "session": "ses_caller"}',
+        );
+        expect(status, 204);
+        expect(orbs.stoppedId, 'a1b2c3');
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test(
+      'an agent stops nothing it did not create (403 permission_denied)',
+      () async {
+        // The orb exists from the start (human-created): no creating record.
+        final server = await serverWith(tasks: tasksService());
+        try {
+          final (status, body) = await _postRaw(
+            server.baseUri,
+            '/api/orb/stop',
+            '{"orb": "worker", "session": "ses_caller"}',
+          );
+          expect(status, 403);
+          expect(jsonDecode(body)['error'], 'permission_denied');
+          expect(orbs.stoppedId, isNull);
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
+    test(
+      'the agent delete passes force through to the guarded deletion',
+      () async {
+        final tasks = tasksService();
+        orbs.listResult = const [];
+        orbs.createResult = _runningOrb();
+        backend.opencode.detailOf = (id) => _detail(id);
+        final server = await serverWith(tasks: tasks);
+        try {
+          await _postRaw(
+            server.baseUri,
+            '/api/orb/spawn',
+            '{"task": "do it", "wait": false, "session": "ses_caller"}',
+          );
+          orbs.listResult = [_runningOrb()];
+          final (status, _) = await _postRaw(
+            server.baseUri,
+            '/api/orb/delete',
+            '{"orb": "worker", "force": true, "session": "ses_caller"}',
+          );
+          expect(status, 204);
+          expect(orbs.deletedId, 'a1b2c3');
+          expect(orbs.deleteForce, isTrue);
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
+    test('the agent export answers the archive path', () async {
+      final tasks = tasksService();
+      orbs.listResult = const [];
+      orbs.createResult = _runningOrb();
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do it", "wait": false, "session": "ses_caller"}',
+        );
+        orbs.listResult = [_runningOrb()];
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/export',
+          '{"orb": "worker", "session": "ses_caller"}',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body)['path'], orbs.exportResult);
+        expect(orbs.exportedId, 'a1b2c3');
+      } finally {
+        await server.stop();
+      }
+    });
   });
 }

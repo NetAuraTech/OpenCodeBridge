@@ -164,9 +164,23 @@ class OrbRefusalError implements Exception {
   /// §3.4): there is nothing to export.
   static const String missingWorkspace = 'missing_workspace';
 
+  /// No orb with the `seed` name exists in the project (issue #100, spec
+  /// §3.3).
+  static const String seedNotFound = 'seed_not_found';
+
+  /// The seed orb's branch was never pushed, so there is no remote state to
+  /// clone from — its state is the default branch anyway (issue #100, spec
+  /// §3.3).
+  static const String seedNotPushed = 'seed_not_pushed';
+
+  /// A `seed` was given but the targeting resolves to an existing orb —
+  /// the seed only parameterizes a new orb's clone (issue #100, spec §3.3).
+  static const String seedConflict = 'seed_conflict';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
   /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
-  /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`).
+  /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`,
+  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`).
   final String code;
 
   /// The clear message for the app.
@@ -441,10 +455,15 @@ class OrbService {
   /// [checkout]) and wait for its boot (spec §2.3). The password is derived
   /// and verified internally (ADR-0001: it is never exposed through the
   /// bridge); the returned record carries the ephemeral-URL descriptor.
+  /// [base] (issue #100, spec §3.3) is the branch the clone starts from —
+  /// the seed's branch, whose tip the entrypoint's first-start clone checks
+  /// out (`ORB_BASE_BRANCH`) instead of the remote's default; the record
+  /// carries it as the PR base of the orb's work.
   Future<OrbRecord> create({
     required String project,
     required String name,
     required String checkout,
+    String? base,
   }) async {
     // The up-front refusals (spec §2.3), in order.
     await _refuseIfNameTaken(project, name);
@@ -466,8 +485,17 @@ class OrbService {
       project,
       branch,
       created,
+      base,
     );
-    await _createVolume('orb-$id-data', id, name, project, branch, created);
+    await _createVolume(
+      'orb-$id-data',
+      id,
+      name,
+      project,
+      branch,
+      created,
+      base,
+    );
     final stateDir = Directory('${stateRoot.path}/$id')
       ..createSync(recursive: true);
 
@@ -500,6 +528,7 @@ class OrbService {
       'ORB_GIT_NAME=${gitIdentity.$1}',
       '-e',
       'ORB_GIT_EMAIL=${gitIdentity.$2}',
+      if (base != null) ...['-e', 'ORB_BASE_BRANCH=$base'],
       '-l',
       'ocb.orb=true',
       '-l',
@@ -510,6 +539,7 @@ class OrbService {
       'ocb.project=$project',
       '-l',
       'ocb.branch=$branch',
+      if (base != null) ...['-l', 'ocb.base=$base'],
       '-l',
       'ocb.created=$created',
       tag,
@@ -551,10 +581,52 @@ class OrbService {
         state: 'running',
         created: created,
         url: url,
+        base: base,
       );
     } finally {
       await logProcess.kill();
     }
+  }
+
+  /// Resolve the `seed` of a new orb's clone (issue #100, spec §3.3): the
+  /// [project]'s orb named [seed] (a stopped one is fine — the seed reads
+  /// the branch tip **from the remote**, never the parent's volume or
+  /// working tree), verified pushed: a branch never pushed cannot be
+  /// seeded (its state is the default branch anyway). Returns the seed's
+  /// branch — the new orb's base — or `null` when no such orb exists in
+  /// the project (the caller's message lists what does).
+  /// [OrbRefusalError.seedNotPushed] when the branch is absent from the
+  /// remote.
+  Future<String?> seedBranch({
+    required String project,
+    required String seed,
+    required String checkout,
+  }) async {
+    OrbRecord? seedOrb;
+    for (final row in await list()) {
+      if (row.project == project && row.state != 'orphan' && row.name == seed) {
+        seedOrb = row;
+        break;
+      }
+    }
+    if (seedOrb == null) return null;
+    // The remote probe doubles as the seed read: ls-remote asks the remote
+    // directly, so a stopped parent still answers.
+    await _remoteUrl(checkout);
+    final probe = await git([
+      'ls-remote',
+      '--heads',
+      'origin',
+      seedOrb.branch,
+    ], workingDirectory: checkout);
+    if (probe.exitCode != 0 || probe.stdout.trim().isEmpty) {
+      throw OrbRefusalError(
+        OrbRefusalError.seedNotPushed,
+        'the orb $seed has no pushed branch — its work is not on the '
+        'remote, so there is nothing to seed from (spec §3.3)',
+      );
+    }
+    return seedOrb.branch;
   }
 
   /// The orb list composed from the labels (spec §2.2): the labeled
@@ -694,6 +766,7 @@ class OrbService {
           branch: labels['ocb.branch'] as String? ?? '',
           state: 'orphan',
           created: labels['ocb.created'] as String? ?? '',
+          base: labels['ocb.base'] as String?,
         ),
       );
       ids.add(id);
@@ -788,6 +861,7 @@ class OrbService {
     created: record.created,
     url: record.url,
     pr: pr,
+    base: record.base,
   );
 
   /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
@@ -1210,6 +1284,7 @@ class OrbService {
         state: 'running',
         created: record.created,
         url: url,
+        base: record.base,
       );
     } finally {
       await logProcess.kill();
@@ -1688,6 +1763,7 @@ class OrbService {
       'ocb.project=${record.project}',
       '-l',
       'ocb.branch=${record.branch}',
+      if (record.base != null) ...['-l', 'ocb.base=${record.base}'],
       '-l',
       'ocb.created=${record.created}',
       newTag,
@@ -1732,6 +1808,7 @@ class OrbService {
         state: 'running',
         created: record.created,
         url: url,
+        base: record.base,
       );
     } finally {
       await logProcess.kill();
@@ -2317,8 +2394,9 @@ class OrbService {
     String orbName,
     String project,
     String branch,
-    String created,
-  ) async {
+    String created, [
+    String? base,
+  ]) async {
     await _runOrThrow([
       'volume',
       'create',
@@ -2334,6 +2412,7 @@ class OrbService {
       'ocb.project=$project',
       '--label',
       'ocb.branch=$branch',
+      if (base != null) ...['--label', 'ocb.base=$base'],
       '--label',
       'ocb.created=$created',
     ]);
@@ -2669,6 +2748,7 @@ class OrbService {
       state: state == 'running' ? 'running' : 'stopped',
       created: decoded['ocb.created'] as String? ?? '',
       url: url,
+      base: decoded['ocb.base'] as String?,
     );
   }
 
@@ -2691,6 +2771,7 @@ class OrbService {
     created: record.created,
     url: null,
     pr: record.pr,
+    base: record.base,
   );
 
   /// The orb id a labeled volume name encodes (`orb-<id>-workspace` /
