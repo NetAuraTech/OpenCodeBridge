@@ -236,6 +236,20 @@ class _FakeOrbs implements OrbService {
     if (error != null) throw error;
   }
 
+  /// The lifecycle pass surface (issue #101): the fake records the arming
+  /// and stays inert — no background pass runs against the endpoint fakes.
+  int lifecycleArmed = 0;
+  bool lifecycleStopped = false;
+
+  @override
+  void startLifecyclePass({Duration? interval}) => lifecycleArmed++;
+
+  @override
+  void stopLifecyclePass() => lifecycleStopped = true;
+
+  @override
+  bool get lifecyclePassRunning => lifecycleArmed > 0 && !lifecycleStopped;
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -708,6 +722,28 @@ void main() {
       } finally {
         await bare.stop();
       }
+    });
+
+    test('the lifecycle pass is armed only when asked (issue #101)', () async {
+      final inert = _FakeOrbs();
+      server = await BridgeServer.start(port: 0, orbs: inert);
+      expect(
+        inert.lifecycleArmed,
+        0,
+        reason: 'a bridge without the flag never arms the pass',
+      );
+      await server.stop();
+
+      final armed = _FakeOrbs();
+      server = await BridgeServer.start(
+        port: 0,
+        orbs: armed,
+        autoLifecyclePass: true,
+        lifecyclePassInterval: const Duration(minutes: 1),
+      );
+      expect(armed.lifecycleArmed, 1);
+      await server.stop();
+      expect(armed.lifecycleStopped, isTrue);
     });
   });
 

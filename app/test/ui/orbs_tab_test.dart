@@ -627,12 +627,25 @@ void main() {
         );
       });
 
-      testWidgets('preparing and cleanup-pending cards carry no actions', (
+      testWidgets('a preparing card carries no actions', (tester) async {
+        await _pumpTab(tester, orbs: [_preparing]);
+        expect(_actionsOf(tester, 'orb_2'), 0);
+      });
+
+      testWidgets('a cleanup-pending card carries the stopped actions '
+          '(issue #101: the human Force delete is the documented exit)', (
         tester,
       ) async {
-        await _pumpTab(tester, orbs: [_preparing, _cleanupPending]);
-        expect(_actionsOf(tester, 'orb_2'), 0);
-        expect(_actionsOf(tester, 'orb_7'), 0);
+        await _pumpTab(tester, orbs: [_cleanupPending]);
+        expect(_actionsOf(tester, 'orb_7'), 3);
+        expect(
+          find.byKey(const ValueKey('orb-action-orb_7-Wake')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('orb-action-orb_7-Force delete')),
+          findsOneWidget,
+        );
       });
 
       testWidgets('an orphan card carries an enabled Clean up', (tester) async {

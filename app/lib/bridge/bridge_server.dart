@@ -289,6 +289,13 @@ class BridgeServer {
   /// `notify_unconfigured`. [notifyCredential] pins that account file to an
   /// explicit path (tests; the standard resolution otherwise).
   ///
+  /// [autoLifecyclePass] arms the automated lifecycle pass (issue #101,
+  /// spec §2.10) on the orb service at [lifecyclePassInterval] (default the
+  /// ~1-min pace). Server mode turns it on (the app's bridge start): the
+  /// bridge is the single actor of orb automation, and bridge down = no
+  /// automation. It stays off elsewhere so no background pass ever runs
+  /// against a test's script fakes or a bare library use.
+  ///
   /// The port is bound first so a port conflict (e.g. a second server-mode
   /// instance) fails fast, before any opencode service or on-disk work.
   static Future<BridgeServer> start({
@@ -308,6 +315,8 @@ class BridgeServer {
     NotifyService? notify,
     String? notifyCredential,
     Future<FcmSender> Function(FirebaseServiceAccount)? notifySenderFactory,
+    bool autoLifecyclePass = false,
+    Duration? lifecyclePassInterval,
   }) async {
     final server = await HttpServer.bind(host, port);
     // The orbs are built before the backend and the event hub: the
@@ -384,6 +393,13 @@ class BridgeServer {
       pushDispatcher,
     );
     speed?.start();
+    // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
+    // the single actor of orb automation — bridge down = no automation
+    // (accepted by construction). Tests arm it explicitly; the pass keeps
+    // running until the bridge stops.
+    if (autoLifecyclePass) {
+      orbService?.startLifecyclePass(interval: lifecyclePassInterval);
+    }
     if (tunnelSupervisor != null) {
       await tunnelSupervisor.start();
     }
@@ -517,6 +533,7 @@ class BridgeServer {
   Uri get healthUri => baseUri.replace(path: healthPath);
 
   Future<void> stop() async {
+    _orbs?.stopLifecyclePass();
     await _server.close(force: true);
     await _hostServer?.close(force: true);
     await _events?.close();

@@ -1007,7 +1007,10 @@ class _OrbCard extends StatelessWidget {
   /// Update on a running or stopped orb (issue #98, spec §2.8) and the Force
   /// delete on a running, stopped, or broken orb (issue #98, spec §2.7); the
   /// broken-state "Fresh state" stays disabled until it lands — the tooltip
-  /// says which. A re-issued action in the same state is a safe no-op (the
+  /// says which. A cleanup-pending orb (issue #101, spec §2.10.2) is a
+  /// stopped orb under the badge: it carries the stopped card's actions —
+  /// the human's force-delete is the documented exit for a leaked variant
+  /// (§2.10.4). A re-issued action in the same state is a safe no-op (the
   /// handler guards on the busy flag).
   List<_CardAction> _actions(OrbRecord orb, ColorScheme scheme) {
     final update = _CardAction(
@@ -1021,6 +1024,20 @@ class _OrbCard extends StatelessWidget {
       onPressed: () => onForceDelete(orb),
     );
     final freshState = const _CardAction(label: 'Fresh state', ticket: '#97');
+    // A cleanup-pending orb (`cleanup_pending:<reason>`) is a stopped orb
+    // under the badge (issue #101): the same actions, including the human's
+    // force-delete — the documented exit for a leaked variant (§2.10.4).
+    if (orb.isStoppedLike) {
+      return [
+        _CardAction(
+          label: waking ? 'Waking…' : 'Wake',
+          enabled: true,
+          onPressed: () => onWake(orb),
+        ),
+        update,
+        forceDelete,
+      ];
+    }
     switch (orb.state) {
       case 'running':
         return [
@@ -1033,16 +1050,6 @@ class _OrbCard extends StatelessWidget {
             label: creatingSession ? 'Creating…' : 'New session',
             enabled: true,
             onPressed: () => onNewSession(orb),
-          ),
-          update,
-          forceDelete,
-        ];
-      case 'stopped':
-        return [
-          _CardAction(
-            label: waking ? 'Waking…' : 'Wake',
-            enabled: true,
-            onPressed: () => onWake(orb),
           ),
           update,
           forceDelete,
@@ -1060,7 +1067,7 @@ class _OrbCard extends StatelessWidget {
           ),
         ];
       default:
-        return const []; // preparing, cleanup_pending
+        return const []; // preparing
     }
   }
 }

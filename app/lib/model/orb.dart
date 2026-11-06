@@ -66,8 +66,17 @@ class OrbRecord {
   final String branch;
 
   /// The composed state (spec §2.2): `running`, `stopped`,
-  /// `broken:workspace`, `broken:state`, or `orphan`.
+  /// `cleanup_pending:<reason>` (a stopped orb the automated lifecycle
+  /// pass surfaced as a guard-blocked auto-delete candidate, issue #101,
+  /// spec §2.10.2/§9.4), `broken:workspace`, `broken:state`, or `orphan`.
   final String state;
+
+  /// Whether this is a stopped orb under the badge: plain `stopped`, or
+  /// `cleanup_pending:<reason>` — the same container state, the lifecycle
+  /// pass's marker composing a surfaced variant of it. The Wake/Update/
+  /// Force-delete actions treat the two alike.
+  bool get isStoppedLike =>
+      state == 'stopped' || state.startsWith('cleanup_pending');
 
   /// The creation timestamp, ISO 8601 (label `ocb.created`).
   final String created;
