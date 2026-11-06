@@ -1012,9 +1012,10 @@ class BridgeServer {
         return;
       }
       // The orbs (issue #93): `POST` creates, `GET` composes the list,
-      // `DELETE /api/orbs/<id>` cleans up an orphan (issue #96). Checked
-      // before the session matchers (a bare list path would otherwise read
-      // as a session id to them).
+      // `DELETE /api/orbs/<id>` is the protected deletion (issue #98 — the
+      // guard, the optional `force` body, the orphan cleanup for orphan
+      // records). Checked before the session matchers (a bare list path
+      // would otherwise read as a session id to them).
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.orbsPath) {
         await BridgeServer._handleOrbCreate(request, sessions, orbs);
@@ -1028,17 +1029,20 @@ class BridgeServer {
       if (request.method == 'DELETE') {
         final orbId = BridgeServer._orbIdIn(request.uri.path);
         if (orbId != null) {
-          await BridgeServer._handleOrbOrphanDelete(request, orbId, orbs);
+          await BridgeServer._handleOrbDelete(request, orbId, orbs);
           return;
         }
       }
-      // The orb lifecycle actions (issue #97): `POST /api/orbs/<id>/stop`
-      // (the single trigger for every orb death path — the sessions moved
-      // to the host, the container stopped last, the `ocb.stopped` marker
-      // set), `POST /api/orbs/<id>/wake` (the full start path re-run, the
-      // marker off), `POST /api/orbs/<id>/sessions` (a new session in the
-      // orb workspace). Checked before the session matchers (a bare path
-      // would otherwise read as a session id to them).
+      // The orb lifecycle actions (issue #97, #98): `POST
+      // /api/orbs/<id>/stop` (the single trigger for every orb death path —
+      // the sessions moved to the host, the container stopped last, the
+      // `ocb.stopped` marker set), `POST /api/orbs/<id>/wake` (the full
+      // start path re-run, the marker off), `POST /api/orbs/<id>/sessions`
+      // (a new session in the orb workspace), `POST /api/orbs/<id>/update`
+      // (the per-orb image update, spec §2.8), `POST /api/orbs/<id>/export`
+      // (the `docker cp` tar.gz export, spec §3.4). Checked before the
+      // session matchers (a bare path would otherwise read as a session id
+      // to them).
       if (request.method == 'POST') {
         final orbAction = BridgeServer._orbActionIn(request.uri.path);
         if (orbAction != null) {
@@ -2600,13 +2604,15 @@ class BridgeServer {
     await response.close();
   }
 
-  /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
-  /// never auto-deleted; issue #96): `DELETE /api/orbs/<id>` removes the
-  /// orphan's labeled volumes and its state dir. A container still existing
-  /// for the id is a 409 `orb_exists` (a live orb is not an orphan — its
-  /// force-delete lands with the lifecycle actions, #98); neither volume
-  /// existing is a 404; a daemon failure is a 502.
-  static Future<void> _handleOrbOrphanDelete(
+  /// The protected deletion (issue #98, spec §2.7): `DELETE /api/orbs/<id>`
+  /// — with the optional JSON body `{"force": true}` (no body is
+  /// non-forced) — evaluates the deletion guard first (an `orphan` record
+  /// goes through the explicit orphan cleanup) and removes the container,
+  /// the workspace and data volumes, and the state dir. A guard refusal is
+  /// a 409 `deletion_refused` carrying the guard's reasons (the human's
+  /// force-delete overrides it — the automated path never forces,
+  /// §2.10.2); a missing orb or orphan is a 404; a daemon failure is a 502.
+  static Future<void> _handleOrbDelete(
     HttpRequest request,
     String id,
     OrbService? orbs,
@@ -2616,12 +2622,25 @@ class BridgeServer {
       BridgeServer._dockerUnavailable(response);
       return;
     }
+    final body = await BridgeServer._jsonBody(request);
+    final force = body?['force'] == true;
     try {
-      await orbs.deleteOrphan(id);
+      await orbs.delete(id, force: force);
       response.statusCode = HttpStatus.noContent;
-    } on OrbExistsError {
+    } on OrbDeletionRefusedError catch (e) {
       response.statusCode = HttpStatus.conflict;
-      response.write(jsonEncode({'error': 'orb_exists', 'id': id}));
+      response.write(
+        jsonEncode({
+          'error': 'deletion_refused',
+          'id': e.id,
+          'reasons': e.guard.reasons,
+          'dirty': e.guard.dirty,
+          'unpushedCount': e.guard.unpushedCount,
+        }),
+      );
+    } on OrbNotFoundError {
+      await BridgeServer._notFound(response);
+      return;
     } on OrbOrphanNotFoundError {
       await BridgeServer._notFound(response);
       return;
@@ -2632,19 +2651,24 @@ class BridgeServer {
     await response.close();
   }
 
-  /// The orb lifecycle actions (issue #97): `stop` (the single trigger for
-  /// every orb death path — every session exported to the host and deleted
-  /// from the orb only after its import, the container stopped last, the
-  /// `ocb.stopped` marker set; a re-issue while stopped is a safe no-op)
-  /// answers 204; `wake` (the full start path re-run, the marker off)
-  /// answers 200 with the running record; `sessions` (a new session in the
-  /// orb workspace, its row stamped with the orb) answers 201 with the row.
-  /// The error mapping: a missing orb a 404; a named refusal a 400 with its
-  /// code and message; a failed boot a 502 `orb_boot_failed` with the log
-  /// tail; a missing session prerequisite (no host CLI, no host service,
-  /// no checkout, no orb password) a 503 `opencode_unavailable`; a failed
-  /// session move a 502 `session_move_failed`; a service error the
-  /// [_serviceError] mapping; a daemon failure a 502 `docker_unreachable`.
+  /// The orb lifecycle actions (issue #97, #98): `stop` (the single
+  /// trigger for every orb death path — every session exported to the host
+  /// and deleted from the orb only after its import, the container stopped
+  /// last, the `ocb.stopped` marker set; a re-issue while stopped is a safe
+  /// no-op) answers 204; `wake` (the full start path re-run, the marker
+  /// off) answers 200 with the running record; `sessions` (a new session in
+  /// the orb workspace, its row stamped with the orb) answers 201 with the
+  /// row; `update` (the per-orb image update, spec §2.8 — the container
+  /// recreated on the current image over the same volumes, never forced)
+  /// answers 200 with the record (a stopped orb stays stopped); `export`
+  /// (the `docker cp` tar.gz of the whole workspace, spec §3.4) answers 200
+  /// with `{'path': <the export file>}`. The error mapping: a missing orb a
+  /// 404; a named refusal a 400 with its code and message; a failed boot a
+  /// 502 `orb_boot_failed` with the log tail; a missing session
+  /// prerequisite (no host CLI, no host service, no checkout, no orb
+  /// password) a 503 `opencode_unavailable`; a failed session move a 502
+  /// `session_move_failed`; a service error the [_serviceError] mapping; a
+  /// daemon failure a 502 `docker_unreachable`.
   static Future<void> _handleOrbAction(
     HttpRequest request,
     String id,
@@ -2666,6 +2690,16 @@ class BridgeServer {
           final record = await orbs.wake(id);
           response.statusCode = HttpStatus.ok;
           response.write(jsonEncode(record.toJson()));
+          break;
+        case 'update':
+          final updated = await orbs.update(id);
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode(updated.toJson()));
+          break;
+        case 'export':
+          final path = await orbs.export(id);
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode({'path': path}));
           break;
         default: // 'sessions'
           final session = await orbs.createSessionOnOrb(id);
@@ -2794,9 +2828,10 @@ class BridgeServer {
   }
 
   /// The (orb id, action) behind an orb lifecycle path
-  /// `/api/orbs/<id>/<action>` (issue #97), or `null` when [path] is not one
-  /// (the bare orb-detail path has no action segment, and any word other
-  /// than `stop`, `wake`, or `sessions` is not an action).
+  /// `/api/orbs/<id>/<action>` (issue #97, #98), or `null` when [path] is
+  /// not one (the bare orb-detail path has no action segment, and any word
+  /// other than `stop`, `wake`, `sessions`, `update`, or `export` is not an
+  /// action).
   static (String, String)? _orbActionIn(String path) {
     const prefix = '/api/orbs/';
     if (!path.startsWith(prefix)) return null;
@@ -2806,7 +2841,11 @@ class BridgeServer {
     final id = rest.substring(0, slash);
     final action = rest.substring(slash + 1);
     if (id.isEmpty || id.contains('/') || action.contains('/')) return null;
-    if (action != 'stop' && action != 'wake' && action != 'sessions') {
+    if (action != 'stop' &&
+        action != 'wake' &&
+        action != 'sessions' &&
+        action != 'update' &&
+        action != 'export') {
       return null;
     }
     return (id, action);

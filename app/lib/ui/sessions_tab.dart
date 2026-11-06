@@ -156,6 +156,10 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// progress over the whole blocking move (a target-orb boot included).
   String? _movingId;
 
+  /// The id whose workspace export (issue #98, spec §3.4) is in flight: its
+  /// row shows progress over the blocking `docker cp` export.
+  String? _exportingId;
+
   /// The deep-link session awaiting a loaded list (issue #24): set when the
   /// target arrives before the rows; a failed load leaves it for the next
   /// successful one.
@@ -524,9 +528,11 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     session: s,
                     deleting: _deletingId == s.id,
                     moving: _movingId == s.id,
+                    exporting: _exportingId == s.id,
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
                     onMoveToOrb: _moveToOrb,
+                    onExportWorkspace: _exportWorkspace,
                     orb: _orbOf(s.orb),
                     onOrbChipTapped: widget.onOrbChipTapped,
                   ),
@@ -561,6 +567,32 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       if (mounted) _snackBar('Could not move the session.');
     } finally {
       if (mounted) setState(() => _movingId = null);
+    }
+  }
+
+  /// The `docker cp` export (issue #98, spec §3.4): the bridge writes a
+  /// lossless tar.gz of the orb's whole workspace (untracked files and
+  /// `.git` included) next to the project's local clone and answers with
+  /// its path — the snackbar names it. An orb session only; the row shows
+  /// progress meanwhile.
+  Future<void> _exportWorkspace(Session session) async {
+    final orbs = _orbs;
+    final orbId = session.orb;
+    if (orbs == null || orbId == null || _exportingId != null) return;
+    setState(() => _exportingId = session.id);
+    try {
+      final path = await orbs.export(orbId);
+      if (mounted) _snackBar('Workspace exported to $path.');
+    } on OrbCreateError catch (e) {
+      if (mounted) {
+        _snackBar('Could not export the workspace: ${e.details ?? e.code}');
+      }
+    } on OrbsClientError catch (e) {
+      if (mounted) _snackBar('Could not export the workspace: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not export the workspace.');
+    } finally {
+      if (mounted) setState(() => _exportingId = null);
     }
   }
 
@@ -715,10 +747,12 @@ class _SessionRow extends StatelessWidget {
     required this.session,
     required this.deleting,
     required this.moving,
+    required this.exporting,
     required this.onDelete,
     required this.orb,
     this.onTap,
     this.onMoveToOrb,
+    this.onExportWorkspace,
     this.onOrbChipTapped,
   });
 
@@ -740,11 +774,20 @@ class _SessionRow extends StatelessWidget {
   /// shows progress, and the menu is gone for the whole blocking move.
   final bool moving;
 
+  /// True while the row's workspace export (issue #98, spec §3.4) is in
+  /// flight: the row shows progress, and the menu is gone for the blocking
+  /// export.
+  final bool exporting;
+
   final ValueChanged<Session> onDelete;
 
   /// The host → orb move (issue #97): the menu's "Move to orb…" item,
   /// offered to host sessions only (`session.orb == null`).
   final ValueChanged<Session>? onMoveToOrb;
+
+  /// The `docker cp` export (issue #98, spec §3.4): the menu's "Export
+  /// workspace…" item, offered to orb sessions only (`session.orb != null`).
+  final ValueChanged<Session>? onExportWorkspace;
 
   /// The session → orb navigation (spec §9.2): called with the orb id when
   /// the chip is tapped.
@@ -856,7 +899,7 @@ class _SessionRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              deleting || moving
+              deleting || moving || exporting
                   ? const SizedBox(
                       width: 20,
                       height: 20,
@@ -871,9 +914,18 @@ class _SessionRow extends StatelessWidget {
                             onDelete(session);
                           case 'move-to-orb':
                             onMoveToOrb?.call(session);
+                          case 'export-workspace':
+                            onExportWorkspace?.call(session);
                         }
                       },
                       itemBuilder: (context) => [
+                        // Orb sessions only (issue #98, spec §3.4): the
+                        // `docker cp` export of the orb's workspace.
+                        if (session.orb != null)
+                          const PopupMenuItem(
+                            value: 'export-workspace',
+                            child: Text('Export workspace…'),
+                          ),
                         // Host sessions only (issue #97): an orb session
                         // already lives on its orb.
                         if (session.orb == null)

@@ -24,13 +24,19 @@ Future<(int, String)> _get(Uri base, String path) async {
   }
 }
 
-Future<(int, String)> _delete(Uri base, String path) async {
+/// A `DELETE` with an (optionally empty) JSON body — the protected
+/// deletion's `{"force": true}`.
+Future<(int, String)> _deleteRaw(Uri base, String path, String body) async {
   final client = HttpClient();
   try {
     final request = await client.deleteUrl(base.replace(path: path));
+    request.headers.contentType = ContentType.json;
+    if (body.isNotEmpty) {
+      request.write(body);
+    }
     final response = await request.close();
-    final body = await response.transform(const Utf8Decoder()).join();
-    return (response.statusCode, body);
+    final raw = await response.transform(const Utf8Decoder()).join();
+    return (response.statusCode, raw);
   } finally {
     client.close(force: true);
   }
@@ -143,6 +149,42 @@ class _FakeOrbs implements OrbService {
     deleteOrphanId = id;
     final error = deleteOrphanError;
     if (error != null) throw error;
+  }
+
+  String? deleteId;
+  bool? deleteForce;
+  Object? deleteError;
+
+  @override
+  Future<void> delete(String id, {bool force = false}) async {
+    deleteId = id;
+    deleteForce = force;
+    final error = deleteError;
+    if (error != null) throw error;
+  }
+
+  String? updateId;
+  OrbRecord? updateRecord;
+  Object? updateError;
+
+  @override
+  Future<OrbRecord> update(String id) async {
+    updateId = id;
+    final error = updateError;
+    if (error != null) throw error;
+    return updateRecord!;
+  }
+
+  String? exportId;
+  String? exportPath;
+  Object? exportError;
+
+  @override
+  Future<String> export(String id) async {
+    exportId = id;
+    final error = exportError;
+    if (error != null) throw error;
+    return exportPath!;
   }
 
   String? stopId;
@@ -540,7 +582,7 @@ void main() {
     });
   });
 
-  group('DELETE /api/orbs/<id> (issue #96)', () {
+  group('DELETE /api/orbs/<id> (issue #98)', () {
     late BridgeServer server;
     late _FakeService service;
     late _FakeOrbs orbs;
@@ -564,39 +606,86 @@ void main() {
       await server.stop();
     });
 
-    test(
-      '204 when the orphan is cleaned; the id is the path segment',
-      () async {
-        final (status, body) = await _delete(base, 'api/orbs/eeee');
+    test('204 on a successful deletion; the id is the path segment', () async {
+      final (status, body) = await _deleteRaw(base, 'api/orbs/eeee', '');
 
-        expect(status, 204);
-        expect(body, '');
-        expect(orbs.deleteOrphanId, 'eeee');
+      expect(status, 204);
+      expect(body, '');
+      expect(orbs.deleteId, 'eeee');
+      expect(orbs.deleteForce, false); // no body is a non-forced deletion
+    });
+
+    test(
+      'a guarded refusal is a 409 deletion_refused with the guard',
+      () async {
+        orbs.deleteError = const OrbDeletionRefusedError(
+          'eeee',
+          OrbDeletionGuard(
+            evaluable: true,
+            dirty: ['M src/app.dart'],
+            unpushedCount: 2,
+          ),
+        );
+
+        final (status, body) = await _deleteRaw(base, 'api/orbs/eeee', '');
+
+        expect(status, 409);
+        expect(jsonDecode(body), {
+          'error': 'deletion_refused',
+          'id': 'eeee',
+          'reasons': ['dirty_tree', 'unpushed_commits'],
+          'dirty': ['M src/app.dart'],
+          'unpushedCount': 2,
+        });
       },
     );
 
-    test('a live container is 409 orb_exists', () async {
-      orbs.deleteOrphanError = const OrbExistsError('eeee');
+    test('a force body passes force through to the service', () async {
+      final (status, body) = await _deleteRaw(
+        base,
+        'api/orbs/eeee',
+        '{"force": true}',
+      );
 
-      final (status, body) = await _delete(base, 'api/orbs/eeee');
+      expect(status, 204);
+      expect(body, '');
+      expect(orbs.deleteId, 'eeee');
+      expect(orbs.deleteForce, true);
+    });
 
-      expect(status, 409);
-      expect(jsonDecode(body), {'error': 'orb_exists', 'id': 'eeee'});
+    test('a non-boolean force is not a force', () async {
+      final (status, body) = await _deleteRaw(
+        base,
+        'api/orbs/eeee',
+        '{"force": "yes"}',
+      );
+
+      expect(status, 204);
+      expect(orbs.deleteForce, false);
+    });
+
+    test('a missing orb is 404 not_found', () async {
+      orbs.deleteError = const OrbNotFoundError('eeee');
+
+      final (status, body) = await _deleteRaw(base, 'api/orbs/eeee', '');
+
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
     });
 
     test('a missing orphan is 404 not_found', () async {
-      orbs.deleteOrphanError = const OrbOrphanNotFoundError('eeee');
+      orbs.deleteError = const OrbOrphanNotFoundError('eeee');
 
-      final (status, body) = await _delete(base, 'api/orbs/eeee');
+      final (status, body) = await _deleteRaw(base, 'api/orbs/eeee', '');
 
       expect(status, 404);
       expect(jsonDecode(body), {'error': 'not_found'});
     });
 
     test('a daemon failure is 502 docker_unreachable', () async {
-      orbs.deleteOrphanError = const DockerUnavailableError('Cannot connect');
+      orbs.deleteError = const DockerUnavailableError('Cannot connect');
 
-      final (status, body) = await _delete(base, 'api/orbs/eeee');
+      final (status, body) = await _deleteRaw(base, 'api/orbs/eeee', '');
 
       expect(status, 502);
       expect(jsonDecode(body), {'error': 'docker_unreachable'});
@@ -609,7 +698,11 @@ void main() {
         sessions: SessionsBackend(service: service),
       );
       try {
-        final (status, body) = await _delete(bare.baseUri, 'api/orbs/eeee');
+        final (status, body) = await _deleteRaw(
+          bare.baseUri,
+          'api/orbs/eeee',
+          '',
+        );
         expect(status, 503);
         expect(jsonDecode(body), {'error': 'docker_unavailable'});
       } finally {
@@ -721,12 +814,49 @@ void main() {
       expect(orbs.sessionOrbId, 'aaaa');
     });
 
+    test('update is a 200 with the record', () async {
+      orbs.updateRecord = record;
+
+      final (status, body) = await _postRaw(base, 'api/orbs/aaaa/update', '');
+
+      expect(status, 200);
+      expect(jsonDecode(body), {
+        'id': 'aaaa',
+        'name': 'dev',
+        'project': 'p1',
+        'branch': 'orb/aaaa',
+        'state': 'running',
+        'created': '2026-11-04T00:00:00.000Z',
+        'url': 'http://127.0.0.1:39999',
+      });
+      expect(orbs.updateId, 'aaaa');
+    });
+
+    test('export is a 200 with the export path', () async {
+      const path = '/proj/one/dev-aaaa-20261104-000000UTC.tar.gz';
+      orbs.exportPath = path;
+
+      final (status, body) = await _postRaw(base, 'api/orbs/aaaa/export', '');
+
+      expect(status, 200);
+      expect(jsonDecode(body), {'path': path});
+      expect(orbs.exportId, 'aaaa');
+    });
+
     test('an unknown id is a 404 for each action', () async {
       orbs.stopError = const OrbNotFoundError('nope');
       orbs.wakeError = const OrbNotFoundError('nope');
       orbs.sessionError = const OrbNotFoundError('nope');
+      orbs.updateError = const OrbNotFoundError('nope');
+      orbs.exportError = const OrbNotFoundError('nope');
 
-      for (final action in const ['stop', 'wake', 'sessions']) {
+      for (final action in const [
+        'stop',
+        'wake',
+        'sessions',
+        'update',
+        'export',
+      ]) {
         final (status, body) = await _postRaw(
           base,
           'api/orbs/nope/$action',
@@ -749,8 +879,16 @@ void main() {
         orbs.stopError = refusal;
         orbs.wakeError = refusal;
         orbs.sessionError = refusal;
+        orbs.updateError = refusal;
+        orbs.exportError = refusal;
 
-        for (final action in const ['stop', 'wake', 'sessions']) {
+        for (final action in const [
+          'stop',
+          'wake',
+          'sessions',
+          'update',
+          'export',
+        ]) {
           final (status, body) = await _postRaw(
             base,
             'api/orbs/aaaa/$action',
@@ -773,8 +911,9 @@ void main() {
       orbs.wakeError = boot;
       orbs.stopError = boot;
       orbs.sessionError = boot;
+      orbs.updateError = boot;
 
-      for (final action in const ['stop', 'wake', 'sessions']) {
+      for (final action in const ['stop', 'wake', 'sessions', 'update']) {
         final (status, body) = await _postRaw(
           base,
           'api/orbs/aaaa/$action',
@@ -796,8 +935,9 @@ void main() {
         orbs.stopError = unavailable;
         orbs.wakeError = unavailable;
         orbs.sessionError = unavailable;
+        orbs.updateError = unavailable;
 
-        for (final action in const ['stop', 'wake', 'sessions']) {
+        for (final action in const ['stop', 'wake', 'sessions', 'update']) {
           final (status, body) = await _postRaw(
             base,
             'api/orbs/aaaa/$action',
@@ -834,8 +974,16 @@ void main() {
       orbs.stopError = daemon;
       orbs.wakeError = daemon;
       orbs.sessionError = daemon;
+      orbs.updateError = daemon;
+      orbs.exportError = daemon;
 
-      for (final action in const ['stop', 'wake', 'sessions']) {
+      for (final action in const [
+        'stop',
+        'wake',
+        'sessions',
+        'update',
+        'export',
+      ]) {
         final (status, body) = await _postRaw(
           base,
           'api/orbs/aaaa/$action',

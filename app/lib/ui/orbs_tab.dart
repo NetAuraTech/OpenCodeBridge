@@ -22,10 +22,14 @@ import 'structured_view.dart';
 ///
 /// The actions are gated by state (spec §9.5): Stop while running (a
 /// confirm, then the bridge's single unguarded death path), Wake while
-/// stopped (lossless — no confirm; the button blocks for the boot), and New
-/// session on a running orb (issue #97). The per-orb update and force-delete
-/// stay disabled with an explanatory tooltip until their ticket lands (#98),
-/// as does the broken-state "Fresh state".
+/// stopped (lossless — no confirm; the button blocks for the boot), New
+/// session on a running orb (issue #97), the per-orb image update on a
+/// running or stopped orb (issue #98, spec §2.8 — lossless and never forced,
+/// no confirm; the button blocks for the re-boot of a running orb), and the
+/// force delete on a running, stopped, or broken orb (issue #98, spec §2.7 —
+/// its confirm explains what force discards; the bridge's guard refusal is
+/// overridden by the explicit force). The broken-state "Fresh state" stays
+/// disabled with an explanatory tooltip until it lands.
 ///
 /// The FAB opens the create-orb wizard as a bottom sheet (spec §9.3): the
 /// project + the orb name first, then the live staged boot log in the sheet
@@ -133,6 +137,13 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
 
   /// The orb ids whose New session create is in flight (issue #97).
   final Set<String> _creatingSessionIds = <String>{};
+
+  /// The orb ids whose per-orb update is in flight (issue #98): the bridge
+  /// blocks for the whole re-boot of a running orb.
+  final Set<String> _updatingIds = <String>{};
+
+  /// The orb ids whose force delete is in flight (issue #98).
+  final Set<String> _deletingIds = <String>{};
 
   /// The create in flight, if any (the wizard's sheet renders it; the tab
   /// owns it, so closing the sheet mid-boot keeps the creation alive).
@@ -519,6 +530,86 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
     }
   }
 
+  /// The per-orb image update (issue #98, spec §2.8): the bridge recreates
+  /// the container on the current image over the same volumes — the
+  /// workspace is preserved, the stop marker untouched (a stopped orb is
+  /// recreated, not started), a running orb comes back running. Lossless
+  /// and never forced: no confirm; the button blocks ("Updating…") for the
+  /// whole re-boot of a running orb.
+  Future<void> _update(OrbRecord orb) async {
+    final client = _client;
+    if (client == null || _updatingIds.contains(orb.id)) return; // no-op
+    setState(() => _updatingIds.add(orb.id));
+    try {
+      await client.update(orb.id);
+      if (mounted) _snackBar('Orb updated.');
+      unawaited(_load());
+    } on OrbCreateError catch (e) {
+      if (mounted) {
+        _snackBar('Could not update the orb: ${e.details ?? e.code}');
+      }
+    } on OrbsClientError catch (e) {
+      if (mounted) _snackBar('Could not update the orb: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not update the orb.');
+    } finally {
+      if (mounted) setState(() => _updatingIds.remove(orb.id));
+    }
+  }
+
+  /// The force delete (issue #98, spec §2.7): the confirm asks about the
+  /// discard (the guard's reasons are the bridge's — the dialog names what
+  /// force removes), then the bridge's protected deletion with `force: true`
+  /// removes the container, the workspace and data volumes, and the state
+  /// dir. A refusal anyway (or a wire failure) is a snackbar with its
+  /// detail.
+  Future<void> _confirmForceDelete(OrbRecord orb) async {
+    final client = _client;
+    if (client == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Force delete this orb?'),
+        content: Text(
+          '"${orb.name}" carries work that the guard will not delete on its '
+          'own — uncommitted changes, unpushed commits, or a workspace that '
+          'cannot be verified. Force delete removes the container, the '
+          'workspace and data volumes, and the state directory: everything '
+          'in the orb is discarded. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const ValueKey('orb-force-delete-confirm'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Force delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _forceDelete(orb, client);
+  }
+
+  Future<void> _forceDelete(OrbRecord orb, OrbsClient client) async {
+    if (_deletingIds.contains(orb.id)) return;
+    setState(() => _deletingIds.add(orb.id));
+    try {
+      await client.delete(orb.id, force: true);
+      if (mounted) _snackBar('Orb deleted.');
+      unawaited(_load());
+    } on OrbsClientError catch (e) {
+      if (mounted) _snackBar('Could not delete the orb: ${e.message}');
+    } catch (_) {
+      if (mounted) _snackBar('Could not delete the orb.');
+    } finally {
+      if (mounted) setState(() => _deletingIds.remove(orb.id));
+    }
+  }
+
   /// Opens [session] in the structured view (the same view the Sessions tab
   /// opens); when the view closes, the list re-loads.
   Future<void> _openSession(Session session) async {
@@ -674,11 +765,15 @@ class OrbsTabState extends State<OrbsTab> with WidgetsBindingObserver {
                           creatingSession: _creatingSessionIds.contains(
                             orbs[index].id,
                           ),
+                          updating: _updatingIds.contains(orbs[index].id),
+                          deleting: _deletingIds.contains(orbs[index].id),
                           onTap: () => _cardTap(orbs[index]),
                           onOpenPr: _openPr,
                           onStop: _confirmStop,
                           onWake: _wake,
                           onNewSession: _newSession,
+                          onUpdate: _update,
+                          onForceDelete: _confirmForceDelete,
                           onCleanOrphan: _confirmCleanOrphan,
                         ),
                         childCount: orbs.length,
@@ -700,7 +795,7 @@ const String _stagePrefix = '[orb] stage: ';
 
 const double _gridPadding = 12;
 const double _cardWidth = 280;
-const double _cardHeight = 172;
+const double _cardHeight = 204;
 
 /// The orb's state word on the card (spec §9.4).
 String _stateWord(String state) {
@@ -772,27 +867,36 @@ class _OrbCard extends StatelessWidget {
     required this.onStop,
     required this.onWake,
     required this.onNewSession,
+    required this.onUpdate,
+    required this.onForceDelete,
     required this.onCleanOrphan,
     this.stopping = false,
     this.waking = false,
     this.creatingSession = false,
+    this.updating = false,
+    this.deleting = false,
   });
 
   final OrbRecord orb;
   final int sessionCount;
   final bool highlighted;
 
-  /// The card's lifecycle action is in flight (issue #97): its button
-  /// carries its busy label ("Stopping…", "Waking…", "Creating…").
+  /// The card's lifecycle action is in flight (issue #97, #98): its button
+  /// carries its busy label ("Stopping…", "Waking…", "Creating…",
+  /// "Updating…", "Deleting…").
   final bool stopping;
   final bool waking;
   final bool creatingSession;
+  final bool updating;
+  final bool deleting;
 
   final VoidCallback onTap;
   final ValueChanged<String> onOpenPr;
   final ValueChanged<OrbRecord> onStop;
   final ValueChanged<OrbRecord> onWake;
   final ValueChanged<OrbRecord> onNewSession;
+  final ValueChanged<OrbRecord> onUpdate;
+  final ValueChanged<OrbRecord> onForceDelete;
   final ValueChanged<OrbRecord> onCleanOrphan;
 
   @override
@@ -899,14 +1003,23 @@ class _OrbCard extends StatelessWidget {
   }
 
   /// The card's lifecycle actions (spec §9.5), gated by state: Stop and New
-  /// session while running, Wake while stopped (issue #97, enabled); the
-  /// per-orb update and force-delete stay disabled until #98, and the
-  /// broken-state "Fresh state" until it lands — the tooltip says which.
-  /// A re-issued action in the same state is a safe no-op (the handler
-  /// guards on the busy flag).
+  /// session while running, Wake while stopped (issue #97); the per-orb
+  /// Update on a running or stopped orb (issue #98, spec §2.8) and the Force
+  /// delete on a running, stopped, or broken orb (issue #98, spec §2.7); the
+  /// broken-state "Fresh state" stays disabled until it lands — the tooltip
+  /// says which. A re-issued action in the same state is a safe no-op (the
+  /// handler guards on the busy flag).
   List<_CardAction> _actions(OrbRecord orb, ColorScheme scheme) {
-    final update = const _CardAction(label: 'Update', ticket: '#98');
-    final forceDelete = const _CardAction(label: 'Force delete', ticket: '#98');
+    final update = _CardAction(
+      label: updating ? 'Updating…' : 'Update',
+      enabled: true,
+      onPressed: () => onUpdate(orb),
+    );
+    final forceDelete = _CardAction(
+      label: deleting ? 'Deleting…' : 'Force delete',
+      enabled: true,
+      onPressed: () => onForceDelete(orb),
+    );
     final freshState = const _CardAction(label: 'Fresh state', ticket: '#97');
     switch (orb.state) {
       case 'running':
@@ -922,6 +1035,7 @@ class _OrbCard extends StatelessWidget {
             onPressed: () => onNewSession(orb),
           ),
           update,
+          forceDelete,
         ];
       case 'stopped':
         return [
@@ -931,6 +1045,7 @@ class _OrbCard extends StatelessWidget {
             onPressed: () => onWake(orb),
           ),
           update,
+          forceDelete,
         ];
       case 'broken:workspace':
         return [forceDelete];

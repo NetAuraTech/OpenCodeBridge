@@ -164,6 +164,14 @@ class _FakeOrbsClient extends OrbsClient {
   Completer<void>? newSessionGate;
   Session? newSessionRecord;
 
+  /// The (issue #98) exit-path scripts: the per-orb update and the
+  /// force delete.
+  Object? updateError;
+  Completer<void>? updateGate;
+  OrbRecord? updateRecord;
+  Object? forceDeleteError;
+  Completer<void>? forceDeleteGate;
+
   var listCalls = 0;
   final List<bool> listIncludePr = [];
   final List<(String, String)> createdRequests = [];
@@ -172,6 +180,8 @@ class _FakeOrbsClient extends OrbsClient {
   final List<String> stopped = [];
   final List<String> woken = [];
   final List<String> newSessions = [];
+  final List<String> updated = [];
+  final List<(String, bool)> forceDeleted = [];
 
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
@@ -214,6 +224,34 @@ class _FakeOrbsClient extends OrbsClient {
     final error = deleteError;
     if (error is Object) throw error;
     deleted.add(id);
+  }
+
+  @override
+  Future<void> delete(String id, {bool force = false}) async {
+    final gate = forceDeleteGate;
+    if (gate != null) await gate.future;
+    final error = forceDeleteError;
+    if (error is Object) throw error;
+    forceDeleted.add((id, force));
+  }
+
+  @override
+  Future<OrbRecord> update(String id) async {
+    final gate = updateGate;
+    if (gate != null) await gate.future;
+    final error = updateError;
+    if (error is Object) throw error;
+    updated.add(id);
+    final record = updateRecord;
+    if (record != null) return record;
+    return OrbRecord(
+      id: id,
+      name: 'updated',
+      project: 'p1',
+      branch: 'orb/$id',
+      state: 'running',
+      created: '2025-01-03T00:00:00Z',
+    );
   }
 
   @override
@@ -493,54 +531,51 @@ void main() {
     });
 
     group('card actions (gated by state, tickets as tooltips)', () {
-      testWidgets('a running card carries Stop, New session and Update', (
+      testWidgets(
+        'a running card carries Stop, New session, Update and Force delete',
+        (tester) async {
+          await _pumpTab(tester, orbs: [_running]);
+          expect(_actionsOf(tester, 'orb_1'), 4);
+          expect(
+            find.byKey(const ValueKey('orb-action-orb_1-Stop')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('orb-action-orb_1-New session')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('orb-action-orb_1-Update')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('orb-action-orb_1-Force delete')),
+            findsOneWidget,
+          );
+          // All four are wired (issues #97 and #98).
+          for (final label in const [
+            'Stop',
+            'New session',
+            'Update',
+            'Force delete',
+          ]) {
+            expect(
+              tester
+                  .widget<TextButton>(
+                    find.byKey(ValueKey('orb-action-orb_1-$label')),
+                  )
+                  .onPressed,
+              isNotNull,
+            );
+          }
+        },
+      );
+
+      testWidgets('a stopped card carries Wake, Update and Force delete', (
         tester,
       ) async {
-        await _pumpTab(tester, orbs: [_running]);
-        expect(_actionsOf(tester, 'orb_1'), 3);
-        expect(
-          find.byKey(const ValueKey('orb-action-orb_1-Stop')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('orb-action-orb_1-New session')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('orb-action-orb_1-Update')),
-          findsOneWidget,
-        );
-        // Stop and New session are wired (issue #97)…
-        for (final label in const ['Stop', 'New session']) {
-          expect(
-            tester
-                .widget<TextButton>(
-                  find.byKey(ValueKey('orb-action-orb_1-$label')),
-                )
-                .onPressed,
-            isNotNull,
-          );
-        }
-        // …and Update stays disabled with the ticket it lands in.
-        expect(
-          tester
-              .widget<TextButton>(
-                find.byKey(const ValueKey('orb-action-orb_1-Update')),
-              )
-              .onPressed,
-          isNull,
-        );
-        expect(
-          find.byWidgetPredicate(
-            (w) => w is Tooltip && w.message == 'Lands in #98',
-          ),
-          findsOneWidget, // Update
-        );
-      });
-
-      testWidgets('a stopped card carries Wake and Update', (tester) async {
         await _pumpTab(tester, orbs: [_stopped]);
-        expect(_actionsOf(tester, 'orb_3'), 2);
+        expect(_actionsOf(tester, 'orb_3'), 3);
         expect(
           find.byKey(const ValueKey('orb-action-orb_3-Wake')),
           findsOneWidget,
@@ -549,23 +584,21 @@ void main() {
           find.byKey(const ValueKey('orb-action-orb_3-Update')),
           findsOneWidget,
         );
-        // Wake is wired (issue #97); Update stays disabled.
         expect(
-          tester
-              .widget<TextButton>(
-                find.byKey(const ValueKey('orb-action-orb_3-Wake')),
-              )
-              .onPressed,
-          isNotNull,
+          find.byKey(const ValueKey('orb-action-orb_3-Force delete')),
+          findsOneWidget,
         );
-        expect(
-          tester
-              .widget<TextButton>(
-                find.byKey(const ValueKey('orb-action-orb_3-Update')),
-              )
-              .onPressed,
-          isNull,
-        );
+        // All three are wired (issues #97 and #98).
+        for (final label in const ['Wake', 'Update', 'Force delete']) {
+          expect(
+            tester
+                .widget<TextButton>(
+                  find.byKey(ValueKey('orb-action-orb_3-$label')),
+                )
+                .onPressed,
+            isNotNull,
+          );
+        }
       });
 
       testWidgets('a broken:workspace card carries Force delete', (
@@ -821,6 +854,182 @@ void main() {
           findsOneWidget,
         );
         expect(find.byType(StructuredSessionScreen), findsNothing);
+      });
+    });
+
+    group('exit paths (issue #98)', () {
+      testWidgets(
+        'Update updates without confirming, then reloads and reports',
+        (tester) async {
+          final tab = await _pumpTab(tester, orbs: [_running]);
+
+          await tester.tap(
+            find.byKey(const ValueKey('orb-action-orb_1-Update')),
+          );
+          await tester.pumpAndSettle();
+
+          // No confirm dialog — the update is lossless.
+          expect(tab.orbs.updated, ['orb_1']);
+          expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
+          expect(find.text('Orb updated.'), findsOneWidget);
+        },
+      );
+
+      testWidgets('a stopped orb can be updated too', (tester) async {
+        final tab = await _pumpTab(tester, orbs: [_stopped]);
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_3-Update')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.updated, ['orb_3']);
+        expect(find.text('Orb updated.'), findsOneWidget);
+      });
+
+      testWidgets('the Update button carries its busy label over the reboot', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        final gate = Completer<void>();
+        tab.orbs.updateGate = gate;
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_1-Update')));
+        await tester.pump();
+
+        expect(find.text('Updating…'), findsOneWidget);
+        expect(tab.orbs.updated, isEmpty);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.updated, ['orb_1']);
+        expect(find.text('Updating…'), findsNothing);
+      });
+
+      testWidgets('a failed update reports the decoded wire error', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        tab.orbs.updateError = const OrbCreateError(
+          statusCode: 400,
+          code: 'update_busy',
+          details: 'a session is running',
+        );
+
+        await tester.tap(find.byKey(const ValueKey('orb-action-orb_1-Update')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.updated, isEmpty);
+        expect(
+          find.text('Could not update the orb: a session is running'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('Force delete confirms, then deletes, reloads and reports', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_1-Force delete')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Force delete this orb?'), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-force-delete-confirm')),
+        );
+        await tester.pumpAndSettle();
+
+        // The protected deletion with the human override.
+        expect(tab.orbs.forceDeleted, [('orb_1', true)]);
+        expect(tab.orbs.listCalls, greaterThanOrEqualTo(2));
+        expect(find.text('Orb deleted.'), findsOneWidget);
+      });
+
+      testWidgets('cancelling the force-delete confirm keeps the orb', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_1-Force delete')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.forceDeleted, isEmpty);
+        expect(find.byKey(const ValueKey('orb-orb_1')), findsOneWidget);
+      });
+
+      testWidgets('a failed force delete reports the decoded wire error', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        tab.orbs.forceDeleteError = const OrbsClientError(
+          409,
+          'deletion_refused',
+        );
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_1-Force delete')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('orb-force-delete-confirm')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.forceDeleted, isEmpty);
+        expect(
+          find.text('Could not delete the orb: deletion_refused'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('the Force delete button carries its busy label', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_running]);
+        final gate = Completer<void>();
+        tab.orbs.forceDeleteGate = gate;
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_1-Force delete')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('orb-force-delete-confirm')),
+        );
+        await tester.pump();
+
+        expect(find.text('Deleting…'), findsOneWidget);
+        expect(tab.orbs.forceDeleted, isEmpty);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.forceDeleted, [('orb_1', true)]);
+        expect(find.text('Deleting…'), findsNothing);
+      });
+
+      testWidgets('a broken:workspace card force-deletes through the dialog', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_brokenWorkspace]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_4-Force delete')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('orb-force-delete-confirm')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.forceDeleted, [('orb_4', true)]);
+        expect(find.text('Orb deleted.'), findsOneWidget);
       });
     });
 
@@ -1160,8 +1369,13 @@ void main() {
           // The consumption is reported after the frame.
           expect(consumed, [1]);
 
-          // Tapping the highlighted card clears it locally.
-          await tester.tap(find.byKey(const ValueKey('orb-orb_1')));
+          // Tapping the highlighted card clears it locally (the tap lands
+          // on the card's title row — the action buttons absorb their own
+          // taps).
+          await tester.tapAt(
+            tester.getTopLeft(find.byKey(const ValueKey('orb-orb_1'))) +
+                const Offset(24, 24),
+          );
           await tester.pump();
           final cleared = tester.widget<Container>(
             find.byKey(const ValueKey('orb-orb_1')),

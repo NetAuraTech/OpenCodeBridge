@@ -152,9 +152,21 @@ class OrbRefusalError implements Exception {
   /// The orb is not running (the per-orb session create, issue #97).
   static const String notRunning = 'not_running';
 
+  /// The orb is not updatable: its state is neither `running` nor `stopped`
+  /// (the per-orb image update, issue #98, spec §2.8).
+  static const String notUpdatable = 'not_updatable';
+
+  /// The running orb is busy (an active session or a pending permission) —
+  /// the update is never forced (issue #98, spec §2.8/§2.10.1).
+  static const String updateBusy = 'update_busy';
+
+  /// The orb's workspace volume is missing (the export, issue #98, spec
+  /// §3.4): there is nothing to export.
+  static const String missingWorkspace = 'missing_workspace';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
   /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
-  /// `not_running`).
+  /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`).
   final String code;
 
   /// The clear message for the app.
@@ -215,6 +227,66 @@ class OrbNotFoundError implements Exception {
 
   @override
   String toString() => 'OrbNotFoundError($id)';
+}
+
+/// The deletion guard's evaluation for one orb (issue #98, spec §2.7):
+/// whether the workspace could be inspected at all, and — when it could —
+/// the dirty-tree lines and the unpushed-commit count. The automated
+/// lifecycle pass re-evaluates this as-is: a not-deletable orb is kept,
+/// never force-deleted (spec §2.10.2).
+class OrbDeletionGuard {
+  const OrbDeletionGuard({
+    required this.evaluable,
+    this.dirty = const [],
+    this.unpushedCount = 0,
+  });
+
+  /// Whether the workspace could be inspected (a container with a readable
+  /// git state). `false` means the guard cannot prove the workspace is
+  /// safe — deletion is refused without force (never delete the
+  /// unverifiable).
+  final bool evaluable;
+
+  /// The `git status --porcelain` lines (untracked included, ignored
+  /// excluded) — empty when the tree is clean.
+  final List<String> dirty;
+
+  /// The commits not on any remote (`git rev-list --count HEAD --not
+  /// --remotes`).
+  final int unpushedCount;
+
+  /// The guard's verdict: deletable when it was evaluable and nothing
+  /// needs protecting (clean tree + everything pushed).
+  bool get canDelete => evaluable && dirty.isEmpty && unpushedCount == 0;
+
+  /// The machine-readable refusal words (spec §2.7): `workspace_missing`
+  /// (no inspectable workspace — no container, or an unreadable git
+  /// state), `dirty_tree`, `unpushed_commits` — empty when [canDelete].
+  List<String> get reasons {
+    if (canDelete) return const [];
+    if (!evaluable) return const ['workspace_missing'];
+    return [
+      if (dirty.isNotEmpty) 'dirty_tree',
+      if (unpushedCount > 0) 'unpushed_commits',
+    ];
+  }
+}
+
+/// The deletion guard refused the deletion of [id] (issue #98, spec
+/// §2.7): the bridge answers 409 with [guard]'s reasons. An explicit
+/// force overrides the guard (`force: true` — a human UI action, or an
+/// agent within its spawn tree, §8.4; the automated path never forces).
+class OrbDeletionRefusedError implements Exception {
+  const OrbDeletionRefusedError(this.id, this.guard);
+
+  /// The orb id the deletion was refused for.
+  final String id;
+
+  /// The guard's evaluation (its `reasons` are the refusal words).
+  final OrbDeletionGuard guard;
+
+  @override
+  String toString() => 'OrbDeletionRefusedError($id: ${guard.reasons})';
 }
 
 /// A single session could not be moved (its export or its import failed,
@@ -742,10 +814,11 @@ class OrbService {
     for (final name in present) {
       await _runOrThrow(['volume', 'rm', name]);
     }
-    final stateDir = Directory('${stateRoot.path}/$id');
-    if (stateDir.existsSync()) {
-      stateDir.deleteSync(recursive: true);
-    }
+    // Same root-owned content as the guarded deletion (spec §2.7): the
+    // orphan's container is gone, so the throwaway clean runs on the
+    // current shared image.
+    await _removeStateDir(id, await imageBuilder.ensureImage());
+    _removeStagedConfig(id);
   }
 
   // ------------------------------------------------------------------------
@@ -1186,6 +1259,536 @@ class OrbService {
       active: active.contains(session.id),
       orb: id,
     );
+  }
+
+  // ------------------------------------------------------------------------
+  // The exit paths: protected deletion, per-orb image update, the
+  // `docker cp` export (issue #98, spec §2.7/§2.8/§3.4).
+
+  /// The deletion guard's evaluation for [id] (issue #98, spec §2.7): the
+  /// pure, reusable read the automated lifecycle pass re-evaluates on every
+  /// pass (it never forces — a blocked orb is kept and surfaced).
+  /// [OrbNotFoundError] when the id has no record. The checks run against
+  /// the actual container state: a running container is probed with
+  /// `docker exec git`; any other existing container is probed with a
+  /// throwaway container over the same workspace volume (the image carries
+  /// an entrypoint — `--entrypoint git` overrides it). Any git failure, a
+  /// missing workspace volume, or an orphan (no container) is
+  /// `evaluable: false` — the guard refuses without force (never delete the
+  /// unverifiable; the orphan's removal is the explicit orphan cleanup).
+  Future<OrbDeletionGuard> deleteGuard(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state == 'orphan') {
+      return const OrbDeletionGuard(evaluable: false);
+    }
+    final container = 'orb-$id';
+    final state = await _inspectState(container);
+    if (state == 'running') {
+      final status = await run([
+        'exec',
+        container,
+        'git',
+        '-C',
+        '/workspace',
+        'status',
+        '--porcelain',
+      ]);
+      if (status.exitCode != 0) {
+        return const OrbDeletionGuard(evaluable: false);
+      }
+      final unpushed = await run([
+        'exec',
+        container,
+        'git',
+        '-C',
+        '/workspace',
+        'rev-list',
+        '--count',
+        'HEAD',
+        '--not',
+        '--remotes',
+      ]);
+      if (unpushed.exitCode != 0) {
+        return const OrbDeletionGuard(evaluable: false);
+      }
+      return _guardResult(status.stdout, unpushed.stdout);
+    }
+    // The container exists but is not running: a throwaway container over
+    // the same workspace volume.
+    if (!await _workspaceVolumePresent(id)) {
+      return const OrbDeletionGuard(evaluable: false);
+    }
+    final image = await _containerImage(id);
+    if (image == null) {
+      return const OrbDeletionGuard(evaluable: false);
+    }
+    final status = await run([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'git',
+      '-v',
+      'orb-$id-workspace:/ws',
+      image,
+      '-C',
+      '/ws',
+      'status',
+      '--porcelain',
+    ]);
+    if (status.exitCode != 0) {
+      return const OrbDeletionGuard(evaluable: false);
+    }
+    final unpushed = await run([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'git',
+      '-v',
+      'orb-$id-workspace:/ws',
+      image,
+      '-C',
+      '/ws',
+      'rev-list',
+      '--count',
+      'HEAD',
+      '--not',
+      '--remotes',
+    ]);
+    if (unpushed.exitCode != 0) {
+      return const OrbDeletionGuard(evaluable: false);
+    }
+    return _guardResult(status.stdout, unpushed.stdout);
+  }
+
+  /// The guard from two git outputs: the porcelain lines and the unpushed
+  /// count — a parse failure of the count is unevaluable (never delete the
+  /// unverifiable).
+  OrbDeletionGuard _guardResult(String statusOut, String unpushedOut) {
+    int count;
+    try {
+      count = int.parse(unpushedOut.trim());
+    } on FormatException {
+      return const OrbDeletionGuard(evaluable: false);
+    }
+    return OrbDeletionGuard(
+      evaluable: true,
+      dirty: _lines(statusOut),
+      unpushedCount: count,
+    );
+  }
+
+  /// The protected deletion (issue #98, spec §2.7): [OrbNotFoundError] when
+  /// the id has no record; an `orphan` record goes through the explicit
+  /// orphan cleanup ([deleteOrphan] — its semantics are unchanged).
+  /// Otherwise the guard ([deleteGuard]) is evaluated first: when it
+  /// refuses and [force] is false, [OrbDeletionRefusedError] carries its
+  /// reasons. A guard pass or [force] removes the container, the workspace
+  /// and data volumes, and the state dir (nothing port-wise to release —
+  /// the port is ephemeral; the service data volume is wiped with it — the
+  /// accepted consequence, the guard protects the git work, not the
+  /// database content).
+  Future<void> delete(String id, {bool force = false}) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state == 'orphan') {
+      await deleteOrphan(id);
+      return;
+    }
+    final guard = await deleteGuard(id);
+    if (!force && !guard.canDelete) {
+      throw OrbDeletionRefusedError(id, guard);
+    }
+    // The container's image, read before the removal: the state dir's
+    // cleaner may need a throwaway container (below).
+    final image = await _containerImage(id);
+    await _runOrThrow(['rm', '-f', 'orb-$id']);
+    // The state dir before the volumes: if its container-side clean fails,
+    // the volumes still mark the orb and a retry re-enters through the
+    // orphan cleanup — nothing left dangling.
+    await _removeStateDir(id, image ?? await imageBuilder.ensureImage());
+    _removeStagedConfig(id);
+    await _removeVolume('orb-$id-workspace');
+    await _removeVolume('orb-$id-data');
+  }
+
+  /// The last create/update/wake's config staging copy (`staged-<id>` in
+  /// the state root, bridge-owned): a throwaway of the injection, gone with
+  /// the deletion (nothing orb-related remains, spec §2.7).
+  void _removeStagedConfig(String id) {
+    final staged = Directory('${stateRoot.path}/staged-$id');
+    if (staged.existsSync()) staged.deleteSync(recursive: true);
+  }
+
+  /// Removes the orb's state dir. The dir itself is bridge-owned, but the
+  /// container writes through its `/root/.local` bind mount **as root**:
+  /// root-owned files the host user cannot unlink (the boot's config, the
+  /// opencode data). When the host-side recursive delete hits them, a
+  /// throwaway container over the same mount deletes the contents as root,
+  /// and the host removes the now-empty dir. [image] is any image present
+  /// on the host for the throwaway run.
+  Future<void> _removeStateDir(String id, String image) async {
+    final stateDir = Directory('${stateRoot.path}/$id');
+    if (!stateDir.existsSync()) return;
+    try {
+      stateDir.deleteSync(recursive: true);
+      return;
+    } on FileSystemException {
+      // Root-owned content (the container wrote it): clean through docker.
+      // A partial host-side delete may have taken some entries already —
+      // the container-side clean is idempotent over the rest.
+    }
+    await _runOrThrow([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'sh',
+      '-v',
+      '${stateDir.path}:/ocb-state',
+      image,
+      '-c',
+      'find /ocb-state -mindepth 1 -delete',
+    ]);
+    stateDir.deleteSync();
+  }
+
+  /// Removes the volume [name], tolerating an already-absent volume
+  /// (idempotent — a broken orb may be missing its workspace volume).
+  Future<void> _removeVolume(String name) async {
+    final result = await run(['volume', 'rm', name]);
+    if (result.exitCode == 0) return;
+    final stderr = result.stderr.toLowerCase();
+    if (stderr.contains('no such volume') || stderr.contains('not found')) {
+      return;
+    }
+    throw DockerUnavailableError(result.stderr.trim());
+  }
+
+  /// The per-orb image update (issue #98, spec §2.8): the container is
+  /// recreated on the current shared image over the same workspace and data
+  /// volumes — the code lives in the volume and is preserved, the
+  /// container is disposable, the in-container rw layer (config, auth) is
+  /// re-injected wake-style, and the `ocb.stopped` marker is untouched: a
+  /// stopped orb is recreated (not started) and stays stopped. A running
+  /// orb is only updatable while it is not busy — no active session and no
+  /// pending permission (the update is never forced, and never automatic
+  /// on wake) — and comes back running, with a fresh boot and a fresh
+  /// ephemeral port. [OrbNotFoundError] for an unknown id; the named
+  /// refusals are [OrbRefusalError.notUpdatable] (a state that is neither
+  /// running nor stopped — `preparing`, `broken:*` — or a missing state
+  /// dir) and [OrbRefusalError.updateBusy].
+  Future<OrbRecord> update(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    final running = record.state == 'running';
+    if (!running && record.state != 'stopped') {
+      throw const OrbRefusalError(
+        OrbRefusalError.notUpdatable,
+        'only a running or a stopped orb can be updated',
+      );
+    }
+    final container = 'orb-$id';
+    if (running) {
+      final password = await lastPassword(id);
+      if (password == null) {
+        throw OrbSessionsUnavailableError(
+          'the orb service password cannot be read from the orb logs',
+        );
+      }
+      final service = _orbService(await _orbUrl(id, record), password);
+      if (await _hasBusySessions(service)) {
+        throw const OrbRefusalError(
+          OrbRefusalError.updateBusy,
+          'the orb has a busy session (active or awaiting a permission) — '
+          'finish it or stop the orb before the update',
+        );
+      }
+    }
+    final stateDir = Directory('${stateRoot.path}/$id');
+    if (!stateDir.existsSync()) {
+      throw const OrbRefusalError(
+        OrbRefusalError.notUpdatable,
+        'the orb state dir is missing — the orb cannot be updated',
+      );
+    }
+    // The orb's own env, read while the container still exists (the
+    // recreate re-applies it — the repo and the commit identity it
+    // committed under are kept, spec §3.1).
+    final env = await _orbEnv(container);
+    final newTag = await imageBuilder.ensureImage();
+    if (running) {
+      await _runOrThrow(['stop', container]);
+    }
+    await _runOrThrow(['rm', container]);
+    final host = await (hostIp ?? hostDockerHostIp)();
+    await _runOrThrow([
+      'create',
+      '--name',
+      container,
+      '-p',
+      '127.0.0.1:0:$inContainerPort',
+      '--add-host',
+      'host.docker.internal:$host',
+      '-v',
+      '$home/.ssh:/root/.ssh:ro',
+      '-v',
+      '$home/.config/gh:/root/.config/gh:ro',
+      '-v',
+      'orb-$id-workspace:/workspace',
+      '-v',
+      'orb-$id-data:/var/lib/orb-data',
+      '-v',
+      '${stateDir.path}:/root/.local',
+      '-e',
+      'ORB_ID=$id',
+      for (final entry in env) ...['-e', entry],
+      '-l',
+      'ocb.orb=true',
+      '-l',
+      'ocb.id=$id',
+      '-l',
+      'ocb.name=${record.name}',
+      '-l',
+      'ocb.project=${record.project}',
+      '-l',
+      'ocb.branch=${record.branch}',
+      '-l',
+      'ocb.created=${record.created}',
+      newTag,
+    ]);
+    // The wake-style re-injection (host-authoritative, §6): the checkout's
+    // `.env*` (non-fatal — a missing checkout keeps the last boot's files),
+    // then the staged config and the auth into the fresh rw layer.
+    final resolve = checkoutFor;
+    if (resolve != null) {
+      final checkoutPath = await resolve(record.project);
+      if (checkoutPath != null && checkoutPath.isNotEmpty) {
+        for (final file in _envFiles(checkoutPath)) {
+          await _runOrThrow([
+            'cp',
+            file.path,
+            '$container:/workspace/${file.path.split('/').last}',
+          ]);
+        }
+      }
+    }
+    final staged = await _stageConfig(id);
+    await _copyStagedConfig(container, staged);
+    await _copyAuth(container);
+    if (!running) {
+      // A stopped orb stays stopped: the container is recreated (created,
+      // not started) and the marker is untouched.
+      return _replacedState(record, 'stopped');
+    }
+    // A fresh container holds a fresh log: no stale password lines to
+    // skip.
+    await _runOrThrow(['start', container]);
+    final logProcess = await spawn(['logs', '--follow', container]);
+    final tail = <String>[];
+    _streamBootLines(id, logProcess, tail);
+    try {
+      final (url, password) = await _waitForBoot(id, container, tail);
+      return OrbRecord(
+        id: id,
+        name: record.name,
+        project: record.project,
+        branch: record.branch,
+        state: 'running',
+        created: record.created,
+        url: url,
+      );
+    } finally {
+      await logProcess.kill();
+    }
+  }
+
+  /// Whether the orb's service is busy (spec §2.10.1): an active session
+  /// (TUI-attached, agent working) or a session with a pending permission
+  /// request — a mid-turn state, the most fragile thing to carry through a
+  /// recreation.
+  Future<bool> _hasBusySessions(OpencodeService service) async {
+    final active = await service.activeSessionIds();
+    if (active.isNotEmpty) return true;
+    for (final session in await service.listSessions()) {
+      final pending = await service.pendingPermissions(session.id);
+      if (pending.isNotEmpty) return true;
+    }
+    return false;
+  }
+
+  /// The container's own `ORB_*` env entries (`Key=Value` strings from its
+  /// `Config.Env`), re-applied by the recreate (minus `ORB_ID`, which the
+  /// recreate sets explicitly) — the recreate keeps the orb's repo and the
+  /// commit identity it committed under (spec §3.1).
+  Future<List<String>> _orbEnv(String container) async {
+    final result = await run([
+      'inspect',
+      '--format',
+      '{{json .Config.Env}}',
+      container,
+    ]);
+    if (result.exitCode != 0) {
+      throw DockerUnavailableError(result.stderr.trim());
+    }
+    final decoded = jsonDecode(result.stdout);
+    if (decoded is! List) return const [];
+    return [
+      for (final entry in decoded)
+        if (entry is String &&
+            entry.startsWith('ORB_') &&
+            !entry.startsWith('ORB_ID='))
+          entry,
+    ];
+  }
+
+  /// The `docker cp` export (issue #98, spec §3.4): a lossless tar.gz of
+  /// the whole orb workspace (untracked files and `.git` included) written
+  /// next to the project's local clone (the checkout's parent dir) with the
+  /// deterministic [exportFileName] name — the user extracts and resumes
+  /// exactly where the agent stopped. A running orb tars in place
+  /// (`docker exec tar`, then `docker cp` out — a binary cannot flow
+  /// through the string runner seam); a stopped or broken orb and an
+  /// orphan use a throwaway container over the workspace volume with the
+  /// target dir bind-mounted (`--entrypoint tar` overrides the image's
+  /// entrypoint; the orphan runs on the current shared image). Returns the
+  /// export file's path.
+  Future<String> export(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    final resolve = checkoutFor;
+    final checkout = resolve == null ? null : await resolve(record.project);
+    if (checkout == null || checkout.trim().isEmpty) {
+      throw const OrbRefusalError(
+        OrbRefusalError.missingCheckout,
+        'the project checkout is not available on the host — the workspace '
+        'cannot be exported',
+      );
+    }
+    final targetDir = File(checkout).parent.path;
+    final fileName = exportFileName(
+      record.name,
+      record.id,
+      DateTime.now().toUtc(),
+    );
+    final target = '$targetDir/$fileName';
+    if (record.state != 'orphan') {
+      final state = await _inspectState('orb-$id');
+      if (state == 'running') {
+        await _runOrThrow([
+          'exec',
+          'orb-$id',
+          'tar',
+          'czf',
+          '/tmp/$fileName',
+          '-C',
+          '/workspace',
+          '.',
+        ]);
+        await _runOrThrow(['cp', 'orb-$id:/tmp/$fileName', target]);
+        // Best-effort cleanup inside the orb (the container is disposable).
+        await run(['exec', 'orb-$id', 'rm', '-f', '/tmp/$fileName']);
+        return target;
+      }
+    }
+    // A non-running container (or none at all — the orphan): a throwaway
+    // container over the workspace volume, writing into the bind-mounted
+    // out dir.
+    await _requireWorkspaceVolume(id);
+    final image = record.state == 'orphan'
+        ? await imageBuilder.ensureImage()
+        : await _containerImage(id);
+    if (image == null) {
+      throw const OrbRefusalError(
+        OrbRefusalError.missingWorkspace,
+        'the orb container image cannot be read — the workspace cannot be '
+        'exported',
+      );
+    }
+    await _runOrThrow([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'tar',
+      '-v',
+      'orb-$id-workspace:/ws',
+      '-v',
+      '$targetDir:/out',
+      image,
+      '-czf',
+      '/out/$fileName',
+      '-C',
+      '/ws',
+      '.',
+    ]);
+    return target;
+  }
+
+  /// Refuses when the orb's workspace volume is missing (issue #98, spec
+  /// §3.4 — [OrbRefusalError.missingWorkspace]: there is nothing to
+  /// export).
+  Future<void> _requireWorkspaceVolume(String id) async {
+    if (await _workspaceVolumePresent(id)) return;
+    throw const OrbRefusalError(
+      OrbRefusalError.missingWorkspace,
+      'the orb workspace volume is missing — there is nothing to export',
+    );
+  }
+
+  /// Whether the labeled volume `orb-<id>-workspace` exists (the filter is
+  /// the id's prefix — the data volume may share it).
+  Future<bool> _workspaceVolumePresent(String id) async {
+    final result = await run([
+      'volume',
+      'ls',
+      '--filter',
+      'name=orb-$id-',
+      '--format',
+      '{{.Name}}',
+    ]);
+    if (result.exitCode != 0) {
+      throw DockerUnavailableError(result.stderr.trim());
+    }
+    return _lines(result.stdout).contains('orb-$id-workspace');
+  }
+
+  /// The image reference the orb's own container was created from (its
+  /// `Config.Image`) — what a throwaway container (the guard's git, the
+  /// export's tar) runs on; `null` when the container does not exist or the
+  /// image cannot be read.
+  Future<String?> _containerImage(String id) async {
+    final result = await run([
+      'inspect',
+      '--format',
+      '{{.Config.Image}}',
+      'orb-$id',
+    ]);
+    if (result.exitCode != 0) return null;
+    final image = result.stdout.trim();
+    return image.isEmpty ? null : image;
+  }
+
+  /// The export file name (issue #98, spec §3.4):
+  /// `<sanitized name>-<id>-<YYYYMMDD-HHMMSS>UTC.tar.gz` — deterministic
+  /// for a given (name, id, instant), pure (the lifecycle's tests pin the
+  /// format). [now] is converted to UTC.
+  static String exportFileName(String name, String id, DateTime now) {
+    final utc = now.toUtc();
+    String two(int value) => value.toString().padLeft(2, '0');
+    final stamp =
+        '${utc.year}${two(utc.month)}${two(utc.day)}-'
+        '${two(utc.hour)}${two(utc.minute)}${two(utc.second)}UTC';
+    return '${_exportNamePart(name)}-$id-$stamp.tar.gz';
+  }
+
+  /// The name part of the export file name: lowercased, every run of
+  /// characters outside `[a-z0-9._-]` collapsed to one `-`, leading and
+  /// trailing separators trimmed, `orb` when nothing is left.
+  static String _exportNamePart(String name) {
+    final cleaned = name
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9._-]+'), '-')
+        .replaceAll(RegExp(r'^[.-]+|[.-]+$'), '');
+    return cleaned.isEmpty ? 'orb' : cleaned;
   }
 
   /// Whether [url] is a GitHub remote url — `https://`, `http://`, the
