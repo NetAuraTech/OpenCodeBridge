@@ -12,12 +12,14 @@ void main() {
   late List<String?> prQueries;
   late List<(String, String)> creates;
   late List<String> deleted;
+  late List<String> deleteBodies;
   late int rebuildCalls;
 
   setUp(() async {
     prQueries = [];
     creates = [];
     deleted = [];
+    deleteBodies = [];
     rebuildCalls = 0;
     server = await HttpServer.bind('127.0.0.1', 0);
     base = Uri.parse('http://127.0.0.1:${server.port}/');
@@ -114,6 +116,8 @@ void main() {
       }
       if (request.method == 'DELETE' && path.startsWith('/api/orbs/')) {
         final id = path.substring('/api/orbs/'.length);
+        final raw = await utf8.decodeStream(request);
+        deleteBodies.add(raw);
         response.headers.contentType = ContentType.json;
         if (id == 'missing') {
           response.statusCode = HttpStatus.notFound;
@@ -121,10 +125,91 @@ void main() {
         } else if (id == 'exists') {
           response.statusCode = HttpStatus.conflict;
           response.write(jsonEncode({'error': 'orb_exists'}));
+        } else if (id == 'refused') {
+          response.statusCode = HttpStatus.conflict;
+          response.write(
+            jsonEncode({
+              'error': 'deletion_refused',
+              'id': 'refused',
+              'reasons': ['dirty_tree', 'unpushed_commits'],
+              'dirty': ['M src/app.dart'],
+              'unpushedCount': 2,
+            }),
+          );
         } else {
           deleted.add(id);
           response.statusCode = HttpStatus.noContent;
         }
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' && path == '/api/orbs/orb_1/update') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.ok;
+        response.write(
+          jsonEncode({
+            'id': 'orb_1',
+            'name': 'api',
+            'project': 'p1',
+            'branch': 'orb/orb_1',
+            'state': 'running',
+            'created': '2025-01-01T00:00:00Z',
+            'url': 'http://127.0.0.1:49300',
+          }),
+        );
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' && path == '/api/orbs/busy/update') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.badRequest;
+        response.write(
+          jsonEncode({
+            'error': 'update_busy',
+            'details': 'the orb has an active session',
+          }),
+        );
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' && path == '/api/orbs/failsboot/update') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.badGateway;
+        response.write(
+          jsonEncode({
+            'error': 'orb_boot_failed',
+            'details': 'the container exited',
+            'logTail': ['[orb] stage: starting', 'fatal: no good'],
+          }),
+        );
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' && path == '/api/orbs/missing/update') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.notFound;
+        response.write(jsonEncode({'error': 'not_found'}));
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' && path == '/api/orbs/orb_1/export') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.ok;
+        response.write(
+          jsonEncode({'path': '/proj/one/api-orb_1-20250101-000000UTC.tar.gz'}),
+        );
+        await response.close();
+        return;
+      }
+      if (request.method == 'POST' && path == '/api/orbs/nocheckout/export') {
+        response.headers.contentType = ContentType.json;
+        response.statusCode = HttpStatus.badRequest;
+        response.write(
+          jsonEncode({
+            'error': 'missing_checkout',
+            'details': 'no checkout for the project',
+          }),
+        );
         await response.close();
         return;
       }
@@ -304,5 +389,147 @@ void main() {
         ),
       );
     });
+  });
+
+  group('OrbsClient delete (protected deletion, issue #98)', () {
+    test('a 204 is the removal; no body is sent when not forced', () async {
+      await client.delete('orb_1');
+      expect(deleted, ['orb_1']);
+      expect(deleteBodies, ['']);
+    });
+
+    test('the force delete sends the force body', () async {
+      await client.delete('orb_1', force: true);
+      expect(deleted, ['orb_1']);
+      expect(deleteBodies, ['{"force":true}']);
+    });
+
+    test(
+      'a 409 deletion_refused is an OrbsClientError with the wire code',
+      () async {
+        await expectLater(
+          client.delete('refused'),
+          throwsA(
+            isA<OrbsClientError>()
+                .having((e) => e.statusCode, 'statusCode', HttpStatus.conflict)
+                .having((e) => e.message, 'message', 'deletion_refused'),
+          ),
+        );
+        expect(deleted, isEmpty);
+      },
+    );
+
+    test('a 404 is an OrbsClientError', () async {
+      await expectLater(
+        client.delete('missing'),
+        throwsA(
+          isA<OrbsClientError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            HttpStatus.notFound,
+          ),
+        ),
+      );
+      expect(deleted, isEmpty);
+    });
+  });
+
+  group('OrbsClient update (issue #98)', () {
+    test('a 200 decodes the record', () async {
+      final record = await client.update('orb_1');
+      expect(
+        record,
+        const OrbRecord(
+          id: 'orb_1',
+          name: 'api',
+          project: 'p1',
+          branch: 'orb/orb_1',
+          state: 'running',
+          created: '2025-01-01T00:00:00Z',
+          url: 'http://127.0.0.1:49300',
+        ),
+      );
+    });
+
+    test(
+      'a 400 refusal is an OrbCreateError with its code and details',
+      () async {
+        await expectLater(
+          client.update('busy'),
+          throwsA(
+            isA<OrbCreateError>()
+                .having(
+                  (e) => e.statusCode,
+                  'statusCode',
+                  HttpStatus.badRequest,
+                )
+                .having((e) => e.code, 'code', 'update_busy')
+                .having(
+                  (e) => e.details,
+                  'details',
+                  'the orb has an active session',
+                ),
+          ),
+        );
+      },
+    );
+
+    test('a failed re-boot is an OrbCreateError with the log tail', () async {
+      await expectLater(
+        client.update('failsboot'),
+        throwsA(
+          isA<OrbCreateError>()
+              .having((e) => e.statusCode, 'statusCode', HttpStatus.badGateway)
+              .having((e) => e.code, 'code', OrbCreateError.bootFailed)
+              .having((e) => e.logTail, 'logTail', [
+                '[orb] stage: starting',
+                'fatal: no good',
+              ]),
+        ),
+      );
+    });
+
+    test('a 404 is an OrbCreateError with the wire code', () async {
+      await expectLater(
+        client.update('missing'),
+        throwsA(
+          isA<OrbCreateError>()
+              .having((e) => e.statusCode, 'statusCode', HttpStatus.notFound)
+              .having((e) => e.code, 'code', 'not_found'),
+        ),
+      );
+    });
+  });
+
+  group('OrbsClient export (issue #98)', () {
+    test('a 200 returns the export path', () async {
+      expect(
+        await client.export('orb_1'),
+        '/proj/one/api-orb_1-20250101-000000UTC.tar.gz',
+      );
+    });
+
+    test(
+      'a 400 refusal is an OrbCreateError with its code and details',
+      () async {
+        await expectLater(
+          client.export('nocheckout'),
+          throwsA(
+            isA<OrbCreateError>()
+                .having(
+                  (e) => e.statusCode,
+                  'statusCode',
+                  HttpStatus.badRequest,
+                )
+                .having((e) => e.code, 'code', 'missing_checkout')
+                .having(
+                  (e) => e.details,
+                  'details',
+                  'no checkout for the project',
+                ),
+          ),
+        );
+      },
+    );
   });
 }

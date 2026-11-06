@@ -312,12 +312,26 @@ class _FakeOrbsClient extends OrbsClient {
   Object? listError;
   var listCalls = 0;
 
+  /// The (issue #98) workspace-export script: the path [export] answers
+  /// with, an error to throw, and a gate to hold the call in flight.
+  String exportResult = '/code/app/api-orb-20250101-000000UTC.tar.gz';
+  Object? exportError;
+  final List<String> exported = [];
+
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
     listCalls++;
     final error = listError;
     if (error is Object) throw error;
     return orbs;
+  }
+
+  @override
+  Future<String> export(String id) async {
+    exported.add(id);
+    final error = exportError;
+    if (error is Object) throw error;
+    return exportResult;
   }
 }
 
@@ -936,6 +950,86 @@ void main() {
         expect(find.text('working in the orb'), findsOneWidget);
         expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsOneWidget);
         expect(find.text('orb_1'), findsOneWidget);
+      });
+    });
+
+    group('workspace export (issue #98)', () {
+      testWidgets('an orb row offers Export workspace…; a host row does not', (
+        tester,
+      ) async {
+        await _pumpTab(tester, rows: [_one, _orbOne]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_orb1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Export workspace…'), findsOneWidget);
+        expect(find.text('Delete session…'), findsOneWidget);
+        // A tap outside the menu closes it (the barrier).
+        await tester.tapAt(const Offset(5, 5));
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Export workspace…'), findsNothing);
+        expect(find.text('Delete session…'), findsOneWidget);
+      });
+
+      testWidgets('exporting exports the orb, reports the path, and clears', (
+        tester,
+      ) async {
+        final orbs = _FakeOrbsClient();
+        orbs.exportResult = '/code/app/api-orb-20261106-101500UTC.tar.gz';
+        await _pumpTab(tester, rows: [_orbOne], orbs: orbs);
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_orb1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Export workspace…'));
+        await tester.pumpAndSettle();
+
+        expect(orbs.exported, ['orb_1']);
+        expect(
+          find.text(
+            'Workspace exported to /code/app/api-orb-20261106-101500UTC.tar.gz.',
+          ),
+          findsOneWidget,
+        );
+        // The row's spinner is gone once the export lands.
+        expect(find.byKey(const ValueKey('session-ses_orb1')), findsOneWidget);
+      });
+
+      testWidgets('a failed export reports the decoded wire error', (
+        tester,
+      ) async {
+        final orbs = _FakeOrbsClient();
+        orbs.exportError = const OrbCreateError(
+          statusCode: 400,
+          code: 'missing_checkout',
+          details: 'no local clone for project p1',
+        );
+        await _pumpTab(tester, rows: [_orbOne], orbs: orbs);
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_orb1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Export workspace…'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.text(
+            'Could not export the workspace: no local clone for project p1',
+          ),
+          findsOneWidget,
+        );
       });
     });
   });

@@ -140,6 +140,102 @@ class OrbsClient {
     }
   }
 
+  /// The protected deletion (issue #98, spec §2.7): `DELETE /api/orbs/<id>`
+  /// — the bridge evaluates the deletion guard (dirty tree, unpushed
+  /// commits) and refuses with a 409 `deletion_refused` (an
+  /// [OrbsClientError] carrying the code) unless [force] overrides it (the
+  /// explicit human force-delete — the card's confirm dialog). An `orphan`
+  /// record goes through the orphan cleanup (its 404 surfaces here too); a
+  /// 204 is the removal (container, volumes, state dir).
+  Future<void> delete(String id, {bool force = false}) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'DELETE',
+        _base.replace(path: 'api/orbs/$id'),
+        body: force ? jsonEncode({'force': true}) : null,
+        contentType: force ? ContentType.json : null,
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.noContent) {
+        throw OrbsClientError(response.statusCode, _detail(body));
+      }
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// The per-orb image update (issue #98, spec §2.8): the bridge recreates
+  /// the container on the current image over the same volumes (the
+  /// workspace preserved, the marker untouched — a stopped orb stays
+  /// stopped, a running orb comes back running). The bridge blocks for the
+  /// whole re-boot of a running orb; a failure surfaces as an
+  /// [OrbCreateError] (the 400 `not_updatable` / `update_busy` refusals and
+  /// the 502 `orb_boot_failed` with its log tail) or an [OrbsClientError]
+  /// (the 503 when the orb password cannot be read).
+  Future<OrbRecord> update(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/orbs/$id/update'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode == HttpStatus.ok) {
+        return OrbRecord.fromJson(jsonDecode(body));
+      }
+      throw _createError(response.statusCode, body);
+    } on OrbCreateError {
+      rethrow;
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// The `docker cp` export (issue #98, spec §3.4): the bridge writes a
+  /// lossless tar.gz of the orb's whole workspace next to the project's
+  /// local clone and answers 200 with its path. A failure surfaces as an
+  /// [OrbCreateError] (the 400 `missing_checkout` / `missing_workspace`
+  /// refusals) or an [OrbsClientError].
+  Future<String> export(String id) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/orbs/$id/export'),
+        auth: _auth,
+      );
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode == HttpStatus.ok) {
+        final decoded = jsonDecode(body);
+        final path = decoded is Map<String, Object?> ? decoded['path'] : null;
+        return path is String ? path : '';
+      }
+      throw _createError(response.statusCode, body);
+    } on OrbCreateError {
+      rethrow;
+    } on OrbsClientError {
+      rethrow;
+    } catch (error) {
+      throw OrbsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// The orb stop (issue #97, spec §2.5): the single trigger for every orb
   /// death path — every session exported to the host checkout and deleted
   /// from the orb only after its import, the container stopped last, the
