@@ -405,6 +405,19 @@ class BridgeServer {
     }
     server.listen(bridge._route);
     await bridge._listenOnHostIp();
+    // The startup recovery (issue #102, spec §2.11): the bridge owns every
+    // start. It runs after the port is bound and unawaited — a crashed
+    // host's auto-wakes (each a full boot wait) must never hold up the
+    // HTTP surface, and a failed one rides its own catch: the fleet shows
+    // the boot-failure/broken states, the bridge stays up.
+    if (orbService != null) {
+      unawaited(
+        orbService.recover().catchError((Object _) {
+          // A failed recovery degrades to the boot-failure / broken states
+          // (spec §2.11) — never a silent data loss, never a dead bridge.
+        }),
+      );
+    }
     return bridge;
   }
 
@@ -1050,14 +1063,16 @@ class BridgeServer {
           return;
         }
       }
-      // The orb lifecycle actions (issue #97, #98): `POST
+      // The orb lifecycle actions (issue #97, #98, #102): `POST
       // /api/orbs/<id>/stop` (the single trigger for every orb death path —
       // the sessions moved to the host, the container stopped last, the
       // `ocb.stopped` marker set), `POST /api/orbs/<id>/wake` (the full
       // start path re-run, the marker off), `POST /api/orbs/<id>/sessions`
       // (a new session in the orb workspace), `POST /api/orbs/<id>/update`
       // (the per-orb image update, spec §2.8), `POST /api/orbs/<id>/export`
-      // (the `docker cp` tar.gz export, spec §3.4). Checked before the
+      // (the `docker cp` tar.gz export, spec §3.4), `POST
+      // /api/orbs/<id>/fresh-state` (the broken orb's wake over a recreated
+      // state dir, issue #102). Checked before the
       // session matchers (a bare path would otherwise read as a session id
       // to them).
       if (request.method == 'POST') {
@@ -2679,7 +2694,10 @@ class BridgeServer {
   /// recreated on the current image over the same volumes, never forced)
   /// answers 200 with the record (a stopped orb stays stopped); `export`
   /// (the `docker cp` tar.gz of the whole workspace, spec §3.4) answers 200
-  /// with `{'path': <the export file>}`. The error mapping: a missing orb a
+  /// with `{'path': <the export file>}`; `fresh-state` (issue #102, spec
+  /// §9.4 — the broken orb's wake over a recreated state dir: keeps the
+  /// workspace, loses the in-orb sessions) answers 200 with the running
+  /// record. The error mapping: a missing orb a
   /// 404; a named refusal a 400 with its code and message; a failed boot a
   /// 502 `orb_boot_failed` with the log tail; a missing session
   /// prerequisite (no host CLI, no host service, no checkout, no orb
@@ -2717,6 +2735,14 @@ class BridgeServer {
           final path = await orbs.export(id);
           response.statusCode = HttpStatus.ok;
           response.write(jsonEncode({'path': path}));
+          break;
+        case 'fresh-state':
+          // The broken orb's start-with-fresh-state (issue #102, spec
+          // §9.4): the full wake over a recreated state dir; the error
+          // mapping is the wake's.
+          final fresh = await orbs.startWithFreshState(id);
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode(fresh.toJson()));
           break;
         default: // 'sessions'
           final session = await orbs.createSessionOnOrb(id);
@@ -2845,10 +2871,9 @@ class BridgeServer {
   }
 
   /// The (orb id, action) behind an orb lifecycle path
-  /// `/api/orbs/<id>/<action>` (issue #97, #98), or `null` when [path] is
-  /// not one (the bare orb-detail path has no action segment, and any word
-  /// other than `stop`, `wake`, `sessions`, `update`, or `export` is not an
-  /// action).
+  /// `/api/orbs/<id>/<action>` (issue #97, #98, #102), or `null` when
+  /// [path] is not one (the bare orb-detail path has no action segment, and
+  /// any word outside [_orbActions] is not an action).
   static (String, String)? _orbActionIn(String path) {
     const prefix = '/api/orbs/';
     if (!path.startsWith(prefix)) return null;
@@ -2858,15 +2883,19 @@ class BridgeServer {
     final id = rest.substring(0, slash);
     final action = rest.substring(slash + 1);
     if (id.isEmpty || id.contains('/') || action.contains('/')) return null;
-    if (action != 'stop' &&
-        action != 'wake' &&
-        action != 'sessions' &&
-        action != 'update' &&
-        action != 'export') {
-      return null;
-    }
+    if (!_orbActions.contains(action)) return null;
     return (id, action);
   }
+
+  /// The action words of `/api/orbs/<id>/<action>` (issues #97, #98, #102).
+  static const Set<String> _orbActions = {
+    'stop',
+    'wake',
+    'sessions',
+    'update',
+    'export',
+    'fresh-state',
+  };
 
   /// The session id in a move-to-orb path `/api/sessions/{id}/move-to-orb`
   /// (issue #97), or `null` when [path] is not one (the body carries the

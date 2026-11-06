@@ -14,6 +14,7 @@ void main() {
   late List<String> deleted;
   late List<String> deleteBodies;
   late int rebuildCalls;
+  late List<(String, String)> orbActions;
 
   setUp(() async {
     prQueries = [];
@@ -21,12 +22,45 @@ void main() {
     deleted = [];
     deleteBodies = [];
     rebuildCalls = 0;
+    orbActions = [];
     server = await HttpServer.bind('127.0.0.1', 0);
     base = Uri.parse('http://127.0.0.1:${server.port}/');
     client = OrbsClient(base);
     server.listen((request) async {
       final response = request.response;
       final path = request.uri.path;
+      final freshMatch = RegExp(r'^/api/orbs/([^/]+)/fresh-state$')
+          .firstMatch(path);
+      if (request.method == 'POST' && freshMatch != null) {
+        final id = freshMatch.group(1)!;
+        orbActions.add((id, 'fresh-state'));
+        response.headers.contentType = ContentType.json;
+        if (id == 'refused-state') {
+          response.statusCode = HttpStatus.badRequest;
+          response.write(
+            jsonEncode({
+              'error': 'not_wakeable',
+              'details': 'only a broken orb whose state dir is missing',
+            }),
+          );
+          await response.close();
+          return;
+        }
+        response.statusCode = HttpStatus.ok;
+        response.write(
+          jsonEncode({
+            'id': id,
+            'name': 'dev',
+            'project': 'p1',
+            'branch': 'orb/$id',
+            'state': 'running',
+            'created': '2025-01-04T00:00:00Z',
+            'url': 'http://127.0.0.1:49300',
+          }),
+        );
+        await response.close();
+        return;
+      }
       if (request.method == 'GET' && path == '/api/orbs') {
         prQueries.add(request.uri.queryParameters['pr']);
         response.headers.contentType = ContentType.json;
@@ -527,6 +561,33 @@ void main() {
                   'details',
                   'no checkout for the project',
                 ),
+          ),
+        );
+      },
+    );
+  });
+
+  group('OrbsClient startWithFreshState (issue #102)', () {
+    test('posts the action and decodes the record', () async {
+      final record = await client.startWithFreshState('orb_5');
+      expect(orbActions, [('orb_5', 'fresh-state')]);
+      expect(record.state, 'running');
+      expect(record.url, 'http://127.0.0.1:49300');
+    });
+
+    test(
+      'a 400 refusal is an OrbCreateError with its code and details',
+      () async {
+        await expectLater(
+          client.startWithFreshState('refused-state'),
+          throwsA(
+            isA<OrbCreateError>()
+                .having(
+                  (e) => e.statusCode,
+                  'statusCode',
+                  HttpStatus.badRequest,
+                )
+                .having((e) => e.code, 'code', 'not_wakeable'),
           ),
         );
       },
