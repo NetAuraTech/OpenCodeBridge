@@ -710,9 +710,11 @@ class OrbService {
   /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
   /// never auto-deleted; issue #96): removes the orphan's labeled volumes
   /// (`orb-<id>-workspace`, `orb-<id>-data` — either or both) and its state
-  /// dir. [OrbExistsError] when a container still exists for the id (a live
-  /// orb is not an orphan — its force-delete lands with the lifecycle
-  /// actions, #98); [OrbOrphanNotFoundError] when neither volume exists.
+  /// dir, the state dir best-effort (issue #111: its container-written
+  /// subtree is root-owned on the host). [OrbExistsError] when a container
+  /// still exists for the id (a live orb is not an orphan — its force-delete
+  /// lands with the lifecycle actions, #98); [OrbOrphanNotFoundError] when
+  /// neither volume exists.
   Future<void> deleteOrphan(String id) async {
     final container = await run(['inspect', 'orb-$id', '--format', '{{.Id}}']);
     if (container.exitCode == 0) {
@@ -744,7 +746,42 @@ class OrbService {
     }
     final stateDir = Directory('${stateRoot.path}/$id');
     if (stateDir.existsSync()) {
-      stateDir.deleteSync(recursive: true);
+      _deleteStateDirBestEffort(stateDir);
+    }
+  }
+
+  /// Deletes [dir] recursively, best-effort (issue #111): the state dir is
+  /// bind-mounted into the container as `/root/.local`, so the entries the
+  /// container's (root) processes wrote are root-owned on the host and
+  /// cannot be unlinked by the host user. A plain recursive delete throws
+  /// mid-sequence on the first such entry; instead this deletes bottom-up
+  /// what the host user owns and keeps the root-owned remainder — a tiny
+  /// leftover subtree under the state root, which `sudo rm -rf` still
+  /// clears. Never throws.
+  void _deleteStateDirBestEffort(Directory dir) {
+    List<FileSystemEntity> entries;
+    try {
+      entries = dir.listSync(followLinks: false);
+    } on FileSystemException {
+      // Not even listable (a root-owned, non-readable dir): kept as is.
+      return;
+    }
+    for (final entity in entries) {
+      try {
+        if (entity is Directory) {
+          _deleteStateDirBestEffort(entity);
+        }
+        entity.deleteSync(recursive: false);
+      } on FileSystemException {
+        // Root-owned (or raced away): kept, reported by its absence from a
+        // fully deleted tree — the orphan cleanup as a whole stays
+        // successful.
+      }
+    }
+    try {
+      dir.deleteSync(recursive: false);
+    } on FileSystemException {
+      // A non-empty dir (a kept root-owned entry) or a root-owned dir.
     }
   }
 

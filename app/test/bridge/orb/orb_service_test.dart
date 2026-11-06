@@ -1104,6 +1104,49 @@ void main() {
       expect(stateDir.existsSync(), isFalse);
     });
 
+    test(
+      'deleteOrphan best-effort deletes a state dir with root-owned '
+      'entries: owned entries go, the undeletable subtree stays, no throw',
+      () async {
+        // Issue #111: the bind-mounted state dir's in-container subtree is
+        // written by the container's root processes and cannot be unlinked
+        // by the host user. Simulated (rootless) by a non-writable subdir:
+        // unlinking its entries fails with the same EACCES.
+        if (_runningAsRoot()) return;
+        const id = 'eeeeeeeeeeeeeeee';
+        docker.inspectIdResult = const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'no such container',
+        );
+        docker.volumeLsResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-$id-data\n',
+          stderr: '',
+        );
+        final stateDir = Directory('${stateRoot.path}/$id')
+          ..createSync(recursive: true);
+        File('${stateDir.path}/stopped').writeAsStringSync('ts');
+        final share = Directory('${stateDir.path}/share/opencode')
+          ..createSync(recursive: true);
+        File('${share.path}/opencode.db').writeAsStringSync('db');
+        Process.runSync('chmod', ['555', share.path], runInShell: false);
+        addTearDown(
+          () =>
+              Process.runSync('chmod', ['755', share.path], runInShell: false),
+        );
+
+        await service().deleteOrphan(id);
+
+        // The volumes are removed and the user-owned entries are gone; the
+        // root-like subtree survives; the delete never threw.
+        expect(docker.volumeRmNames, ['orb-$id-data']);
+        expect(File('${stateDir.path}/stopped').existsSync(), isFalse);
+        expect(Directory('${stateDir.path}/share').existsSync(), isTrue);
+        expect(File('${share.path}/opencode.db').existsSync(), isTrue);
+      },
+    );
+
     test('deleteOrphan refuses a live container', () async {
       const id = 'eeeeeeeeeeeeeeee';
       docker.inspectIdResult = const DockerCliResult(
@@ -1232,4 +1275,15 @@ void main() {
       expect(OrbService.githubRepo(''), isNull);
     });
   });
+}
+
+/// Whether the test runs as root, under which a chmod-555 directory is still
+/// writable and the deletion denial cannot be exercised.
+bool _runningAsRoot() {
+  try {
+    final out = Process.runSync('id', ['-u'], runInShell: true);
+    return out.exitCode == 0 && out.stdout.toString().trim() == '0';
+  } on Object {
+    return false;
+  }
 }
