@@ -564,6 +564,14 @@ void main() {
       Directory('${stateRoot.path}/$orbId').createSync(recursive: true);
     }
 
+    /// The last injection's staging copy (bridge-owned, deleted with the
+    /// orb — spec §2.7: nothing orb-related remains).
+    void stagedDir() {
+      final staged = Directory('${stateRoot.path}/staged-$orbId')
+        ..createSync(recursive: true);
+      File('${staged.path}/opencode.jsonc').writeAsStringSync('{}');
+    }
+
     void setMarker() {
       File('${stateRoot.path}/$orbId/stopped')
         ..createSync(recursive: true)
@@ -894,6 +902,7 @@ void main() {
           'volumes, and the state dir', () async {
         addOrb(port: 49101);
         stateDir();
+        stagedDir();
         docker.execRespond = (argv) {
           if (argv.last == '--porcelain') {
             return const DockerCliResult(
@@ -906,6 +915,11 @@ void main() {
         };
 
         await service().delete(orbId, force: true);
+
+        expect(
+          Directory('${stateRoot.path}/staged-$orbId').existsSync(),
+          isFalse,
+        );
 
         expect(
           argsIndex(docker.runArgs, ['rm', '-f', container]),
@@ -1002,6 +1016,7 @@ void main() {
       test('an orphan goes through the explicit orphan cleanup', () async {
         addOrphan();
         stateDir();
+        stagedDir();
 
         await service().delete(orbId);
 
@@ -1010,6 +1025,10 @@ void main() {
           'orb-$orbId-data',
         ]);
         expect(Directory('${stateRoot.path}/$orbId').existsSync(), isFalse);
+        expect(
+          Directory('${stateRoot.path}/staged-$orbId').existsSync(),
+          isFalse,
+        );
       });
 
       test('an unknown id throws OrbNotFoundError', () {

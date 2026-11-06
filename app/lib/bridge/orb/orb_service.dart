@@ -818,6 +818,7 @@ class OrbService {
     // orphan's container is gone, so the throwaway clean runs on the
     // current shared image.
     await _removeStateDir(id, await imageBuilder.ensureImage());
+    _removeStagedConfig(id);
   }
 
   // ------------------------------------------------------------------------
@@ -1406,8 +1407,17 @@ class OrbService {
     // the volumes still mark the orb and a retry re-enters through the
     // orphan cleanup — nothing left dangling.
     await _removeStateDir(id, image ?? await imageBuilder.ensureImage());
+    _removeStagedConfig(id);
     await _removeVolume('orb-$id-workspace');
     await _removeVolume('orb-$id-data');
+  }
+
+  /// The last create/update/wake's config staging copy (`staged-<id>` in
+  /// the state root, bridge-owned): a throwaway of the injection, gone with
+  /// the deletion (nothing orb-related remains, spec §2.7).
+  void _removeStagedConfig(String id) {
+    final staged = Directory('${stateRoot.path}/staged-$id');
+    if (staged.existsSync()) staged.deleteSync(recursive: true);
   }
 
   /// Removes the orb's state dir. The dir itself is bridge-owned, but the
