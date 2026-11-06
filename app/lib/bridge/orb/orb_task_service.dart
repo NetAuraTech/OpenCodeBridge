@@ -1,0 +1,501 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+
+import '../../model/command.dart';
+import '../../model/orb.dart';
+import '../sessions/backend.dart';
+import '../sessions/opencode_service.dart';
+import 'orb_service.dart';
+import 'orb_task.dart';
+
+/// The caller could not be resolved to a known session or project directory,
+/// so the task's project is unknown (`orb_spawn` takes no project — the
+/// session knows it, spec §8.2).
+class OrbSpawnProjectError implements Exception {
+  const OrbSpawnProjectError();
+  @override
+  String toString() => 'OrbSpawnProjectError()';
+}
+
+/// Several orbs exist in the project and none was targeted (spec §8.2's
+/// targeting refusal — the tool lists them and retries with an explicit
+/// name once the targeting argument lands, issue #100).
+class OrbAmbiguousError implements Exception {
+  const OrbAmbiguousError(this.project, this.names);
+
+  final String project;
+  final List<String> names;
+
+  @override
+  String toString() => 'OrbAmbiguousError($project: $names)';
+}
+
+/// No task with this id (the persisted tasks.json is the single source).
+class OrbTaskNotFoundError implements Exception {
+  const OrbTaskNotFoundError(this.id);
+
+  final String id;
+
+  @override
+  String toString() => 'OrbTaskNotFoundError($id)';
+}
+
+/// The spawn surface's task service (issue #99, spec §8.2/§8.3): what the
+/// bridge does behind the `orb_spawn`/`orb_wait` global tools.
+///
+/// - **Wake-or-create** on the project's single orb: none → create (name
+///   derived from the task), one → wake (idempotent — a running orb is
+///   returned as-is). Several orbs → [OrbAmbiguousError] (targeting is
+///   issue #100's).
+/// - **Dispatch**: a fresh session on the orb's service (one session per
+///   task), the calling session's model by default, then the task prompt.
+/// - **Completion**: the orb session's turn outcome polled on [pollInterval]
+///   (spec §7.2: the bridge aggregates the orb's opencode session, so the
+///   session detail routes to the orb through the composite). At completion
+///   the record takes the status, the agent's summary, the branch, and the
+///   PR URL if the branch has one, is persisted, and the completion message
+///   is **injected into the calling session** — dropped when that session is
+///   dead (the orb keeps running; the result stays persisted, spec §8.3).
+/// - **Persistence**: every task lives in one JSON file (the tasks file,
+///   next to the bridge's other app-owned state), rewritten on every change.
+///   A restarted bridge resumes watching the tasks that were still running.
+class OrbTaskService {
+  OrbTaskService({
+    required this.orbs,
+    required this.sessions,
+    required this.file,
+    this.pollInterval = const Duration(seconds: 2),
+    Random? random,
+  }) : _random = random ?? Random() {
+    _load();
+    unawaited(_resume());
+  }
+
+  /// The orb lifecycle service (wake-or-create, the PR read through the
+  /// orb list).
+  final OrbService orbs;
+
+  /// The composite sessions backend: project lookup, the per-orb session
+  /// create, the task prompt, and the completion injection all route through
+  /// it (host and orb sessions alike, spec §7.2).
+  final SessionsBackend sessions;
+
+  /// The tasks file (`~/.config/opencodebridge/tasks.json`).
+  final File file;
+
+  /// The completion poll pace; also the test seam (tests drive completion
+  /// with a scripted session detail rather than wall time).
+  final Duration pollInterval;
+
+  final Random _random;
+
+  /// The live task records, newest first.
+  final List<OrbTask> _tasks = [];
+
+  /// Per-project spawn serialization: two concurrent spawns of one project
+  /// must not both decide "no orb — create".
+  final Map<String, Future<void>> _spawningByProject = {};
+
+  bool _watching = false;
+  bool _closed = false;
+
+  /// The persisted + live tasks, newest first.
+  List<OrbTask> get tasks => List.unmodifiable(_tasks);
+
+  /// The task with [id], or `null`.
+  OrbTask? task(String id) {
+    for (final task in _tasks) {
+      if (task.id == id) return task;
+    }
+    return null;
+  }
+
+  /// Dispatch [task] on the project's orb (spec §8.2) and return it.
+  ///
+  /// [callerSession] (the calling session id) and [callerDirectory] (its
+  /// working directory, as the tool's context reports it) identify the
+  /// caller: the project is resolved from the session row, falling back to
+  /// the directory; [callerSession] is also the completion-injection target.
+  /// [model] defaults to the calling session's model. [wait] true (the
+  /// tool-facing default) blocks until the task completes; false returns the
+  /// dispatched record immediately — the completion watcher then persists
+  /// the result and injects the completion message.
+  Future<OrbTask> spawn({
+    required String task,
+    ModelRef? model,
+    bool wait = true,
+    String? callerSession,
+    String? callerDirectory,
+  }) async {
+    final trimmed = task.trim();
+    if (trimmed.isEmpty) {
+      throw const OrbSpawnProjectError();
+    }
+    final projectId = await _resolveProject(callerSession, callerDirectory);
+    // Serialize per project so concurrent spawns wake-or-create one orb.
+    final previous = _spawningByProject[projectId] ?? Future<void>.value();
+    final gate = previous.then((_) {}, onError: (_) {});
+    final done = Completer<void>();
+    final result = gate.then((_) async {
+      try {
+        return await _spawnLocked(
+          projectId: projectId,
+          task: trimmed,
+          model: model,
+          callerSession: callerSession,
+          callerDirectory: callerDirectory,
+        );
+      } finally {
+        done.complete();
+        if (_spawningByProject[projectId] == done.future) {
+          _spawningByProject.remove(projectId);
+        }
+      }
+    });
+    _spawningByProject[projectId] = done.future;
+    final dispatched = await result;
+    if (!wait) return dispatched;
+    return _awaitCompletion(dispatched);
+  }
+
+  Future<OrbTask> _spawnLocked({
+    required String projectId,
+    required String task,
+    ModelRef? model,
+    String? callerSession,
+    String? callerDirectory,
+  }) async {
+    final record = await _wakeOrCreateOrb(projectId, task);
+
+    // The task's session on the orb's service (one session per task, so the
+    // turn outcome is unambiguous for completion detection).
+    final session = await orbs.createSessionOnOrb(record.id);
+
+    // The model: the caller's explicit one, else the calling session's
+    // (spec §8.2's default), best-effort.
+    final effective = model ?? await _callerModel(callerSession);
+    if (effective != null) {
+      try {
+        await sessions.setModel(session.id, effective);
+      } catch (_) {
+        // A model the orb's service rejects: the session keeps its default.
+      }
+    }
+
+    final dispatched = OrbTask(
+      id: 'task_${_token()}',
+      orb: record.id,
+      orbName: record.name,
+      branch: record.branch,
+      session: session.id,
+      callerSession: callerSession,
+      callerDirectory: callerDirectory,
+      task: task,
+      created: DateTime.now().millisecondsSinceEpoch,
+    );
+    _tasks.insert(0, dispatched);
+    _persist();
+
+    try {
+      await sessions.prompt(session.id, _taskPrompt(record, task));
+    } catch (e) {
+      // The dispatch itself failed: the task can never run, so it settles
+      // failed right here (and the caller sees the error).
+      dispatched.status = 'failed';
+      dispatched.summary = 'the task prompt could not be delivered: $e';
+      dispatched.completed = DateTime.now().millisecondsSinceEpoch;
+      _persist();
+      rethrow;
+    }
+    _startWatching();
+    return dispatched;
+  }
+
+  /// Block until the task completes; returns the completed record (an
+  /// already-completed task returns immediately). Used by `wait: true` and
+  /// by the tool-facing `orb_wait`.
+  Future<OrbTask> wait(String taskId) async {
+    final found = task(taskId);
+    if (found == null) throw OrbTaskNotFoundError(taskId);
+    return _awaitCompletion(found);
+  }
+
+  Future<OrbTask> _awaitCompletion(OrbTask target) async {
+    if (target.isDone) return target;
+    // Poll the shared record — any path that completes the task (this call,
+    // the watcher, a concurrent waiter) settles this one too. A closed
+    // service ends the wait with the record as it stands.
+    while (!target.isDone && !_closed) {
+      try {
+        await _check(target);
+      } catch (_) {
+        // A transient service failure: the next pass retries.
+      }
+      if (target.isDone) break;
+      await Future<void>.delayed(pollInterval);
+    }
+    return target;
+  }
+
+  /// The project's single orb, woken (or created) through the existing
+  /// lifecycle (spec §8.2's wake-or-create).
+  Future<OrbRecord> _wakeOrCreateOrb(String projectId, String task) async {
+    final rows = await orbs.list();
+    final inProject = [
+      for (final row in rows)
+        if (row.project == projectId && row.state != 'orphan') row,
+    ];
+    if (inProject.length > 1) {
+      throw OrbAmbiguousError(projectId, [
+        for (final row in inProject) row.name,
+      ]);
+    }
+    if (inProject.length == 1) {
+      final row = inProject.single;
+      if (row.state == 'running') return row;
+      if (row.state == 'stopped') return orbs.wake(row.id);
+      throw OrbRefusalError(
+        OrbRefusalError.notRunning,
+        'the project orb ${row.name} is ${row.state} — spawn refused',
+      );
+    }
+    // No orb: create one, name derived from the task (spec §8.2).
+    String? checkout;
+    try {
+      for (final project in await sessions.projects()) {
+        if (project.id == projectId) checkout = project.canonical;
+      }
+    } on OpencodeServiceError {
+      // The service is unreachable: the checkout stays unknown.
+    }
+    if (checkout == null) throw const OrbSpawnProjectError();
+    final existing = {for (final row in rows) row.name};
+    return orbs.create(
+      project: projectId,
+      name: _derivedName(task, existing),
+      checkout: checkout,
+    );
+  }
+
+  /// A short kebab name derived from the task (lowercase, at most three
+  /// words, a numeric suffix when taken in the project).
+  String _derivedName(String task, Set<String> existing) {
+    final words = task
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .trim()
+        .split(' ')
+        .where((w) => w.isNotEmpty)
+        .take(3)
+        .join('-');
+    final base = words.length > 32 ? words.substring(0, 32) : words;
+    if (base.isEmpty) return _unique('orb', existing);
+    return _unique(base, existing);
+  }
+
+  String _unique(String base, Set<String> existing) {
+    if (!existing.contains(base)) return base;
+    for (var i = 2; ; i++) {
+      if (!existing.contains('$base-$i')) return '$base-$i';
+    }
+  }
+
+  /// Resolve the task's project id (spec §8.2: the session knows its
+  /// project): the calling session's project row first, the caller's working
+  /// directory against the project list second. An orb-session caller (a
+  /// nested spawn, spec §1.4) carries its ORB-side project id, which the
+  /// host does not know: it translates through the orb's own record to the
+  /// host project the orb belongs to.
+  Future<String> _resolveProject(
+    String? callerSession,
+    String? callerDirectory,
+  ) async {
+    if (callerSession != null && callerSession.isNotEmpty) {
+      try {
+        final rows = await sessions.list();
+        for (final row in rows) {
+          if (row.id != callerSession) continue;
+          final orbId = row.orb;
+          if (orbId == null) return row.project.id;
+          for (final orb in await orbs.list()) {
+            if (orb.id == orbId) return orb.project;
+          }
+          throw const OrbSpawnProjectError();
+        }
+      } on OpencodeServiceError {
+        // The service is unreachable: fall through to the directory.
+      }
+    }
+    final directory = callerDirectory?.trim();
+    if (directory != null && directory.isNotEmpty) {
+      try {
+        final projects = await sessions.projects();
+        for (final project in projects) {
+          if (project.canonical == directory) return project.id;
+        }
+      } catch (_) {
+        // Same: unknown below.
+      }
+    }
+    throw const OrbSpawnProjectError();
+  }
+
+  Future<ModelRef?> _callerModel(String? callerSession) async {
+    if (callerSession == null || callerSession.isEmpty) return null;
+    try {
+      return await sessions.currentModel(callerSession);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The prompt sent to the orb's agent: the task text plus the branch
+  /// contract (commit — the post-commit hook pushes; PR when the work is
+  /// done, spec §3).
+  String _taskPrompt(OrbRecord record, String task) =>
+      '$task\n\n'
+      '(Orb task: work in this workspace and commit your changes — a '
+      'post-commit hook pushes them to `${record.branch}`. When the whole '
+      'piece of work is done, open the PR with `gh pr create` (head '
+      '`${record.branch}`); one PR per orb, later tasks push to the same '
+      'branch.)';
+
+  // ------------------------------------------------------------------------
+  // Completion watching, persistence, injection
+
+  /// Re-watch the persisted tasks that were still running when the bridge
+  /// (or the service) started: their orb sessions live on, the results are
+  /// still to come, the injection targets a possibly-dead caller (dropped
+  /// then, spec §8.3).
+  Future<void> _resume() async {
+    if (_tasks.any((t) => !t.isDone)) _startWatching();
+  }
+
+  void _startWatching() {
+    if (_watching || _closed) return;
+    _watching = true;
+    unawaited(_watch());
+  }
+
+  /// Stops the completion watcher (the bridge's [BridgeServer.stop]).
+  void close() => _closed = true;
+
+  Future<void> _watch() async {
+    while (!_closed && _tasks.any((t) => !t.isDone)) {
+      for (final task in List.of(_tasks)) {
+        if (!task.isDone) {
+          try {
+            await _check(task);
+          } catch (_) {
+            // A transient service failure: the next pass retries.
+          }
+        }
+      }
+      if (!_tasks.any((t) => !t.isDone)) break;
+      await Future<void>.delayed(pollInterval);
+    }
+    _watching = false;
+  }
+
+  /// One completion check: when the orb session reports a turn outcome, the
+  /// task completes — status, summary, PR, persistence, injection.
+  Future<void> _check(OrbTask target) async {
+    if (target.isDone) return;
+    final detail = await sessions.getDetail(target.session);
+    final outcome = detail.outcome;
+    if (outcome == null) return;
+    // The reads below cross the event loop, so a concurrent waiter (the
+    // `wait: true` path polls too) may have completed the task in the
+    // meantime: the settle below is guarded on the task still being open.
+    if (target.isDone) return;
+    String summary = '';
+    try {
+      final messages = await sessions.getMessages(target.session);
+      for (final message in messages.reversed) {
+        if (message.role == 'assistant' && (message.text ?? '').isNotEmpty) {
+          summary = message.text!;
+          break;
+        }
+      }
+    } catch (_) {
+      // No summary is a fine degraded completion.
+    }
+    target.status = outcome;
+    target.summary = summary;
+    target.pr = await _prUrl(target);
+    target.completed = DateTime.now().millisecondsSinceEpoch;
+    _persist();
+    await _injectCompletion(target);
+  }
+
+  /// The branch's PR URL (the return channel, spec §3.2), read through the
+  /// orb list's PR state; `null` when the branch has no PR (yet) or gh
+  /// cannot answer.
+  Future<String?> _prUrl(OrbTask target) async {
+    try {
+      final rows = await orbs.list(includePr: true);
+      for (final row in rows) {
+        if (row.id == target.orb) return row.pr?.url;
+      }
+    } catch (_) {
+      // Docker or gh unreachable: no PR for this completion.
+    }
+    return null;
+  }
+
+  /// Inject the completion message into the calling session (spec §8.3).
+  /// A dead caller is a dropped notification — the record stays persisted
+  /// and the orb keeps running.
+  Future<void> _injectCompletion(OrbTask target) async {
+    final caller = target.callerSession;
+    if (caller == null || caller.isEmpty) return;
+    final buffer = StringBuffer()
+      ..write('Orb ${target.orbName} done — work on branch `${target.branch}`')
+      ..write('\nStatus: ${target.status}');
+    if (target.summary.isNotEmpty) buffer.write('\n\n${target.summary}');
+    final pr = target.pr;
+    if (pr != null) buffer.write('\n\nPR: $pr');
+    try {
+      await sessions.prompt(caller, buffer.toString());
+    } catch (_) {
+      // The calling session is gone (or the service refuses): the
+      // notification is dropped, spec §8.3.
+    }
+  }
+
+  void _persist() {
+    try {
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(
+        const JsonEncoder.withIndent('  ')
+            .convert([for (final task in _tasks) task.toJson()]),
+      );
+    } catch (_) {
+      // Persistence is best-effort: the live bridge still serves the task.
+    }
+  }
+
+  void _load() {
+    try {
+      if (!file.existsSync()) return;
+      final decoded = jsonDecode(file.readAsStringSync());
+      if (decoded is! List) return;
+      for (final row in decoded) {
+        _tasks.add(OrbTask.fromJson(row));
+      }
+      _tasks.sort((a, b) => b.created.compareTo(a.created));
+    } catch (_) {
+      // A corrupt tasks file starts the surface fresh.
+    }
+  }
+
+  String _token() {
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    return List.generate(
+      8,
+      (_) => alphabet[_random.nextInt(alphabet.length)],
+    ).join();
+  }
+}
