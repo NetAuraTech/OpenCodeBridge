@@ -451,6 +451,12 @@ void main() {
           contains('"bridgeUrl": "http://host.docker.internal:48201"'),
         );
         expect(configText, contains('"model": "test"'));
+        // The host config file itself is never modified (#117).
+        expect(
+          File('${home.path}/.config/opencode/opencode.jsonc')
+              .readAsStringSync(),
+          isNot(contains('host.docker.internal')),
+        );
         expect(File('$staged/service.json').existsSync(), isFalse);
         expect(File('$staged/plugins/p.txt').existsSync(), isTrue);
         // The staged entries ride in per TOP-LEVEL entry: a directory copy
@@ -1167,6 +1173,130 @@ void main() {
         service().list(),
         throwsA(isA<DockerUnavailableError>()),
       );
+    });
+
+    test('rewriteLoopbackUrls swaps the loopback hosts only', () {
+      // Provider baseURL + MCP server URL, port + path kept.
+      expect(
+        OrbService.rewriteLoopbackUrls(
+          '{"baseURL": "http://localhost:8081/v1", '
+          '"url": "http://127.0.0.1:3000/mcp", '
+          '"baseURL2": "https://0.0.0.0:9/"}',
+        ),
+        '{"baseURL": "http://host.docker.internal:8081/v1", '
+        '"url": "http://host.docker.internal:3000/mcp", '
+        '"baseURL2": "https://host.docker.internal:9/"}',
+      );
+      // Remote URLs and loopback without a scheme pass through untouched.
+      expect(
+        OrbService.rewriteLoopbackUrls(
+          '{"baseURL": "https://api.openai.com/v1", "note": "localhost dev"}',
+        ),
+        '{"baseURL": "https://api.openai.com/v1", "note": "localhost dev"}',
+      );
+      // A URL-less config (no provider block) survives untouched.
+      expect(
+        OrbService.rewriteLoopbackUrls('{"model": "test"}'),
+        '{"model": "test"}',
+      );
+      // A loopback URL ending the string (no port/path) is still rewritten.
+      expect(
+        OrbService.rewriteLoopbackUrls('{"url": "http://localhost"}'),
+        '{"url": "http://host.docker.internal"}',
+      );
+    });
+
+    test(
+      'the staging rewrites loopback provider URLs, remote ones untouched',
+      () async {
+        // A host config with a loopback provider + MCP server and a remote
+        // provider (json, not jsonc — the rewrite must cover both names).
+        final config = Directory('${home.path}/.config/opencode')
+          ..createSync(recursive: true);
+        const hostText =
+            '{\n'
+            '  "model": "local-machine/qwen",\n'
+            '  "provider": {\n'
+            '    "local-machine": {\n'
+            '      "settings": { "baseURL": "http://localhost:8081/v1" }\n'
+            '    },\n'
+            '    "remote": {\n'
+            '      "settings": { "baseURL": "https://api.example.com/v1" }\n'
+            '    }\n'
+            '  },\n'
+            '  "mcp": { "local": { "url": "http://127.0.0.1:3000" } }\n'
+            '}\n';
+        File('${config.path}/opencode.json').writeAsStringSync(hostText);
+        const password = 'pw';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          request.response.statusCode = 200;
+          unawaited(request.response.close());
+        });
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+        docker.logs = 'server password $password\n';
+
+        await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        );
+        await http.close(force: true);
+
+        final container = docker.runArgs.firstWhere(
+          (a) => a.first == 'create',
+        )[2];
+        final id = container.substring('orb-'.length);
+        final stagedText = File('${stateRoot.path}/staged-$id/opencode.json')
+            .readAsStringSync();
+        // Loopback URLs rewritten to host.docker.internal, port kept.
+        expect(
+          stagedText,
+          contains('"baseURL": "http://host.docker.internal:8081/v1"'),
+        );
+        expect(
+          stagedText,
+          contains('"url": "http://host.docker.internal:3000"'),
+        );
+        // The remote provider untouched, the rest of the config intact.
+        expect(stagedText, contains('"baseURL": "https://api.example.com/v1"'));
+        expect(stagedText, contains('"model": "local-machine/qwen"'));
+        // The host config file itself is never modified.
+        expect(
+          File('${config.path}/opencode.json').readAsStringSync(),
+          hostText,
+        );
+      },
+    );
+
+    test('the staging survives a config without any provider block', () async {
+      hostConfig(withPlugins: false);
+      const password = 'pw';
+      final http = await HttpServer.bind('127.0.0.1', 0);
+      http.listen((request) {
+        request.response.statusCode = 200;
+        unawaited(request.response.close());
+      });
+      docker.ports =
+          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+      docker.logs = 'server password $password\n';
+
+      await service().create(
+        project: 'proj-1',
+        name: 'dev',
+        checkout: checkout.path,
+      );
+      await http.close(force: true);
+
+      final container = docker.runArgs.firstWhere(
+        (a) => a.first == 'create',
+      )[2];
+      final id = container.substring('orb-'.length);
+      final stagedText = File('${stateRoot.path}/staged-$id/opencode.jsonc')
+          .readAsStringSync();
+      // Untouched apart from the injected bridge URL.
+      expect(stagedText, contains('"model": "test"'));
     });
 
     test('lastServerPassword takes the last line, or null', () {
