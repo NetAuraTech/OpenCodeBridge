@@ -86,6 +86,9 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
         // (detected by the port conflict) never spawns a second tunnel.
         final bridge = await BridgeServer.start(
           tunnel: BridgeServer.defaultTunnel(),
+          // The automated lifecycle pass (issue #101, spec §2.10): server
+          // mode is where the bridge owns orb automation.
+          autoLifecyclePass: true,
         );
         _bridge = bridge;
         _serverError = null;

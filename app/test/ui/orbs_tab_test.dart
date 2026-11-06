@@ -172,6 +172,10 @@ class _FakeOrbsClient extends OrbsClient {
   Object? forceDeleteError;
   Completer<void>? forceDeleteGate;
 
+  /// The broken-orb fresh-state script (issue #102).
+  Object? freshStateError;
+  OrbRecord? freshStateRecord;
+
   var listCalls = 0;
   final List<bool> listIncludePr = [];
   final List<(String, String)> createdRequests = [];
@@ -182,6 +186,7 @@ class _FakeOrbsClient extends OrbsClient {
   final List<String> newSessions = [];
   final List<String> updated = [];
   final List<(String, bool)> forceDeleted = [];
+  final List<String> freshStarted = [];
 
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
@@ -298,6 +303,23 @@ class _FakeOrbsClient extends OrbsClient {
       created: 300,
       location: '/workspace',
       active: false,
+    );
+  }
+
+  @override
+  Future<OrbRecord> startWithFreshState(String id) async {
+    final error = freshStateError;
+    if (error is Object) throw error;
+    freshStarted.add(id);
+    final record = freshStateRecord;
+    if (record != null) return record;
+    return OrbRecord(
+      id: id,
+      name: 'fresh',
+      project: 'p1',
+      branch: 'orb/$id',
+      state: 'running',
+      created: '2025-01-04T00:00:00Z',
     );
   }
 }
@@ -627,12 +649,25 @@ void main() {
         );
       });
 
-      testWidgets('preparing and cleanup-pending cards carry no actions', (
+      testWidgets('a preparing card carries no actions', (tester) async {
+        await _pumpTab(tester, orbs: [_preparing]);
+        expect(_actionsOf(tester, 'orb_2'), 0);
+      });
+
+      testWidgets('a cleanup-pending card carries the stopped actions '
+          '(issue #101: the human Force delete is the documented exit)', (
         tester,
       ) async {
-        await _pumpTab(tester, orbs: [_preparing, _cleanupPending]);
-        expect(_actionsOf(tester, 'orb_2'), 0);
-        expect(_actionsOf(tester, 'orb_7'), 0);
+        await _pumpTab(tester, orbs: [_cleanupPending]);
+        expect(_actionsOf(tester, 'orb_7'), 3);
+        expect(
+          find.byKey(const ValueKey('orb-action-orb_7-Wake')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('orb-action-orb_7-Force delete')),
+          findsOneWidget,
+        );
       });
 
       testWidgets('an orphan card carries an enabled Clean up', (tester) async {
@@ -1030,6 +1065,69 @@ void main() {
 
         expect(tab.orbs.forceDeleted, [('orb_4', true)]);
         expect(find.text('Orb deleted.'), findsOneWidget);
+      });
+    });
+
+    group('broken-orb actions (issue #102)', () {
+      testWidgets('the Fresh state confirm states what is kept and what is '
+          'lost, then starts with fresh state', (tester) async {
+        final tab = await _pumpTab(tester, orbs: [_brokenState]);
+
+        final button = tester.widget<TextButton>(
+          find.byKey(const ValueKey('orb-action-orb_5-Fresh state')),
+        );
+        expect(button.onPressed, isNotNull);
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_5-Fresh state')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Start with fresh state?'), findsOneWidget);
+        // The stated confirmation (spec §9.4): the workspace is kept, the
+        // in-orb sessions are lost.
+        expect(find.textContaining('workspace'), findsWidgets);
+        expect(find.textContaining('sessions'), findsWidgets);
+
+        await tester.tap(find.byKey(const ValueKey('orb-fresh-state-confirm')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.freshStarted, ['orb_5']);
+        expect(find.text('Orb started with fresh state.'), findsOneWidget);
+      });
+
+      testWidgets('cancelling the Fresh state confirm starts nothing', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_brokenState]);
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_5-Fresh state')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.freshStarted, isEmpty);
+      });
+
+      testWidgets('a failed fresh-state start reports the failure', (
+        tester,
+      ) async {
+        final tab = await _pumpTab(tester, orbs: [_brokenState]);
+        tab.orbs.freshStateError = const OrbsClientError(400, 'not_wakeable');
+
+        await tester.tap(
+          find.byKey(const ValueKey('orb-action-orb_5-Fresh state')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('orb-fresh-state-confirm')));
+        await tester.pumpAndSettle();
+
+        expect(tab.orbs.freshStarted, isEmpty);
+        expect(
+          find.textContaining('Could not start with fresh state'),
+          findsOneWidget,
+        );
       });
     });
 

@@ -121,6 +121,17 @@ class _FakeOrbs implements OrbService {
   @override
   Future<String?> lastPassword(String id) async => null;
 
+  /// The startup recovery (issue #102) and the lifecycle pass (#115) run at
+  /// bridge startup/stop; no orb actually runs in these tests.
+  @override
+  Future<void> recover() async {}
+
+  @override
+  void startLifecyclePass({Duration? interval}) {}
+
+  @override
+  void stopLifecyclePass() {}
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

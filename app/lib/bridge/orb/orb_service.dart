@@ -663,11 +663,22 @@ class OrbService {
       }
     }
 
-    // Re-check the broken containers against what the volumes say.
+    // Re-check the broken containers against what the volumes say, and
+    // compose the cleanup-pending badge the lifecycle pass marked (issue
+    // #101, spec §2.10.2/§9.4): a stopped orb the pass surfaced is the same
+    // container state carrying its reason.
     for (var i = 0; i < rows.length; i++) {
       final row = rows[i];
       if (row.state != 'stopped') continue;
-      rows[i] = _withBrokenState(row, volumeNames);
+      final checked = _withBrokenState(row, volumeNames);
+      if (checked.state != 'stopped') {
+        rows[i] = checked;
+        continue;
+      }
+      final reason = _cleanupReason(row.id);
+      if (reason != null) {
+        rows[i] = _replacedState(row, 'cleanup_pending:$reason');
+      }
     }
 
     for (final volumeName in volumeNames) {
@@ -847,6 +858,42 @@ class OrbService {
     }
   }
 
+  /// The `cleanup-pending` marker of the per-orb state dir (issue #101,
+  /// spec §2.10.2): written by the automated lifecycle pass when a stopped
+  /// auto-delete candidate is guard-blocked, carrying the reason (`uncommitted
+  /// work` / `unpushed work` / …) that the card surfaces as the
+  /// "cleanup pending" state (spec §9.4). State, like the stop marker — the
+  /// pass re-evaluates the guard on every pass and the wake clears the badge.
+  File _cleanupMarker(String id) =>
+      File('${stateRoot.path}/$id/cleanup-pending');
+
+  /// Surfaces [id] as cleanup-pending with the guard's [reason] (the
+  /// lifecycle pass only — the badge is the automated path's surfacing of a
+  /// guard-blocked candidate, never a manual state).
+  Future<void> _markCleanupPending(String id, String reason) async {
+    final marker = _cleanupMarker(id);
+    await marker.parent.create(recursive: true);
+    await marker.writeAsString(reason);
+  }
+
+  Future<void> _removeCleanupMarker(String id) async {
+    final marker = _cleanupMarker(id);
+    if (marker.existsSync()) {
+      await marker.delete();
+    }
+  }
+
+  String? _cleanupReason(String id) {
+    final marker = _cleanupMarker(id);
+    if (!marker.existsSync()) return null;
+    try {
+      final reason = marker.readAsStringSync().trim();
+      return reason.isEmpty ? null : reason;
+    } on FileSystemException {
+      return null;
+    }
+  }
+
   /// The record of the orb [id] (from the label-composed list), or `null`
   /// when the id has no labeled container.
   Future<OrbRecord?> _record(String id) async {
@@ -1003,6 +1050,91 @@ class OrbService {
     }
   }
 
+  /// The startup auto-wake (issue #102, spec §2.11): the bridge owns every
+  /// start — no Docker restart policy. After the label-composed enumeration
+  /// ([list]), every stopped orb without the `ocb.stopped` marker was
+  /// running at crash/reboot time and is auto-woken through the full start
+  /// path ([wake]); a marked orb had its move-to-host complete and stays
+  /// stopped. The in-orb sessions of an auto-woken orb stay in the orb
+  /// (re-attached by the composite services) — no move at recovery.
+  /// Then the startup reconciliation ([_reconcileSessions]).
+  Future<void> recover() async {
+    for (final record in await list()) {
+      if (record.state != 'stopped') continue;
+      if (isStopped(record.id)) continue;
+      try {
+        await wake(record.id);
+      } catch (_) {
+        // Boot failure of an auto-wake = the existing boot-failure state
+        // (spec §2.11): the orb stays as it is (unmarked — the next
+        // startup re-tries) and the rest of the fleet recovers.
+      }
+    }
+    await _reconcileSessions();
+  }
+
+  /// The startup reconciliation (issue #102, spec §2.11): for every session
+  /// id present on **both** the host and a running orb, the in-orb copy is
+  /// deleted (the host is canonical — the import is 409-idempotent, so the
+  /// surviving copy is always the host's). This completes a stop the crash
+  /// interrupted between the import and the orb-side delete (every session
+  /// ends up exactly once, no direction recorded) and reverts a host→orb
+  /// move the crash interrupted after the import (the session stays on the
+  /// host; the user re-issues the move). A host or per-orb read failure
+  /// skips it — never a silent delete on uncertain ground.
+  Future<void> _reconcileSessions() async {
+    final host = hostSessions;
+    if (host == null) return;
+    List<OpencodeSession> hostRows;
+    try {
+      hostRows = await host.listSessions();
+    } catch (_) {
+      return; // The host is unreachable: nothing is reconciled this pass.
+    }
+    final hostIds = {for (final session in hostRows) session.id};
+    if (hostIds.isEmpty) return;
+    for (final record in await list()) {
+      final url = record.url;
+      if (record.state != 'running' || url == null) continue;
+      final password = await lastPassword(record.id);
+      if (password == null) continue; // Still booting: nothing to reconcile.
+      final service = _orbService(url, password);
+      try {
+        final orbSessions = await service.listSessions();
+        for (final session in orbSessions) {
+          if (!hostIds.contains(session.id)) continue;
+          await service.deleteSession(session.id);
+        }
+      } catch (_) {
+        // A degraded orb is skipped for this pass; the next bridge
+        // startup re-tries.
+      }
+    }
+  }
+
+  /// The broken orb's start-with-fresh-state (issue #102, spec §9.4): a
+  /// normal [wake] over a recreated state dir — a fresh `opencode.db` —
+  /// which keeps the workspace volume (uncommitted work included) and
+  /// loses the in-orb sessions (the app's confirmation states it). Only a
+  /// `broken:state` orb (workspace present, state dir missing) is
+  /// wakeable this way; anything else refuses — never a silent repair.
+  Future<OrbRecord> startWithFreshState(String id) async {
+    final record = await _record(id);
+    if (record == null) throw OrbNotFoundError(id);
+    if (record.state != 'broken:state') {
+      throw const OrbRefusalError(
+        OrbRefusalError.notWakeable,
+        'only a broken orb whose state dir is missing can start with fresh '
+        'state',
+      );
+    }
+    // The fresh state dir: what `_withBrokenState` found missing; the wake
+    // then runs its full start path over it (and `_stageConfig` finds the
+    // per-orb dir it needs).
+    Directory('${stateRoot.path}/$id').createSync(recursive: true);
+    return wake(id);
+  }
+
   /// The orb wake (issue #97, spec §2.4): re-runs the full start path on
   /// the same container/volumes/state — the `.env*` re-injection and the
   /// config/auth re-copy (host-authoritative, §6), `docker start`, the boot
@@ -1017,14 +1149,17 @@ class OrbService {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
     if (record.state == 'running') return record;
-    if (record.state != 'stopped') {
+    if (!record.isStoppedLike) {
       throw const OrbRefusalError(
         OrbRefusalError.notWakeable,
         'only a stopped orb can be woken',
       );
     }
+    // The wake resets the idle clock (issue #101, spec §2.10.1): a freshly
+    // woken orb starts its idle window from now — the pre-stop clock no
+    // longer describes its idleness.
+    _idleSince.remove(id);
     final container = 'orb-$id';
-    // The `.env*` re-injection (host-authoritative, §6.1): the same copy
     // as the create. A missing checkout is non-fatal — the orb keeps the
     // env files of its last start.
     final resolve = checkoutFor;
@@ -1066,6 +1201,7 @@ class OrbService {
         skipPasswords: stalePasswords,
       );
       await _removeStoppedMarker(id);
+      await _removeCleanupMarker(id);
       return OrbRecord(
         id: id,
         name: record.name,
@@ -1195,7 +1331,7 @@ class OrbService {
         name: orbName,
         checkout: checkoutPath,
       );
-    } else if (orb.state == 'stopped') {
+    } else if (orb.isStoppedLike) {
       orb = await wake(orb.id);
     } else if (orb.state != 'running') {
       throw const OrbRefusalError(
@@ -1481,7 +1617,7 @@ class OrbService {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
     final running = record.state == 'running';
-    if (!running && record.state != 'stopped') {
+    if (!running && !record.isStoppedLike) {
       throw const OrbRefusalError(
         OrbRefusalError.notUpdatable,
         'only a running or a stopped orb can be updated',
@@ -1639,6 +1775,227 @@ class OrbService {
             !entry.startsWith('ORB_ID='))
           entry,
     ];
+  }
+
+  // ------------------------------------------------------------------------
+  // The automated lifecycle pass (issue #101, spec §2.10): the single actor
+  // of orb automation — 60-min idle auto-stop through the shared stop path,
+  // the 24-h stopped-TTL auto-delete with the guard re-evaluated every pass
+  // (never forced), the merged-PR bypass of the TTL, and the
+  // "cleanup pending" surfacing of guard-blocked candidates.
+
+  /// The idle threshold before the pass auto-stops an orb (spec §2.10.1):
+  /// no busy session for this long. A fixed constant, no knob (a future
+  /// knob = config field + UI, zero logic change, §2.10.5).
+  static const Duration idleStopAfter = Duration(minutes: 60);
+
+  /// How long an orb stays stopped before it becomes an auto-delete
+  /// candidate (spec §2.10.2), clocked from the container's last exit. A
+  /// merged PR bypasses it (§2.10.3). A fixed constant, no knob.
+  static const Duration stoppedAutoDeleteAfter = Duration(hours: 24);
+
+  /// The pass's pace (spec §2.10): ~1 minute over all orbs.
+  static const Duration lifecyclePassInterval = Duration(minutes: 1);
+
+  /// The idle clocks (bridge memory only, spec §2.10): orb id → the instant
+  /// the pass first saw it idle after its last busy observation. A busy orb
+  /// has no entry (the clock resets); a bridge restart resets them all —
+  /// harmless, the stop is lossless.
+  final Map<String, DateTime> _idleSince = {};
+
+  Timer? _lifecycleTimer;
+  bool _lifecycleRunning = false;
+
+  /// The single per-orb exemption point (spec §2.10.5): "is this orb exempt
+  /// from auto-cleanup?" — always no today. A future pin answers yes (stored
+  /// as a Docker label); the pass consults nothing else.
+  bool _isExemptFromAutoCleanup(String id) => false;
+
+  /// Starts the periodic lifecycle pass (spec §2.10): [interval] overrides
+  /// the ~1-min pace (tests). A re-issue replaces the running pass.
+  void startLifecyclePass({Duration? interval}) {
+    _lifecycleTimer?.cancel();
+    _lifecycleTimer = Timer.periodic(
+      interval ?? lifecyclePassInterval,
+      (_) => unawaited(runLifecyclePass()),
+    );
+  }
+
+  /// Stops the periodic pass (the bridge's shutdown); the pass can still be
+  /// driven manually through [runLifecyclePass].
+  void stopLifecyclePass() {
+    _lifecycleTimer?.cancel();
+    _lifecycleTimer = null;
+  }
+
+  /// Whether the periodic pass is armed (tests).
+  bool get lifecyclePassRunning => _lifecycleTimer != null;
+
+  /// One lifecycle pass over all orbs (spec §2.10) — the single actor:
+  ///
+  /// 1. a **running** orb with no busy session (active session or pending
+  ///    permission) for [idleStopAfter] is auto-stopped through exactly the
+  ///    shared [stop] path (all sessions, in-flight included, move to the
+  ///    host; unguarded by construction);
+  /// 2. a **stopped** orb is an auto-delete candidate once the container's
+  ///    last exit is older than [stoppedAutoDeleteAfter] — or immediately,
+  ///    on the pass following its stop, when its PR is merged (§2.10.3); the
+  ///    deletion [deleteGuard] is re-evaluated on every pass and the
+  ///    candidate is deleted **without force** when it passes, kept and
+  ///    surfaced as cleanup-pending with the guard's reason when it blocks;
+  /// 3. orphans, broken orbs, and preparing orbs are left alone (no
+  ///    auto-reaping, no auto-force — §2.10.4); [delete]'s guard is the
+  ///    leak backstop: a leaked orphan's gone-from-the-remote commits read
+  ///    as unpushed and keep it alive behind the badge.
+  ///
+  /// Every per-orb failure is swallowed (the next pass retries): one orb's
+  /// docker hiccup never cancels the pass, and the pass never throws.
+  /// [now] is the wall clock the idle and TTL comparisons run against
+  /// (tests inject a scripted one; production uses `DateTime.now()`).
+  Future<void> runLifecyclePass({DateTime? now}) async {
+    if (_lifecycleRunning) return;
+    _lifecycleRunning = true;
+    try {
+      final clock = now ?? DateTime.now();
+      final List<OrbRecord> records;
+      try {
+        records = await list();
+      } catch (_) {
+        return; // docker unreachable: no automation this pass.
+      }
+      final live = <String>{};
+      for (final record in records) {
+        live.add(record.id);
+        if (_isExemptFromAutoCleanup(record.id)) {
+          _idleSince.remove(record.id);
+          continue;
+        }
+        try {
+          await _lifecycleOrb(record, clock);
+        } catch (_) {
+          // A per-orb failure (docker hiccup, a failed move, a failed
+          // deletion): kept for the next pass — the pass never throws and
+          // one orb never blocks the others.
+        }
+      }
+      // Idle clocks of orbs that are gone (deleted) or no longer running.
+      _idleSince.removeWhere((id, _) => !live.contains(id));
+    } finally {
+      _lifecycleRunning = false;
+    }
+  }
+
+  /// The pass's per-orb step (see [runLifecyclePass]).
+  Future<void> _lifecycleOrb(OrbRecord record, DateTime now) async {
+    switch (record.state) {
+      case 'running':
+        final busy = await _orbIsBusy(record);
+        if (busy == null || busy) {
+          // Busy — or its busy state could not be read (degraded service,
+          // unreadable password): never stop an orb you cannot prove idle.
+          _idleSince.remove(record.id);
+        } else {
+          final idle = _idleSince.putIfAbsent(record.id, () => now);
+          if (now.difference(idle) >= idleStopAfter) {
+            // Auto-stop is exactly the shared stop path (§2.10.1). A failed
+            // stop leaves the clock set: the next pass retries.
+            await stop(record.id);
+            _idleSince.remove(record.id);
+          }
+        }
+        return;
+      case 'stopped':
+        await _lifecycleStopped(record, now);
+        return;
+      default:
+        // cleanup_pending:<reason> is the same container stopped with the
+        // pass's own badge (the list already composed it): re-run the
+        // candidate rule. Anything else (preparing, broken:*, orphan) is
+        // left alone.
+        if (record.isStoppedLike) {
+          await _lifecycleStopped(record, now);
+        }
+    }
+  }
+
+  /// The stopped-orb candidate rule: merged-PR bypass first (a merged orb
+  /// dies without waiting the TTL — the pass following its stop deletes it),
+  /// then the 24-h clock from the container's last exit. A candidate whose
+  /// guard passes is deleted without force; a guard-blocked candidate is
+  /// kept and surfaced as cleanup-pending with the reason; a kept candidate
+  /// whose guard passes again later (the work got pushed) drops the badge.
+  Future<void> _lifecycleStopped(OrbRecord record, DateTime now) async {
+    _idleSince.remove(record.id);
+    final merged = await _prIsMerged(record);
+    if (!merged) {
+      final exit = await _lastExit(record.id);
+      if (exit == null || now.difference(exit) < stoppedAutoDeleteAfter) {
+        // Not yet a candidate: no badge before candidacy (§9.4 — the badge
+        // marks guard-blocked *candidates*).
+        await _removeCleanupMarker(record.id);
+        return;
+      }
+    }
+    try {
+      // Never force — the automated path (§2.10.2): [delete] re-evaluates
+      // the deletion guard on this very pass and a blocked candidate is
+      // kept.
+      await delete(record.id);
+    } on OrbDeletionRefusedError catch (e) {
+      await _markCleanupPending(record.id, _autoCleanupReason(e.guard));
+    }
+  }
+
+  /// Whether the orb's service is busy, or `null` when it cannot be read
+  /// (a degraded orb, an unreadable password, a service error): the caller
+  /// treats both as "keep the orb alive" — the pass never stops an orb it
+  /// cannot prove idle.
+  Future<bool?> _orbIsBusy(OrbRecord record) async {
+    try {
+      final password = await lastPassword(record.id);
+      if (password == null) return null;
+      final url = await _orbUrl(record.id, record);
+      return await _hasBusySessions(_orbService(url, password));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Whether the orb's branch PR reports `merged` (the TTL bypass,
+  /// §2.10.3). Any absence — no `gh`, no repo, no PR, a failed call — is
+  /// false (the TTL applies). A merged PR never stops a live orb here: this
+  /// is consulted only for an orb that is already stopped.
+  Future<bool> _prIsMerged(OrbRecord record) async =>
+      (await _prFor(record))?.state == 'merged';
+
+  /// The container's last exit (the stopped clock, spec §2.10: read from
+  /// `docker inspect` — no new state), or `null` when it cannot be read or
+  /// the container has never exited (`0001-01-01T00:00:00Z`). A `null`
+  /// leaves the orb out of the TTL rule until the clock is readable.
+  Future<DateTime?> _lastExit(String id) async {
+    final result = await run([
+      'inspect',
+      '--format',
+      '{{.State.FinishedAt}}',
+      'orb-$id',
+    ]);
+    if (result.exitCode != 0) return null;
+    final exit = DateTime.tryParse(result.stdout.trim());
+    // Docker's never-exited zero value (`0001-01-01T00:00:00Z`): no clock.
+    if (exit == null || exit.year <= 1) return null;
+    return exit;
+  }
+
+  /// The cleanup-pending badge's reason from the guard's evaluation (spec
+  /// §2.10.2: "uncommitted / unpushed work"; an unreadable workspace names
+  /// itself — the leaked-variant backstop, §2.10.4).
+  static String _autoCleanupReason(OrbDeletionGuard guard) {
+    if (!guard.evaluable) return 'workspace unreadable';
+    final parts = [
+      if (guard.dirty.isNotEmpty) 'uncommitted work',
+      if (guard.unpushedCount > 0) 'unpushed work',
+    ];
+    return parts.isEmpty ? 'work needs protecting' : parts.join(' and ');
   }
 
   /// The `docker cp` export (issue #98, spec §3.4): a lossless tar.gz of
