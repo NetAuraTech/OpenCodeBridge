@@ -2405,15 +2405,19 @@ class OrbService {
     // Per TOP-LEVEL entry, never per file: the container is created, not
     // started (no `docker exec`), and `docker cp` of a file into a
     // destination whose parent directory does not exist there fails, while a
-    // directory copy creates its whole subtree in one call. The image's
-    // /root/.config/opencode exists but is empty, so a top-level copy never
-    // lands inside a pre-existing entry.
+    // directory copy creates its whole subtree in one call. A destination
+    // that already exists (the wake re-copy, §6.2) makes a plain
+    // `cp <src-dir> <dest>` LAND INSIDE it (`plugins/plugins/…`, verified
+    // against docker 29.x) instead of merging — so directories ride as
+    // `cp <src-dir>/. <dest>/`: the merge form, which also creates a
+    // missing destination (the create path). Files copy plain (overwrite).
     for (final entry in staged.listSync(followLinks: false)) {
       final name = entry.path.split('/').last;
+      final isDir = entry is Directory;
       await _runOrThrow([
         'cp',
-        entry.path,
-        '$container:/root/.config/opencode/$name',
+        isDir ? '${entry.path}/.' : entry.path,
+        '$container:/root/.config/opencode/$name${isDir ? '/' : ''}',
       ]);
     }
   }

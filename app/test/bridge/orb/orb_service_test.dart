@@ -453,8 +453,10 @@ void main() {
         expect(configText, contains('"model": "test"'));
         expect(File('$staged/service.json').existsSync(), isFalse);
         expect(File('$staged/plugins/p.txt').existsSync(), isTrue);
-        // The staged entries ride in per TOP-LEVEL entry: a directory copy
-        // (the whole subtree in one `docker cp`) — a per-file copy would
+        // The staged entries ride in per TOP-LEVEL entry: directories as
+        // the merge form (`<src>/. -> <dest>/`: a plain directory cp into an
+        // existing destination lands inside it — `plugins/plugins/… — on
+        // the wake re-copy), files plain (overwrite). A per-file copy would
         // fail in the created (not started) container where the parent
         // directory does not exist yet.
         expect(
@@ -467,14 +469,10 @@ void main() {
             ],
             [
               'cp',
-              '$staged/plugins',
-              '$container:/root/.config/opencode/plugins',
+              '$staged/plugins/.',
+              '$container:/root/.config/opencode/plugins/',
             ],
           ]),
-        );
-        expect(
-          copies.where((a) => a.length > 2 && a[2].contains('plugins/')),
-          isEmpty,
         );
         expect(copies.where((a) => a.last.contains('service.json')), isEmpty);
         // Copy-if-exists: no host auth.json on this fake host.

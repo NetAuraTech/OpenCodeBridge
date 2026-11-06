@@ -38,8 +38,10 @@ import 'tunnel/tunnel_preconditions.dart';
 import 'tunnel/tunnel_setup.dart';
 import 'tunnel/tunnel_supervisor.dart';
 import 'orb/orb_build_context.dart';
+import 'orb/orb_agent_tools.dart';
 import 'orb/orb_image_builder.dart';
 import 'orb/orb_service.dart';
+import 'orb/orb_task_service.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
@@ -58,6 +60,7 @@ class BridgeServer {
     this._docker,
     this._orb,
     this._orbs,
+    this._tasks,
     this._tunnel,
     this._tunnelSetupService,
     this._dockerLogKeepAlive,
@@ -138,6 +141,17 @@ class BridgeServer {
   /// `{"project": "<project id>", "name": "<orb name>"}` (spec §2.3).
   static const String orbsPath = '/api/orbs';
 
+  /// The spawn surface's dispatch (issue #99, spec §8.2): `POST` with the
+  /// body `{"task": …, "model"?: …, "wait"?: bool, "session"?: …,
+  /// "directory"?: …}` — the wake-or-create + task dispatch behind the
+  /// global `orb_spawn` tool.
+  static const String orbSpawnPath = '/api/orb/spawn';
+
+  /// The spawn surface's wait (issue #99, spec §8.3): `POST` with the body
+  /// `{"id": "<task id>"}` — blocks until the task completes and answers the
+  /// structured result (behind the global `orb_wait` tool).
+  static const String orbWaitPath = '/api/orb/wait';
+
   // The structured view's `/` command menu, global commands (issue #46).
   // Each is a thin pass-through of a shared-service endpoint; the service is
   // the single source of truth, so the effect is reflected live in any
@@ -211,6 +225,13 @@ class BridgeServer {
   /// when this machine has no docker CLI, no git CLI, or no image builder,
   /// in which case the orbs endpoints report `docker_unavailable`.
   final OrbService? _orbs;
+
+  /// The spawn surface's task service (issue #99, spec §8.2/§8.3): the
+  /// wake-or-create + dispatch + wait + completion injection behind the
+  /// global `orb_spawn`/`orb_wait` tools; `null` when this machine has no
+  /// orbs service or no sessions backend, in which case the spawn endpoints
+  /// report `opencode_unavailable`.
+  final OrbTaskService? _tasks;
 
   /// The listener on the host's docker-bridge address (spec §8.5): orb
   /// containers reach the bridge as `http://host.docker.internal:<port>`,
@@ -309,6 +330,7 @@ class BridgeServer {
     DockerBackend? docker,
     OrbImageBuilder? orb,
     OrbService? orbs,
+    OrbTaskService? tasks,
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor)? tunnelSetup,
     Duration dockerLogKeepAlive = const Duration(seconds: 20),
@@ -327,6 +349,15 @@ class BridgeServer {
     // [orbEmit] once the hub is built (any orb creation happens on the HTTP
     // surface, after [start] returns).
     void Function(String)? orbEmit;
+    // The spawn surface's global agent tools (issue #99, spec §8.1): the
+    // opencode v2 plugin registering orb_spawn/orb_wait, materialized into
+    // the global opencode plugins dir at startup (create-if-missing — the
+    // on-disk copy wins), so the host opencode has the tools and every orb
+    // inherits them through the config copy (§6.2). A failure degrades: the
+    // spawn endpoints still serve.
+    try {
+      await OrbAgentTools.materialize();
+    } catch (_) {}
     final orbBuilder =
         orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
     // The backend the orb service's PR repo resolver (issue #96) reaches:
@@ -347,6 +378,24 @@ class BridgeServer {
     final backend =
         sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
     orbBackend = backend;
+    // The spawn surface's task service (issue #99): the host default wires
+    // the orb lifecycle service and the composite sessions backend — both
+    // required, and both only built by the bridge itself (a test faking
+    // either one injects [tasks], or the spawn endpoints answer 503).
+    final taskService =
+        tasks ??
+        (orbService != null &&
+                backend != null &&
+                orbs == null &&
+                sessions == null
+            ? OrbTaskService(
+                orbs: orbService,
+                sessions: backend,
+                file: File(
+                  '${homeDirectory()}/.config/opencodebridge/tasks.json',
+                ),
+              )
+            : null);
     final fsService = fs ?? const LinuxFsService();
     final eventHub =
         events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
@@ -386,6 +435,7 @@ class BridgeServer {
       dockerBackend,
       orbBuilder,
       orbService,
+      taskService,
       tunnelSupervisor,
       tunnelSetupService,
       dockerLogKeepAlive,
@@ -435,6 +485,7 @@ class BridgeServer {
       _docker,
       _orb,
       _orbs,
+      _tasks,
       _tunnel,
       _tunnelSetupService,
       _dockerLogKeepAlive,
@@ -547,6 +598,7 @@ class BridgeServer {
 
   Future<void> stop() async {
     _orbs?.stopLifecyclePass();
+    _tasks?.close();
     await _server.close(force: true);
     await _hostServer?.close(force: true);
     await _events?.close();
@@ -938,6 +990,7 @@ class BridgeServer {
     DockerBackend? docker,
     OrbImageBuilder? orb,
     OrbService? orbs,
+    OrbTaskService? tasks,
     TunnelSupervisor? tunnel,
     TunnelSetup Function(TunnelSupervisor) tunnelSetup,
     Duration dockerLogKeepAlive,
@@ -1049,6 +1102,19 @@ class BridgeServer {
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.orbsPath) {
         await BridgeServer._handleOrbCreate(request, sessions, orbs);
+        return;
+      }
+      // The spawn surface (issue #99, spec §8.2/§8.3): the global
+      // `orb_spawn`/`orb_wait` tools' endpoints, checked before the session
+      // matchers like the other bare paths.
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbSpawnPath) {
+        await BridgeServer._handleOrbSpawn(request, tasks);
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbWaitPath) {
+        await BridgeServer._handleOrbWait(request, tasks);
         return;
       }
       if (request.method == 'GET' &&
@@ -2605,6 +2671,111 @@ class BridgeServer {
     } on OrbImageBuildError {
       response.statusCode = HttpStatus.badGateway;
       response.write(jsonEncode({'error': 'docker_build_failed'}));
+    }
+    await response.close();
+  }
+
+  /// The spawn surface's dispatch (issue #99, spec §8.2): `POST` with the
+  /// body `{"task": "free text", "model"?: {"id", "providerID", "variant"?},
+  /// "wait"?: bool (default true), "session"?: the calling session id,
+  /// "directory"?: the calling working directory}`. The
+  /// session/directory pair identifies the caller (the tool's context): the
+  /// project is resolved from them — never an argument — and the session is
+  /// the completion-injection target. `wait: true` blocks until the task
+  /// completes and answers the structured result; `wait: false` answers the
+  /// dispatched task immediately.
+  static Future<void> _handleOrbSpawn(
+    HttpRequest request,
+    OrbTaskService? tasks,
+  ) async {
+    final response = request.response;
+    if (tasks == null) {
+      BridgeServer._unavailable(response);
+      await response.close();
+      return;
+    }
+    final body = await BridgeServer._jsonBody(request);
+    final task = BridgeServer._stringField(body, 'task');
+    if (task == null || task.trim().isEmpty) {
+      await BridgeServer._invalidBody(response);
+      return;
+    }
+    final waitField = body?['wait'];
+    final wait = waitField is bool ? waitField : true;
+    try {
+      final dispatched = await tasks.spawn(
+        task: task,
+        model: BridgeServer._modelRef(body),
+        wait: wait,
+        callerSession: BridgeServer._stringField(body, 'session'),
+        callerDirectory: BridgeServer._stringField(body, 'directory'),
+      );
+      response.statusCode = wait ? HttpStatus.ok : HttpStatus.created;
+      response.write(jsonEncode(dispatched.toJson()));
+    } on OrbSpawnProjectError {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'project_unknown'}));
+    } on OrbAmbiguousError catch (e) {
+      // The targeting argument is issue #100's; the tool reports the list.
+      response.statusCode = HttpStatus.conflict;
+      response.write(jsonEncode({'error': 'orb_ambiguous', 'orbs': e.names}));
+    } on OrbTaskNotFoundError catch (e) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found', 'id': e.id}));
+    } on OrbNameTakenError catch (e) {
+      response.statusCode = HttpStatus.conflict;
+      response.write(jsonEncode({'error': 'name_taken', 'name': e.name}));
+    } on OrbRefusalError catch (e) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': e.code, 'details': e.message}));
+    } on OrbBootError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(
+        jsonEncode({
+          'error': 'orb_boot_failed',
+          'details': e.detail,
+          'logTail': e.logTail,
+        }),
+      );
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
+    } on OrbImageBuildError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_build_failed'}));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The spawn surface's wait (issue #99, spec §8.3): `POST` with the body
+  /// `{"id": "<task id>"}` — blocks until the task completes and answers the
+  /// structured result (status, summary, results, branch, PR once it
+  /// exists). An unknown task id is a 404.
+  static Future<void> _handleOrbWait(
+    HttpRequest request,
+    OrbTaskService? tasks,
+  ) async {
+    final response = request.response;
+    if (tasks == null) {
+      BridgeServer._unavailable(response);
+      await response.close();
+      return;
+    }
+    final body = await BridgeServer._jsonBody(request);
+    final id = BridgeServer._stringField(body, 'id');
+    if (id == null || id.isEmpty) {
+      await BridgeServer._invalidBody(response);
+      return;
+    }
+    try {
+      final settled = await tasks.wait(id);
+      response.statusCode = HttpStatus.ok;
+      response.write(jsonEncode(settled.toJson()));
+    } on OrbTaskNotFoundError catch (e) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found', 'id': e.id}));
     }
     await response.close();
   }

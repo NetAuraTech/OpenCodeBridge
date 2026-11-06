@@ -271,7 +271,7 @@ After starting the declared services, the entrypoint waits until **all** declare
 
 ### 6.6 Config location — scripts-as-config
 
-Unified in the image: the boot scripts (with the Dockerfile) live in the app-owned build-context dir (§5.2) and are **baked into the image** (part of the tag hash). **scripts-as-config**: changing boot behavior = editing those global files (the §5 "edit the files" model) — no separate knobs file, no app/bridge settings surface for boot prep. The global opencode custom tool (§8) stays in `~/.config/opencode/tools/`, untouched — two config domains, each file where its reader finds it.
+Unified in the image: the boot scripts (with the Dockerfile) live in the app-owned build-context dir (§5.2) and are **baked into the image** (part of the tag hash). **scripts-as-config**: changing boot behavior = editing those global files (the §5 "edit the files" model) — no separate knobs file, no app/bridge settings surface for boot prep. The global opencode plugin tool (§8) stays in `~/.config/opencode/plugins/`, untouched — two config domains, each file where its reader finds it.
 
 ## 7. Bridge architecture
 
@@ -314,9 +314,9 @@ Models/agents/skills registries are exposed **once** (identical across orbs — 
 
 ## 8. Agent-facing spawn surface & contract
 
-### 8.1 The surface — a global opencode custom tool
+### 8.1 The surface — a global opencode plugin tool
 
-A global opencode **custom tool** (TypeScript file in `~/.config/opencode/tools/`) that calls the **bridge's HTTP API** (localhost) — the tool never talks to Docker directly. No MCP server, no CLI command ([#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79); extension-point research: [#78](https://github.com/NetAuraTech/OpenCodeBridge/issues/78), branch `research/opencode-agent-tools`, file `docs/research/opencode-agent-tools.md` (that branch)).
+A global opencode **plugin** (a dependency-free TypeScript file in `~/.config/opencode/plugins/` exporting `{ id, setup }` and registering the tools through `ctx.tool.transform`) that calls the **bridge's HTTP API** (localhost) — the tool never talks to Docker directly. No MCP server, no CLI command ([#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79); extension-point research: [#78](https://github.com/NetAuraTech/OpenCodeBridge/issues/78), branch `research/opencode-agent-tools`, file `docs/research/opencode-agent-tools.md` (that branch)). A v1 `tools/` file (the `tool()` helper shape) is *not* loaded by opencode v2 servers (verified on v2.1.4) — the plugin dir is where v2's reader finds agent tools.
 
 Global placement on purpose: no scripts committed to any repo (spirit of the global preparation), and **every orb's opencode inherits the tool** through the host config copied at every start (§6.2) — which is also what makes nested spawning work ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)).
 

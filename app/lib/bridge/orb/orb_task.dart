@@ -1,0 +1,112 @@
+// The spawn surface's task record (issue #99, spec §8.2/§8.3): one `orb_spawn`
+// dispatches a task onto an orb's opencode session; the record is what
+// `orb_wait` returns and what the completion injection reports. It is the
+// bridge's only durable state for the spawn surface — the file at
+// `~/.config/opencodebridge/tasks.json` is what survives a bridge restart
+// ("the result is persisted", spec §8.3).
+
+/// One dispatched orb task.
+class OrbTask {
+  OrbTask({
+    required this.id,
+    required this.orb,
+    required this.orbName,
+    required this.branch,
+    required this.session,
+    required this.task,
+    required this.created,
+    this.callerSession,
+    this.callerDirectory,
+    this.status = 'running',
+    this.summary = '',
+    this.pr,
+    this.completed,
+  });
+
+  /// The task's technical id (`task_<token>`): what `orb_wait` takes.
+  final String id;
+
+  /// The orb id the task runs on.
+  final String orb;
+
+  /// The orb's user-facing name (the injection message addresses it).
+  final String orbName;
+
+  /// The orb's dedicated branch (`orb/<id>`): where the work lands.
+  final String branch;
+
+  /// The orb session the task was dispatched to.
+  final String session;
+
+  /// The calling session id (the injection target), or `null` when the
+  /// caller could not be identified as a session.
+  final String? callerSession;
+
+  /// The calling session's working directory as the tool reported it (the
+  /// caller-lookup fallback), or `null`.
+  final String? callerDirectory;
+
+  /// The free-text task handed to the orb's agent.
+  final String task;
+
+  /// Epoch millis of the dispatch.
+  final int created;
+
+  /// `running` until the orb session's turn ends, then the service's
+  /// outcome: `succeeded`, `failed`, or `interrupted`.
+  String status;
+
+  /// The orb agent's final message (its summary of the work), captured at
+  /// completion; empty when unavailable.
+  String summary;
+
+  /// The branch's PR URL once one exists (the return channel, spec §3.2),
+  /// or `null` when the work has none yet.
+  String? pr;
+
+  /// Epoch millis of the completion, or `null` while running.
+  int? completed;
+
+  /// Whether the task has reached its terminal status.
+  bool get isDone => completed != null;
+
+  /// The structured result's artifacts (spec §8.3's `results`): the branch
+  /// always, the PR once it exists.
+  List<String> get results => ['branch: $branch', if (pr != null) 'PR: $pr'];
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'orb': orb,
+    'orbName': orbName,
+    'branch': branch,
+    'session': session,
+    if (callerSession != null) 'caller': callerSession,
+    if (callerDirectory != null) 'callerDirectory': callerDirectory,
+    'task': task,
+    'created': created,
+    'status': status,
+    'summary': summary,
+    'results': results,
+    if (pr != null) 'pr': pr,
+    if (completed != null) 'completed': completed,
+  };
+
+  factory OrbTask.fromJson(Object? json) {
+    final map = json is Map<String, Object?> ? json : const {};
+    return OrbTask(
+      id: map['id'] as String? ?? '',
+      orb: map['orb'] as String? ?? '',
+      orbName: map['orbName'] as String? ?? '',
+      branch: map['branch'] as String? ?? '',
+      session: map['session'] as String? ?? '',
+      callerSession: map['caller'] as String?,
+      callerDirectory: map['callerDirectory'] as String?,
+      task: map['task'] as String? ?? '',
+      created: (map['created'] as num?)?.toInt() ?? 0,
+      status: map['status'] as String? ?? 'running',
+      summary: map['summary'] as String? ?? '',
+      pr: map['pr'] as String?,
+      completed: (map['completed'] as num?)?.toInt(),
+    );
+  }
+}
