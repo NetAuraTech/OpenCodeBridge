@@ -589,6 +589,110 @@ void main() {
       expect(find.text('Cost \$0.0000'), findsOneWidget);
     });
 
+    testWidgets('a completed turn shows its stats footer (issue #121)', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'user', text: 'fix it', created: 0),
+          SessionMessage(
+            role: 'assistant',
+            text: 'done',
+            created: 0,
+            streamed: 1000,
+            completed: 1500,
+            outputTokens: 80,
+            reasoningTokens: 20,
+          ),
+          SessionMessage(id: 'i1', role: 'idle'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      // 0 -> 1500 is 1.5s; 100 tokens over 1s of streaming: 100.0 tok/s.
+      expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+      expect(find.text('1.5s · 0 compactions · 100.0 tok/s'), findsOneWidget);
+    });
+
+    testWidgets('a turn with a compaction counts it in the footer', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'user', text: 'fix it', created: 0),
+          SessionMessage(id: 'c1', role: 'compaction', text: 'the summary'),
+          SessionMessage(
+            role: 'assistant',
+            text: 'done',
+            created: 0,
+            streamed: 1000,
+            completed: 2000,
+            outputTokens: 100,
+            reasoningTokens: 0,
+          ),
+          SessionMessage(id: 'i1', role: 'idle'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      expect(find.text('2.0s · 1 compaction · 100.0 tok/s'), findsOneWidget);
+      // The compaction marker itself keeps rendering.
+      expect(find.text('the summary'), findsOneWidget);
+    });
+
+    testWidgets('a running turn shows no footer; the end brings it back', (
+      tester,
+    ) async {
+      const history = [
+        SessionMessage(role: 'user', text: 'go', created: 0),
+        SessionMessage(
+          role: 'assistant',
+          text: 'done',
+          created: 0,
+          streamed: 1000,
+          completed: 1500,
+          outputTokens: 100,
+        ),
+        SessionMessage(id: 'i1', role: 'idle'),
+      ];
+      final client = _FakeClient(details: const [_detail0], messages: history);
+      final events = await _pump(tester, client: client);
+      expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+
+      // The next turn starts: the frozen stats disappear while the agent
+      // works (the live footer is issue #122).
+      events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('turn-stats')), findsNothing);
+
+      // The turn ends and the normalize settles the history: the footer
+      // comes back.
+      events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+      await events.close();
+    });
+
+    testWidgets('a history without stats timestamps shows no footer', (
+      tester,
+    ) async {
+      // A history whose steps carry no timestamps (a composed/legacy
+      // history): the footer has nothing real to show.
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'user', text: 'no stats here'),
+          SessionMessage(role: 'assistant', text: 'sure'),
+        ],
+      );
+      await _pump(tester, client: client);
+      expect(find.byKey(const ValueKey('turn-stats')), findsNothing);
+    });
+
     testWidgets('a phone-sized screen shows the pending banner without '
         'overflowing', (tester) async {
       // A phone with the soft keyboard up: the body is squeezed to about

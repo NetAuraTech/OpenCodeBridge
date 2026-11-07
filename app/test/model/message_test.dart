@@ -185,6 +185,11 @@ void main() {
             'answers': null,
           },
         ],
+        'created': null,
+        'streamed': null,
+        'completed': null,
+        'outputTokens': null,
+        'reasoningTokens': null,
       });
       final back = SessionMessage.fromJson(msg.toJson());
       expect(back.id, 'msg_1');
@@ -205,7 +210,31 @@ void main() {
         'reasoning': null,
         'contextTokens': null,
         'tools': <Object?>[],
+        'created': null,
+        'streamed': null,
+        'completed': null,
+        'outputTokens': null,
+        'reasoningTokens': null,
       });
+    });
+
+    test('the turn timestamps and token counts round-trip', () {
+      const msg = SessionMessage(
+        id: 'msg_2',
+        role: 'assistant',
+        created: 10,
+        streamed: 20,
+        completed: 30,
+        outputTokens: 7,
+        reasoningTokens: 3,
+      );
+      final back = SessionMessage.fromJson(msg.toJson());
+      expect(back.created, 10);
+      expect(back.streamed, 20);
+      expect(back.completed, 30);
+      expect(back.outputTokens, 7);
+      expect(back.reasoningTokens, 3);
+      expect(back, msg);
     });
 
     test('parses an empty tool list', () {
@@ -237,7 +266,9 @@ void main() {
     expect(
       SessionMessage(role: 'user').toString(),
       'SessionMessage(id: null, role: user, text: null, '
-      'reasoning: null, contextTokens: null, tools: [])',
+      'reasoning: null, contextTokens: null, tools: [], created: null, '
+      'streamed: null, completed: null, outputTokens: null, '
+      'reasoningTokens: null)',
     );
   });
 }
