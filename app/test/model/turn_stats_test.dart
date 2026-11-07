@@ -180,7 +180,7 @@ void main() {
       },
     );
 
-    test('several steer prompts between two idles stay one Turn: the first '
+    test('several steer prompts between two idles stay one turn: the first '
         'prompt anchors, every step weighs (issue #123)', () {
       final stats = computeTurnStats([
         SessionMessage(id: 'i0', role: 'idle', created: 0),
@@ -220,7 +220,7 @@ void main() {
       expect(stats?.tokensPerSecond, closeTo(140, 0.001));
     });
 
-    test('a steer prompt whose step has not landed keeps the Turn at its '
+    test('a steer prompt whose step has not landed keeps the turn at its '
         'first prompt (issue #123)', () {
       final stats = computeTurnStats([
         SessionMessage(id: 'i0', role: 'idle', created: 0),
@@ -242,7 +242,7 @@ void main() {
       expect(stats?.tokensPerSecond, 200);
     });
 
-    test('a queued prompt after the idle keeps the previous Turn frozen '
+    test('a queued prompt after the idle keeps the previous turn frozen '
         '(issue #123)', () {
       final stats = computeTurnStats([
         SessionMessage(id: 'u1', role: 'user', created: 0),
@@ -254,8 +254,8 @@ void main() {
           output: 200,
         ),
         SessionMessage(id: 'i1', role: 'idle', created: 1601),
-        // The queued prompt: the previous Turn closed before it, its own
-        // has not started — the footer keeps showing the previous Turn.
+        // The queued prompt: the previous turn closed before it, its own
+        // has not started — the footer keeps showing the previous turn.
         SessionMessage(id: 'u2', role: 'user', created: 5000),
       ]);
       // The u2 window holds no step: the walk falls back to the u1 Turn
@@ -264,7 +264,7 @@ void main() {
       expect(stats?.tokensPerSecond, 400);
     });
 
-    test('a legacy bare prompt tail falls back to the previous Turn (issue '
+    test('a legacy bare prompt tail falls back to the previous turn (issue '
         '#123)', () {
       final stats = computeTurnStats([
         SessionMessage(id: 'u1', role: 'user', created: 0),
@@ -282,6 +282,54 @@ void main() {
       // (50 tokens over 0.5s of streaming).
       expect(stats?.duration, const Duration(milliseconds: 1100));
       expect(stats?.tokensPerSecond, 100);
+    });
+
+    test('a queued prompt after consecutive idle markers keeps the last '
+        'contentful turn (issue #123)', () {
+      final stats = computeTurnStats([
+        SessionMessage(id: 'u1', role: 'user', created: 0),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 600,
+          completed: 1100,
+          output: 50,
+        ),
+        // Two idle markers in a row (a re-delivered boundary): the empty
+        // window between them is skipped in one step back.
+        SessionMessage(id: 'i1', role: 'idle', created: 1200),
+        SessionMessage(id: 'i2', role: 'idle', created: 1200),
+        SessionMessage(id: 'u2', role: 'user', created: 5000),
+      ]);
+      expect(stats?.duration, const Duration(milliseconds: 1100));
+      expect(stats?.tokensPerSecond, 100);
+    });
+
+    test('a legacy multi-turn history falls back to the last prompt\'s own '
+        'turn (issue #123)', () {
+      final stats = computeTurnStats([
+        // No idle markers anywhere (legacy): every prompt is its own Turn.
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        _step(
+          id: 'a0',
+          created: 0,
+          streamed: 500,
+          completed: 600,
+          output: 1000,
+        ),
+        SessionMessage(id: 'u1', role: 'user', created: 1000),
+        _step(
+          id: 'a1',
+          created: 1000,
+          streamed: 1500,
+          completed: 1800,
+          output: 100,
+        ),
+        // The queued prompt: the footer keeps u1's Turn, not a merge of both.
+        SessionMessage(id: 'u2', role: 'user', created: 2000),
+      ]);
+      expect(stats?.duration, const Duration(milliseconds: 800));
+      expect(stats?.tokensPerSecond, 200);
     });
 
     test('a steer prompt keeps the turn: the duration starts at the first '

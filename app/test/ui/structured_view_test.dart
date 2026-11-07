@@ -1062,7 +1062,7 @@ void main() {
     );
 
     testWidgets(
-      'a queued prompt freezes the previous footer; its own Turn starts a '
+      'a queued prompt freezes the previous footer; its own turn starts a '
       'new live footer (issue #123)',
       (tester) async {
         // The first Turn completes while a second prompt sits queued in the

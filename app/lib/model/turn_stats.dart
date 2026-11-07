@@ -147,9 +147,10 @@ TurnStats? liveTurnStats(List<SessionMessage> messages, {required int now}) {
 /// The Turn's window closed right before the one starting at [start], or
 /// `null` when the history holds no earlier window. The window at [start] is
 /// the one a queued prompt opened without running it (issue #123): skipping
-/// the `idle` markers that close it, the previous Turn is the window after
-/// the next `idle` marker back — or, with none (legacy), everything before
-/// the pending prompts.
+/// the `idle` markers that close the earlier Turn, that Turn is the window
+/// after the next `idle` marker back — or, with none (legacy history), the
+/// window of the last prompt before them: every legacy prompt was its own
+/// Turn, so the queued prompt's predecessor is the prompt before.
 (int start, int end)? _previousTurnWindow(
   List<SessionMessage> messages,
   int start,
@@ -160,10 +161,15 @@ TurnStats? liveTurnStats(List<SessionMessage> messages, {required int now}) {
     end--;
   }
   if (end == 0) return null;
+  int? lastPrompt;
   for (var i = end - 1; i >= 0; i--) {
-    if (messages[i].role == 'idle') return (i + 1, end);
+    final role = messages[i].role;
+    if (role == 'idle') return (i + 1, end);
+    if (role == 'user' || role == 'synthetic') lastPrompt ??= i;
   }
-  return (0, end);
+  // No idle marker anywhere (legacy history): the previous Turn is the last
+  // prompt's own window.
+  return (lastPrompt ?? 0, end);
 }
 
 /// The raw parts of the Turn's stats, folded over the window [start, end):
