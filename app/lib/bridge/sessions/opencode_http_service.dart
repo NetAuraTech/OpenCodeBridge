@@ -284,22 +284,9 @@ class OpencodeHttpService implements OpencodeService {
     final items = <Object?>[];
     String? cursor;
     for (var page = 0; page < _maxPages; page++) {
-      final params = <String, String>{'limit': '$limit'};
-      if (cursor != null) params['cursor'] = cursor;
-      final body = await _get(
-        _base.replace(
-          path: '/api/session/${Uri.encodeComponent(id)}/message',
-          queryParameters: params,
-        ),
-      );
-      final decoded = jsonDecode(body);
-      final map = decoded is Map<String, Object?>
-          ? decoded
-          : const <String, Object?>{};
-      final data = map['data'];
-      final list = data is List ? data : const <Object?>[];
-      items.addAll(list);
-      cursor = _nextCursor(decoded);
+      final result = await _messagePage(id, limit: limit, cursor: cursor);
+      items.addAll(result.items);
+      cursor = result.nextCursor;
       if (cursor == null) break;
     }
     items.sort((a, b) => _messageOrder(a, b));
@@ -311,6 +298,50 @@ class OpencodeHttpService implements OpencodeService {
       }
     }
     return messages;
+  }
+
+  @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    final result = await _messagePage(id, limit: limit, cursor: cursor);
+    final items = result.items;
+    items.sort((a, b) => _messageOrder(a, b));
+    final messages = <SessionMessage>[];
+    for (final item in items) {
+      if (item is Map<String, Object?>) {
+        final message = _messageFrom(item);
+        if (message != null) messages.add(message);
+      }
+    }
+    return MessagePage(messages: messages, nextCursor: result.nextCursor);
+  }
+
+  /// One newest-first page of the session's history: the raw service items
+  /// (unsorted, the kinds the structured view renders) and the cursor to the
+  /// next (older) page.
+  Future<({List<Object?> items, String? nextCursor})> _messagePage(
+    String id, {
+    required int limit,
+    String? cursor,
+  }) async {
+    final params = <String, String>{'limit': '$limit'};
+    if (cursor != null) params['cursor'] = cursor;
+    final body = await _get(
+      _base.replace(
+        path: '/api/session/${Uri.encodeComponent(id)}/message',
+        queryParameters: params,
+      ),
+    );
+    final decoded = jsonDecode(body);
+    final map = decoded is Map<String, Object?>
+        ? decoded
+        : const <String, Object?>{};
+    final data = map['data'];
+    final list = data is List ? data : const <Object?>[];
+    return (items: list, nextCursor: _nextCursor(decoded));
   }
 
   /// Chronological order for the history items: the service's

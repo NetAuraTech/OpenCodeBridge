@@ -1290,6 +1290,16 @@ class BridgeServer {
           return;
         }
       }
+      // The paged history read (issue #124): `GET /api/sessions/{id}/messages/page`.
+      // Checked before the plain `/messages` read (the two paths are distinct,
+      // but the page path must not fall through to it).
+      if (request.method == 'GET') {
+        final id = BridgeServer._messagesPageSessionIn(request.uri.path);
+        if (id != null) {
+          await BridgeServer._messagesPage(request, id, sessions);
+          return;
+        }
+      }
       if (request.method == 'GET' || request.method == 'POST') {
         final id = BridgeServer._messagesSessionIn(request.uri.path);
         if (id != null) {
@@ -1486,6 +1496,17 @@ class BridgeServer {
     return Uri.decodeComponent(id);
   }
 
+  /// The single session id in a paged-messages path, or `null` when [path] is
+  /// not `api/sessions/{id}/messages/page` (issue #124's bounded read).
+  static String? _messagesPageSessionIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/messages/page';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
   /// The single session id in a permissions path, or `null` when [path] is not
   /// `api/sessions/{id}/permissions` (endpoint 8).
   static String? _permissionsSessionIn(String path) {
@@ -1659,6 +1680,43 @@ class BridgeServer {
       final messages = await sessions.getMessages(id);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode([for (final m in messages) m.toJson()]));
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+    }
+    await response.close();
+  }
+
+  /// The paged history read (issue #124): one newest-first page of the
+  /// session's history (`?limit=…&cursor=…`), returned as
+  /// `{"messages": [...], "cursor": …}`. The page is chronological within
+  /// itself; `cursor` is the handle to the next (older) page, or `null` at the
+  /// oldest. Unknown session is a 404; a service failure is a 502.
+  static Future<void> _messagesPage(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+  ) async {
+    final response = request.response;
+    if (sessions == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    try {
+      final query = request.uri.queryParameters;
+      final limit = int.tryParse(query['limit'] ?? '') ?? 50;
+      final cursor = query['cursor'];
+      final page = await sessions.getMessagesPage(
+        id,
+        limit: limit,
+        cursor: cursor,
+      );
+      response.statusCode = HttpStatus.ok;
+      response.write(
+        jsonEncode({
+          'messages': [for (final m in page.messages) m.toJson()],
+          'cursor': page.nextCursor,
+        }),
+      );
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
     }

@@ -133,6 +133,14 @@ class CompositeOpencodeService implements OpencodeService {
       (await _route(id)).getMessages(id);
 
   @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async =>
+      (await _route(id)).getMessagesPage(id, limit: limit, cursor: cursor);
+
+  @override
   Future<void> prompt(
     String id,
     String text, {

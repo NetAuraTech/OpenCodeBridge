@@ -2613,6 +2613,17 @@ class _FakeService implements OpencodeService {
   }
 
   @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    if (failMessages) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return MessagePage(messages: messages, nextCursor: null);
+  }
+
+  @override
   Future<void> prompt(
     String id,
     String text, {

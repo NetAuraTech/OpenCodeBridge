@@ -270,4 +270,316 @@ void main() {
       expect(turnStatsLabel([SessionMessage(role: 'user')]), isNull);
     });
   });
+
+  group('currentTurnRange', () {
+    test('an idle session: the window is before the closing idle marker', () {
+      final (start, end) = currentTurnRange([
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        _step(id: 'a0', created: 0, streamed: 1, completed: 2, output: 1),
+        SessionMessage(id: 'i0', role: 'idle', created: 3),
+        SessionMessage(id: 'u1', role: 'user', created: 10),
+        _step(id: 'a1', created: 10, streamed: 20, completed: 30, output: 2),
+        SessionMessage(id: 'i1', role: 'idle', created: 31),
+      ]);
+      expect(start, 3);
+      expect(end, 5); // just before the closing idle at 5.
+    });
+
+    test('an active session: the window runs to the end', () {
+      final (start, end) = currentTurnRange([
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        _step(id: 'a0', created: 0, streamed: 1, completed: 2, output: 1),
+        SessionMessage(id: 'i0', role: 'idle', created: 3),
+        SessionMessage(id: 'u1', role: 'user', created: 10),
+        _step(id: 'a1', created: 10, streamed: 20, output: 2),
+      ]);
+      expect(start, 3);
+      expect(end, 5);
+    });
+
+    test(
+      'a legacy history without idle markers: the last prompt starts it',
+      () {
+        final (start, end) = currentTurnRange([
+          SessionMessage(id: 'u0', role: 'user', created: 0),
+          _step(id: 'a0', created: 0, streamed: 1, completed: 2, output: 1),
+          SessionMessage(id: 'u1', role: 'user', created: 10),
+          _step(id: 'a1', created: 10, streamed: 20, completed: 30, output: 2),
+        ]);
+        expect(start, 2);
+        expect(end, 4);
+      },
+    );
+
+    test('an empty history reads as the empty window', () {
+      final (start, end) = currentTurnRange(const []);
+      expect(start, 0);
+      expect(end, 0);
+    });
+  });
+
+  group('computeTurnFooters', () {
+    // A step with 100 output tokens streamed over 1s reads 100.0 tok/s.
+    SessionMessage step(
+      int created, {
+      required String id,
+      int completed = 2000,
+    }) => SessionMessage(
+      id: id,
+      role: 'assistant',
+      created: created,
+      streamed: created + 1000,
+      completed: completed,
+      outputTokens: 100,
+      reasoningTokens: 0,
+    );
+
+    test('a completed turn labels its closing idle marker row', () {
+      final footers = computeTurnFooters(const [
+        SessionMessage(role: 'user', text: 'go', created: 0),
+        SessionMessage(
+          role: 'assistant',
+          created: 0,
+          streamed: 1000,
+          completed: 1500,
+          outputTokens: 100,
+          reasoningTokens: 0,
+        ),
+        SessionMessage(id: 'i1', role: 'idle'),
+      ], oldestLoaded: true);
+      expect(footers, {2: '1.5s · 0 compactions · 100.0 tok/s'});
+    });
+
+    test('an active (open) turn labels the last row', () {
+      final footers = computeTurnFooters(const [
+        SessionMessage(role: 'user', text: 'go', created: 0),
+        SessionMessage(
+          role: 'assistant',
+          created: 0,
+          streamed: 1000,
+          completed: 1500,
+          outputTokens: 100,
+          reasoningTokens: 0,
+        ),
+      ], oldestLoaded: true);
+      expect(footers, {1: '1.5s · 0 compactions · 100.0 tok/s'});
+    });
+
+    test('two completed turns each label their own closing marker', () {
+      final footers = computeTurnFooters([
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        step(0, id: 'a0', completed: 2000),
+        SessionMessage(id: 'i0', role: 'idle', created: 2001),
+        SessionMessage(id: 'u1', role: 'user', created: 10000),
+        step(10000, id: 'a1', completed: 12000),
+        SessionMessage(id: 'i1', role: 'idle', created: 12001),
+      ], oldestLoaded: true);
+      expect(footers, {
+        2: '2.0s · 0 compactions · 100.0 tok/s',
+        5: '2.0s · 0 compactions · 100.0 tok/s',
+      });
+    });
+
+    test('an older turn is hidden until its opening marker loads', () {
+      // Only the tail of a previous turn (no prompt, no opening marker) is in
+      // the window: the first loaded turn is partial, so its footer is
+      // withheld. The current turn is complete and labeled.
+      final footers = computeTurnFooters([
+        step(0, id: 'a0', completed: 2000), // a stray step of a previous turn
+        SessionMessage(id: 'i0', role: 'idle', created: 2001),
+        SessionMessage(id: 'u1', role: 'user', created: 10000),
+        step(10000, id: 'a1', completed: 12000),
+        SessionMessage(id: 'i1', role: 'idle', created: 12001),
+      ], oldestLoaded: false);
+      expect(footers.keys, isNot(contains(1)));
+      expect(footers, {4: '2.0s · 0 compactions · 100.0 tok/s'});
+    });
+
+    test('the first turn is hidden until the whole history is loaded', () {
+      final footers = computeTurnFooters([
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        step(0, id: 'a0', completed: 1500),
+        SessionMessage(id: 'i0', role: 'idle', created: 1501),
+        SessionMessage(id: 'u1', role: 'user', created: 10000),
+        step(10000, id: 'a1', completed: 12000),
+        SessionMessage(id: 'i1', role: 'idle', created: 12001),
+      ], oldestLoaded: false);
+      // The current turn (the second) is shown; the first is not yet.
+      expect(footers, {5: '2.0s · 0 compactions · 100.0 tok/s'});
+    });
+
+    test('a running turn labels the last row; the closed turn is hidden', () {
+      final footers = computeTurnFooters(
+        [
+          SessionMessage(id: 'u0', role: 'user', created: 0),
+          step(0, id: 'a0', completed: 1500),
+          SessionMessage(id: 'i0', role: 'idle', created: 1501),
+          // The running turn: a prompt and a step so far.
+          SessionMessage(id: 'u1', role: 'user', created: 10000),
+          step(10000, id: 'a1', completed: 12000),
+        ],
+        oldestLoaded: true,
+        running: true,
+      );
+      // The closed turn's marker (2) keeps its footer; the running turn [3,5)
+      // labels its last row (4) live.
+      expect(footers, {
+        2: '1.5s · 0 compactions · 100.0 tok/s',
+        4: '2.0s · 0 compactions · 100.0 tok/s',
+      });
+    });
+
+    test('a running turn with no step yet has no footer', () {
+      final footers = computeTurnFooters(
+        [
+          SessionMessage(id: 'u0', role: 'user', created: 0),
+          step(0, id: 'a0', completed: 1500),
+          SessionMessage(id: 'i0', role: 'idle', created: 1501),
+          SessionMessage(id: 'u1', role: 'user', created: 10000),
+        ],
+        oldestLoaded: true,
+        running: true,
+      );
+      // The closed turn's marker (2) keeps its footer; the running turn has no
+      // step yet, so nothing labels its rows.
+      expect(footers, {2: '1.5s · 0 compactions · 100.0 tok/s'});
+    });
+  });
+
+  group('loadCurrentTurn', () {
+    /// A scripted page source: serves [history] (oldest-first) newest-first in
+    /// pages of [pageSize], counting every fetch.
+    Future<MessagePage> fetch(
+      List<SessionMessage> history,
+      int pageSize,
+      List<int> requests,
+      String? cursor,
+    ) async {
+      requests.add(cursor == null ? 0 : int.parse(cursor));
+      final newestFirst = history.reversed.toList();
+      final offset = cursor == null ? 0 : int.parse(cursor);
+      final slice = newestFirst.skip(offset).take(pageSize).toList();
+      final next = offset + pageSize < history.length
+          ? '${offset + pageSize}'
+          : null;
+      // Return the slice oldest-first (chronological).
+      return MessagePage(messages: slice.reversed.toList(), nextCursor: next);
+    }
+
+    test(
+      'an idle session reads only the pages that cover the last turn',
+      () async {
+        // 3 turns of 4 messages (prompt, 2 steps, closing idle) each.
+        final history = <SessionMessage>[];
+        for (var t = 0; t < 3; t++) {
+          history.add(
+            SessionMessage(id: 'u$t', role: 'user', created: t * 10000),
+          );
+          history.add(
+            _step(
+              id: 'a${t}0',
+              created: t * 10000,
+              streamed: t * 10000 + 1000,
+              completed: t * 10000 + 2000,
+              output: 10,
+            ),
+          );
+          history.add(
+            _step(
+              id: 'a${t}1',
+              created: t * 10000 + 2000,
+              streamed: t * 10000 + 3000,
+              completed: t * 10000 + 4000,
+              output: 10,
+            ),
+          );
+          history.add(
+            SessionMessage(id: 'i$t', role: 'idle', created: t * 10000 + 4100),
+          );
+        }
+        const pageSize = 3; // Small pages so the turn (4 msgs) spans > 1 page.
+        final requests = <int>[];
+        final (messages, next) = await loadCurrentTurn(
+          fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
+        );
+        // The last turn is the 4 newest messages; the read covers it plus the
+        // overshoot page. It must not read the whole 12-message history: two
+        // pages of 3 suffice (the current turn's opener idle is in the second).
+        expect(requests.length, 2);
+        expect(messages.length, 6);
+        // The window of the loaded messages is the current (last) turn.
+        final (start, end) = currentTurnRange(messages);
+        expect(
+          end - start,
+          3,
+        ); // prompt + 2 steps (the closing idle is at end).
+        expect(next, isNotNull); // older pages remain for lazy loading.
+      },
+    );
+
+    test('an active session stops at the first idle marker', () async {
+      // One completed turn, then an active turn (no closing idle).
+      final history = <SessionMessage>[
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        _step(
+          id: 'a0',
+          created: 0,
+          streamed: 1000,
+          completed: 2000,
+          output: 10,
+        ),
+        SessionMessage(id: 'i0', role: 'idle', created: 2100),
+        SessionMessage(id: 'u1', role: 'user', created: 10000),
+        _step(
+          id: 'a1',
+          created: 10000,
+          streamed: 11000,
+          completed: 12000,
+          output: 10,
+        ),
+      ];
+      const pageSize = 2;
+      final requests = <int>[];
+      final (messages, _) = await loadCurrentTurn(
+        fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
+      );
+      // The active turn is 2 messages; with the opener idle it spans two
+      // pages of 2 (not the full 5-message history).
+      expect(requests.length, 2);
+      final (start, end) = currentTurnRange(messages);
+      expect(end - start, 2); // prompt + 1 step.
+    });
+
+    test('a single open turn reads its whole (small) history', () async {
+      // No idle markers at all: the turn is the whole history.
+      final history = <SessionMessage>[
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        _step(
+          id: 'a0',
+          created: 0,
+          streamed: 1000,
+          completed: 2000,
+          output: 10,
+        ),
+      ];
+      const pageSize = 3;
+      final requests = <int>[];
+      final (messages, next) = await loadCurrentTurn(
+        fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
+      );
+      expect(requests.length, 1);
+      expect(messages, history);
+      expect(next, isNull);
+    });
+
+    test('an empty history reads nothing', () async {
+      final requests = <int>[];
+      final (messages, next) = await loadCurrentTurn(
+        fetchPage: (cursor) => fetch(const [], 5, requests, cursor),
+      );
+      expect(messages, isEmpty);
+      expect(next, isNull);
+      expect(requests.length, 1);
+    });
+  });
 }

@@ -117,6 +117,16 @@ abstract class OpencodeService {
   /// flight (spec §5, endpoint 6). User and assistant turns only.
   Future<List<SessionMessage>> getMessages(String id);
 
+  /// One page of the session's history, oldest-first within the page, with
+  /// the cursor to the next (older) page (issue #124). The service paginates
+  /// the history newest-first, so the first fetch (no [cursor]) is the newest
+  /// page of at most [limit] messages.
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  });
+
   /// Send a prompt to the session (spec §5, endpoint 7). Input is enabled at
   /// any time; a mid-turn prompt is accepted with `delivery: steer` and the
   /// service runs turns sequentially. [files] and [skills] are the optional

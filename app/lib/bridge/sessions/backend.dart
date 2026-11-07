@@ -80,6 +80,12 @@ class SessionsBackend {
   Future<List<SessionMessage>> getMessages(String id) =>
       service.getMessages(id);
 
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) => service.getMessagesPage(id, limit: limit, cursor: cursor);
+
   Future<void> prompt(
     String id,
     String text, {

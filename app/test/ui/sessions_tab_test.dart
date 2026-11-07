@@ -165,6 +165,18 @@ class _FakeSessionsClient extends SessionsClient {
   ];
 
   @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    String? cursor,
+    int? limit,
+  }) async {
+    return const MessagePage(
+      messages: [SessionMessage(role: 'user', text: 'hello')],
+      nextCursor: null,
+    );
+  }
+
+  @override
   Future<void> prompt(
     String id,
     String text, {

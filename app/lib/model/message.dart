@@ -291,6 +291,48 @@ class SessionMessage {
       'outputTokens: $outputTokens, reasoningTokens: $reasoningTokens)';
 }
 
+/// One page of a session's history, as the paged read serves it (issue
+/// #124): the page's messages in chronological (oldest-first) order, and the
+/// cursor to the next (older) page — `null` when the page is the oldest. The
+/// service paginates the history newest-first, so the first fetch (no cursor)
+/// is the newest page.
+class MessagePage {
+  const MessagePage({required this.messages, required this.nextCursor});
+
+  /// The page's messages, oldest first.
+  final List<SessionMessage> messages;
+
+  /// The cursor to the next (older) page, or `null` at the oldest page.
+  final String? nextCursor;
+
+  /// The page's messages with [older] (an already-loaded, newer page)
+  /// prepended in chronological order.
+  MessagePage prepend(List<SessionMessage> older) =>
+      MessagePage(messages: [...older, ...messages], nextCursor: nextCursor);
+
+  @override
+  bool operator ==(Object other) =>
+      other is MessagePage &&
+      other.nextCursor == nextCursor &&
+      _sameList(other.messages, messages);
+
+  @override
+  int get hashCode => Object.hash(Object.hashAll(messages), nextCursor);
+
+  @override
+  String toString() =>
+      'MessagePage(${messages.length} messages, '
+      'nextCursor: $nextCursor)';
+}
+
+bool _sameList(List<SessionMessage> a, List<SessionMessage> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
 int? _intOrNull(Object? value) => value is num ? value.toInt() : null;
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {
