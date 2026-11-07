@@ -229,6 +229,182 @@ void main() {
     });
   });
 
+  group('liveTurnStats', () {
+    test(
+      'ticks the duration from the first prompt to now, before any step',
+      () {
+        // The turn has a prompt but no completed step yet: the live footer
+        // shows the ticking duration (and the compaction count) anyway, so it
+        // appears the moment a prompt is sent.
+        final stats = liveTurnStats([
+          SessionMessage(role: 'user', created: 1000),
+        ], now: 4500);
+        expect(stats?.duration, const Duration(milliseconds: 3500));
+        expect(stats?.compactions, 0);
+        expect(stats?.tokensPerSecond, isNull);
+      },
+    );
+
+    test('a step still streaming does not yet count toward the throughput', () {
+      // One step finished, one is in flight (started, not completed): the
+      // in-flight step's missing fields do not drop the throughput, and the
+      // finished step's number stands.
+      final stats = liveTurnStats([
+        SessionMessage(role: 'user', created: 0),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 1100,
+          completed: 1600,
+          output: 100,
+        ),
+        // The in-flight step: created only (from step.started), no
+        // streamed/completed/tokens yet.
+        _step(id: 'a2', created: 2000),
+      ], now: 2500);
+      // Duration ticks to now (2500 - 0); throughput is the finished step
+      // alone: 100 tokens over 1s.
+      expect(stats?.duration, const Duration(milliseconds: 2500));
+      expect(stats?.tokensPerSecond, 100);
+      expect(stats?.compactions, 0);
+    });
+
+    test('the in-flight step settles in once it completes', () {
+      // The same turn a moment later: the second step has ended, so both
+      // steps weigh the throughput exactly as the frozen fold would.
+      final stats = liveTurnStats([
+        SessionMessage(role: 'user', created: 0),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 1100,
+          completed: 1600,
+          output: 100,
+        ),
+        _step(
+          id: 'a2',
+          created: 2000,
+          streamed: 2700,
+          completed: 2800,
+          output: 400,
+        ),
+      ], now: 2900);
+      // (100 + 400) / (1.0s + 0.7s) = 294.11… ; duration 0 -> 2900.
+      expect(stats?.duration, const Duration(milliseconds: 2900));
+      expect(stats?.tokensPerSecond, closeTo(294.1176, 0.01));
+    });
+
+    test('freezes into the identical value the frozen fold shows', () {
+      // The live stats at the turn's end and the frozen stats over the same
+      // history agree on throughput and compactions; the duration differs only
+      // by the gap between the last step's completion and the end instant.
+      final messages = [
+        SessionMessage(role: 'user', created: 10),
+        SessionMessage(id: 'c1', role: 'compaction', created: 20),
+        _step(id: 'a1', created: 30, streamed: 400, completed: 900, output: 50),
+        _step(
+          id: 'a2',
+          created: 1000,
+          streamed: 1800,
+          completed: 2000,
+          output: 300,
+          reasoning: 100,
+        ),
+      ];
+      final live = liveTurnStats(messages, now: 2000)!;
+      final frozen = computeTurnStats(messages)!;
+      expect(live.compactions, frozen.compactions);
+      expect(live.tokensPerSecond, frozen.tokensPerSecond);
+      // Live duration runs to now (2000); the frozen one to the last step's
+      // completion (also 2000 here, so they match exactly).
+      expect(live.duration, frozen.duration);
+    });
+
+    test('a finished step lacking a field still drops the live throughput', () {
+      final stats = liveTurnStats([
+        SessionMessage(role: 'user', created: 0),
+        _step(
+          id: 'a1',
+          created: 0,
+          streamed: 1000,
+          completed: 1500,
+          output: 50,
+        ),
+        // Finished (completed) but its streamed timestamp is missing.
+        _step(id: 'a2', created: 1500, completed: 2000, output: 10),
+      ], now: 2100);
+      // The duration still ticks; the throughput is dropped.
+      expect(stats?.duration, const Duration(milliseconds: 2100));
+      expect(stats?.tokensPerSecond, isNull);
+    });
+
+    test('no prompt and no step yet: nothing to show', () {
+      expect(liveTurnStats([], now: 1000), isNull);
+      // A turn with no prompt known and no finished step: a compaction alone
+      // is noise, so the footer stays empty.
+      expect(
+        liveTurnStats([SessionMessage(role: 'compaction')], now: 1000),
+        isNull,
+      );
+    });
+
+    test(
+      'a legacy history (no idle markers) reads back to its last prompt',
+      () {
+        final stats = liveTurnStats([
+          SessionMessage(id: 'u0', role: 'user', created: 0),
+          _step(
+            id: 'a0',
+            created: 0,
+            streamed: 500,
+            completed: 600,
+            output: 10,
+          ),
+          SessionMessage(id: 'u1', role: 'user', created: 1000),
+          _step(
+            id: 'a1',
+            created: 1000,
+            streamed: 2000,
+            completed: 2500,
+            output: 200,
+          ),
+        ], now: 2600);
+        // The turn is u1 -> a1: 1000 -> 2600, 200 / 1s.
+        expect(stats?.duration, const Duration(milliseconds: 1600));
+        expect(stats?.tokensPerSecond, 200);
+      },
+    );
+  });
+
+  group('turnWindow', () {
+    test(
+      'a completed history: the window is the last turn, between its idles',
+      () {
+        final (start, end) = turnWindow([
+          SessionMessage(id: 'u0', role: 'user'),
+          SessionMessage(id: 'i0', role: 'idle'),
+          SessionMessage(id: 'u1', role: 'user'),
+          _step(id: 'a1'),
+          SessionMessage(id: 'i1', role: 'idle'),
+        ]);
+        // i1 closes the last turn, so `end` sits past it; the window is the
+        // turn between i0 and i1 — the previous turn (u0) is excluded by i0.
+        expect(start, 2);
+        expect(end, 4);
+      },
+    );
+
+    test('an in-flight turn (no trailing idle) runs to the end', () {
+      final (start, end) = turnWindow([
+        SessionMessage(id: 'i0', role: 'idle'),
+        SessionMessage(id: 'u1', role: 'user', created: 5),
+        _step(id: 'a1'),
+      ]);
+      expect(start, 1);
+      expect(end, 3);
+    });
+  });
+
   group('TurnStats.label', () {
     test('the full footer: duration, compactions, tok/s', () {
       const stats = TurnStats(

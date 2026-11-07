@@ -71,9 +71,47 @@ String? turnStatsLabel(List<SessionMessage> messages) =>
 /// assistant output yet has no stats to show. A history without `idle`
 /// markers (legacy) reads the Turn as starting at its last prompt.
 TurnStats? computeTurnStats(List<SessionMessage> messages) {
-  // The Turn's window is [boundary + 1, end): `end` past the trailing
-  // `idle` markers (the last one closes the Turn), `boundary` at the
-  // previous `idle` marker.
+  final (start, end) = turnWindow(messages);
+  final fold = _fold(messages, start, end, live: false);
+  if (!fold.hasAssistant) return null;
+  return _statsFrom(fold);
+}
+
+/// The LIVE task stats of the Turn that is running in [messages] (issue
+/// #122), read at wall-clock [now] (epoch millis). It is the same fold as
+/// [computeTurnStats] — the same weighted streaming-duration throughput and
+/// the same compaction count — so it freezes into the identical value once
+/// the Turn ends, but it is live in two ways:
+///
+/// - The duration runs from the Turn's first prompt to [now] (ticking), not
+///   to the last completed step.
+/// - The in-flight step (started but not yet completed) is still streaming:
+///   it is not yet counted toward the throughput, and its still-missing
+///   fields are not treated as a deficit, so the footer ticks from the first
+///   prompt onward and the throughput settles in as each step completes.
+///
+/// Returns `null` when the footer would carry no real number (no first
+/// prompt known and no throughput yet — a compaction count alone is noise).
+TurnStats? liveTurnStats(List<SessionMessage> messages, {required int now}) {
+  final (start, end) = turnWindow(messages);
+  final fold = _fold(messages, start, end, live: true);
+  final duration = fold.firstPrompt != null
+      ? Duration(milliseconds: (now - fold.firstPrompt!).clamp(0, 1 << 30))
+      : null;
+  if (duration == null && fold.tokensPerSecond == null) return null;
+  return TurnStats(
+    duration: duration,
+    compactions: fold.compactions,
+    tokensPerSecond: fold.tokensPerSecond,
+  );
+}
+
+/// The Turn's window `[start, end)` of [messages]: `end` is past the trailing
+/// `idle` markers (the last one closes the Turn), and `start` is at the
+/// previous `idle` marker + 1 — or, for a legacy history without `idle`
+/// markers, at the Turn's last prompt (every legacy prompt was its own Turn).
+/// The walk is proportional to the Turn's size, never the whole history.
+(int start, int end) turnWindow(List<SessionMessage> messages) {
   var end = messages.length;
   while (end > 0 && messages[end - 1].role == 'idle') {
     end--;
@@ -82,20 +120,76 @@ TurnStats? computeTurnStats(List<SessionMessage> messages) {
   for (var i = end - 1; i >= 0; i--) {
     final role = messages[i].role;
     if (role == 'idle') {
-      // The Turn is the window after the boundary; its fold below starts it
-      // at its first prompt (a steer prompt reuses the same Turn, so the
-      // earliest prompt in the window drives the duration).
-      return _statsFor(messages, i + 1, end);
+      // The Turn is the window after the boundary; a steer prompt reuses the
+      // same Turn, so the fold below starts it at its first prompt.
+      return (i + 1, end);
     }
     if (role == 'user' || role == 'synthetic') lastPrompt ??= i;
   }
-  // No idle marker anywhere (legacy history): every prompt was its own Turn
-  // without a boundary marker, so the Turn starts at its last prompt.
-  return _statsFor(messages, lastPrompt ?? 0, end);
+  // No idle marker anywhere (legacy history): the Turn starts at its last
+  // prompt.
+  return (lastPrompt ?? 0, end);
 }
 
-/// Folds the Turn's window `[start, end)` into its stats.
-TurnStats? _statsFor(List<SessionMessage> messages, int start, int end) {
+/// The raw parts of the Turn's stats, folded over the window [start, end):
+/// the first prompt's time, the last completed step's time, the compaction
+/// count, the summed output tokens, the summed provider-active streaming
+/// time, whether any finished step lacks a field, and whether the window
+/// holds any assistant step at all.
+class _TurnFold {
+  const _TurnFold({
+    required this.firstPrompt,
+    required this.lastCompleted,
+    required this.compactions,
+    required this.tokens,
+    required this.streamedMillis,
+    required this.incomplete,
+    required this.hasAssistant,
+  });
+
+  final int? firstPrompt;
+
+  final int? lastCompleted;
+
+  final int compactions;
+
+  final int? tokens;
+
+  final int? streamedMillis;
+
+  /// True when a finished step lacks a field the throughput needs.
+  final bool incomplete;
+
+  final bool hasAssistant;
+
+  /// Output + reasoning tokens over the provider-active streaming time, the
+  /// steps weighted by their active time: aggregate before dividing. `null`
+  /// while any finished step lacks a streamed timestamp, or no step streamed.
+  double? get tokensPerSecond {
+    final tokens = this.tokens;
+    final streamedMillis = this.streamedMillis;
+    return !incomplete &&
+            tokens != null &&
+            streamedMillis != null &&
+            streamedMillis > 0
+        ? tokens / (streamedMillis / 1000)
+        : null;
+  }
+}
+
+/// Folds the Turn's window `[start, end)` into a [_TurnFold].
+///
+/// When [live] is true the in-flight step (started but not yet completed) is
+/// skipped: it is still streaming, so it neither counts toward the throughput
+/// nor drops it for its still-missing fields. When [live] is false (the
+/// frozen, turn-ended stats) every assistant step is a finished one and any
+/// of them lacking a field drops the throughput.
+_TurnFold _fold(
+  List<SessionMessage> messages,
+  int start,
+  int end, {
+  required bool live,
+}) {
   var compactions = 0;
   int? firstPrompt;
   int? lastCompleted;
@@ -113,6 +207,10 @@ TurnStats? _statsFor(List<SessionMessage> messages, int start, int end) {
         compactions++;
       case 'assistant':
         hasAssistant = true;
+        if (live && message.completed == null) {
+          // The in-flight step: still streaming, not yet a number.
+          continue;
+        }
         if (message.completed != null) lastCompleted = message.completed;
         if (message.created == null ||
             message.streamed == null ||
@@ -127,24 +225,27 @@ TurnStats? _statsFor(List<SessionMessage> messages, int start, int end) {
         }
     }
   }
-  if (!hasAssistant) return null;
+  return _TurnFold(
+    firstPrompt: firstPrompt,
+    lastCompleted: lastCompleted,
+    compactions: compactions,
+    tokens: tokens,
+    streamedMillis: streamedMillis,
+    incomplete: incomplete,
+    hasAssistant: hasAssistant,
+  );
+}
 
-  final duration = firstPrompt != null && lastCompleted != null
-      ? Duration(milliseconds: lastCompleted - firstPrompt)
-      : null;
-  // Aggregate before dividing so the steps are weighted by provider-active
-  // time; omit the stat while any step lacks a streamed timestamp.
-  final tokensPerSecond =
-      !incomplete &&
-          tokens != null &&
-          streamedMillis != null &&
-          streamedMillis > 0
-      ? tokens / (streamedMillis / 1000)
+/// Builds the frozen [TurnStats] from a [_TurnFold]: the duration runs to the
+/// last completed step.
+TurnStats _statsFrom(_TurnFold fold) {
+  final duration = fold.firstPrompt != null && fold.lastCompleted != null
+      ? Duration(milliseconds: fold.lastCompleted! - fold.firstPrompt!)
       : null;
   return TurnStats(
     duration: duration,
-    compactions: compactions,
-    tokensPerSecond: tokensPerSecond,
+    compactions: fold.compactions,
+    tokensPerSecond: fold.tokensPerSecond,
   );
 }
 
