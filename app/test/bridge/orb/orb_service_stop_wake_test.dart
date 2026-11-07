@@ -342,6 +342,18 @@ class _FakeGit {
   };
 }
 
+/// The GhRunner seam, scripted by the argv (the gh auth probe, issue #120).
+class _FakeGh {
+  final List<List<String>> args = [];
+  final Map<String, GitCliResult> results = {};
+
+  GhRunner get run => (List<String> argv) async {
+    args.add(List.of(argv));
+    return results[argv.join(' ')] ??
+        const GitCliResult(exitCode: 0, stdout: '', stderr: '');
+  };
+}
+
 /// A scripted opencode service (the orb's or the host's).
 class _FakeOpencode implements OpencodeService {
   final List<OpencodeSession> sessions = [];
@@ -543,6 +555,7 @@ void main() {
       Future<String?> Function(String projectId)? checkoutFor,
       OpencodeService? hostSessions,
       OpencodeService Function(String url, String password)? orbServiceFor,
+      GhRunner? gh,
       Duration? bootTimeout,
       Duration? pollInterval,
     }) {
@@ -560,10 +573,81 @@ void main() {
         checkoutFor: checkoutFor,
         hostSessions: hostSessions,
         orbServiceFor: orbServiceFor,
+        gh: gh,
         bootTimeout: bootTimeout ?? const Duration(minutes: 10),
         pollInterval: pollInterval ?? const Duration(milliseconds: 5),
       );
     }
+
+    // ----------------------------------------------------------------------
+    // The gh auth re-injection + push marker (issue #120)
+
+    group('the wake re-injects the gh credentials (issue #120)', () {
+      _FakeGh hostGh() {
+        final gh = _FakeGh();
+        gh.results['auth status --json hosts'] = const GitCliResult(
+          exitCode: 0,
+          stdout:
+              '{"hosts":{"github.com":[{"state":"success","active":true,'
+              '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
+          stderr: '',
+        );
+        gh.results['auth token'] = const GitCliResult(
+          exitCode: 0,
+          stdout: 'gho_ROTATED\n',
+          stderr: '',
+        );
+        return gh;
+      }
+
+      test('the wake stages the host token and clears the stale push '
+          'marker (host-authoritative, §6.2 pattern)', () async {
+        final http = await bootServer();
+        addOrb(state: 'exited', restartPort: http.port);
+        stateDir();
+        setMarker();
+        // A stale marker from a pre-fix boot and a stale staged config
+        // from a rotated-out token: the wake replaces both.
+        File('${stateRoot.path}/$orbId/push-failed').writeAsStringSync('x\n');
+        Directory('${stateRoot.path}/$orbId/gh').createSync(recursive: true);
+        File('${stateRoot.path}/$orbId/gh/hosts.yml')
+            .writeAsStringSync('github.com:\n    stale: true\n');
+
+        final record = await service(gh: hostGh().run).wake(orbId);
+        await http.close(force: true);
+
+        expect(record.state, 'running');
+        expect(
+          File('${stateRoot.path}/$orbId/push-failed').existsSync(),
+          isFalse,
+        );
+        expect(
+          File('${stateRoot.path}/$orbId/gh/hosts.yml').readAsStringSync(),
+          contains('oauth_token: gho_ROTATED'),
+        );
+      });
+
+      test('a wake without a host gh runner keeps the marker semantics and '
+          'stages nothing new', () async {
+        final http = await bootServer();
+        addOrb(state: 'exited', restartPort: http.port);
+        stateDir();
+        setMarker();
+        File('${stateRoot.path}/$orbId/push-failed').writeAsStringSync('x\n');
+
+        final record = await service().wake(orbId);
+        await http.close(force: true);
+
+        expect(record.state, 'running');
+        // No token to re-inject: the marker (the one honest push signal)
+        // survives — the wake fixed nothing about the push.
+        expect(
+          File('${stateRoot.path}/$orbId/push-failed').existsSync(),
+          isTrue,
+        );
+        expect(Directory('${stateRoot.path}/$orbId/gh').existsSync(), isFalse);
+      });
+    });
 
     // ----------------------------------------------------------------------
     // stop

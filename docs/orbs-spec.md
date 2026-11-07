@@ -163,7 +163,7 @@ Automation lives in the **bridge**: a periodic lifecycle pass (~1 min, over all 
 
 - **One branch per orb**: `orb/<orb-id>` — long-lived across the orb's life, **multiple tasks per orb**. No per-task branches ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80)).
 - **Identity**: the host's global `user.name`/`user.email`, captured into the container-local gitconfig the entrypoint synthesizes (§4).
-- **When to push**: a `post-commit` hook in the orb's clone pushes `HEAD` to `orb/<orb-id>` **after every commit** — the remote is always the mirror of the branch; the agent just commits. (Hook installation belongs to boot preparation, §6.3.)
+- **When to push**: a `post-commit` hook in the orb's clone pushes `HEAD` to `orb/<orb-id>` **after every commit** — the remote is always the mirror of the branch; the agent just commits. (Hook installation belongs to boot preparation, §6.3.) A failed push must not leave the orb looking healthy ([#120](https://github.com/NetAuraTech/OpenCodeBridge/issues/120)): the hook reports the failure in its output (git streams it to the committing agent; git ignores a post-commit hook's exit code) and writes a `push-failed` marker on the state mount, which the orb list composes as the row's `pushFailing` flag (the card shows "push to the remote is failing" — seed, the PR flow, and the guard's pushed side all silently ride on that push). A successful push clears the marker; so does a start that re-staged the gh credentials (§4 — the verdict is no longer known, the next push proves it).
 
 ### 3.2 The PR is the return channel
 
@@ -197,6 +197,7 @@ Mount the host's auth **surface**, never a specific key file ([#77](https://gith
 
 - **Mounts** (whole directories, **read-only**): `~/.ssh/` + `~/.config/gh/`.
 - The **orb entrypoint synthesizes a container-local gitconfig**: the host's commit identity (global `user.name`/`user.email`) + the git credential helper pointing at the container-local `gh` (in the base image).
+- **Staged gh credentials** ([#120](https://github.com/NetAuraTech/OpenCodeBridge/issues/120)): on a host where gh keeps its token in the Secret-Service keyring, the mounted `~/.config/gh/` carries only `hosts.yml` — no token — and every https push/`gh` call in the orb dies. The bridge (which CAN read the keyring) probes the host gh at every create/wake/update; with an active github.com login it stages a **container-local gh config** carrying the host token on the state-dir mount, and the entrypoint points `GH_CONFIG_DIR` at it when it exists (exported for the whole boot, so opencode — the push hook, the agent's `gh pr create` — inherits it). Host-authoritative like §6.2 (re-staged every start; a rotated token replaces the old); no token on the host → nothing staged, the mount stays the surface. The staged file is a bridge-injected secret: mode 600, rides the state dir, deleted with the orb — the §4 surface stays the mount, the app never sees the value (ADR-0001).
 - **Fallback** `ssh-keyscan github.com` when the mounted `known_hosts` has no entry for it.
 - The **codebase is not mounted** (the clone lives in the orb's volume; work comes out via push / `docker cp`).
 - This replaces the retired skill's `GH_TOKEN`/`insteadOf` mechanism.
