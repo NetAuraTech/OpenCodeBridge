@@ -114,25 +114,35 @@ void main() {
       expect(stats?.tokensPerSecond, isNull);
     });
 
-    test('a legacy history without idle markers reads back to its last '
-        'prompt', () {
-      final stats = computeTurnStats([
-        SessionMessage(id: 'u0', role: 'user', created: 0),
-        _step(id: 'a0', created: 0, streamed: 500, completed: 600, output: 10),
-        SessionMessage(id: 'u1', role: 'user', created: 1000),
-        _step(
-          id: 'a1',
-          created: 1000,
-          streamed: 2000,
-          completed: 2500,
-          output: 200,
-        ),
-      ]);
-      // The turn is u1 -> a1: 1000 -> 2500, 200 / 1s.
-      expect(stats?.duration, const Duration(milliseconds: 1500));
-      expect(stats?.compactions, 0);
-      expect(stats?.tokensPerSecond, 200);
-    });
+    test(
+      'a history without idle markers is one turn from its first prompt '
+      '(issue #123: the session never closed a turn, so no prompt cut it)',
+      () {
+        final stats = computeTurnStats([
+          SessionMessage(id: 'u0', role: 'user', created: 0),
+          _step(
+            id: 'a0',
+            created: 0,
+            streamed: 500,
+            completed: 600,
+            output: 10,
+          ),
+          // A steered prompt inside the session's first, unclosed turn.
+          SessionMessage(id: 'u1', role: 'user', created: 1000),
+          _step(
+            id: 'a1',
+            created: 1000,
+            streamed: 2000,
+            completed: 2500,
+            output: 200,
+          ),
+        ]);
+        // One turn (u0 -> a1): 0 -> 2500, (10 + 200) over 0.5s + 1.0s.
+        expect(stats?.duration, const Duration(milliseconds: 2500));
+        expect(stats?.compactions, 0);
+        expect(stats?.tokensPerSecond, closeTo(140, 0.001));
+      },
+    );
 
     test('a running turn (no trailing idle) gets its stats so far', () {
       final stats = computeTurnStats([
@@ -264,7 +274,7 @@ void main() {
       expect(stats?.tokensPerSecond, 400);
     });
 
-    test('a legacy bare prompt tail falls back to the previous turn (issue '
+    test('a legacy bare prompt tail folds as the single unclosed turn (issue '
         '#123)', () {
       final stats = computeTurnStats([
         SessionMessage(id: 'u1', role: 'user', created: 0),
@@ -305,10 +315,11 @@ void main() {
       expect(stats?.tokensPerSecond, 100);
     });
 
-    test('a legacy multi-turn history falls back to the last prompt\'s own '
-        'turn (issue #123)', () {
+    test('a no-idle history ending in a prompt folds as one turn (issue '
+        '#123)', () {
       final stats = computeTurnStats([
-        // No idle markers anywhere (legacy): every prompt is its own Turn.
+        // No idle markers anywhere: the session's first turn never closed,
+        // so the trailing prompt is a steer inside it, not a new turn.
         SessionMessage(id: 'u0', role: 'user', created: 0),
         _step(
           id: 'a0',
@@ -325,11 +336,11 @@ void main() {
           completed: 1800,
           output: 100,
         ),
-        // The queued prompt: the footer keeps u1's Turn, not a merge of both.
         SessionMessage(id: 'u2', role: 'user', created: 2000),
       ]);
-      expect(stats?.duration, const Duration(milliseconds: 800));
-      expect(stats?.tokensPerSecond, 200);
+      // One turn (u0 -> a1): 0 -> 1800, (1000 + 100) over 0.5s + 0.5s.
+      expect(stats?.duration, const Duration(milliseconds: 1800));
+      expect(stats?.tokensPerSecond, 1100);
     });
 
     test('a steer prompt keeps the turn: the duration starts at the first '
@@ -500,32 +511,25 @@ void main() {
       );
     });
 
-    test(
-      'a legacy history (no idle markers) reads back to its last prompt',
-      () {
-        final stats = liveTurnStats([
-          SessionMessage(id: 'u0', role: 'user', created: 0),
-          _step(
-            id: 'a0',
-            created: 0,
-            streamed: 500,
-            completed: 600,
-            output: 10,
-          ),
-          SessionMessage(id: 'u1', role: 'user', created: 1000),
-          _step(
-            id: 'a1',
-            created: 1000,
-            streamed: 2000,
-            completed: 2500,
-            output: 200,
-          ),
-        ], now: 2600);
-        // The turn is u1 -> a1: 1000 -> 2600, 200 / 1s.
-        expect(stats?.duration, const Duration(milliseconds: 1600));
-        expect(stats?.tokensPerSecond, 200);
-      },
-    );
+    test('a history without idle markers ticks from its first prompt (issue '
+        '#123)', () {
+      final stats = liveTurnStats([
+        SessionMessage(id: 'u0', role: 'user', created: 0),
+        _step(id: 'a0', created: 0, streamed: 500, completed: 600, output: 10),
+        // A steered prompt inside the session's first, unclosed turn.
+        SessionMessage(id: 'u1', role: 'user', created: 1000),
+        _step(
+          id: 'a1',
+          created: 1000,
+          streamed: 2000,
+          completed: 2500,
+          output: 200,
+        ),
+      ], now: 2600);
+      // One turn (u0 -> now): 0 -> 2600, (10 + 200) over 0.5s + 1.0s.
+      expect(stats?.duration, const Duration(milliseconds: 2600));
+      expect(stats?.tokensPerSecond, closeTo(140, 0.001));
+    });
   });
 
   group('turnWindow', () {
