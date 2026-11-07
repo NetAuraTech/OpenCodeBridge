@@ -111,6 +111,18 @@ const _workerRecord = OrbRecord(
   created: '2025-01-03T00:00:00Z',
 );
 
+/// A running orb whose post-commit push to the remote fails (issue #120):
+/// the branch never reaches the remote, and the card surfaces it.
+const _pushFailing = OrbRecord(
+  id: 'orb_12',
+  name: 'drifting',
+  project: 'p1',
+  branch: 'orb/orb_12',
+  state: 'running',
+  created: '2025-01-01T00:00:00Z',
+  pushFailing: true,
+);
+
 const _sessionA = Session(
   id: 'ses_1',
   title: 'a',
@@ -537,6 +549,15 @@ void main() {
         await _pumpTab(tester, orbs: [_cleanupPending]);
         expect(find.text('cleanup pending'), findsOneWidget);
         expect(find.text('uncommitted work'), findsOneWidget);
+      });
+
+      testWidgets('a push-failing card surfaces the broken push (issue '
+          '#120)', (tester) async {
+        await _pumpTab(tester, orbs: [_pushFailing]);
+        // The orb stays what it is (running) — the push failure is a
+        // detail line, not a state change.
+        expect(find.text('running'), findsOneWidget);
+        expect(find.text('push to the remote is failing'), findsOneWidget);
       });
 
       testWidgets('an orphan card wears the orphaned state', (tester) async {

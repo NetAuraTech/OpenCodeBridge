@@ -561,7 +561,11 @@ void main() {
       });
       final port = http.port;
       docker.ports = '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
-      docker.logs = 'server password $password\n';
+      // The log starts WITHOUT the password line: the boot wait keeps
+      // polling (the log child stays open) until the test has streamed its
+      // lines and only then does the password line land — the create
+      // cannot complete mid-stream and close the child under the test.
+      docker.logs = '';
       final child = _FakeProcess();
       docker.processes.add(child);
 
@@ -573,6 +577,7 @@ void main() {
       child.stdout.add('cloning the remote');
       child.stderr.add('fetch origin');
       child.exit(0);
+      docker.logs = 'server password $password\n';
       final record = await pending;
       await http.close(force: true);
 
@@ -1263,6 +1268,190 @@ void main() {
 
       expect(gh.args, isEmpty);
       expect(rows.single.pr, isNull);
+    });
+
+    group('the staged gh credentials (issue #120)', () {
+      /// The host gh answers the status probe and the token read (the
+      /// keyring case: the mounted `hosts.yml` carries no token, the bridge
+      /// injects the host's token as a container-local gh config).
+      _FakeGh hostGh({String token = 'gho_SECRET\n'}) {
+        final gh = _FakeGh();
+        gh.results['auth status --json hosts'] = const GitCliResult(
+          exitCode: 0,
+          stdout:
+              '{"hosts":{"github.com":[{"state":"success","active":true,'
+              '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
+          stderr: '',
+        );
+        gh.results['auth token'] = GitCliResult(
+          exitCode: 0,
+          stdout: token,
+          stderr: '',
+        );
+        return gh;
+      }
+
+      Future<({String id, _FakeGh gh})> createWithGh(_FakeGh gh) async {
+        const password = 'pw';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          request.response.statusCode = 200;
+          unawaited(request.response.close());
+        });
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+        docker.logs = 'server password $password\n';
+        await service(gh: gh.run)
+            .create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+        await http.close(force: true);
+        final container = docker.runArgs.firstWhere((a) => a.first == 'create');
+        return (id: container[2].substring('orb-'.length), gh: gh);
+      }
+
+      test(
+        'create stages a container-local gh config from the host token',
+        () async {
+          // The bridge reads the host's gh state (which reaches the
+          // keyring) and stages a container-local gh config on the state
+          // dir mount — the orb's gh (and the push credential helper)
+          // read the staged config, not the tokenless mount.
+          final (id: id, gh: gh) = await createWithGh(hostGh());
+          expect(
+            gh.args
+                .map((a) => a.join(' '))
+                .where(
+                  (a) => a == 'auth status --json hosts' || a == 'auth token',
+                )
+                .toList(),
+            ['auth status --json hosts', 'auth token'],
+          );
+          final hosts = File('${stateRoot.path}/$id/gh/hosts.yml');
+          expect(hosts.existsSync(), isTrue);
+          expect(
+            hosts.readAsStringSync(),
+            allOf([
+              contains('github.com:'),
+              contains('oauth_token: gho_SECRET'),
+              contains('user: dev'),
+            ]),
+          );
+        },
+      );
+
+      test('a create without a host gh runner stages nothing (never '
+          'refuses)', () async {
+        // No gh on the host PATH: the ssh mount can still carry the push —
+        // creation proceeds, nothing is staged.
+        const password = 'pw';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          request.response.statusCode = 200;
+          unawaited(request.response.close());
+        });
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+        docker.logs = 'server password $password\n';
+        await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        );
+        await http.close(force: true);
+        final create = docker.runArgs.firstWhere((a) => a.first == 'create');
+        final id = create[2].substring('orb-'.length);
+        expect(Directory('${stateRoot.path}/$id/gh').existsSync(), isFalse);
+      });
+
+      test('a host gh with no token (logged out) stages nothing', () async {
+        final gh = _FakeGh();
+        gh.results['auth status --json hosts'] = const GitCliResult(
+          exitCode: 0,
+          stdout: '{"hosts":{}}',
+          stderr: '',
+        );
+        gh.results['auth token'] = const GitCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'no oauth token found for github.com',
+        );
+        final (id: id, gh: _) = await createWithGh(gh);
+        expect(Directory('${stateRoot.path}/$id/gh').existsSync(), isFalse);
+      });
+
+      test('a logged-in host gh whose config file already carries a token '
+          'still gets the injection (one mechanism)', () async {
+        // The bridge never parses the mounted file: whenever the host gh
+        // can produce a token for github.com, the container-local config
+        // is staged — the mount may carry a stale token, the staged copy
+        // is host-authoritative.
+        final (id: id, gh: _) = await createWithGh(hostGh());
+        expect(File('${stateRoot.path}/$id/gh/hosts.yml').existsSync(), isTrue);
+      });
+    });
+
+    group('the push-failure surfacing (issue #120)', () {
+      Future<List<OrbRecord>> listTwoRunning({
+        bool markerOnA = false,
+        bool markerOnB = false,
+      }) async {
+        const created = '2026-11-04T00:00:00.000Z';
+        const a = 'aaaaaaaaaaaaaaaa';
+        const b = 'bbbbbbbbbbbbbbbb';
+        String labels(String id, String name) => jsonEncode({
+          'ocb.orb': 'true',
+          'ocb.id': id,
+          'ocb.name': name,
+          'ocb.project': 'p1',
+          'ocb.branch': 'orb/$id',
+          'ocb.created': created,
+        });
+        docker.psResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-$a\norb-$b\n',
+          stderr: '',
+        );
+        docker.containerLabelsResult = DockerCliResult(
+          exitCode: 0,
+          stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
+          stderr: '',
+        );
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'running\nrunning\n',
+          stderr: '',
+        );
+        docker.ports = 'null\nnull\n';
+        docker.containerLogs['orb-$a'] = 'server password pw\n';
+        docker.containerLogs['orb-$b'] = 'server password pw\n';
+        docker.volumeLsResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+        );
+        if (markerOnA) {
+          Directory('${stateRoot.path}/$a').createSync(recursive: true);
+          File('${stateRoot.path}/$a/push-failed').writeAsStringSync(
+            'git push origin HEAD:refs/heads/orb/$a failed\n',
+          );
+        }
+        if (markerOnB) {
+          Directory('${stateRoot.path}/$b').createSync(recursive: true);
+          File('${stateRoot.path}/$b/push-failed').writeAsStringSync('x\n');
+        }
+        return service().list();
+      }
+
+      test('a row whose state dir carries the push-failed marker is '
+          'pushFailing', () async {
+        final rows = await listTwoRunning(markerOnA: true);
+        expect(rows.firstWhere((r) => r.name == 'dev').pushFailing, isTrue);
+        expect(rows.firstWhere((r) => r.name == 'beta').pushFailing, isFalse);
+      });
+
+      test('a row without the marker is not pushFailing', () async {
+        final rows = await listTwoRunning();
+        expect(rows.every((r) => !r.pushFailing), isTrue);
+      });
     });
 
     test('deleteOrphan removes the orphan volumes and the state dir', () async {

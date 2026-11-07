@@ -448,6 +448,18 @@ class _FakeGit {
   };
 }
 
+/// The GhRunner seam, scripted by the argv (the gh auth probe, issue #120).
+class _FakeGh {
+  final List<List<String>> args = [];
+  final Map<String, GitCliResult> results = {};
+
+  GhRunner get run => (List<String> argv) async {
+    args.add(List.of(argv));
+    return results[argv.join(' ')] ??
+        const GitCliResult(exitCode: 0, stdout: '', stderr: '');
+  };
+}
+
 /// A scripted opencode service (the running orb's — the update's busy
 /// check).
 class _FakeOpencode implements OpencodeService {
@@ -608,6 +620,7 @@ void main() {
       Future<String?> Function(String projectId)? checkoutFor,
       OpencodeService? hostSessions,
       OpencodeService Function(String url, String password)? orbServiceFor,
+      GhRunner? gh,
       Duration? bootTimeout,
       Duration? pollInterval,
     }) {
@@ -624,10 +637,51 @@ void main() {
         checkoutFor: checkoutFor,
         hostSessions: hostSessions,
         orbServiceFor: orbServiceFor,
+        gh: gh,
         bootTimeout: bootTimeout ?? const Duration(minutes: 10),
         pollInterval: pollInterval ?? const Duration(milliseconds: 5),
       );
     }
+
+    // The update re-stages the gh credentials (issue #120, wake-style
+    // re-injection): the recreate writes the current host token into the
+    // state dir's gh config and clears a stale push marker.
+    test('the update re-stages the gh credentials and clears the push '
+        'marker', () async {
+      addOrb(state: 'exited');
+      stateDir();
+      setMarker();
+      hostConfig();
+      docker.containerEnv = jsonEncode(['ORB_ID=$orbId']);
+      // A stale marker from a pre-fix boot: the credentials re-stage
+      // clears it (the marker's verdict is no longer known).
+      File('${stateRoot.path}/$orbId/push-failed').writeAsStringSync('x\n');
+      final gh = _FakeGh();
+      gh.results['auth status --json hosts'] = const GitCliResult(
+        exitCode: 0,
+        stdout:
+            '{"hosts":{"github.com":[{"state":"success","active":true,'
+            '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
+        stderr: '',
+      );
+      gh.results['auth token'] = const GitCliResult(
+        exitCode: 0,
+        stdout: 'gho_UPDATE\n',
+        stderr: '',
+      );
+
+      final record = await service(gh: gh.run).update(orbId);
+
+      expect(record.state, 'stopped');
+      expect(
+        File('${stateRoot.path}/$orbId/gh/hosts.yml').readAsStringSync(),
+        contains('oauth_token: gho_UPDATE'),
+      );
+      expect(
+        File('${stateRoot.path}/$orbId/push-failed').existsSync(),
+        isFalse,
+      );
+    });
 
     // ----------------------------------------------------------------------
     // The deletion guard (spec §2.7)

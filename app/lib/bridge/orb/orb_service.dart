@@ -561,6 +561,10 @@ class OrbService {
     final staged = await _stageConfig(id);
     await _copyStagedConfig(container, staged);
     await _copyAuth(container);
+    // The container-local gh credentials (issue #120): the host's gh token
+    // read bridge-side (the bridge reaches the keyring the read-only mount
+    // cannot), staged on the state dir mount the entrypoint points gh at.
+    await _stageGhConfig(id);
 
     // The start: the entrypoint's first-start path (clone, hook,
     // container-local gitconfig — spec §6.3) then `opencode serve`.
@@ -753,6 +757,24 @@ class OrbService {
       }
     }
 
+    // The push-failure surfacing (issue #120): the orb's post-commit hook
+    // writes a `push-failed` marker on the state mount when its push to
+    // the remote fails; the row carries it (the return channel — seed,
+    // the PR flow, the guard's pushed side — silently rides on that push,
+    // spec §3, so a failed push must not leave the orb looking healthy).
+    // A cheap host-side file read, never a container probe; the broken
+    // rows' detail (the missing volume/dir) is the louder signal, and an
+    // orphan's marker is stale by construction (no container to push).
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      if (row.state == 'orphan' || row.state.startsWith('broken')) {
+        continue;
+      }
+      if (File('${stateRoot.path}/${row.id}/push-failed').existsSync()) {
+        rows[i] = _withPushFailing(row);
+      }
+    }
+
     for (final volumeName in volumeNames) {
       final id = _volumeOrbId(volumeName);
       if (id == null || ids.contains(id)) continue;
@@ -862,6 +884,20 @@ class OrbService {
     url: record.url,
     pr: pr,
     base: record.base,
+    pushFailing: record.pushFailing,
+  );
+
+  OrbRecord _withPushFailing(OrbRecord record) => OrbRecord(
+    id: record.id,
+    name: record.name,
+    project: record.project,
+    branch: record.branch,
+    state: record.state,
+    created: record.created,
+    url: record.url,
+    pr: record.pr,
+    base: record.base,
+    pushFailing: true,
   );
 
   /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
@@ -1254,6 +1290,10 @@ class OrbService {
     final staged = await _stageConfig(id);
     await _copyStagedConfig(container, staged);
     await _copyAuth(container);
+    // The gh credentials re-stage (issue #120): the current host token
+    // (it rotates), and a stale push marker from before the stop is not
+    // carried into the new boot when the credentials were refreshed.
+    await _stageGhConfig(id);
     // The in-container service mints a fresh `server password` on every
     // start (spec §7.1) and the container log keeps the lines of every
     // previous boot: count them before the start so the boot wait skips
@@ -1787,6 +1827,8 @@ class OrbService {
     final staged = await _stageConfig(id);
     await _copyStagedConfig(container, staged);
     await _copyAuth(container);
+    // The gh credentials re-stage (issue #120, wake-style).
+    await _stageGhConfig(id);
     if (!running) {
       // A stopped orb stays stopped: the container is recreated (created,
       // not started) and the marker is untouched.
@@ -2538,6 +2580,93 @@ class OrbService {
       auth.path,
       '$container:/root/.local/share/opencode/auth.json',
     ]);
+  }
+
+  /// Stage the container-local gh credentials (issue #120, spec §4): on a
+  /// host whose gh keeps its token in the Secret-Service keyring, the
+  /// read-only `~/.config/gh` mount carries only `hosts.yml` — no token —
+  /// so every https push/`gh` call inside the orb dies (`could not read
+  /// Username`), silently killing the return channel (§3). The bridge CAN
+  /// reach the keyring, so it reads the host's token and stages a
+  /// container-local gh config on the state-dir mount
+  /// (`<stateRoot>/<id>/gh/hosts.yml` → `/root/.local/gh/hosts.yml`),
+  /// which the entrypoint points `GH_CONFIG_DIR` at whenever it exists.
+  /// One mechanism, no per-host branching: the mount stays mounted, the
+  /// staged config simply wins (host-authoritative, re-staged at every
+  /// create/wake/update — the token may have rotated). No host gh, no
+  /// active github.com login, or no token: nothing is staged and the
+  /// mount stays the surface (ssh remotes are unaffected either way — the
+  /// mounted `~/.ssh` carries the key). The staged file carries a secret,
+  /// so it rides the state dir: mode 600, deleted with the orb (its dir,
+  /// spec §2.7). A successful stage clears the orb's stale `push-failed`
+  /// marker: the marker said "the push is broken"; with the credentials
+  /// refreshed that verdict is no longer known, and the next push re-marks
+  /// it if it still fails (a start without credentials keeps the marker —
+  /// it fixed nothing).
+  Future<void> _stageGhConfig(String id) async {
+    final runner = gh;
+    if (runner == null) return;
+    String? login;
+    String token;
+    try {
+      // The active github.com login (hosts.yml needs the user key, and
+      // `gh auth token` alone does not say whose token it is).
+      final status = await runner(['auth', 'status', '--json', 'hosts']);
+      if (status.exitCode != 0) return;
+      final decoded = jsonDecode(status.stdout);
+      final hosts = decoded is Map<String, Object?> ? decoded['hosts'] : null;
+      final entries = hosts is Map<String, Object?>
+          ? hosts['github.com']
+          : null;
+      if (entries is! List) return;
+      for (final entry in entries) {
+        if (entry is Map<String, Object?> &&
+            entry['active'] == true &&
+            entry['state'] == 'success' &&
+            entry['login'] is String) {
+          login = entry['login'] as String;
+          break;
+        }
+      }
+      if (login == null) return;
+      final result = await runner(['auth', 'token']);
+      if (result.exitCode != 0) return;
+      token = result.stdout.trim();
+    } on Object {
+      // No gh on the PATH anymore, or unreadable output: the mount stays
+      // the surface (the create proceeds — an ssh remote still pushes).
+      return;
+    }
+    // A token/login that is not a plain scalar is not a GitHub token /
+    // login: stage nothing (the staged file is YAML the container reads).
+    if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(token) ||
+        !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(login)) {
+      return;
+    }
+    final dir = Directory('${stateRoot.path}/$id/gh')
+      ..createSync(recursive: true);
+    final hostsFile = File('${dir.path}/hosts.yml');
+    // The gh hosts.yml shape (4-space indent).
+    hostsFile.writeAsStringSync(
+      'github.com:\n'
+      '    users:\n'
+      '        $login:\n'
+      '            oauth_token: $token\n'
+      '    user: $login\n',
+    );
+    try {
+      Process.runSync('chmod', ['600', hostsFile.path]);
+    } on ProcessException {
+      // No chmod on the PATH: the file is written, permissions are best-
+      // effort (same fallback as the Firebase service-account file).
+    }
+    final marker = File('${stateRoot.path}/$id/push-failed');
+    try {
+      if (marker.existsSync()) marker.deleteSync();
+    } on FileSystemException {
+      // A lingering marker only over-surfaces, never hides; the state
+      // dir's own removal (the deletion) takes it with it.
+    }
   }
 
   /// The host checkout's `.env*` files, host-authoritative (spec §6.1):

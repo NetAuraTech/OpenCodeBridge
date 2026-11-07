@@ -541,6 +541,7 @@ void main() {
           branch: 'orb/bbbb',
           state: 'stopped',
           created: '2026-11-04T00:00:00.000Z',
+          pushFailing: true,
         ),
       ];
 
@@ -564,6 +565,7 @@ void main() {
           'branch': 'orb/bbbb',
           'state': 'stopped',
           'created': '2026-11-04T00:00:00.000Z',
+          'pushFailing': true,
         },
       ]);
     });
