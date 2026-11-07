@@ -960,6 +960,191 @@ void main() {
       },
     );
 
+    testWidgets(
+      'a steered prompt keeps one live footer anchored at the original '
+      'prompt (issue #123)',
+      (tester) async {
+        // A Turn already running, steered once: the history carries the
+        // steering prompt with no idle marker closing the Turn. The live
+        // footer keeps counting from the Turn's FIRST prompt, and the
+        // steered prompt's steps join the throughput as they complete.
+        const midTurn = [
+          SessionMessage(id: 'i0', role: 'idle', created: 0),
+          SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000),
+          SessionMessage(
+            id: 'm1',
+            role: 'assistant',
+            text: 'a',
+            created: 1000,
+            streamed: 1500,
+            completed: 2000,
+            outputTokens: 100,
+            reasoningTokens: 0,
+          ),
+          // The steer, delivered mid-Turn: no idle marker between the steps.
+          SessionMessage(id: 'u2', role: 'user', text: 'also', created: 2500),
+        ];
+        const ended = [
+          ...midTurn,
+          SessionMessage(
+            id: 'm2',
+            role: 'assistant',
+            text: 'b',
+            created: 2600,
+            streamed: 3100,
+            completed: 3600,
+            outputTokens: 200,
+            reasoningTokens: 0,
+          ),
+          SessionMessage(id: 'i1', role: 'idle', created: 3601),
+        ];
+        var now = 3000;
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [midTurn, ended],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(now),
+        );
+
+        // Opened mid-Turn (no closing idle): the live footer anchors at the
+        // Turn's first prompt (1000), not the steer (2500), and folds the
+        // finished step (100 tokens over 0.5s). One footer, not two.
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(find.text('2.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
+
+        // The steered prompt's step runs and completes: its 200 tokens join
+        // the Turn's average (300 tokens over 1.0s), the duration keeps
+        // running from the first prompt.
+        events.add(
+          _event(
+            'session.step.started',
+            aggregateID: 'ses_1',
+            data: const {'assistantMessageID': 'm2', 'started': 2600},
+          ),
+        );
+        events.add(
+          _event(
+            'session.step.streamed',
+            aggregateID: 'ses_1',
+            created: 3100,
+            data: const {'assistantMessageID': 'm2'},
+          ),
+        );
+        events.add(
+          _event(
+            'session.step.ended',
+            aggregateID: 'ses_1',
+            created: 3600,
+            data: const {
+              'assistantMessageID': 'm2',
+              'tokens': {'input': 10, 'output': 200, 'reasoning': 0},
+            },
+          ),
+        );
+        now = 3600;
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(find.text('2.6s · 0 compactions · 300.0 tok/s'), findsOneWidget);
+
+        // The Turn ends: the frozen footer settles on the same single-turn
+        // window — 1000 -> 3600, 300 tokens over 1.0s.
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(find.text('2.6s · 0 compactions · 300.0 tok/s'), findsOneWidget);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'a queued prompt freezes the previous footer; its own Turn starts a '
+      'new live footer (issue #123)',
+      (tester) async {
+        // The first Turn completes while a second prompt sits queued in the
+        // history (the idle marker closed the first Turn before it). The
+        // frozen footer keeps showing the completed Turn until the queued
+        // prompt's own Turn starts.
+        const completed = [
+          SessionMessage(id: 'u1', role: 'user', text: 'go', created: 0),
+          SessionMessage(
+            id: 'm1',
+            role: 'assistant',
+            text: 'a',
+            created: 0,
+            streamed: 1000,
+            completed: 2000,
+            outputTokens: 200,
+            reasoningTokens: 0,
+          ),
+          SessionMessage(id: 'i1', role: 'idle', created: 2001),
+        ];
+        const queued = [
+          ...completed,
+          SessionMessage(id: 'u2', role: 'user', text: 'next', created: 5000),
+        ];
+        const running = [
+          ...queued,
+          SessionMessage(
+            id: 'm2',
+            role: 'assistant',
+            text: 'b',
+            created: 5000,
+            streamed: 5500,
+            completed: 6000,
+            outputTokens: 100,
+            reasoningTokens: 0,
+          ),
+          SessionMessage(id: 'i2', role: 'idle', created: 6001),
+        ];
+        var now = 100;
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [completed, queued, queued, running],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(now),
+        );
+
+        // Open on the completed Turn: its frozen footer.
+        expect(find.text('2.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
+
+        // The service settles the queued prompt into the history (the turn-
+        // boundary normalize): the trailing window holds only the pending
+        // prompt, so the FROZEN footer keeps the completed Turn — it does not
+        // vanish while the queued Turn waits to start.
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(find.text('2.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
+
+        // The queued prompt's Turn starts: a fresh LIVE footer begins AT the
+        // queued prompt, not at the Turn before.
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        now = 5500;
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(find.text('0.5s · 0 compactions'), findsOneWidget);
+
+        // The new Turn ends: the footer freezes on ITS window (5000 -> 6000,
+        // 100 tokens over 0.5s).
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        now = 6000;
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('1.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
+        await events.close();
+      },
+    );
+
     testWidgets('a history without stats timestamps shows no footer', (
       tester,
     ) async {

@@ -180,6 +180,110 @@ void main() {
       },
     );
 
+    test('several steer prompts between two idles stay one Turn: the first '
+        'prompt anchors, every step weighs (issue #123)', () {
+      final stats = computeTurnStats([
+        SessionMessage(id: 'i0', role: 'idle', created: 0),
+        SessionMessage(id: 'u1', role: 'user', created: 100),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 600,
+          completed: 700,
+          output: 10,
+        ),
+        // Two steer prompts delivered mid-Turn: no idle marker between them.
+        SessionMessage(id: 'u2', role: 'user', created: 800),
+        SessionMessage(id: 'c1', role: 'compaction', created: 900),
+        _step(
+          id: 'a2',
+          created: 1000,
+          streamed: 1500,
+          completed: 2000,
+          output: 100,
+        ),
+        SessionMessage(id: 'u3', role: 'user', created: 2100),
+        _step(
+          id: 'a3',
+          created: 2100,
+          streamed: 2600,
+          completed: 3100,
+          output: 100,
+        ),
+        SessionMessage(id: 'i1', role: 'idle', created: 3101),
+      ]);
+      // One Turn (the window after i0): 100 -> 3100; the steered prompts are
+      // no Turn boundary, so all three steps weigh the throughput together:
+      // (10 + 100 + 100) over 0.5s + 0.5s + 0.5s = 210/1.5.
+      expect(stats?.duration, const Duration(milliseconds: 3000));
+      expect(stats?.compactions, 1);
+      expect(stats?.tokensPerSecond, closeTo(140, 0.001));
+    });
+
+    test('a steer prompt whose step has not landed keeps the Turn at its '
+        'first prompt (issue #123)', () {
+      final stats = computeTurnStats([
+        SessionMessage(id: 'i0', role: 'idle', created: 0),
+        SessionMessage(id: 'u1', role: 'user', created: 100),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 600,
+          completed: 700,
+          output: 100,
+        ),
+        // The steer prompt is in the history; its step has not started yet.
+        SessionMessage(id: 'u2', role: 'user', created: 800),
+      ]);
+      // The Turn stays the u1 window: 100 -> 700, the a1 step alone
+      // (100 tokens over 0.5s of streaming). The undelivered prompt neither
+      // restarts the duration nor joins the fold.
+      expect(stats?.duration, const Duration(milliseconds: 600));
+      expect(stats?.tokensPerSecond, 200);
+    });
+
+    test('a queued prompt after the idle keeps the previous Turn frozen '
+        '(issue #123)', () {
+      final stats = computeTurnStats([
+        SessionMessage(id: 'u1', role: 'user', created: 0),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 600,
+          completed: 1600,
+          output: 200,
+        ),
+        SessionMessage(id: 'i1', role: 'idle', created: 1601),
+        // The queued prompt: the previous Turn closed before it, its own
+        // has not started — the footer keeps showing the previous Turn.
+        SessionMessage(id: 'u2', role: 'user', created: 5000),
+      ]);
+      // The u2 window holds no step: the walk falls back to the u1 Turn
+      // (200 tokens over 0.5s of streaming).
+      expect(stats?.duration, const Duration(milliseconds: 1600));
+      expect(stats?.tokensPerSecond, 400);
+    });
+
+    test('a legacy bare prompt tail falls back to the previous Turn (issue '
+        '#123)', () {
+      final stats = computeTurnStats([
+        SessionMessage(id: 'u1', role: 'user', created: 0),
+        _step(
+          id: 'a1',
+          created: 100,
+          streamed: 600,
+          completed: 1100,
+          output: 50,
+        ),
+        // No idle marker anywhere (legacy): the trailing prompt has no step.
+        SessionMessage(id: 'u2', role: 'user', created: 2000),
+      ]);
+      // The u2 pseudo-Turn has no content: the footer keeps the u1 Turn
+      // (50 tokens over 0.5s of streaming).
+      expect(stats?.duration, const Duration(milliseconds: 1100));
+      expect(stats?.tokensPerSecond, 100);
+    });
+
     test('a steer prompt keeps the turn: the duration starts at the first '
         'prompt', () {
       final stats = computeTurnStats([
