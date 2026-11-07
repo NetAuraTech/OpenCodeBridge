@@ -17,6 +17,8 @@ class OrbTask {
     required this.created,
     this.callerSession,
     this.callerDirectory,
+    this.callerOrb,
+    this.createdOrb = false,
     this.status = 'running',
     this.summary = '',
     this.pr,
@@ -45,6 +47,17 @@ class OrbTask {
   /// The calling session's working directory as the tool reported it (the
   /// caller-lookup fallback), or `null`.
   final String? callerDirectory;
+
+  /// The orb the calling session ran inside at dispatch (issue #100, spec
+  /// §8.4's spawn-tree edge: a nested spawn's tree runs through the
+  /// caller's orb, recorded here because a later session move changes the
+  /// live row). `null` for a host-session caller.
+  final String? callerOrb;
+
+  /// Whether this spawn **created** the task's orb (issue #100, spec §8.4):
+  /// the task record doubles as the spawn-tree edge — the orb named
+  /// [orb] belongs to [callerSession]'s spawn tree from this task on.
+  final bool createdOrb;
 
   /// The free-text task handed to the orb's agent.
   final String task;
@@ -82,6 +95,8 @@ class OrbTask {
     'session': session,
     if (callerSession != null) 'caller': callerSession,
     if (callerDirectory != null) 'callerDirectory': callerDirectory,
+    if (callerOrb != null) 'callerOrb': callerOrb,
+    if (createdOrb) 'createdOrb': true,
     'task': task,
     'created': created,
     'status': status,
@@ -101,6 +116,8 @@ class OrbTask {
       session: map['session'] as String? ?? '',
       callerSession: map['caller'] as String?,
       callerDirectory: map['callerDirectory'] as String?,
+      callerOrb: map['callerOrb'] as String?,
+      createdOrb: map['createdOrb'] == true,
       task: map['task'] as String? ?? '',
       created: (map['created'] as num?)?.toInt() ?? 0,
       status: map['status'] as String? ?? 'running',

@@ -778,6 +778,37 @@ void main() {
       expect(r.called('opencode'), isTrue);
     });
 
+    test(
+      'a first start without a base checks out the remote default',
+      () async {
+        // The fake git answers `symbolic-ref` with `origin/main` (the fake
+        // default branch).
+        final r = await h.run(firstStart: true);
+        expect(r.exitCode, 0);
+        expect(
+          r.lastCallTo('git -C ${h.workspace.path} checkout'),
+          contains('origin/main'),
+        );
+      },
+    );
+
+    test(
+      'a seeded first start checks out the seed branch (ORB_BASE_BRANCH)',
+      () async {
+        // The seed (spec §3.3): the bridge passes the seed's branch; the
+        // clone checks out the remote's branch tip, never the default.
+        final r = await h.run(
+          firstStart: true,
+          env: {'ORB_BASE_BRANCH': 'orb/seedid'},
+        );
+        expect(r.exitCode, 0);
+        expect(
+          r.lastCallTo('git -C ${h.workspace.path} checkout'),
+          contains('origin/orb/seedid'),
+        );
+      },
+    );
+
     test('the ssh known-hosts fallback seeds a container-local copy', () async {
       final r = await h.run(firstStart: false, knownHosts: false);
       expect(r.exitCode, 0);

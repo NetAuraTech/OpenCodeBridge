@@ -50,11 +50,14 @@ abstract class OrbAgentTools {
     }
   }
 
-  /// One plugin registering both spawn-surface tools (spec §8.2/§8.3):
-  /// `orb_spawn` wakes-or-creates the project's orb and dispatches the task
+  /// One plugin registering the spawn-surface tools (spec §8.2/§8.3/§8.4):
+  /// `orb_spawn` wakes-or-creates the targeted orb and dispatches the task
   /// (project never an argument — the tool passes its session id and the
   /// bridge resolves the project from the session row), `orb_wait` blocks
-  /// until a dispatched task completes and returns the structured result.
+  /// until a dispatched task completes and returns the structured result,
+  /// and `orb_stop`/`orb_delete`/`orb_export` are the spawn-tree-scoped orb
+  /// controls (issue #100 — the bridge scopes every call to the caller's
+  /// tree; the human is unrestricted).
   static const String _spawnPlugin = r'''
 import fs from "fs"
 import os from "os"
@@ -110,9 +113,10 @@ export default {
       editor.add({
         name: "orb_spawn",
         description:
-          "Dispatch a task to the project's orb (the Docker sandbox workspace): wakes the " +
-          "project's orb or creates one, sends the task to its agent, and by default waits " +
-          "for the result. The work lands on the orb's dedicated branch (orb/<id>) — the " +
+          "Dispatch a task to an orb (the Docker sandbox workspace): wakes the targeted or " +
+          "project's single orb, creates one when none exists, or creates the additional orb " +
+          "when the given name is not taken yet. Sends the task to its agent, and by default " +
+          "waits for the result. The work lands on the orb's dedicated branch (orb/<id>) — the " +
           "orb's agent commits and the branch is pushed after every commit. The project is " +
           "not an argument: this session's project is used.",
         input: {
@@ -126,6 +130,21 @@ export default {
             wait: {
               type: "boolean",
               description: "Block until the task completes (default true); false returns the orb handle immediately",
+            },
+            orb: {
+              type: "string",
+              description:
+                "Name of the target orb: an existing orb's name wakes-or-uses it; an unused name creates " +
+                "that additional orb (fresh clone, fresh branch). Omitted: the project's single orb — when " +
+                "several exist the tool refuses and lists them, so retry with an explicit name.",
+            },
+            seed: {
+              type: "string",
+              description:
+                "Name of an orb to clone from: the new orb's clone starts from the seed's pushed branch tip " +
+                "(git state only, read from the remote — the seed may be stopped), and its PR stacks on the " +
+                "seed's branch instead of the default branch. Only parameterizes a creation — pass it with a " +
+                "new orb name.",
             },
           },
           required: ["task"],
@@ -146,6 +165,8 @@ export default {
               task: args.task,
               model,
               wait: args.wait ?? true,
+              orb: args.orb,
+              seed: args.seed,
               session: context?.sessionID,
             })
           } catch (e) {
@@ -159,8 +180,7 @@ export default {
                 output:
                   "Several orbs exist in this project: " +
                   (row.orbs || []).join(", ") +
-                  ". Targeting by orb name lands with the next bridge version; until then use " +
-                  "the single-orb project or stop/delete the extra orbs.",
+                  '. Retry orb_spawn with the "orb" argument set to one of these names.',
               }
             }
             if (code === "project_unknown") {
@@ -168,6 +188,9 @@ export default {
             }
             if (code === "not_running") {
               return { output: "Orb spawn refused: the project's orb is broken. Fix or delete it from the app's Orbs tab." }
+            }
+            if (code === "seed_not_found" || code === "seed_not_pushed" || code === "seed_conflict") {
+              return { output: "Orb spawn refused (" + code + "): " + (row.details || "see the seed rules, spec §3.3.") }
             }
             return { output: "Orb spawn failed: " + code + (result.row && result.row.details ? " — " + result.row.details : "") }
           }
@@ -188,10 +211,10 @@ export default {
           required: ["task_id"],
         },
         output,
-        async execute(args) {
+        async execute(args, context) {
           let result
           try {
-            result = await post("/api/orb/wait", { id: args.task_id })
+            result = await post("/api/orb/wait", { id: args.task_id, session: context?.sessionID })
           } catch (e) {
             return { output: "Orb wait failed: the OpenCodeBridge is unreachable at " + bridgeUrl() + " (" + e + ")." }
           }
@@ -201,9 +224,90 @@ export default {
             if (code === "not_found") {
               return { output: 'No orb task "' + args.task_id + '". The bridge persists its tasks — check the id orb_spawn returned.' }
             }
+            if (code === "permission_denied") {
+              return { output: "Orb wait refused: that task's orb is outside this session's spawn tree." }
+            }
             return { output: "Orb wait failed: " + code }
           }
           return { output: describe(result.row) }
+        },
+      })
+      // The spawn-tree controls (spec §8.4): stop / delete / export of the
+      // orbs inside this session's spawn tree — never another agent's orb,
+      // never the orb this session runs inside. The bridge scopes every
+      // call; the human's own controls are the app's, not these tools.
+      const orbRefInput = {
+        type: "object",
+        properties: {
+          orb: { type: "string", description: "Name of the orb (or its id)" },
+          force: { type: "boolean", description: "orb_delete only: override the deletion guard (discard the prototype without committing)" },
+        },
+        required: ["orb"],
+      }
+      const control = async (verb, doneWord, pathname, args, context) => {
+        let result
+        try {
+          result = await post(pathname, { orb: args.orb, force: args.force === true, session: context?.sessionID })
+        } catch (e) {
+          return { output: "Orb " + verb + " failed: the OpenCodeBridge is unreachable at " + bridgeUrl() + " (" + e + ")." }
+        }
+        if (!result.ok) {
+          const row = result.row
+          const code = row && row.error ? row.error : "http_" + result.status
+          if (code === "permission_denied") {
+            return { output: "Refused: orb \"" + args.orb + "\" is outside this session's spawn tree (an agent controls only the orbs it spawned)." }
+          }
+          if (code === "deletion_refused") {
+            return {
+              output:
+                "Orb delete refused — uncommitted or unpushed changes: " +
+                (row.reasons || []).join("; ") +
+                ". Commit and let the push finish, or pass force: true to discard the work deliberately.",
+            }
+          }
+          if (code === "not_found") {
+            return { output: 'No orb "' + args.orb + '" in this project.' }
+          }
+          return { output: "Orb " + verb + " failed: " + code + (result.row && result.row.details ? " — " + result.row.details : "") }
+        }
+        if (verb === "export") {
+          const path = result.row && result.row.path
+          return { output: "Orb " + args.orb + " exported." + (path ? " Archive: " + path : "") }
+        }
+        return { output: "Orb " + args.orb + " " + doneWord + "." }
+      }
+      editor.add({
+        name: "orb_stop",
+        description:
+          "Stop an orb of this session's spawn tree (the sessions it holds move to the host). " +
+          "Wake it again with orb_spawn targeting its name.",
+        input: orbRefInput,
+        output,
+        async execute(args, context) {
+          return control("stop", "stopped", "/api/orb/stop", args, context)
+        },
+      })
+      editor.add({
+        name: "orb_delete",
+        description:
+          "Delete an orb of this session's spawn tree (container, volumes, state). Refused while " +
+          "changes are uncommitted or unpushed; force: true discards them deliberately (the losing " +
+          "prototype variant — the intended force case).",
+        input: orbRefInput,
+        output,
+        async execute(args, context) {
+          return control("delete", "deleted", "/api/orb/delete", args, context)
+        },
+      })
+      editor.add({
+        name: "orb_export",
+        description:
+          "Export an orb of this session's spawn tree: a tar.gz of the whole workspace (uncommitted " +
+          "state included) placed next to the project's checkout on the host.",
+        input: orbRefInput,
+        output,
+        async execute(args, context) {
+          return control("export", "exported", "/api/orb/export", args, context)
         },
       })
     })

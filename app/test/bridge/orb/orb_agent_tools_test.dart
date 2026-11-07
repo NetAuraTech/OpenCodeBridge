@@ -35,11 +35,21 @@ void main() {
     // unresolvable import fails the whole plugin load).
     expect(source, isNot(contains('@opencode-ai/plugin')));
     expect(source, contains('from "fs"'));
-    // Both tools, calling only the bridge HTTP API (spec §8.1).
+    // The spawn surface's tools, calling only the bridge HTTP API (§8.1).
     expect(source, contains('name: "orb_spawn"'));
     expect(source, contains('name: "orb_wait"'));
     expect(source, contains('/api/orb/spawn'));
     expect(source, contains('/api/orb/wait'));
+    // The issue #100 contract: the targeting/seed arguments and the
+    // spawn-tree-scoped controls (spec §8.2/§3.3/§8.4).
+    expect(source, contains('orb: args.orb'));
+    expect(source, contains('seed: args.seed'));
+    expect(source, contains('name: "orb_stop"'));
+    expect(source, contains('name: "orb_delete"'));
+    expect(source, contains('name: "orb_export"'));
+    expect(source, contains('/api/orb/stop'));
+    expect(source, contains('/api/orb/delete'));
+    expect(source, contains('/api/orb/export'));
     expect(source, isNot(contains('docker')));
     expect(OrbAgentTools.files.keys, ['opencodebridge_orbs.ts']);
   });

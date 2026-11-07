@@ -50,6 +50,7 @@ class OrbRecord {
     required this.created,
     this.url,
     this.pr,
+    this.base,
   });
 
   /// The technical identifier (label `ocb.id`): names the branch, the
@@ -89,6 +90,11 @@ class OrbRecord {
   /// one exists (issue #96); `null` when not requested or none found.
   final OrbPr? pr;
 
+  /// The branch the clone started from (label `ocb.base`, issue #100, spec
+  /// §3.3): the seed's branch for a seeded orb — the PR stacks on it.
+  /// `null` for an unseeded orb (its PR base is the remote's default).
+  final String? base;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
@@ -98,6 +104,7 @@ class OrbRecord {
     'created': created,
     if (url != null) 'url': url,
     if (pr != null) 'pr': pr!.toJson(),
+    if (base != null) 'base': base,
   };
 
   factory OrbRecord.fromJson(Object? json) {
@@ -111,6 +118,7 @@ class OrbRecord {
       created: map['created'] as String? ?? '',
       url: map['url'] as String?,
       pr: map['pr'] == null ? null : OrbPr.fromJson(map['pr']),
+      base: map['base'] as String?,
     );
   }
 
@@ -124,11 +132,12 @@ class OrbRecord {
       other.state == state &&
       other.created == created &&
       other.url == url &&
-      other.pr == pr;
+      other.pr == pr &&
+      other.base == base;
 
   @override
   int get hashCode =>
-      Object.hash(id, name, project, branch, state, created, url, pr);
+      Object.hash(id, name, project, branch, state, created, url, pr, base);
 
   @override
   String toString() => 'OrbRecord(id: $id, name: $name, state: $state)';

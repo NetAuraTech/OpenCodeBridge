@@ -200,7 +200,10 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   /// (the orb id, which the hook bakes into its push refspec),
   /// `ORB_REPO_URL` (the project's GitHub remote url, spec §4),
   /// `ORB_GIT_NAME`/`ORB_GIT_EMAIL` (the host's git identity, copied verbatim
-  /// — ADR-0001, the app never sees the values).
+  /// — ADR-0001, the app never sees the values),
+  /// `ORB_BASE_BRANCH` (optional, issue #100 spec §3.3: the seed's branch —
+  /// the first-start clone checks that branch out instead of the remote's
+  /// default).
   ///
   /// The bridge injects the `.env*` files into the created (not yet started)
   /// container's workspace before `docker start`; the entrypoint reads them
@@ -269,7 +272,14 @@ if [ ! -d "$WORKSPACE/.git" ]; then
     git -C "$WORKSPACE" remote set-head origin -a
     # -f: the bridge may already have injected `.env*` files into the
     # (non-empty) workspace before the start.
-    git -C "$WORKSPACE" checkout -f "$(git -C "$WORKSPACE" symbolic-ref --short refs/remotes/origin/HEAD)"
+    # The clone's base: the seed's branch when the bridge set
+    # ORB_BASE_BRANCH (a seeded orb, spec §3.3 — the branch tip read from
+    # the remote), the remote's default branch otherwise.
+    if [ -n "${ORB_BASE_BRANCH:-}" ]; then
+        git -C "$WORKSPACE" checkout -f "origin/$ORB_BASE_BRANCH"
+    else
+        git -C "$WORKSPACE" checkout -f "$(git -C "$WORKSPACE" symbolic-ref --short refs/remotes/origin/HEAD)"
+    fi
     hook="$WORKSPACE/.git/hooks/post-commit"
     printf '%s\n' \
         '#!/bin/sh' \

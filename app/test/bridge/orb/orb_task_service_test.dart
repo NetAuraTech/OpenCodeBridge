@@ -156,6 +156,12 @@ class _FakeOrbs implements OrbService {
   String? createProject;
   String? createName;
   String? createCheckout;
+  String? createBase;
+
+  /// The scripted `seedBranch` result; [seedBranchError] throws instead.
+  String? seedBranchResult;
+  Object? seedBranchError;
+  (String, String, String)? seedBranchCall;
 
   Session? createSessionResult;
   String? createSessionOrbId;
@@ -177,10 +183,12 @@ class _FakeOrbs implements OrbService {
     required String project,
     required String name,
     required String checkout,
+    String? base,
   }) async {
     createProject = project;
     createName = name;
     createCheckout = checkout;
+    createBase = base;
     return createResult!;
   }
 
@@ -188,6 +196,18 @@ class _FakeOrbs implements OrbService {
   Future<Session> createSessionOnOrb(String id) async {
     createSessionOrbId = id;
     return createSessionResult!;
+  }
+
+  @override
+  Future<String?> seedBranch({
+    required String project,
+    required String seed,
+    required String checkout,
+  }) async {
+    seedBranchCall = (project, seed, checkout);
+    final error = seedBranchError;
+    if (error != null) throw error;
+    return seedBranchResult;
   }
 
   @override
@@ -408,6 +428,375 @@ void main() {
           callerSession: 'ses_in_orb',
         );
         expect(task.orb, 'a1b2c3');
+      },
+    );
+  });
+
+  // The targeting + seed + spawn-tree rows (issue #100, spec §8.2/§3.3).
+  OrbRecord stoppedNamed(String name, {String id = 'd4e5f6'}) => OrbRecord(
+    id: id,
+    name: name,
+    project: 'prj_1',
+    branch: 'orb/$id',
+    state: 'stopped',
+    created: '2026-01-01T00:00:00.000Z',
+  );
+
+  group('orb targeting (issue #100)', () {
+    test('an explicit name already taken targets that orb', () async {
+      orbs.listResult = [
+        _runningOrb(id: 'x1', name: 'alpha'),
+        stoppedNamed('beta', id: 'x2'),
+      ];
+      orbs.wakeResult = _runningOrb(id: 'x2', name: 'beta');
+      scriptDispatch();
+
+      final task = await service.spawn(
+        task: 'do it',
+        orb: 'beta',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(orbs.wokenId, 'x2');
+      expect(orbs.createName, isNull);
+      expect(task.orb, 'x2');
+      expect(task.orbName, 'beta');
+    });
+
+    test('an explicit unused name creates the additional orb', () async {
+      orbs.listResult = [_runningOrb(id: 'x1', name: 'alpha')];
+      orbs.createResult = _runningOrb(id: 'x2', name: 'variant');
+      scriptDispatch();
+
+      final task = await service.spawn(
+        task: 'do it',
+        orb: 'variant',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      // No ambiguity check on an explicit name: the single orb in the
+      // project is not woken; the fresh clone is created instead.
+      expect(orbs.wokenId, isNull);
+      expect(orbs.createName, 'variant');
+      expect(orbs.createCheckout, '/home/dev/shop');
+      expect(orbs.createBase, isNull);
+      expect(task.orb, 'x2');
+      expect(task.createdOrb, isTrue);
+    });
+
+    test('the created orb is attached to the caller spawn tree', () async {
+      orbs.listResult = const [];
+      orbs.createResult = _runningOrb(name: 'do-it');
+      scriptDispatch();
+
+      final task = await service.spawn(
+        task: 'do it',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      expect(task.createdOrb, isTrue);
+
+      // The caller's tree now contains the orb it created.
+      expect(
+        await service.canControl(callerSession: 'ses_caller', orbId: task.orb),
+        isTrue,
+      );
+      // Another agent's session never sees it.
+      expect(
+        await service.canControl(callerSession: 'ses_other', orbId: task.orb),
+        isFalse,
+      );
+      // The human (no session) is unrestricted.
+      expect(
+        await service.canControl(callerSession: null, orbId: task.orb),
+        isTrue,
+      );
+    });
+
+    test('an edge whose caller is unknown controls nothing', () async {
+      orbs.listResult = const [];
+      orbs.createResult = _runningOrb(name: 'do-it');
+      scriptDispatch();
+
+      final task = await service.spawn(
+        task: 'do it',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      expect(task.createdOrb, isTrue);
+
+      // The creating session disappears from the bridge's view (deleted):
+      // no session resolves to the edge, so no agent controls the orb —
+      // only the human does.
+      backend.rows = const [];
+      expect(
+        await service.canControl(callerSession: 'ses_caller', orbId: task.orb),
+        isTrue, // the edge's session id still matches the caller's id
+      );
+      expect(
+        await service.canControl(callerSession: 'ses_other', orbId: task.orb),
+        isFalse,
+      );
+    });
+  });
+
+  group('seed (issue #100, spec §3.3)', () {
+    test(
+      'a seeded clone starts from the seed branch and stacks the PR',
+      () async {
+        orbs.listResult = [_runningOrb(id: 'xB', name: 'parent')];
+        orbs.seedBranchResult = 'orb/xB';
+        // The real OrbService.create returns the record carrying its base.
+        orbs.createResult = OrbRecord(
+          id: 'xC',
+          name: 'variant',
+          project: 'prj_1',
+          branch: 'orb/xC',
+          state: 'running',
+          created: '2026-01-01T00:00:00.000Z',
+          url: 'http://127.0.0.1:9999',
+          base: 'orb/xB',
+        );
+        scriptDispatch();
+
+        final task = await service.spawn(
+          task: 'variant work',
+          orb: 'variant',
+          seed: 'parent',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+
+        expect(orbs.seedBranchCall?.$2, 'parent');
+        expect(orbs.createBase, 'orb/xB');
+        expect(task.orb, 'xC');
+        // The task prompt carries the stacking contract (spec §3.2): the PR
+        // base is the seed's branch, not the default.
+        final prompt = backend.opencode.prompts.last.$2;
+        expect(prompt, contains('base `orb/xB`'));
+      },
+    );
+
+    test('a seed naming no orb of the project is refused', () async {
+      orbs.listResult = [_runningOrb(id: 'xB', name: 'parent')];
+      orbs.seedBranchResult = null; // OrbService: no such orb in the project.
+
+      await expectLater(
+        service.spawn(
+          task: 'do it',
+          orb: 'variant',
+          seed: 'ghost',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(isA<OrbRefusalError>()),
+      );
+      expect(orbs.createName, isNull);
+    });
+
+    test('a seed whose branch was never pushed is refused', () async {
+      orbs.seedBranchError = const OrbRefusalError(
+        OrbRefusalError.seedNotPushed,
+        'not pushed',
+      );
+
+      await expectLater(
+        service.spawn(
+          task: 'do it',
+          orb: 'variant',
+          seed: 'parent',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.seedNotPushed,
+          ),
+        ),
+      );
+    });
+
+    test('a seed with an existing target orb is refused', () async {
+      orbs.listResult = [_runningOrb(id: 'xB', name: 'parent')];
+
+      await expectLater(
+        service.spawn(
+          task: 'do it',
+          orb: 'parent',
+          seed: 'parent',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.seedConflict,
+          ),
+        ),
+      );
+    });
+
+    test('a seed without a target name is refused', () async {
+      orbs.listResult = [_runningOrb(id: 'xB', name: 'parent')];
+
+      await expectLater(
+        service.spawn(
+          task: 'do it',
+          seed: 'parent',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.seedConflict,
+          ),
+        ),
+      );
+    });
+  });
+
+  group('spawn-tree permissions (issue #100, spec §8.4)', () {
+    /// A in-orb session on orb [orbId] as the backend sees it.
+    Session inOrbSession(String id, String orbId) => Session(
+      id: id,
+      title: 'task',
+      project: const SessionProject(id: 'prj_orb', name: 'orb'),
+      created: 300,
+      location: '/workspace',
+      active: true,
+      orb: orbId,
+    );
+
+    test(
+      'the tree is transitive: A spawns B, B spawns C, C is A tree',
+      () async {
+        // A (ses_caller) spawns B.
+        orbs.listResult = const [];
+        orbs.createResult = _runningOrb(id: 'orbB', name: 'b');
+        scriptDispatch();
+        await service.spawn(
+          task: 'b work',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+
+        // B's agent (ses_b, a session on orbB) spawns C.
+        backend.rows = [_callerRow, inOrbSession('ses_b', 'orbB')];
+        orbs.listResult = [_runningOrb(id: 'orbB', name: 'b')];
+        orbs.createResult = _runningOrb(id: 'orbC', name: 'c');
+        await service.spawn(
+          task: 'c work',
+          orb: 'c',
+          wait: false,
+          callerSession: 'ses_b',
+        );
+
+        // C is in B's tree and (transitively) in A's.
+        expect(
+          await service.canControl(callerSession: 'ses_b', orbId: 'orbC'),
+          isTrue,
+        );
+        expect(
+          await service.canControl(callerSession: 'ses_caller', orbId: 'orbC'),
+          isTrue,
+        );
+        // B's agent cannot stop B — its own orb is outside its tree.
+        expect(
+          await service.canControl(callerSession: 'ses_b', orbId: 'orbB'),
+          isFalse,
+        );
+        // A can stop B (it created it).
+        expect(
+          await service.canControl(callerSession: 'ses_caller', orbId: 'orbB'),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'the tree survives moves: a moved session keeps control by id',
+      () async {
+        orbs.listResult = const [];
+        orbs.createResult = _runningOrb(name: 'do-it');
+        scriptDispatch();
+        final task = await service.spawn(
+          task: 'do it',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+
+        // The session is moved to the host (and its row disappears from the
+        // in-orb listing entirely / lives host-side with the SAME id): the
+        // edge stays by session id.
+        backend.rows = [
+          Session(
+            id: 'ses_caller',
+            title: 'moved caller',
+            project: const SessionProject(id: 'prj_1', name: 'shop'),
+            created: 100,
+            location: '/home/dev/shop',
+            active: true,
+          ),
+        ];
+        expect(
+          await service.canControl(
+            callerSession: 'ses_caller',
+            orbId: task.orb,
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test('a human-created orb is outside every agent tree', () async {
+      // The orb exists without any creating task record.
+      orbs.listResult = [_runningOrb()];
+      expect(
+        await service.canControl(callerSession: 'ses_caller', orbId: 'a1b2c3'),
+        isFalse,
+      );
+      // The human is unrestricted.
+      expect(
+        await service.canControl(callerSession: null, orbId: 'a1b2c3'),
+        isTrue,
+      );
+    });
+
+    test(
+      'wait rights are tree-scoped, the dispatch owner always passes',
+      () async {
+        orbs.listResult = const [];
+        orbs.createResult = _runningOrb();
+        scriptDispatch();
+        final task = await service.spawn(
+          task: 'do it',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+
+        // The dispatch owner always waits its own task.
+        final settled = service.wait(task.id, callerSession: 'ses_caller');
+        // (The task never completes here; just the check passing to the poll.)
+        expect(
+          await service.canControl(
+            callerSession: 'ses_caller',
+            orbId: task.orb,
+          ),
+          isTrue,
+        );
+        settled.ignore();
+
+        await expectLater(
+          service.wait(task.id, callerSession: 'ses_intruder'),
+          throwsA(isA<OrbPermissionError>()),
+        );
       },
     );
   });

@@ -21,7 +21,7 @@ class OrbSpawnProjectError implements Exception {
 
 /// Several orbs exist in the project and none was targeted (spec §8.2's
 /// targeting refusal — the tool lists them and retries with an explicit
-/// name once the targeting argument lands, issue #100).
+/// name).
 class OrbAmbiguousError implements Exception {
   const OrbAmbiguousError(this.project, this.names);
 
@@ -42,13 +42,29 @@ class OrbTaskNotFoundError implements Exception {
   String toString() => 'OrbTaskNotFoundError($id)';
 }
 
-/// The spawn surface's task service (issue #99, spec §8.2/§8.3): what the
-/// bridge does behind the `orb_spawn`/`orb_wait` global tools.
+/// The caller is an agent and the orb is outside its spawn tree (issue
+/// #100, spec §8.4): the agent may only control the orbs it spawned itself
+/// or had its subagents spawn — never another agent's orb, never the orb it
+/// itself runs inside, never a human-created orb.
+class OrbPermissionError implements Exception {
+  const OrbPermissionError(this.orb);
+
+  final String orb;
+
+  @override
+  String toString() => 'OrbPermissionError($orb)';
+}
+
+/// The spawn surface's task service (issue #99 + #100, spec §8): what the
+/// bridge does behind the global `orb_spawn`/`orb_wait`/`orb_stop`/
+/// `orb_delete`/`orb_export` tools.
 ///
-/// - **Wake-or-create** on the project's single orb: none → create (name
-///   derived from the task), one → wake (idempotent — a running orb is
-///   returned as-is). Several orbs → [OrbAmbiguousError] (targeting is
-///   issue #100's).
+/// - **Targeting + wake-or-create** (spec §8.2): an explicit orb name wakes
+///   or uses that orb, an unused name creates the additional orb (optionally
+///   **seeded** from another orb's pushed branch tip, §3.3); no name → the
+///   project's single orb: none → create (name derived from the task), one →
+///   wake (idempotent — a running orb is returned as-is), several →
+///   [OrbAmbiguousError].
 /// - **Dispatch**: a fresh session on the orb's service (one session per
 ///   task), the calling session's model by default, then the task prompt.
 /// - **Completion**: the orb session's turn outcome polled on [pollInterval]
@@ -58,6 +74,9 @@ class OrbTaskNotFoundError implements Exception {
 ///   PR URL if the branch has one, is persisted, and the completion message
 ///   is **injected into the calling session** — dropped when that session is
 ///   dead (the orb keeps running; the result stays persisted, spec §8.3).
+/// - **The spawn tree** ([canControl], spec §8.4): the creating-task records
+///   are the tree's edges, keyed by session id; every agent-facing orb right
+///   is scoped to the caller's tree, the human is unrestricted.
 /// - **Persistence**: every task lives in one JSON file (the tasks file,
 ///   next to the bridge's other app-owned state), rewritten on every change.
 ///   A restarted bridge resumes watching the tasks that were still running.
@@ -117,7 +136,14 @@ class OrbTaskService {
   /// [callerSession] (the calling session id) and [callerDirectory] (its
   /// working directory, as the tool's context reports it) identify the
   /// caller: the project is resolved from the session row, falling back to
-  /// the directory; [callerSession] is also the completion-injection target.
+  /// the directory; [callerSession] is also the completion-injection target
+  /// and the **spawn tree** parent of an orb this call creates (issue #100,
+  /// spec §8.4). [orb] (issue #100, spec §8.2) targets by orb **name**: an
+  /// existing orb's name wakes-or-uses it, an unused name creates that
+  /// additional orb, omitted keeps the single-orb wake-or-create (several
+  /// orbs → [OrbAmbiguousError]). [seed] names the orb whose pushed branch
+  /// tip the new clone starts from (spec §3.3); it parameterizes a creation
+  /// only — with an existing target or no seed orb it is refused.
   /// [model] defaults to the calling session's model. [wait] true (the
   /// tool-facing default) blocks until the task completes; false returns the
   /// dispatched record immediately — the completion watcher then persists
@@ -126,6 +152,8 @@ class OrbTaskService {
     required String task,
     ModelRef? model,
     bool wait = true,
+    String? orb,
+    String? seed,
     String? callerSession,
     String? callerDirectory,
   }) async {
@@ -144,6 +172,8 @@ class OrbTaskService {
           projectId: projectId,
           task: trimmed,
           model: model,
+          orb: orb?.trim(),
+          seed: seed?.trim(),
           callerSession: callerSession,
           callerDirectory: callerDirectory,
         );
@@ -164,10 +194,17 @@ class OrbTaskService {
     required String projectId,
     required String task,
     ModelRef? model,
+    String? orb,
+    String? seed,
     String? callerSession,
     String? callerDirectory,
   }) async {
-    final record = await _wakeOrCreateOrb(projectId, task);
+    final (record, created) = await _targetOrCreateOrb(
+      projectId,
+      task,
+      orb,
+      seed,
+    );
 
     // The task's session on the orb's service (one session per task, so the
     // turn outcome is unambiguous for completion detection).
@@ -192,6 +229,8 @@ class OrbTaskService {
       session: session.id,
       callerSession: callerSession,
       callerDirectory: callerDirectory,
+      callerOrb: await _hostOrbOf(callerSession ?? ''),
+      createdOrb: created,
       task: task,
       created: DateTime.now().millisecondsSinceEpoch,
     );
@@ -216,9 +255,20 @@ class OrbTaskService {
   /// Block until the task completes; returns the completed record (an
   /// already-completed task returns immediately). Used by `wait: true` and
   /// by the tool-facing `orb_wait`.
-  Future<OrbTask> wait(String taskId) async {
+  ///
+  /// [callerSession] (issue #100, spec §8.4) scopes the wait right to the
+  /// caller's spawn tree: an agent waits for the tasks of its own tree —
+  /// and always for a task it dispatched itself (the `wait: false` →
+  /// `orb_wait` flow); `null` is the human, unrestricted.
+  Future<OrbTask> wait(String taskId, {String? callerSession}) async {
     final found = task(taskId);
     if (found == null) throw OrbTaskNotFoundError(taskId);
+    if (callerSession != null &&
+        callerSession.isNotEmpty &&
+        found.callerSession != callerSession &&
+        !await canControl(callerSession: callerSession, orbId: found.orb)) {
+      throw OrbPermissionError(found.orb);
+    }
     return _awaitCompletion(found);
   }
 
@@ -239,29 +289,137 @@ class OrbTaskService {
     return target;
   }
 
-  /// The project's single orb, woken (or created) through the existing
-  /// lifecycle (spec §8.2's wake-or-create).
-  Future<OrbRecord> _wakeOrCreateOrb(String projectId, String task) async {
+  /// The project's orb for the spawn (spec §8.2's targeting + §3.3's seed),
+  /// as `(record, created)` — [created] true when this call created the orb
+  /// (the spawn-tree attachment fact, spec §8.4).
+  ///
+  /// - explicit [orb] name taken → that orb (woken when stopped);
+  /// - explicit name not yet taken → the additional orb, a fresh clone
+  ///   (from the default branch, or from [seed]'s pushed branch tip when
+  ///   given) on a fresh `orb/<id>` branch;
+  /// - name omitted → the single-orb wake-or-create: one orb (wake),
+  ///   several ([OrbAmbiguousError] with the project's names), none
+  ///   (create, name derived from the task).
+  ///
+  /// [seed] parameterizes a creation only: with an existing target it is
+  /// refused ([OrbRefusalError.seedConflict]), and so is a seed with no
+  /// target name to create under — a seed never changes a wake.
+  Future<(OrbRecord, bool)> _targetOrCreateOrb(
+    String projectId,
+    String task,
+    String? orb,
+    String? seed,
+  ) async {
     final rows = await orbs.list();
     final inProject = [
       for (final row in rows)
         if (row.project == projectId && row.state != 'orphan') row,
     ];
+    if (orb != null && orb.isNotEmpty) {
+      final existing = [
+        for (final row in inProject)
+          if (row.name == orb) row,
+      ];
+      if (existing.length > 1) {
+        throw OrbAmbiguousError(projectId, [orb]);
+      }
+      if (existing.length == 1) {
+        if (seed != null && seed.isNotEmpty) {
+          throw const OrbRefusalError(
+            OrbRefusalError.seedConflict,
+            'the seed only parameterizes a new orb — the targeted orb '
+            'already exists (spec §3.3)',
+          );
+        }
+        return (await _wakeOrUse(existing.single), false);
+      }
+      // The additional orb (spec §8.2): a fresh clone under the name.
+      if (seed != null && seed.isNotEmpty) {
+        return (await _createSeeded(projectId, orb, seed), true);
+      }
+      return (await _createOrb(projectId, orb), true);
+    }
+    // No target name: the single-orb wake-or-create (#99's contract).
+    if (seed != null && seed.isNotEmpty) {
+      throw const OrbRefusalError(
+        OrbRefusalError.seedConflict,
+        'the seed parameterizes a new orb — pass it with a new orb name '
+        'to spawn (spec §3.3)',
+      );
+    }
     if (inProject.length > 1) {
       throw OrbAmbiguousError(projectId, [
         for (final row in inProject) row.name,
       ]);
     }
     if (inProject.length == 1) {
-      final row = inProject.single;
-      if (row.state == 'running') return row;
-      if (row.state == 'stopped') return orbs.wake(row.id);
+      return (await _wakeOrUse(inProject.single), false);
+    }
+    return (
+      await _createOrb(
+        projectId,
+        _derivedName(task, {for (final row in rows) row.name}),
+      ),
+      true,
+    );
+  }
+
+  /// The existing-orb branch of the targeting (spec §8.2): a running orb is
+  /// used as-is (idempotent wake), a stopped one is woken, any other state
+  /// refuses.
+  Future<OrbRecord> _wakeOrUse(OrbRecord row) async {
+    if (row.state == 'running') return row;
+    if (row.isStoppedLike) return orbs.wake(row.id);
+    throw OrbRefusalError(
+      OrbRefusalError.notRunning,
+      'the project orb ${row.name} is ${row.state} — spawn refused',
+    );
+  }
+
+  /// The additional orb (fresh clone of the project's default branch).
+  Future<OrbRecord> _createOrb(String projectId, String name) async {
+    final checkout = await _checkoutOf(projectId);
+    return orbs.create(project: projectId, name: name, checkout: checkout);
+  }
+
+  /// The seeded clone (spec §3.3): the seed's branch tip, read from the
+  /// remote through [OrbService.seedBranch] — the seed parent may be
+  /// stopped, and its uncommitted working tree is never part of the seed.
+  /// The clone's base label carries the seed's branch: the orb's PR stacks
+  /// on the parent's branch, not the default.
+  Future<OrbRecord> _createSeeded(
+    String projectId,
+    String name,
+    String seed,
+  ) async {
+    final checkout = await _checkoutOf(projectId);
+    final base = await orbs.seedBranch(
+      project: projectId,
+      seed: seed,
+      checkout: checkout,
+    );
+    if (base == null) {
+      final names = [
+        for (final row in await orbs.list())
+          if (row.project == projectId && row.state != 'orphan') row.name,
+      ];
       throw OrbRefusalError(
-        OrbRefusalError.notRunning,
-        'the project orb ${row.name} is ${row.state} — spawn refused',
+        OrbRefusalError.seedNotFound,
+        'no orb named $seed in this project — seed with one of: '
+        '${names.join(', ').isEmpty ? '(none yet)' : names.join(', ')}',
       );
     }
-    // No orb: create one, name derived from the task (spec §8.2).
+    return orbs.create(
+      project: projectId,
+      name: name,
+      checkout: checkout,
+      base: base,
+    );
+  }
+
+  /// The project's canonical checkout (the create's clone source and the
+  /// seed's remote probe).
+  Future<String> _checkoutOf(String projectId) async {
     String? checkout;
     try {
       for (final project in await sessions.projects()) {
@@ -271,12 +429,7 @@ class OrbTaskService {
       // The service is unreachable: the checkout stays unknown.
     }
     if (checkout == null) throw const OrbSpawnProjectError();
-    final existing = {for (final row in rows) row.name};
-    return orbs.create(
-      project: projectId,
-      name: _derivedName(task, existing),
-      checkout: checkout,
-    );
+    return checkout;
   }
 
   /// A short kebab name derived from the task (lowercase, at most three
@@ -353,14 +506,123 @@ class OrbTaskService {
 
   /// The prompt sent to the orb's agent: the task text plus the branch
   /// contract (commit — the post-commit hook pushes; PR when the work is
-  /// done, spec §3).
-  String _taskPrompt(OrbRecord record, String task) =>
-      '$task\n\n'
-      '(Orb task: work in this workspace and commit your changes — a '
-      'post-commit hook pushes them to `${record.branch}`. When the whole '
-      'piece of work is done, open the PR with `gh pr create` (head '
-      '`${record.branch}`); one PR per orb, later tasks push to the same '
-      'branch.)';
+  /// done, spec §3). The PR's base is the branch the clone started from
+  /// (spec §3.2/§3.3): the remote's default for a fresh clone — gh's own
+  /// default — or the **seed's branch** for a seeded orb (the PR stacks on
+  /// the parent).
+  String _taskPrompt(OrbRecord record, String task) {
+    final base = record.base;
+    return '$task\n\n'
+        '(Orb task: work in this workspace and commit your changes — a '
+        'post-commit hook pushes them to `${record.branch}`. When the whole '
+        'piece of work is done, open the PR with `gh pr create` (head '
+        '`${record.branch}`'
+        '${base == null ? '' : ', base `$base` — this orb stacks on that '
+                  'branch, not the default'}'
+        '); one PR per orb, later tasks push to the same branch.)';
+  }
+
+  // ------------------------------------------------------------------------
+  // The spawn tree & permissions (issue #100, spec §8.4)
+
+  /// The orb an agent-facing control call refers to: [ref] is an orb
+  /// **name** within the caller's project (the same resolution the spawn
+  /// targeting uses), or an orb **id** when no name matches. `null` when
+  /// neither resolves. When the caller's project cannot be resolved (a
+  /// human call without a session), the name resolves across all projects —
+  /// a name taken in several of them is [OrbAmbiguousError] (the id always
+  /// disambiguates).
+  Future<OrbRecord?> resolveOrb(
+    String ref, {
+    String? callerSession,
+    String? callerDirectory,
+  }) async {
+    String? projectId;
+    try {
+      projectId = await _resolveProject(callerSession, callerDirectory);
+    } on OrbSpawnProjectError {
+      projectId = null; // No project context: resolve globally.
+    }
+    final rows = await orbs.list();
+    final named = [
+      for (final row in rows)
+        if (row.state != 'orphan' &&
+            row.name == ref &&
+            (projectId == null || row.project == projectId))
+          row,
+    ];
+    if (named.length > 1) {
+      throw OrbAmbiguousError(projectId ?? '', [ref]);
+    }
+    if (named.length == 1) return named.single;
+    for (final row in rows) {
+      if (row.id == ref) return row;
+    }
+    return null;
+  }
+
+  /// Whether the caller may act on the orb [orbId] (stop, delete, export):
+  /// the agent's rights are **scoped to its spawn tree** — the orbs it
+  /// spawned itself or had its subagents spawn — while the human (a caller
+  /// that is none of these) is unrestricted (spec §8.4).
+  ///
+  /// The tree is derived from the persisted task records: a task that
+  /// created its orb is the edge from the caller's session id to that orb,
+  /// recorded with the orb the caller ran inside at the time ([OrbTask
+  /// .callerOrb]) — all of it **keyed by session id and durable**, so it
+  /// **survives moves**: a session moved to the host keeps the id the edges
+  /// are keyed by (spec §7.2/§8.4). The walk goes up the target orb's
+  /// creating-edge chain: the caller is in the tree when it is an edge's
+  /// spawner, transitively, with no depth limit (A spawns B, B spawns C ⇒ C
+  /// is in A's tree). The chain ends at a human-created orb (no creating
+  /// record — out of every agent's reach), and the orb the caller itself
+  /// runs inside is outside its own tree (B's agent cannot stop B).
+  ///
+  /// [callerSession] is the caller as the tool request presents it: an
+  /// agent's session id (host or orb side); `null`/empty is the human.
+  Future<bool> canControl({
+    required String? callerSession,
+    required String orbId,
+  }) async {
+    if (callerSession == null || callerSession.isEmpty) return true;
+    // An agent never controls the orb it itself runs inside: its own orb
+    // is outside its tree (spec §8.4 — B's agent cannot stop B).
+    if (await _hostOrbOf(callerSession) == orbId) return false;
+    String? hop = orbId;
+    final visited = <String>{};
+    while (hop != null && visited.add(hop)) {
+      final edge = _creatingTask(hop);
+      if (edge == null) return false; // human-created: out of every tree
+      if (edge.callerSession == callerSession) return true;
+      hop = edge.callerOrb;
+    }
+    return false;
+  }
+
+  /// The orb the session [session] runs inside, or `null` when it is a host
+  /// session (its row is not stamped with an orb) or unknown (a dead
+  /// session: no hosting chain).
+  Future<String?> _hostOrbOf(String session) async {
+    if (session.isEmpty) return null;
+    try {
+      for (final row in await sessions.list()) {
+        if (row.id == session) return row.orb;
+      }
+    } on OpencodeServiceError {
+      // The service is unreachable: unknown, like a host session.
+    }
+    return null;
+  }
+
+  /// The creating task of the orb [orbId] (the spawn-tree edge into it), or
+  /// `null` when no record created it — a human-created orb ends every
+  /// agent's chain (spec §8.4: an agent never touches those).
+  OrbTask? _creatingTask(String orbId) {
+    for (final task in _tasks) {
+      if (task.createdOrb && task.orb == orbId) return task;
+    }
+    return null;
+  }
 
   // ------------------------------------------------------------------------
   // Completion watching, persistence, injection

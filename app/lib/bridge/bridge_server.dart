@@ -152,6 +152,15 @@ class BridgeServer {
   /// structured result (behind the global `orb_wait` tool).
   static const String orbWaitPath = '/api/orb/wait';
 
+  /// The spawn surface's agent-facing orb controls (issue #100, spec §8.4):
+  /// `POST` with the body `{"orb": "<name>", "session"?: "…", "directory"?: "…", "force"?: true}`
+  /// — the stop / delete / export of the orbs inside the calling agent's
+  /// spawn tree, behind the global `orb_stop`/`orb_delete`/`orb_export`
+  /// tools.
+  static const String orbStopPath = '/api/orb/stop';
+  static const String orbDeletePath = '/api/orb/delete';
+  static const String orbExportPath = '/api/orb/export';
+
   // The structured view's `/` command menu, global commands (issue #46).
   // Each is a thin pass-through of a shared-service endpoint; the service is
   // the single source of truth, so the effect is reflected live in any
@@ -1115,6 +1124,24 @@ class BridgeServer {
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.orbWaitPath) {
         await BridgeServer._handleOrbWait(request, tasks);
+        return;
+      }
+      // The spawn surface's agent-facing orb controls (issue #100, spec
+      // §8.4): the same lifecycle operations as the human's `/api/orbs/…`
+      // routes, scoped to the caller's spawn tree.
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbStopPath) {
+        await BridgeServer._handleOrbControl(request, tasks, orbs, 'stop');
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbDeletePath) {
+        await BridgeServer._handleOrbControl(request, tasks, orbs, 'delete');
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbExportPath) {
+        await BridgeServer._handleOrbControl(request, tasks, orbs, 'export');
         return;
       }
       if (request.method == 'GET' &&
@@ -2707,6 +2734,8 @@ class BridgeServer {
         task: task,
         model: BridgeServer._modelRef(body),
         wait: wait,
+        orb: BridgeServer._stringField(body, 'orb'),
+        seed: BridgeServer._stringField(body, 'seed'),
         callerSession: BridgeServer._stringField(body, 'session'),
         callerDirectory: BridgeServer._stringField(body, 'directory'),
       );
@@ -2770,12 +2799,124 @@ class BridgeServer {
       return;
     }
     try {
-      final settled = await tasks.wait(id);
+      final settled = await tasks.wait(
+        id,
+        callerSession: BridgeServer._stringField(body, 'session'),
+      );
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode(settled.toJson()));
     } on OrbTaskNotFoundError catch (e) {
       response.statusCode = HttpStatus.notFound;
       response.write(jsonEncode({'error': 'not_found', 'id': e.id}));
+    } on OrbPermissionError catch (e) {
+      response.statusCode = HttpStatus.forbidden;
+      response.write(jsonEncode({'error': 'permission_denied', 'orb': e.orb}));
+    }
+    await response.close();
+  }
+
+  /// The spawn surface's agent-facing orb controls (issue #100, spec §8.4):
+  /// `POST /api/orb/stop|delete|export` with the body `{"orb": "<name or
+  /// id>", "session"?: …, "directory"?: …}` (+ `"force": true` on the
+  /// delete). The orb reference resolves through the task service (the
+  /// caller's project first); the operation then runs on the same lifecycle
+  /// services the human's `/api/orbs/…` routes use — the deletion guard
+  /// applies exactly as it does to the human, with the explicit `force`
+  /// override (the intended discard-without-committing case). The scoping:
+  /// a call carrying a `session` (the agent tools always send their own id)
+  /// may only act inside that session's spawn tree ([OrbPermissionError] →
+  /// 403); a call without one is the human's, unrestricted — the same
+  /// self-identification contract as the spawn endpoint (#99). A 200/204 on
+  /// success; an unknown orb a 404; a refused deletion a 409
+  /// `deletion_refused` with the guard's reasons.
+  static Future<void> _handleOrbControl(
+    HttpRequest request,
+    OrbTaskService? tasks,
+    OrbService? orbs,
+    String action,
+  ) async {
+    final response = request.response;
+    if (tasks == null || orbs == null) {
+      BridgeServer._unavailable(response);
+      await response.close();
+      return;
+    }
+    final body = await BridgeServer._jsonBody(request);
+    final ref = BridgeServer._stringField(body, 'orb');
+    if (ref == null || ref.isEmpty) {
+      await BridgeServer._invalidBody(response);
+      return;
+    }
+    final callerSession = BridgeServer._stringField(body, 'session');
+    try {
+      final record = await tasks.resolveOrb(
+        ref,
+        callerSession: callerSession,
+        callerDirectory: BridgeServer._stringField(body, 'directory'),
+      );
+      if (record == null) {
+        await BridgeServer._notFound(response);
+        return;
+      }
+      if (callerSession != null &&
+          callerSession.isNotEmpty &&
+          !await tasks.canControl(
+            callerSession: callerSession,
+            orbId: record.id,
+          )) {
+        throw OrbPermissionError(record.id);
+      }
+      switch (action) {
+        case 'stop':
+          await orbs.stop(record.id);
+          response.statusCode = HttpStatus.noContent;
+        case 'delete':
+          await orbs.delete(record.id, force: body?['force'] == true);
+          response.statusCode = HttpStatus.noContent;
+        default: // 'export'
+          final path = await orbs.export(record.id);
+          response.statusCode = HttpStatus.ok;
+          response.write(jsonEncode({'path': path}));
+      }
+    } on OrbPermissionError catch (e) {
+      response.statusCode = HttpStatus.forbidden;
+      response.write(jsonEncode({'error': 'permission_denied', 'orb': e.orb}));
+    } on OrbSpawnProjectError {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'project_unknown'}));
+    } on OrbAmbiguousError catch (e) {
+      response.statusCode = HttpStatus.conflict;
+      response.write(jsonEncode({'error': 'orb_ambiguous', 'orbs': e.names}));
+    } on OrbDeletionRefusedError catch (e) {
+      response.statusCode = HttpStatus.conflict;
+      response.write(
+        jsonEncode({
+          'error': 'deletion_refused',
+          'id': e.id,
+          'reasons': e.guard.reasons,
+          'dirty': e.guard.dirty,
+          'unpushedCount': e.guard.unpushedCount,
+        }),
+      );
+    } on OrbNotFoundError {
+      await BridgeServer._notFound(response);
+    } on OrbSessionsUnavailableError {
+      BridgeServer._unavailable(response);
+    } on OrbSessionMoveError catch (e) {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(
+        jsonEncode({
+          'error': 'session_move_failed',
+          'session': e.session,
+          'details': e.detail,
+        }),
+      );
+    } on OrbRefusalError catch (e) {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': e.code, 'details': e.message}));
+    } on DockerUnavailableError {
+      response.statusCode = HttpStatus.badGateway;
+      response.write(jsonEncode({'error': 'docker_unreachable'}));
     }
     await response.close();
   }
