@@ -67,14 +67,28 @@ String? turnStatsLabel(List<SessionMessage> messages) =>
 /// cost is proportional to the Turn's size, never the whole history), then
 /// fold the Turn's steps into duration, compactions and throughput.
 ///
-/// Returns `null` when the window holds no assistant step — a turn with no
-/// assistant output yet has no stats to show. A history without `idle`
-/// markers (legacy) reads the Turn as starting at its last prompt.
+/// Returns `null` when the history holds no assistant step at all — a turn
+/// with no assistant output yet has no stats to show. A history without
+/// `idle` markers is the session's undivided first Turn: every prompt in it
+/// was steered into the execution that has not closed yet.
+///
+/// A queued prompt opens the NEXT Turn (issue #123): once the previous Turn
+/// closed at its `idle` marker, the prompt waits alone in the trailing
+/// window. That window has no step yet, so the frozen stats fall back to the
+/// Turn the prompt has not replaced — the previous footer stays frozen until
+/// the queued prompt's own Turn produces its first step (and the view's live
+/// fold has taken it over while it runs). A steered prompt needs no
+/// fallback: it never closed a Turn, so it sits in the same window as the
+/// prompt it steers.
 TurnStats? computeTurnStats(List<SessionMessage> messages) {
-  final (start, end) = turnWindow(messages);
-  final fold = _fold(messages, start, end, live: false);
-  if (!fold.hasAssistant) return null;
-  return _statsFrom(fold);
+  var (start, end) = turnWindow(messages);
+  while (true) {
+    final fold = _fold(messages, start, end, live: false);
+    if (fold.hasAssistant) return _statsFrom(fold);
+    final previous = _previousTurnWindow(messages, start);
+    if (previous == null) return null;
+    (start, end) = previous;
+  }
 }
 
 /// The LIVE task stats of the Turn that is running in [messages] (issue
@@ -108,27 +122,57 @@ TurnStats? liveTurnStats(List<SessionMessage> messages, {required int now}) {
 
 /// The Turn's window `[start, end)` of [messages]: `end` is past the trailing
 /// `idle` markers (the last one closes the Turn), and `start` is at the
-/// previous `idle` marker + 1 — or, for a legacy history without `idle`
-/// markers, at the Turn's last prompt (every legacy prompt was its own Turn).
-/// The walk is proportional to the Turn's size, never the whole history.
+/// previous `idle` marker + 1. The walk is proportional to the Turn's size,
+/// never the whole history.
+///
+/// With no `idle` marker anywhere the session has never closed a Turn: the
+/// one it shows is its first, still running (only a Turn's end writes an
+/// `idle` marker), and every prompt the history holds was delivered INTO it
+/// — a steer is an inbox delivery into the running execution (issue #123),
+/// never a new boundary. The Turn therefore starts at its FIRST prompt. (A
+/// queued prompt cannot contradict this: it reaches the history only after
+/// an `idle` marker closed the Turn before it.)
 (int start, int end) turnWindow(List<SessionMessage> messages) {
   var end = messages.length;
   while (end > 0 && messages[end - 1].role == 'idle') {
     end--;
   }
-  int? lastPrompt;
   for (var i = end - 1; i >= 0; i--) {
-    final role = messages[i].role;
-    if (role == 'idle') {
+    if (messages[i].role == 'idle') {
       // The Turn is the window after the boundary; a steer prompt reuses the
       // same Turn, so the fold below starts it at its first prompt.
       return (i + 1, end);
     }
-    if (role == 'user' || role == 'synthetic') lastPrompt ??= i;
   }
-  // No idle marker anywhere (legacy history): the Turn starts at its last
-  // prompt.
-  return (lastPrompt ?? 0, end);
+  // No `idle` marker anywhere: the session's first, undivided Turn — it
+  // starts at its first prompt.
+  for (var i = 0; i < end; i++) {
+    final role = messages[i].role;
+    if (role == 'user' || role == 'synthetic') return (i, end);
+  }
+  return (0, end);
+}
+
+/// The Turn's window closed right before the one starting at [start], or
+/// `null` when the history holds no earlier Turn. The window at [start] is
+/// the one a queued prompt opened without running it (issue #123): skipping
+/// the `idle` markers that close the earlier Turn, that Turn is the window
+/// after the next `idle` marker back — or, with none, the whole stretch
+/// before them: the session's undivided first Turn, its steers included
+/// (the same read [turnWindow] gives a history without any marker).
+(int start, int end)? _previousTurnWindow(
+  List<SessionMessage> messages,
+  int start,
+) {
+  if (start == 0) return null;
+  var end = start;
+  while (end > 0 && messages[end - 1].role == 'idle') {
+    end--;
+  }
+  for (var i = end - 1; i >= 0; i--) {
+    if (messages[i].role == 'idle') return (i + 1, end);
+  }
+  return (0, end);
 }
 
 /// The raw parts of the Turn's stats, folded over the window [start, end):
