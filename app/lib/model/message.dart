@@ -155,6 +155,11 @@ class SessionMessage {
     this.reasoning,
     this.contextTokens,
     this.tools = const [],
+    this.created,
+    this.streamed,
+    this.completed,
+    this.outputTokens,
+    this.reasoningTokens,
   });
 
   /// The service's message id (its `Session.Message` id). The bridge sets it
@@ -163,8 +168,9 @@ class SessionMessage {
   /// without one (a locally-appended user prompt).
   final String? id;
 
-  /// `user`, `assistant`, or `compaction` (a context-compaction marker of
-  /// the history, whose [text] is the summary the compaction wrote).
+  /// `user`, `assistant`, `compaction` (a context-compaction marker of
+  /// the history, whose [text] is the summary the compaction wrote), or
+  /// `idle` (the marker closing a turn, carrying no content).
   final String role;
 
   /// The message's text; `null` when the message carries only tools.
@@ -187,6 +193,29 @@ class SessionMessage {
   /// user messages.
   final List<ToolCall> tools;
 
+  /// The message's creation (the service's `time.created`, epoch millis),
+  /// or `null` when the message was composed without one. Feeds the turn
+  /// stats (issue #121).
+  final int? created;
+
+  /// The assistant message's first streamed token (the service's
+  /// `time.streamed`, epoch millis): the model call's streaming began.
+  /// `null` while absent (a step whose provider never reported streaming).
+  final int? streamed;
+
+  /// The assistant message's completion (the service's `time.completed`,
+  /// epoch millis); `null` while the step has not completed (or the message
+  /// is not an assistant step).
+  final int? completed;
+
+  /// The assistant step's billed output tokens (the service's `tokens
+  /// .output`), or `null` when the service carried no tokens.
+  final int? outputTokens;
+
+  /// The assistant step's billed reasoning tokens (the service's
+  /// `tokens.reasoning`), or `null` when the service carried no tokens.
+  final int? reasoningTokens;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'role': role,
@@ -194,6 +223,11 @@ class SessionMessage {
     'reasoning': reasoning,
     'contextTokens': contextTokens,
     'tools': [for (final tool in tools) tool.toJson()],
+    'created': created,
+    'streamed': streamed,
+    'completed': completed,
+    'outputTokens': outputTokens,
+    'reasoningTokens': reasoningTokens,
   };
 
   factory SessionMessage.fromJson(Object? json) {
@@ -210,6 +244,11 @@ class SessionMessage {
       tools: tools is List
           ? [for (final item in tools) ToolCall.fromJson(item)]
           : const [],
+      created: _intOrNull(map['created']),
+      streamed: _intOrNull(map['streamed']),
+      completed: _intOrNull(map['completed']),
+      outputTokens: _intOrNull(map['outputTokens']),
+      reasoningTokens: _intOrNull(map['reasoningTokens']),
     );
   }
 
@@ -221,7 +260,12 @@ class SessionMessage {
       other.text == text &&
       other.reasoning == reasoning &&
       other.contextTokens == contextTokens &&
-      _toolsEqual(other.tools, tools);
+      _toolsEqual(other.tools, tools) &&
+      other.created == created &&
+      other.streamed == streamed &&
+      other.completed == completed &&
+      other.outputTokens == outputTokens &&
+      other.reasoningTokens == reasoningTokens;
 
   @override
   int get hashCode => Object.hash(
@@ -231,14 +275,23 @@ class SessionMessage {
     reasoning,
     contextTokens,
     Object.hashAll(tools),
+    created,
+    streamed,
+    completed,
+    outputTokens,
+    reasoningTokens,
   );
 
   @override
   String toString() =>
       'SessionMessage(id: $id, role: $role, '
       'text: $text, reasoning: $reasoning, '
-      'contextTokens: $contextTokens, tools: $tools)';
+      'contextTokens: $contextTokens, tools: $tools, '
+      'created: $created, streamed: $streamed, completed: $completed, '
+      'outputTokens: $outputTokens, reasoningTokens: $reasoningTokens)';
 }
+
+int? _intOrNull(Object? value) => value is num ? value.toInt() : null;
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {
   if (a.length != b.length) return false;

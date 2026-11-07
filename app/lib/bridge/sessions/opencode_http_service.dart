@@ -275,7 +275,8 @@ class OpencodeHttpService implements OpencodeService {
   /// client walks every page and sorts back to chronological.
   /// `user` and `assistant` turns are conversational; `compaction` items
   /// carry the summary the compaction wrote (the structured view renders
-  /// them as a divider in the history); the other message kinds (system,
+  /// them as a divider in the history); `idle` items mark a turn's end (the
+  /// turn stats read them as boundaries); the other message kinds (system,
   /// synthetic, shell, …) carry no display content.
   @override
   Future<List<SessionMessage>> getMessages(String id) async {
@@ -971,7 +972,17 @@ class OpencodeHttpService implements OpencodeService {
     final id = item['id'] is String ? item['id'] as String : null;
     if (type == 'user') {
       final text = item['text'] is String ? item['text'] as String : null;
-      return SessionMessage(id: id, role: 'user', text: text);
+      return SessionMessage(
+        id: id,
+        role: 'user',
+        text: text,
+        created: _messageCreated(item),
+      );
+    }
+    if (type == 'idle') {
+      // The marker closing a turn (issue #121): the turn-stats window walks
+      // back to it. It carries no content.
+      return SessionMessage(id: id, role: 'idle');
     }
     if (type == 'compaction') {
       // The item's `summary` is the text the compaction wrote; a running
@@ -980,7 +991,12 @@ class OpencodeHttpService implements OpencodeService {
       final summary = item['summary'] is String
           ? item['summary'] as String
           : null;
-      return SessionMessage(id: id, role: 'compaction', text: summary);
+      return SessionMessage(
+        id: id,
+        role: 'compaction',
+        text: summary,
+        created: _messageCreated(item),
+      );
     }
     if (type != 'assistant') return null;
     final content = item['content'];
@@ -1008,7 +1024,27 @@ class OpencodeHttpService implements OpencodeService {
       reasoning: reasonings.isEmpty ? null : reasonings.join('\n'),
       contextTokens: _contextTokensFrom(item['tokens']),
       tools: tools,
+      created: _messageCreated(item),
+      streamed: _messageTime(item, 'streamed'),
+      completed: _messageTime(item, 'completed'),
+      outputTokens: _tokenField(item['tokens'], 'output'),
+      reasoningTokens: _tokenField(item['tokens'], 'reasoning'),
     );
+  }
+
+  /// One of an item's `time` timestamps (`created`, `streamed`,
+  /// `completed`), or `null` when the service carries none.
+  static int? _messageTime(Map<String, Object?> item, String field) {
+    final time = item['time'];
+    return time is Map<String, Object?> ? (time[field] as num?)?.toInt() : null;
+  }
+
+  /// One field of the service's `TokenUsage.Info`, or `null` when the item
+  /// carries no tokens (the field's absence and a zero token count are
+  /// distinct: a step without tokens cannot feed the turn's throughput).
+  static int? _tokenField(Object? json, String field) {
+    final map = json is Map<String, Object?> ? json : null;
+    return (map?[field] as num?)?.toInt();
   }
 
   /// The context an assistant message's model call sent to the model: its

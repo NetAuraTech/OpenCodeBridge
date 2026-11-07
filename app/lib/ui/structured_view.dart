@@ -14,6 +14,7 @@ import '../model/message.dart';
 import '../model/permission.dart';
 import '../model/question.dart';
 import '../model/session_detail.dart';
+import '../model/turn_stats.dart';
 import '../settings/app_settings.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
@@ -515,9 +516,14 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         }
       }
     }
-    _compactionIndex =
-        _messages.isNotEmpty && _messages.last.role == 'compaction'
-        ? _messages.length - 1
+    // The last content row: the history may end in the idle marker that
+    // closed the turn, past which a live compaction marker would ride.
+    var last = _messages.length - 1;
+    while (last >= 0 && _messages[last].role == 'idle') {
+      last--;
+    }
+    _compactionIndex = last >= 0 && _messages[last].role == 'compaction'
+        ? last
         : null;
   }
 
@@ -672,6 +678,11 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     text: text ?? message.text,
     reasoning: reasoning ?? message.reasoning,
     tools: tools ?? message.tools,
+    created: message.created,
+    streamed: message.streamed,
+    completed: message.completed,
+    outputTokens: message.outputTokens,
+    reasoningTokens: message.reasoningTokens,
   );
 
   /// A part (`reasoning:0`, `text:1`, …) starts: from the next delta on, the
@@ -2076,6 +2087,16 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// The completed turn's stats footer text (issue #121), or `null` while
+  /// the session has no completed turn to report: while the turn is active
+  /// (its numbers are still moving — the live footer is issue #122) or when
+  /// the last turn's window holds no assistant step. The walk back is
+  /// proportional to the turn's size, never the whole history.
+  String? get _turnStatsText {
+    if (_turnActive || _messages.isEmpty) return null;
+    return turnStatsLabel(_messages);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2144,21 +2165,48 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
                                       // history index.
                                       final i = _messages.length - 1 - index;
                                       final message = _messages[i];
+                                      // The completed turn's stats footer (issue
+                                      // #121) rides on the history's last row —
+                                      // the idle marker closing the turn when the
+                                      // history carries one, else the turn's last
+                                      // message (legacy history).
+                                      final footer = i == _messages.length - 1
+                                          ? _turnStatsText
+                                          : null;
+                                      if (message.role == 'idle') {
+                                        // The turn-boundary marker carries no
+                                        // content of its own.
+                                        return _TurnStatsFooter(label: footer);
+                                      }
                                       if (message.role == 'compaction') {
-                                        return _CompactionPane(
-                                          message: message,
-                                          inFlight:
-                                              _compacting &&
-                                              i == _compactionIndex,
+                                        return Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            _CompactionPane(
+                                              message: message,
+                                              inFlight:
+                                                  _compacting &&
+                                                  i == _compactionIndex,
+                                            ),
+                                            _TurnStatsFooter(label: footer),
+                                          ],
                                         );
                                       }
                                       final inFlight =
                                           _turnActive &&
                                           message.id != null &&
                                           _liveMessages.containsKey(message.id);
-                                      return _MessagePane(
-                                        message: message,
-                                        inFlight: inFlight,
+                                      return Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          _MessagePane(
+                                            message: message,
+                                            inFlight: inFlight,
+                                          ),
+                                          _TurnStatsFooter(label: footer),
+                                        ],
                                       );
                                     },
                                   ),
@@ -2566,6 +2614,36 @@ class _CostBar extends StatelessWidget {
     final pct = used / limit * 100;
     final text = pct < 10 ? pct.toStringAsFixed(1) : pct.toStringAsFixed(0);
     return '$text%';
+  }
+}
+
+/// The completed turn's stats footer (issue #121): `duration · N
+/// compactions · X.X tok/s`, dimmed under the turn's last row. `null` or
+/// empty renders nothing (an empty row keeps the lazy list's item count
+/// stable).
+class _TurnStatsFooter extends StatelessWidget {
+  const _TurnStatsFooter({required this.label});
+
+  final String? label;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = this.label;
+    if (label == null || label.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      // Sits under the turn's last message: the label hugs the message it
+      // describes, and the pane's own bottom padding keeps the next turn
+      // clear.
+      padding: const EdgeInsets.only(top: 2),
+      child: Text(
+        label,
+        key: const ValueKey('turn-stats'),
+        style: TextStyle(
+          fontSize: 11,
+          color: Theme.of(context).colorScheme.outline,
+        ),
+      ),
+    );
   }
 }
 

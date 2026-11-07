@@ -129,13 +129,13 @@ void main() {
     {
       'type': 'assistant',
       'id': 'm2',
-      'time': {'created': 2},
+      'time': {'created': 2, 'streamed': 8, 'completed': 9},
       'agent': 'a',
       'model': 'm',
       'tokens': {
         'input': 100,
         'output': 50,
-        'reasoning': 0,
+        'reasoning': 12,
         'cache': {'read': 5000, 'write': 10},
       },
       'content': [
@@ -225,6 +225,14 @@ void main() {
       'status': 'completed',
       'reason': 'manual',
       'summary': 'the compressed context',
+    },
+    {
+      // The marker closing the turn (issue #121): mapped to the contract's
+      // `idle` role, the turn stats' boundary.
+      'type': 'idle',
+      'id': 'm5',
+      'time': {'created': 4},
+      'outcome': 'succeeded',
     },
     {
       'type': 'system',
@@ -783,19 +791,30 @@ void main() {
     test('getMessages walks the paginated history and maps the turns', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       final messages = await service.getMessages('ses_1');
-      // The 200 synthetic fillers are skipped, leaving the two turns and
-      // the compaction marker, back in chronological order despite the
-      // newest-first pages.
-      expect(messages, hasLength(3));
+      // The 200 synthetic fillers are skipped, leaving the two turns, the
+      // compaction marker and the idle marker, back in chronological order
+      // despite the newest-first pages.
+      expect(messages, hasLength(4));
       expect(
         messages[0],
-        const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
+        const SessionMessage(
+          id: 'm1',
+          role: 'user',
+          text: 'do the thing',
+          created: 1,
+        ),
       );
       final assistant = messages[1];
       expect(assistant.id, 'm2');
       expect(assistant.role, 'assistant');
       expect(assistant.text, 'working');
       expect(assistant.reasoning, 'hmm');
+      // The turn stats' timestamps and billed tokens (issue #121).
+      expect(assistant.created, 2);
+      expect(assistant.streamed, 8);
+      expect(assistant.completed, 9);
+      expect(assistant.outputTokens, 50);
+      expect(assistant.reasoningTokens, 12);
       expect(assistant.tools, hasLength(5));
       // The tool input is a map, so compare fields (deep) not by ==.
       expect(assistant.tools[0].id, 't1');
@@ -852,8 +871,11 @@ void main() {
           id: 'm4',
           role: 'compaction',
           text: 'the compressed context',
+          created: 3,
         ),
       );
+      // The idle marker maps to the turn-boundary role, no content.
+      expect(messages[3], const SessionMessage(id: 'm5', role: 'idle'));
       // The client walked the pages: a full first page, then the rest.
       expect(messageOffsets, [0, 200]);
     });
