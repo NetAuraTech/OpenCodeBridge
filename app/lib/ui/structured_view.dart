@@ -177,6 +177,7 @@ class StructuredSessionPanel extends StatefulWidget {
     this.onNewSession,
     this.onOpenSettings,
     this.onClose,
+    this.showCloseButton = false,
     this.settings,
     this.onThemeModeChanged,
     this.imageReader,
@@ -217,6 +218,13 @@ class StructuredSessionPanel extends StatefulWidget {
   /// `null` when closing is not a thing the panel can do (the flow then
   /// runs with the view kept in place).
   final FutureOr<void> Function()? onClose;
+
+  /// Shows an explicit close/back control in the header when [onClose] is
+  /// wired (issue #131): used by a narrow two-pane layout that toggles
+  /// between the list and the detail in place (no navigator push/pop).
+  /// `false` leaves the route's auto-implied back button to do the work on
+  /// a pushed screen.
+  final bool showCloseButton;
 
   /// The app's settings (issue #49): `/themes` reads and persists the theme
   /// choice from here. `null` leaves `/themes` a note that it is
@@ -463,6 +471,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// cursor).
   int _historyGeneration = 0;
 
+  /// Bumped on each session switch (issue #131): async loads started for a
+  /// previous session bail out when their token no longer matches, so a late
+  /// response never overwrites the newly selected session's state.
+  int _sessionLoadToken = 0;
+
   /// The small page size the bounded turn read and the lazy older loads use
   /// (issue #124): small enough that a read covers the current turn plus a
   /// little overshoot, never the whole history.
@@ -527,6 +540,30 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _prompt.addListener(_onPromptCleared);
     _scroll.addListener(_onScroll);
     _loadInitial();
+    _listenToStreams();
+  }
+
+  @override
+  void didUpdateWidget(covariant StructuredSessionPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final sessionChanged = widget.sessionId != oldWidget.sessionId;
+    final streamsChanged =
+        widget.events != oldWidget.events || widget.gaps != oldWidget.gaps;
+    if (sessionChanged) {
+      _switchToSession(widget.title);
+    } else if (widget.title != oldWidget.title && _title == oldWidget.title) {
+      _title = widget.title;
+    }
+    if (streamsChanged || sessionChanged) {
+      _listenToStreams();
+    }
+  }
+
+  void _listenToStreams() {
+    _events?.cancel();
+    _events = null;
+    _gapsSub?.cancel();
+    _gapsSub = null;
     final stream = widget.events;
     if (stream != null) {
       _events = stream.listen(_onEvent);
@@ -535,6 +572,65 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     if (gaps != null) {
       _gapsSub = gaps.listen(_onGap);
     }
+  }
+
+  /// Resets session-specific state and reloads when the panel follows a
+  /// different session (issue #131). The event/gap streams carry all
+  /// sessions and are filtered by [widget.sessionId], so the subscriptions
+  /// stay valid; the loaded data, prompt state, and in-flight work are all
+  /// replaced with the new session's.
+  void _switchToSession(String title) {
+    _sessionLoadToken++;
+    _flush?.cancel();
+    _flush = null;
+    _turnTick?.cancel();
+    _turnTick = null;
+    _pendingDeltas.clear();
+    _pendingReasoning.clear();
+    _liveMessages.clear();
+    _liveTools.clear();
+    _liveToolsOf.clear();
+    _needsSep.clear();
+    _needsSepReasoning.clear();
+    _compactionIndex = null;
+    _detail = null;
+    _messages = const [];
+    _pending = const [];
+    _questions = const [];
+    _answerBusyId = null;
+    _loading = true;
+    _loadError = null;
+    _promptBusy = false;
+    _compacting = false;
+    _replyBusyId = null;
+    _turnActive = false;
+    _contextUsed = null;
+    _prefill = null;
+    _decode = null;
+    _stick = true;
+    _atBottom = true;
+    _normalizing = false;
+    _oldestCursor = null;
+    _oldestLoaded = false;
+    _loadingOlder = false;
+    _historyGeneration++;
+    _title = title;
+    _commands = SlashCommands.catalog;
+    _menus = _buildMenus();
+    _commandsFetched = false;
+    _skills = const [];
+    _skillsFetched = false;
+    _filesToken = null;
+    _files = null;
+    _mentions = const [];
+    _images = const [];
+    _commandBusy = false;
+    _prompt.clear();
+    if (_scroll.hasClients) {
+      _scroll.jumpTo(0);
+    }
+    if (mounted) setState(() {});
+    _loadInitial();
   }
 
   @override
@@ -599,14 +695,16 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// read, issue #124 — never the whole history), and the pending permission
   /// requests (endpoints 5, 6, 8).
   Future<void> _loadInitial() async {
+    final token = _sessionLoadToken;
+    final sessionId = widget.sessionId;
     try {
       final results = await Future.wait<Object?>([
-        widget.client.getDetail(widget.sessionId),
-        _loadTurn(),
-        widget.client.getPermissions(widget.sessionId),
-        widget.client.getQuestions(widget.sessionId),
+        widget.client.getDetail(sessionId),
+        _loadTurn(sessionId),
+        widget.client.getPermissions(sessionId),
+        widget.client.getQuestions(sessionId),
       ]);
-      if (!mounted) return;
+      if (!mounted || token != _sessionLoadToken) return;
       // The fetched history is authoritative: drop the streamed leftovers.
       _flush?.cancel();
       _flush = null;
@@ -631,7 +729,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       // lands on it for free — no settle, no crawl.
       _stick = true;
     } on SessionsClientError catch (e) {
-      if (!mounted) return;
+      if (!mounted || token != _sessionLoadToken) return;
       setState(() {
         _loadError = e.statusCode == 0
             ? 'Cannot reach the bridge.'
@@ -640,7 +738,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         _loading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || token != _sessionLoadToken) return;
       setState(() {
         _loadError = 'Could not load the session.';
         _loading = false;
@@ -652,9 +750,9 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// newest-first pages that cover it, oldest-first, plus the cursor to the
   /// next older page (the lazy-load continuation) — `null` once the history
   /// is exhausted.
-  Future<MessagePage> _loadTurn() => loadCurrentTurn(
+  Future<MessagePage> _loadTurn([String? sessionId]) => loadCurrentTurn(
     fetchPage: (cursor) => widget.client.getMessagesPage(
-      widget.sessionId,
+      sessionId ?? widget.sessionId,
       limit: _turnPageLimit,
       cursor: cursor,
     ),
@@ -1405,14 +1503,16 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   Future<void> _normalize() async {
     if (_normalizing) return; // One re-fetch at a time; it takes the latest.
     _normalizing = true;
+    final token = _sessionLoadToken;
+    final sessionId = widget.sessionId;
     try {
       final results = await Future.wait<Object?>([
-        widget.client.getDetail(widget.sessionId),
-        _loadTurn(),
-        widget.client.getPermissions(widget.sessionId),
-        widget.client.getQuestions(widget.sessionId),
+        widget.client.getDetail(sessionId),
+        _loadTurn(sessionId),
+        widget.client.getPermissions(sessionId),
+        widget.client.getQuestions(sessionId),
       ]);
-      if (!mounted) return;
+      if (!mounted || token != _sessionLoadToken) return;
       // The fetched history is authoritative: drop the streamed leftovers.
       _flush?.cancel();
       _flush = null;
@@ -1439,7 +1539,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     } catch (_) {
       // Same: a normalize failure never breaks the view.
     } finally {
-      _normalizing = false;
+      if (token == _sessionLoadToken) _normalizing = false;
     }
   }
 
@@ -1452,13 +1552,15 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     if (cursor == null || _loadingOlder) return;
     _loadingOlder = true;
     final generation = _historyGeneration;
+    final token = _sessionLoadToken;
+    final sessionId = widget.sessionId;
     try {
       final page = await widget.client.getMessagesPage(
-        widget.sessionId,
+        sessionId,
         limit: _turnPageLimit,
         cursor: cursor,
       );
-      if (!mounted) return;
+      if (!mounted || token != _sessionLoadToken) return;
       // A normalize (turn boundary, gap) replaced the history while this
       // page was in flight: its cursor belongs to the old read — dropping
       // the page keeps the history and the cursor coherent (issue #124).
@@ -1474,15 +1576,17 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     } catch (_) {
       // Same: a failed load never breaks the view.
     } finally {
-      _loadingOlder = false;
+      if (token == _sessionLoadToken) _loadingOlder = false;
     }
   }
 
   /// Re-fetches the pending permission requests (endpoint 8).
   Future<void> _refreshPermissions() async {
+    final token = _sessionLoadToken;
+    final sessionId = widget.sessionId;
     try {
-      final pending = await widget.client.getPermissions(widget.sessionId);
-      if (!mounted) return;
+      final pending = await widget.client.getPermissions(sessionId);
+      if (!mounted || token != _sessionLoadToken) return;
       setState(() => _pending = pending);
     } on SessionsClientError {
       // Keep the last pending list on screen.
@@ -1492,9 +1596,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// Re-fetches the pending question forms (issue #50); a transient failure
   /// keeps the last list on screen.
   Future<void> _refreshQuestions() async {
+    final token = _sessionLoadToken;
+    final sessionId = widget.sessionId;
     try {
-      final questions = await widget.client.getQuestions(widget.sessionId);
-      if (!mounted) return;
+      final questions = await widget.client.getQuestions(sessionId);
+      if (!mounted || token != _sessionLoadToken) return;
       setState(() => _questions = questions);
     } on SessionsClientError {
       // Keep the last pending list on screen.
@@ -1511,17 +1617,14 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     final raw = _prompt.text;
     final text = raw.trim();
     if (text.isEmpty || _promptBusy) return;
+    final token = _sessionLoadToken;
+    final sessionId = widget.sessionId;
     final (files, skills) = _attachments(raw);
     setState(() => _promptBusy = true);
     try {
-      await widget.client.prompt(
-        widget.sessionId,
-        text,
-        files: files,
-        skills: skills,
-      );
+      await widget.client.prompt(sessionId, text, files: files, skills: skills);
+      if (!mounted || token != _sessionLoadToken) return;
       _prompt.clear();
-      if (!mounted) return;
       // The turn-start re-fetch may have landed between the prompt POST
       // resolving and here and already brought in the service's copy of this
       // user message (the service persists it before the turn starts): the
@@ -1549,16 +1652,20 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       });
       _compensateGrow(oldScroll, oldMax);
     } on SessionsClientError catch (e) {
-      if (mounted) {
+      if (mounted && token == _sessionLoadToken) {
         _snackBar(
           'Could not send the message '
           '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
         );
       }
     } catch (_) {
-      if (mounted) _snackBar('Could not send the message.');
+      if (mounted && token == _sessionLoadToken) {
+        _snackBar('Could not send the message.');
+      }
     } finally {
-      if (mounted) setState(() => _promptBusy = false);
+      if (mounted && token == _sessionLoadToken) {
+        setState(() => _promptBusy = false);
+      }
     }
   }
 
@@ -2525,7 +2632,17 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AppBar(title: Text(_title)),
+          AppBar(
+            title: Text(_title),
+            leading: widget.showCloseButton && widget.onClose != null
+                ? IconButton(
+                    icon: const Icon(Icons.arrow_back),
+                    tooltip: 'Back',
+                    onPressed: widget.onClose,
+                  )
+                : null,
+            automaticallyImplyLeading: !widget.showCloseButton,
+          ),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())

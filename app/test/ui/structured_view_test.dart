@@ -405,6 +405,49 @@ class _FakeClient extends SessionsClient {
   }
 }
 
+/// A [SessionsClient] double returning different data per session id, for the
+/// in-place session-switching test (issue #131).
+class _SessionSwitchClient extends SessionsClient {
+  _SessionSwitchClient() : super(Uri.parse('http://bridge.test/'));
+
+  @override
+  Future<SessionDetail> getDetail(String id) async => SessionDetail(
+    id: id,
+    title: id,
+    location: '/$id',
+    cost: 0,
+    tokens: const TokenUsage(
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    ),
+    outcome: null,
+  );
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async => [
+    SessionMessage(
+      role: 'assistant',
+      text: id == 'ses_a' ? 'alpha says hi' : 'beta says hi',
+    ),
+  ];
+
+  @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async => MessagePage(messages: await getMessages(id), nextCursor: null);
+
+  @override
+  Future<List<PermissionRequest>> getPermissions(String id) async => const [];
+
+  @override
+  Future<List<QuestionForm>> getQuestions(String id) async => const [];
+}
+
 /// A [SessionsClient] double serving a history newest-first in fixed pages
 /// (issue #124's paged read): the view's bounded turn read and lazy older
 /// loads walk the real cursor chain, counting every fetch.
@@ -4203,5 +4246,118 @@ void main() {
       await tester.pump();
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets(
+      'switching sessionId reloads the panel for the new session and the '
+      'event stream follows it (issue #131)',
+      (tester) async {
+        final client = _SessionSwitchClient();
+        final events = StreamController<BridgeEvent>.broadcast();
+        String sessionId = 'ses_a';
+        String title = 'alpha';
+        await tester.pumpWidget(
+          MaterialApp(
+            home: StatefulBuilder(
+              builder: (context, setState) => Scaffold(
+                body: Column(
+                  children: [
+                    Expanded(
+                      child: StructuredSessionPanel(
+                        sessionId: sessionId,
+                        title: title,
+                        client: client,
+                        events: events.stream,
+                      ),
+                    ),
+                    TextButton(
+                      key: const ValueKey('switch'),
+                      onPressed: () => setState(() {
+                        sessionId = 'ses_b';
+                        title = 'beta';
+                      }),
+                      child: const Text('switch'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('alpha'), findsOneWidget);
+        expect(find.text('alpha says hi'), findsOneWidget);
+        expect(find.text('beta says hi'), findsNothing);
+
+        // An event for the selected session applies.
+        events.add(
+          _event(
+            'session.usage.updated',
+            aggregateID: 'ses_a',
+            data: {
+              'cost': 0.5,
+              'tokens': {
+                'input': 0,
+                'output': 0,
+                'reasoning': 0,
+                'cache': {'read': 0, 'write': 0},
+              },
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Cost \$0.5000'), findsOneWidget);
+
+        await tester.tap(find.byKey(const ValueKey('switch')));
+        await tester.pumpAndSettle();
+
+        // The pane swapped in place: new session's title and history, no
+        // stale content from the previous session.
+        expect(find.text('beta'), findsOneWidget);
+        expect(find.text('beta says hi'), findsOneWidget);
+        expect(find.text('alpha says hi'), findsNothing);
+        expect(find.text('Cost \$0.5000'), findsNothing);
+
+        // Events for the old session are ignored; events for the new session
+        // follow it.
+        events.add(
+          _event(
+            'session.usage.updated',
+            aggregateID: 'ses_a',
+            data: {
+              'cost': 0.9,
+              'tokens': {
+                'input': 0,
+                'output': 0,
+                'reasoning': 0,
+                'cache': {'read': 0, 'write': 0},
+              },
+            },
+          ),
+        );
+        await tester.pump();
+        expect(find.text('Cost \$0.9000'), findsNothing);
+
+        events.add(
+          _event(
+            'session.usage.updated',
+            aggregateID: 'ses_b',
+            data: {
+              'cost': 0.2,
+              'tokens': {
+                'input': 0,
+                'output': 0,
+                'reasoning': 0,
+                'cache': {'read': 0, 'write': 0},
+              },
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Cost \$0.2000'), findsOneWidget);
+      },
+    );
   });
 }

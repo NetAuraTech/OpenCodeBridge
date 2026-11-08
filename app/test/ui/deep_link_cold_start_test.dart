@@ -201,24 +201,27 @@ class _ShellState extends State<_Shell> {
 /// wiring with scripted clients and check that the back arrow of the opened
 /// view returns to the list underneath.
 void main() {
-  testWidgets('a session link opened from cold: back returns to the list', (
-    tester,
-  ) async {
-    final links = StreamController<DeepLink>();
-    await tester.pumpWidget(MaterialApp(home: _Shell(links: links.stream)));
-    links.add(DeepLink.session('ses_1'));
-    await tester.pumpAndSettle();
+  testWidgets(
+    'a session link opened from cold: opens the session in the detail pane '
+    'while the list stays visible (issue #131)',
+    (tester) async {
+      final links = StreamController<DeepLink>();
+      await tester.pumpWidget(MaterialApp(home: _Shell(links: links.stream)));
+      links.add(DeepLink.session('ses_1'));
+      await tester.pumpAndSettle();
 
-    // The structured view of the targeted session is up, on top of the
-    // list.
-    expect(find.text('fix the flaky test'), findsWidgets);
-
-    // The back arrow returns to the list underneath.
-    await tester.tap(find.byTooltip('Back'));
-    await tester.pumpAndSettle();
-    expect(find.text('1 session'), findsOneWidget);
-    expect(find.text('fix the flaky test'), findsOneWidget);
-  });
+      // The targeted session opens in the detail pane (no navigator push):
+      // the list stays visible, and there is no back navigation to the list.
+      expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('sessions-detail-panel')),
+        findsOneWidget,
+      );
+      expect(find.text('fix the flaky test'), findsWidgets);
+      expect(find.text('1 session'), findsOneWidget);
+      expect(find.byTooltip('Back'), findsNothing);
+    },
+  );
 
   testWidgets('a container link opened from cold: back returns to the list', (
     tester,
