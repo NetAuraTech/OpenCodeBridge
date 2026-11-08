@@ -224,13 +224,21 @@ void main() {
   late OrbTaskService service;
   late Duration waitGrace;
 
-  OrbTaskService newService() => OrbTaskService(
-    orbs: orbs,
-    sessions: backend,
-    file: tasksFile,
-    pollInterval: const Duration(milliseconds: 5),
-    waitGrace: waitGrace,
-  );
+  /// Every service a test builds (the completion watcher polls on its own):
+  /// torn down with the temp dir, so no writer outlives it.
+  final services = <OrbTaskService>[];
+
+  OrbTaskService newService() {
+    final created = OrbTaskService(
+      orbs: orbs,
+      sessions: backend,
+      file: tasksFile,
+      pollInterval: const Duration(milliseconds: 5),
+      waitGrace: waitGrace,
+    );
+    services.add(created);
+    return created;
+  }
 
   setUp(() async {
     temp = await Directory.systemTemp.createTemp('orb-tasks');
@@ -242,6 +250,11 @@ void main() {
   });
 
   tearDown(() async {
+    // The watchers first (they still persist into the temp dir), then it.
+    for (final created in services) {
+      created.close();
+    }
+    services.clear();
     await temp.delete(recursive: true);
   });
 

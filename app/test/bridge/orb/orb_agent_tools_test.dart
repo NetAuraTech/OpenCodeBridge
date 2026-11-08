@@ -58,9 +58,8 @@ void main() {
     'a failed spawn fetch asks the recent tasks before answering (issue #143)',
     () async {
       await OrbAgentTools.materialize(into: temp);
-      final source = File(
-        '${temp.path}/opencodebridge_orbs.ts',
-      ).readAsStringSync();
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
       // The timeout-aware path: the spawn catch asks the bridge's recent
       // tasks (by the tool's directory), and a non-empty answer points at
       // the dispatched task instead of the blind "unreachable" error.
