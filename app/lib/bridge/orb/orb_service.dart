@@ -210,6 +210,30 @@ class OrbBootError implements Exception {
   String toString() => 'OrbBootError($id: $detail)';
 }
 
+/// One host provider credential for the post-boot credential sync (issue
+/// #138, spec §6.7): the integration the orb's opencode stores its key
+/// under, and the credential value as the host service's `GET
+/// /api/credential` reports it (an opencode `Credential.Value` JSON object,
+/// e.g. `{"type":"key","key":"…"}`). The secret crosses only from the
+/// bridge to the orb's own server — never through the bridge's API surface
+/// (ADR-0001).
+class OrbCredential {
+  const OrbCredential({
+    required this.integrationId,
+    required this.value,
+    this.label,
+  });
+
+  /// The integration id (the credential's provider key).
+  final String integrationId;
+
+  /// The stored credential value, verbatim from the host service.
+  final Map<String, Object?> value;
+
+  /// The display label, when the host carries one.
+  final String? label;
+}
+
 /// There is nothing to clean for [id]: no orphan volumes exist (issue #96,
 /// spec §2.2 — the explicit orphan cleanup found no orphan).
 class OrbOrphanNotFoundError implements Exception {
@@ -368,6 +392,7 @@ class OrbService {
     this.checkoutFor,
     this.hostSessions,
     this.orbServiceFor,
+    this.hostCredentials,
     this.bootTimeout = const Duration(minutes: 10),
     this.pollInterval = const Duration(milliseconds: 500),
   });
@@ -445,6 +470,15 @@ class OrbService {
   /// [OpencodeHttpService] for the given url and password (tests inject a
   /// fake).
   final OpencodeService Function(String url, String password)? orbServiceFor;
+
+  /// Reads the host's provider credentials for the post-boot credential sync
+  /// (issue #138, spec §6.7): the host service's stored integration
+  /// credentials, secret values included (`GET /api/credential` — the only
+  /// supported read of the whole store). The default reads the shared-service
+  /// descriptor (`~/.local/state/opencode/service.json`); a missing or
+  /// unreadable descriptor yields the empty list — the orb then boots with
+  /// whatever credentials its state dir already holds (tests inject a fake).
+  final Future<List<OrbCredential>> Function()? hostCredentials;
 
   /// How long the boot wait runs before it fails the create.
   final Duration bootTimeout;
@@ -578,6 +612,7 @@ class OrbService {
     _streamBootLines(id, logProcess, tail);
     try {
       final (url, password) = await _waitForBoot(id, container, tail);
+      await _syncHostCredentials(id, url, password);
       return OrbRecord(
         id: id,
         name: name,
@@ -1315,6 +1350,7 @@ class OrbService {
         tail,
         skipPasswords: stalePasswords,
       );
+      await _syncHostCredentials(id, url, password);
       await _removeStoppedMarker(id);
       await _removeCleanupMarker(id);
       return OrbRecord(
@@ -1887,6 +1923,7 @@ class OrbService {
     _streamBootLines(id, logProcess, tail);
     try {
       final (url, password) = await _waitForBoot(id, container, tail);
+      await _syncHostCredentials(id, url, password);
       return OrbRecord(
         id: id,
         name: record.name,
@@ -2798,6 +2835,186 @@ class OrbService {
       await Future<void>.delayed(pollInterval);
     }
   }
+
+  /// The post-boot provider-credential sync (issue #138, spec §6.7): the
+  /// host's stored integration credentials are pushed into the orb's own
+  /// opencode server (`POST /api/credential`), so an orb agent can reach
+  /// the host's providers (the legacy `auth.json` copy no longer covers a
+  /// v2 host, whose credentials live in the service's DB). Host-authoritative
+  /// like §6.2 and §4 (re-synced on every create/wake/update; the host's
+  /// value replaces the orb's after a stop/wake — the orb state dir's copy
+  /// only survives an update re-create). An integration the orb already
+  /// holds with the same value is skipped (idempotent). Every failure
+  /// degrades to a boot-log warning: a credential-less orb is a degraded
+  /// orb, not a failed boot (the host may simply have no shared service).
+  Future<void> _syncHostCredentials(
+    String id,
+    String url,
+    String password,
+  ) async {
+    final read = hostCredentials ?? _hostCredentialsFromDescriptor;
+    List<OrbCredential> credentials;
+    try {
+      credentials = await read();
+    } on Object catch (error) {
+      _bootWarn(id, 'the host credentials could not be read ($error)');
+      return;
+    }
+    if (credentials.isEmpty) return;
+    final auth = 'Basic ${base64.encode(utf8.encode('opencode:$password'))}';
+    try {
+      final client = HttpClient();
+      try {
+        final existing = await _orbCredentials(client, url, auth);
+        for (final credential in credentials) {
+          if (existing[credential.integrationId] ==
+              _credentialKey(credential.value)) {
+            continue;
+          }
+          await _postOrbCredential(client, url, auth, credential);
+        }
+      } finally {
+        client.close(force: true);
+      }
+    } on Object catch (error) {
+      _bootWarn(id, 'the host credentials could not be synced ($error)');
+    }
+  }
+
+  /// The orb's stored credentials as `integrationId -> canonical value key`
+  /// (`GET /api/credential`, the same key-space the create payloads compare
+  /// against). A failed read yields the empty map: every host credential is
+  /// then (re-)posted.
+  Future<Map<String, String>> _orbCredentials(
+    HttpClient client,
+    String url,
+    String auth,
+  ) async {
+    try {
+      final request = await client.getUrl(Uri.parse('$url/api/credential'));
+      request.headers.set('Authorization', auth);
+      final response = await request.close();
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) return {};
+      final decoded = jsonDecode(body);
+      final data = decoded is Map<String, Object?> ? decoded['data'] : null;
+      if (data is! List) return {};
+      return {
+        for (final entry in data)
+          if (entry is Map<String, Object?> &&
+              entry['integrationID'] is String &&
+              entry['value'] != null)
+            entry['integrationID'] as String: _credentialKey(entry['value']),
+      };
+    } on Object {
+      return {};
+    }
+  }
+
+  /// Stores one credential in the orb (`POST /api/credential`, activated:
+  /// a rotated host token replaces the orb's active credential, host-
+  /// authoritative). A conflict (the id already exists) is the credential
+  /// already there — accepted.
+  Future<void> _postOrbCredential(
+    HttpClient client,
+    String url,
+    String auth,
+    OrbCredential credential,
+  ) async {
+    final request = await client.postUrl(Uri.parse('$url/api/credential'));
+    request.headers.set('Authorization', auth);
+    request.headers.contentType = ContentType.json;
+    request.write(
+      jsonEncode({
+        'integrationID': credential.integrationId,
+        'value': credential.value,
+        'activate': true,
+        if (credential.label != null) 'label': credential.label,
+      }),
+    );
+    final response = await request.close();
+    await response.drain<void>();
+    if (response.statusCode != HttpStatus.ok &&
+        response.statusCode != HttpStatus.conflict) {
+      throw Exception(
+        'POST /api/credential for ${credential.integrationId} answered '
+        '${response.statusCode}',
+      );
+    }
+  }
+
+  /// The canonical key of a credential value JSON: a stable
+  /// whitespace-free rendering, so the host's `GET` body and the payload the
+  /// bridge posts back (and the orb re-serves) compare equal whatever
+  /// spacing the server used.
+  static String _credentialKey(Object? value) => _compactJson(value);
+
+  /// A stable whitespace-free JSON rendering of a decoded value (map and
+  /// list orders preserved as the server sent them).
+  static String _compactJson(Object? value) {
+    if (value is Map) {
+      final entries = value.entries
+          .map((e) => '${jsonEncode(e.key)}:${_compactJson(e.value)}')
+          .join(',');
+      return '{$entries}';
+    }
+    if (value is List) {
+      return '[${value.map(_compactJson).join(',')}]';
+    }
+    return jsonEncode(value);
+  }
+
+  /// Reads the host's credentials through the shared-service descriptor
+  /// (`~/.local/state/opencode/service.json`, the same source the sessions
+  /// backend uses); no descriptor — no credentials (the orb boots as before
+  /// the sync existed). The [hostCredentials] seam overrides it.
+  Future<List<OrbCredential>> _hostCredentialsFromDescriptor() async {
+    final file = File('$home/.local/state/opencode/service.json');
+    if (!file.existsSync()) return const [];
+    final raw = jsonDecode(await file.readAsString());
+    if (raw is! Map<String, Object?>) return const [];
+    final url = raw['url'];
+    final password = raw['password'];
+    if (url is! String || password is! String) return const [];
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(Uri.parse('$url/api/credential'));
+      request.headers.set(
+        'Authorization',
+        'Basic ${base64.encode(utf8.encode('opencode:$password'))}',
+      );
+      final response = await request.close();
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) {
+        throw Exception('GET /api/credential answered ${response.statusCode}');
+      }
+      final decoded = jsonDecode(body);
+      final data = decoded is Map<String, Object?> ? decoded['data'] : null;
+      if (data is! List) return const [];
+      return [
+        for (final entry in data)
+          if (entry is Map<String, Object?> &&
+              entry['integrationID'] is String &&
+              entry['value'] is Map<String, Object?>)
+            OrbCredential(
+              integrationId: entry['integrationID'] as String,
+              value: entry['value'] as Map<String, Object?>,
+              label: entry['label'] is String ? entry['label'] as String : null,
+            ),
+      ];
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// A sync failure as a boot-log warning (the OrbService's own line, not a
+  /// container log line — the event shape `orb.boot` already carries).
+  void _bootWarn(String id, String message) => emit?.call(
+    bridgeEvent(
+      type: BridgeEventType.orbBoot,
+      data: {'id': id, 'line': '[orb] credential sync: $message'},
+    ),
+  );
 
   /// The descriptor verification (issue #93): the orb's `/api/session`
   /// with the Basic `opencode:<password>` auth (spec §7.1) — `true` on the
