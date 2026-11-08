@@ -3831,4 +3831,203 @@ void main() {
       },
     );
   });
+
+  group('StructuredSessionPanel embedded (issue #130)', () {
+    /// The panel in the right-hand pane of a `Row` (the two-pane layout's
+    /// shape, issue #131): no route is pushed for it, and [onNewSession] /
+    /// [onClose] are wired through a host that records the calls.
+    /// [hideWhenClosed] makes the host drop the pane when the panel asks to
+    /// close, like the future layout's selection clear.
+    Future<StreamController<BridgeEvent>> _pumpEmbedded(
+      WidgetTester tester, {
+      required _FakeClient client,
+      List<String>? calls,
+      bool hideWhenClosed = false,
+      bool? wired,
+    }) async {
+      final events = StreamController<BridgeEvent>.broadcast();
+      var visible = true;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: StatefulBuilder(
+            builder: (context, setState) => Scaffold(
+              body: Row(
+                children: [
+                  const SizedBox(width: 200, child: Text('list pane')),
+                  if (visible || !hideWhenClosed)
+                    Expanded(
+                      child: StructuredSessionPanel(
+                        sessionId: 'ses_1',
+                        title: 'external session',
+                        client: client,
+                        events: events.stream,
+                        onNewSession: () => calls?.add('new-session'),
+                        onClose: (wired ?? true)
+                            ? () {
+                                calls?.add('close');
+                                if (hideWhenClosed) {
+                                  setState(() => visible = false);
+                                }
+                              }
+                            : null,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      return events;
+    }
+
+    testWidgets('renders in a Row pane with no navigator route', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        messages: const [
+          SessionMessage(role: 'user', text: 'hello'),
+          SessionMessage(role: 'assistant', text: 'done'),
+        ],
+      );
+      await _pumpEmbedded(tester, client: client);
+
+      // The header, the cost bar, the history, and the prompt input all
+      // render embedded — the same widgets the full-screen route shows.
+      expect(find.text('list pane'), findsOneWidget);
+      expect(find.text('external session'), findsOneWidget);
+      expect(find.byKey(const ValueKey('structured-cost')), findsOneWidget);
+      expect(find.text('hello'), findsOneWidget);
+      expect(find.text('done'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('structured-prompt-input')),
+        findsOneWidget,
+      );
+
+      // Embedded in the root route: no back button (there is nothing to
+      // pop), where the pushed route shows one.
+      expect(find.byType(BackButton), findsNothing);
+    });
+
+    testWidgets('the prompt sends from the pane', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pumpEmbedded(tester, client: client);
+
+      await _typePrompt(tester, 'keep going');
+      await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.prompts, [('ses_1', 'keep going', null, null)]);
+      expect(_promptText(tester), isEmpty);
+      // The locally appended user message shows in the pane's history.
+      expect(find.text('keep going'), findsOneWidget);
+    });
+
+    testWidgets('the permission banner floats over the pane\'s list', (
+      tester,
+    ) async {
+      const request = PermissionRequest(
+        id: 'per_1',
+        action: 'shell',
+        resources: ['rm -rf node_modules'],
+      );
+      final client = _FakeClient(
+        details: const [_detail0],
+        permissionLists: const [
+          <PermissionRequest>[],
+          <PermissionRequest>[request],
+        ],
+      );
+      final events = await _pumpEmbedded(tester, client: client);
+
+      events.add(_event('permission.asked', aggregateID: 'ses_1'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Permission requested: shell'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('permission-once-per_1')));
+      await tester.pump();
+      await tester.pump();
+      expect(client.replies, const [('ses_1', 'per_1', PermissionReply.once)]);
+    });
+
+    testWidgets('a slash command opens its menu and runs from the pane', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pumpEmbedded(tester, client: client);
+
+      await _typePrompt(tester, '/compact');
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+      await _pressEnter(tester);
+
+      expect(client.compacts, 1);
+    });
+
+    testWidgets('the navigation commands call onClose, not a navigator pop', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final calls = <String>[];
+      await _pumpEmbedded(tester, client: client, calls: calls);
+
+      await _typePrompt(tester, '/clear');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      // The view asks to close (the host's callback), then the flow runs —
+      // and nothing popped: the root route (and the list pane) is intact.
+      expect(calls, ['close', 'new-session']);
+      expect(find.text('list pane'), findsOneWidget);
+      expect(find.text('external session'), findsOneWidget);
+    });
+
+    testWidgets('the flow runs without closing when onClose is not wired', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final calls = <String>[];
+      await _pumpEmbedded(tester, client: client, calls: calls, wired: false);
+      // onNewSession stays wired (the test host always wires it); only
+      // onClose is absent: the view cannot close itself, the flow runs.
+      await _typePrompt(tester, '/clear');
+      await tester.pump();
+      await _pressEnter(tester);
+
+      expect(calls, ['new-session']);
+      expect(find.byType(StructuredSessionPanel), findsOneWidget);
+    });
+
+    testWidgets('onClose can drop the pane; the panel unmounts cleanly', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      final calls = <String>[];
+      final events = await _pumpEmbedded(
+        tester,
+        client: client,
+        calls: calls,
+        hideWhenClosed: true,
+      );
+
+      await _typePrompt(tester, '/clear');
+      await tester.pump();
+      await _pressEnter(tester);
+      await tester.pump();
+
+      expect(calls, ['close', 'new-session']);
+      expect(find.byType(StructuredSessionPanel), findsNothing);
+
+      // The lifecycle is bound to the panel's own mount: an event after the
+      // pane is gone is dropped, no exception.
+      events.add(_event('permission.asked', aggregateID: 'ses_1'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
+  });
 }
