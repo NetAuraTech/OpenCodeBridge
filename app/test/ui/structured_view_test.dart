@@ -414,6 +414,57 @@ Future<StreamController<BridgeEvent>> _pump(
   return events;
 }
 
+/// The panel in the right-hand pane of a `Row` (the two-pane layout's
+/// shape, issue #131): no route is pushed for it, and `onNewSession` /
+/// `onClose` are wired through a host that records the calls.
+/// [hideWhenClosed] makes the host drop the pane when the panel asks to
+/// close, like the future layout's selection clear; [wired] `false` leaves
+/// `onClose` unwired.
+Future<StreamController<BridgeEvent>> _pumpEmbedded(
+  WidgetTester tester, {
+  required _FakeClient client,
+  List<String>? calls,
+  bool hideWhenClosed = false,
+  bool wired = true,
+}) async {
+  final events = StreamController<BridgeEvent>.broadcast();
+  var visible = true;
+  await tester.pumpWidget(
+    MaterialApp(
+      home: StatefulBuilder(
+        builder: (context, setState) => Scaffold(
+          body: Row(
+            children: [
+              const SizedBox(width: 200, child: Text('list pane')),
+              if (visible || !hideWhenClosed)
+                Expanded(
+                  child: StructuredSessionPanel(
+                    sessionId: 'ses_1',
+                    title: 'external session',
+                    client: client,
+                    events: events.stream,
+                    onNewSession: () => calls?.add('new-session'),
+                    onClose: wired
+                        ? () {
+                            calls?.add('close');
+                            if (hideWhenClosed) {
+                              setState(() => visible = false);
+                            }
+                          }
+                        : null,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  await tester.pump();
+  return events;
+}
+
 /// The app's root (issue #49): the MaterialApp follows the persisted theme
 /// choice and re-themes in place when the choice changes — the callback
 /// re-runs this build, exactly like `OpenCodeBridgeApp`.
@@ -3833,56 +3884,6 @@ void main() {
   });
 
   group('StructuredSessionPanel embedded (issue #130)', () {
-    /// The panel in the right-hand pane of a `Row` (the two-pane layout's
-    /// shape, issue #131): no route is pushed for it, and [onNewSession] /
-    /// [onClose] are wired through a host that records the calls.
-    /// [hideWhenClosed] makes the host drop the pane when the panel asks to
-    /// close, like the future layout's selection clear.
-    Future<StreamController<BridgeEvent>> _pumpEmbedded(
-      WidgetTester tester, {
-      required _FakeClient client,
-      List<String>? calls,
-      bool hideWhenClosed = false,
-      bool? wired,
-    }) async {
-      final events = StreamController<BridgeEvent>.broadcast();
-      var visible = true;
-      await tester.pumpWidget(
-        MaterialApp(
-          home: StatefulBuilder(
-            builder: (context, setState) => Scaffold(
-              body: Row(
-                children: [
-                  const SizedBox(width: 200, child: Text('list pane')),
-                  if (visible || !hideWhenClosed)
-                    Expanded(
-                      child: StructuredSessionPanel(
-                        sessionId: 'ses_1',
-                        title: 'external session',
-                        client: client,
-                        events: events.stream,
-                        onNewSession: () => calls?.add('new-session'),
-                        onClose: (wired ?? true)
-                            ? () {
-                                calls?.add('close');
-                                if (hideWhenClosed) {
-                                  setState(() => visible = false);
-                                }
-                              }
-                            : null,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pump();
-      await tester.pump();
-      return events;
-    }
-
     testWidgets('renders in a Row pane with no navigator route', (
       tester,
     ) async {
