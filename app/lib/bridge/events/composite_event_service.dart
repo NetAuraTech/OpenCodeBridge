@@ -27,6 +27,7 @@ class CompositeOpencodeEventService implements OpencodeEventService {
     required this.orbPassword,
     this.upstreamFactory = _defaultUpstreamFactory,
     this.refreshInterval = const Duration(seconds: 15),
+    this.bootRetryInterval = const Duration(seconds: 2),
   }) {
     _controller = StreamController<OpencodeEvent>.broadcast(
       onListen: () => _onFirstListen(),
@@ -61,10 +62,19 @@ class CompositeOpencodeEventService implements OpencodeEventService {
   /// respawned orb is picked up on the next pass).
   final Duration refreshInterval;
 
+  /// How soon to retry after a pass that left a running orb without an
+  /// upstream (still booting: its `server password` line is not in the log
+  /// yet). Without it, a session the agent spawns the instant the orb is ready
+  /// would stream only once the next [refreshInterval] pass attaches the orb,
+  /// and its `session.created` / first turn could be invisible to the app for
+  /// that whole window.
+  final Duration bootRetryInterval;
+
   late final StreamController<OpencodeEvent> _controller;
   final Map<String, _OrbUpstream> _upstreams = {};
   StreamSubscription<OpencodeEvent>? _hostSubscription;
   Timer? _timer;
+  Timer? _bootRetry;
   bool _started = false;
   bool _closed = false;
   Future<void>? _reconciling;
@@ -108,11 +118,18 @@ class CompositeOpencodeEventService implements OpencodeEventService {
       // Docker is down (or the labels unreadable): degrade to host-only.
     }
     final live = <String>{};
+    var booting = false;
     for (final record in records) {
       final url = record.url;
       if (record.state != 'running' || url == null) continue;
       final password = await orbPassword(record.id);
-      if (password == null) continue; // Still booting (no log line yet).
+      if (password == null) {
+        // Running but still booting (no `server password` line in the log
+        // yet). Its sessions start streaming the instant that line lands,
+        // so retry soon instead of waiting for the next full pass.
+        booting = true;
+        continue;
+      }
       live.add(record.id);
       final key = '$url|$password';
       final existing = _upstreams[record.id];
@@ -134,6 +151,16 @@ class CompositeOpencodeEventService implements OpencodeEventService {
       await entry.subscription.cancel();
       await entry.upstream.close();
     }
+    if (booting) _scheduleBootRetry();
+  }
+
+  /// One short-timer retry for a pass that saw a running orb still booting
+  /// (no password yet in its log). A retry that finds it still booting
+  /// schedules the next one, so the attach happens within [bootRetryInterval]
+  /// of the log line landing — long before the next [refreshInterval] pass.
+  void _scheduleBootRetry() {
+    if (_closed || _bootRetry?.isActive == true) return;
+    _bootRetry = Timer(bootRetryInterval, () => unawaited(_reconcile()));
   }
 
   @override
@@ -143,6 +170,9 @@ class CompositeOpencodeEventService implements OpencodeEventService {
     final timer = _timer;
     _timer = null;
     timer?.cancel();
+    final bootRetry = _bootRetry;
+    _bootRetry = null;
+    bootRetry?.cancel();
     await _hostSubscription?.cancel();
     for (final entry in _upstreams.values) {
       await entry.subscription.cancel();

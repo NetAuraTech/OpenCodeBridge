@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
+import '../bridge/events/bridge_event.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/fs_client.dart';
@@ -137,6 +138,23 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// [dispose]); a provided [EventSource] is owned by the caller.
   bool _ownsEvents = false;
 
+  /// The tab's own subscription to [_events] (spec §8): the session-level
+  /// events that change *which rows exist* — a spawned/created session, a
+  /// title the agent assigns (`session.renamed`), a deletion — and the turn
+  /// boundaries that move the active dot. The composite fan-out carries every
+  /// service's events on this one stream (issue #95); the detail pane holds
+  /// its own subscription for the turn's content.
+  StreamSubscription<BridgeEvent>? _eventsSub;
+
+  /// True while a [_refreshFromEvents]-triggered list load is in flight, so a
+  /// burst (a spawn's create, rename and first turn) collapses into one load.
+  bool _refreshInFlight = false;
+
+  /// True when a session event arrived while [_refreshInFlight] was true:
+  /// the list reloads once more when the in-flight one lands, so the last
+  /// word is never dropped.
+  bool _refreshAgain = false;
+
   /// The fetched rows, `null` until the first successful load.
   List<Session>? _rows;
 
@@ -181,7 +199,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _orbs = widget.orbs ?? OrbsClient(base, auth: widget.auth);
       _setupEvents(base);
       widget.access?.addListener(_onAccessState);
-      _load();
+      unawaited(_load());
     } else {
       _loading = false;
     }
@@ -270,7 +288,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   /// Sets up the event source (spec §8): the provided one, or a real
-  /// [EventsClient] at [base] owned (and disconnected) by the tab.
+  /// [EventsClient] at [base] owned (and disconnected) by the tab. The tab
+  /// also listens to it itself (the list follows the sessions, not just the
+  /// open view).
   void _setupEvents(Uri base) {
     _teardownEvents();
     final provided = widget.events;
@@ -280,25 +300,172 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _events = EventsClient(base, auth: widget.auth);
       _ownsEvents = true;
     }
-    _events!.connect();
+    unawaited(_events!.connect());
+    _eventsSub = _events!.events.listen(_onBridgeEvent);
   }
 
   /// Stops the event source, disconnecting it only when the tab owns it.
   void _teardownEvents() {
+    _eventsSub?.cancel();
+    _eventsSub = null;
     final source = _events;
     if (source == null) return;
     _events = null;
     if (_ownsEvents) {
       _ownsEvents = false;
-      source.disconnect();
+      unawaited(source.disconnect());
     }
   }
 
-  Future<void> _load() async {
+  /// The list's own reaction to the unified event stream (spec §8). The
+  /// stream carries every service's events (host and orbs alike, issue
+  /// #95), and a session id is globally unique: no service needs naming.
+  ///
+  /// - `session.created` — a session appeared, typically one the agent
+  ///   spawned on an orb. The rows were fetched before it existed, so the
+  ///   list reloads (coalesced, and quiet so the rows stay on screen).
+  ///   This is what makes a spawned session show up without switching tabs.
+  /// - `session.renamed` — the agent named the session on its first turn:
+  ///   the row's title is patched in place. A rename for a session the list
+  ///   does not know reloads instead (its create was missed).
+  /// - `session.deleted` / the bridge-native `session.closed` — drop the row.
+  /// - The turn boundaries (`session.execution.*`) move the row's active dot
+  ///   in place, no refetch.
+  ///
+  /// Any other event naming an unknown session (a streamed delta, the first
+  /// turn of a just-spawned orb session whose create preceded its upstream's
+  /// attach) reloads too, coalesced: the list must never stay short of rows
+  /// until the next manual refresh or app foreground.
+  void _onBridgeEvent(BridgeEvent event) {
+    if (!mounted) return;
+    final rows = _rows;
+    if (rows == null) return; // The initial load is still in flight.
+    final sessionId = _sessionOf(event);
+    switch (event.type) {
+      case 'session.created':
+      case 'session.renamed':
+      case 'session.deleted':
+      case BridgeEventType.sessionClosed:
+        // `created` always reloads, even for a known id: the row's location,
+        // project or orb attribution is not something the id alone proves.
+        if (event.type == 'session.created' ||
+            sessionId == null ||
+            !_hasRow(rows, sessionId)) {
+          unawaited(_refreshFromEvents());
+        } else if (event.type == 'session.renamed') {
+          _patchRow(sessionId, title: _titleOf(event));
+        } else if (event.type == 'session.deleted' ||
+            event.type == BridgeEventType.sessionClosed) {
+          _patchRow(sessionId, drop: true);
+        }
+        return;
+      case 'session.execution.started':
+        if (sessionId != null) _setActive(sessionId, true, rows);
+        return;
+      case 'session.execution.succeeded':
+      case 'session.execution.failed':
+      case 'session.execution.interrupted':
+        if (sessionId != null) _setActive(sessionId, false, rows);
+        return;
+      default:
+        if (sessionId != null && !_hasRow(rows, sessionId)) {
+          unawaited(_refreshFromEvents());
+        }
+    }
+  }
+
+  /// The session an event names: the durable aggregate id (every
+  /// session-scoped opencode event carries one), else `data.sessionID` (the
+  /// bridge-native events), else the `form`'s nested session id, else `null`.
+  String? _sessionOf(BridgeEvent event) {
+    final durable = event.durable;
+    if (durable != null) return durable.aggregateID;
+    final data = event.data;
+    final id = data['sessionID'];
+    if (id is String && id.isNotEmpty) return id;
+    final form = data['form'];
+    if (form is Map<String, Object?>) {
+      final nested = form['sessionID'];
+      if (nested is String && nested.isNotEmpty) return nested;
+    }
+    return null;
+  }
+
+  bool _hasRow(List<Session> rows, String id) =>
+      rows.where((session) => session.id == id).isNotEmpty;
+
+  /// The title a `session.renamed` payload carries (its `data.title`).
+  String? _titleOf(BridgeEvent event) {
+    final title = event.data['title'];
+    return title is String && title.isNotEmpty ? title : null;
+  }
+
+  /// Replaces the row [id] in place: a new [title], an [active] dot, or
+  /// ([drop]) nothing — the row is gone. A drop also clears the detail pane
+  /// when it shows that row; a patch otherwise carries the pane's row along.
+  void _patchRow(String id, {String? title, bool? active, bool drop = false}) {
+    final rows = _rows;
+    if (rows == null) return;
+    if (drop) {
+      setState(() {
+        _rows = [
+          for (final session in rows)
+            if (session.id != id) session,
+        ];
+        if (_selectedSession?.id == id) _selectedSession = null;
+      });
+      return;
+    }
+    setState(() {
+      _rows = [
+        for (final session in rows)
+          if (session.id == id)
+            session.copyWith(title: title, active: active)
+          else
+            session,
+      ];
+      final selected = _selectedSession;
+      if (selected != null && selected.id == id) {
+        _selectedSession = selected.copyWith(title: title, active: active);
+      }
+    });
+  }
+
+  /// Moves the row [id]'s active dot, only when it actually disagrees (the
+  /// turn boundaries arrive in pairs — the start right after the spawn).
+  void _setActive(String id, bool active, List<Session> rows) {
+    final row = rows.where((session) => session.id == id).firstOrNull;
+    if (row == null || row.active == active) return;
+    _patchRow(id, active: active);
+  }
+
+  /// Reloads the list after a session event, coalescing bursts: while a load
+  /// is in flight the request is remembered and one more load runs when it
+  /// lands (a spawn's create, rename and first turn arrive together).
+  Future<void> _refreshFromEvents() async {
+    if (_refreshInFlight) {
+      _refreshAgain = true;
+      return;
+    }
+    _refreshInFlight = true;
+    try {
+      _refreshAgain = true;
+      while (_refreshAgain && mounted) {
+        _refreshAgain = false;
+        await _load(quiet: true);
+      }
+    } finally {
+      _refreshInFlight = false;
+    }
+  }
+
+  /// Loads the rows. [quiet]: an event-driven refresh keeps the current rows
+  /// on screen (the spinner stays the first load's); a failure leaves them too.
+  Future<void> _load({bool quiet = false}) async {
     final client = _client;
     if (client == null) return;
     setState(() {
-      _loading = true;
+      if (!quiet) _loading = true;
       _error = null;
     });
     try {
@@ -314,6 +481,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       unawaited(_loadOrbs());
     } on SessionsClientError catch (e) {
       if (!mounted) return;
+      if (quiet) return; // Keep the rows on screen: the next event retries.
       setState(() {
         _error = e.statusCode == 0
             ? 'Cannot reach the bridge.'
@@ -322,6 +490,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       });
     } catch (_) {
       if (!mounted) return;
+      if (quiet) return;
       setState(() {
         _error = 'Could not load the session list.';
         _loading = false;
@@ -941,7 +1110,12 @@ class _SessionRow extends StatelessWidget {
                         ],
                         Expanded(
                           child: Text(
-                            session.title,
+                            // A just-created session has no title yet (the
+                            // agent sets it on its first turn): the row
+                            // reads its directory until `session.renamed`.
+                            session.title.isNotEmpty
+                                ? session.title
+                                : session.location,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
