@@ -96,6 +96,26 @@ function describe(row) {
 // The bridge's structured task row (spec §8.3), rendered for the agent.
 const output = { type: "object", properties: { output: { type: "string" } }, required: ["output"] }
 
+// The recent tasks of this session's project (issue #143), newest first: the
+// bridge's /api/orb/tasks, asked by the directory the tool runs in. Read after
+// a spawn whose transport failed, so the caller learns whether the dispatch
+// landed instead of guessing "unreachable". No project -> no tasks.
+async function recentTasks(directory) {
+  try {
+    const response = await fetch(bridgeUrl() + "/api/orb/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ directory }),
+    })
+    if (!response.ok) return []
+    const row = await response.json()
+    const tasks = row && Array.isArray(row.tasks) ? row.tasks : []
+    return tasks.slice(0, 5)
+  } catch {
+    return []
+  }
+}
+
 async function post(pathname, body) {
   const response = await fetch(bridgeUrl() + pathname, {
     method: "POST",
@@ -129,7 +149,10 @@ export default {
             },
             wait: {
               type: "boolean",
-              description: "Block until the task completes (default true); false returns the orb handle immediately",
+              description:
+                "Block until the task completes (default true); false returns the orb handle immediately. " +
+                "The block is bounded: a long task answers as running (poll it with orb_wait), and a " +
+                "repeated spawn of a task already running on the orb returns that task — it is not duplicated.",
             },
             orb: {
               type: "string",
@@ -170,6 +193,24 @@ export default {
               session: context?.sessionID,
             })
           } catch (e) {
+            // The fetch failed (issue #143): a blocking spawn holds the
+            // response for the task, which commonly outlives the caller's
+            // timeout while the bridge dispatches on. Ask for the project's
+            // recent tasks before declaring the bridge unreachable: the
+            // dispatch usually landed, and a blind error invites a duplicate
+            // retry (the bridge dedups identical running tasks, but the
+            // caller should not rely on it).
+            const recent = await recentTasks(context?.directory)
+            if (recent.length > 0) {
+              return {
+                output:
+                  "Orb spawn: the call failed before an answer arrived (" +
+                  e +
+                  "), but the bridge took the dispatch. Its recent tasks:\n\n" +
+                  recent.map((row) => `${row.id} — ${row.orbName} — ${row.status} — ${row.task}`).join("\n") +
+                  "\n\nDo not call orb_spawn again for the same task. Use orb_wait with the matching task_id.",
+              }
+            }
             return { output: "Orb spawn failed: the OpenCodeBridge is unreachable at " + bridgeUrl() + " (" + e + ")." }
           }
           if (!result.ok) {

@@ -54,6 +54,21 @@ void main() {
     expect(OrbAgentTools.files.keys, ['opencodebridge_orbs.ts']);
   });
 
+  test(
+    'a failed spawn fetch asks the recent tasks before answering (issue #143)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The timeout-aware path: the spawn catch asks the bridge's recent
+      // tasks (by the tool's directory), and a non-empty answer points at
+      // the dispatched task instead of the blind "unreachable" error.
+      expect(source, contains('/api/orb/tasks'));
+      expect(source, contains('recentTasks(context?.directory)'));
+      expect(source, contains('orb_wait with the matching task_id'));
+    },
+  );
+
   test('materialize never overwrites an edited copy (on-disk wins)', () async {
     final file = File('${temp.path}/opencodebridge_orbs.ts')
       ..writeAsStringSync('// tuned by hand');

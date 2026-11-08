@@ -10,6 +10,7 @@ class OrbTask {
   OrbTask({
     required this.id,
     required this.orb,
+    required this.project,
     required this.orbName,
     required this.branch,
     required this.session,
@@ -30,6 +31,11 @@ class OrbTask {
 
   /// The orb id the task runs on.
   final String orb;
+
+  /// The host project id the orb belongs to (issue #143): a retried dispatch
+  /// and the recent-tasks read both resolve a project, and the dedup is
+  /// per project's orb.
+  final String project;
 
   /// The orb's user-facing name (the injection message addresses it).
   final String orbName;
@@ -90,6 +96,7 @@ class OrbTask {
   Map<String, Object?> toJson() => {
     'id': id,
     'orb': orb,
+    'project': project,
     'orbName': orbName,
     'branch': branch,
     'session': session,
@@ -111,6 +118,7 @@ class OrbTask {
     return OrbTask(
       id: map['id'] as String? ?? '',
       orb: map['orb'] as String? ?? '',
+      project: map['project'] as String? ?? '',
       orbName: map['orbName'] as String? ?? '',
       branch: map['branch'] as String? ?? '',
       session: map['session'] as String? ?? '',

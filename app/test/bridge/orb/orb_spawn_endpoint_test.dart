@@ -559,6 +559,74 @@ void main() {
     );
   });
 
+  group('POST /api/orb/tasks (issue #143)', () {
+    test('without a task service answers 503', () async {
+      final server = await serverWith(tasks: null);
+      try {
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/tasks',
+          '{"directory": "/home/dev/shop"}',
+        );
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'opencode_unavailable'});
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('answers the project tasks newest first', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        final (_, spawnBody) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the thing", "wait": false, "session": "ses_caller"}',
+        );
+        final id = jsonDecode(spawnBody)['id'] as String;
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/tasks',
+          '{"project": "prj_1"}',
+        );
+        expect(status, 200);
+        final row = jsonDecode(body);
+        expect(row['project'], 'prj_1');
+        expect(row['tasks'], hasLength(1));
+        expect(row['tasks'][0]['id'], id);
+        expect(row['tasks'][0]['status'], 'running');
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('an unknown directory answers no tasks', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      final server = await serverWith(tasks: tasks);
+      try {
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/tasks',
+          '{"directory": "/nowhere"}',
+        );
+        expect(status, 200);
+        expect(jsonDecode(body), {'project': null, 'tasks': []});
+      } finally {
+        await server.stop();
+      }
+    });
+  });
+
   group('POST /api/orb/stop|delete|export (issue #100)', () {
     OrbTaskService tasksService() =>
         OrbTaskService(orbs: orbs, sessions: backend, file: tasksFile);

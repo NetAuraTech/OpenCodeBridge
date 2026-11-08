@@ -165,6 +165,7 @@ class _FakeOrbs implements OrbService {
 
   Session? createSessionResult;
   String? createSessionOrbId;
+  int createSessionCalls = 0;
 
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
@@ -194,6 +195,7 @@ class _FakeOrbs implements OrbService {
 
   @override
   Future<Session> createSessionOnOrb(String id) async {
+    createSessionCalls++;
     createSessionOrbId = id;
     return createSessionResult!;
   }
@@ -220,24 +222,47 @@ void main() {
   late _FakeOrbs orbs;
   late _FakeBackend backend;
   late OrbTaskService service;
+  late Duration waitGrace;
 
-  OrbTaskService newService() => OrbTaskService(
-    orbs: orbs,
-    sessions: backend,
-    file: tasksFile,
-    pollInterval: const Duration(milliseconds: 5),
-  );
+  /// Every service a test builds (the completion watcher polls on its own):
+  /// torn down with the temp dir, so no writer outlives it.
+  final services = <OrbTaskService>[];
+
+  OrbTaskService newService() {
+    final created = OrbTaskService(
+      orbs: orbs,
+      sessions: backend,
+      file: tasksFile,
+      pollInterval: const Duration(milliseconds: 5),
+      waitGrace: waitGrace,
+    );
+    services.add(created);
+    return created;
+  }
 
   setUp(() async {
     temp = await Directory.systemTemp.createTemp('orb-tasks');
     tasksFile = File('${temp.path}/tasks.json');
     orbs = _FakeOrbs();
     backend = _FakeBackend(_FakeOpencode());
+    waitGrace = const Duration(seconds: 1);
     service = newService();
   });
 
   tearDown(() async {
-    await temp.delete(recursive: true);
+    // The watchers first: an in-flight completion pass (done before close
+    // bites) still persists into the temp dir, so it settles before the
+    // dir goes. The delete then tolerates a straggler write outright.
+    for (final created in services) {
+      created.close();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+    services.clear();
+    try {
+      await temp.delete(recursive: true);
+    } on FileSystemException {
+      // A watcher write landed mid-delete: the OS reaps the dir.
+    }
   });
 
   /// Script the dispatch seams: a task session on orb `a1b2c3` whose turn
@@ -1058,6 +1083,144 @@ void main() {
         await until(
           () => backend.opencode.prompts.any((p) => p.$1 == 'ses_caller'),
         );
+      },
+    );
+  });
+
+  group('idempotent dispatch (issue #143)', () {
+    setUp(() {
+      orbs.listResult = [_runningOrb()];
+    });
+
+    test('the same task text yields one task, one session', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final second = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second, same(first));
+      expect(orbs.createSessionCalls, 1);
+      expect(service.tasks, hasLength(1));
+      expect(backend.opencode.prompts, hasLength(1));
+    });
+
+    test('concurrent spawns of the same task dedup too', () async {
+      scriptDispatch();
+
+      final answers = await Future.wait([
+        service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+      ]);
+
+      expect(answers[0], same(answers[1]));
+      expect(orbs.createSessionCalls, 1);
+      expect(service.tasks, hasLength(1));
+      expect(backend.opencode.prompts, hasLength(1));
+    });
+
+    test('normalized text dedups (case, whitespace, punctuation)', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form!',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final second = await service.spawn(
+        task: '  fix   THE login form  ',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final third = await service.spawn(
+        task: 'Fix the\nlogin\tform.',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second.id, first.id);
+      expect(third.id, first.id);
+      expect(orbs.createSessionCalls, 1);
+    });
+
+    test('a different task text dispatches a second session', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final second = await service.spawn(
+        task: 'Fix the signup form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second.id, isNot(first.id));
+      expect(orbs.createSessionCalls, 2);
+      expect(service.tasks, hasLength(2));
+      expect(backend.opencode.prompts, hasLength(2));
+    });
+
+    test('a completed task with the same text dispatches anew', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      // The orb session turn ends: the first task is no longer running.
+      backend.opencode.detailOf = (id) => _detail(id, outcome: 'succeeded');
+      await until(() => first.isDone);
+
+      final second = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second.id, isNot(first.id));
+      expect(orbs.createSessionCalls, 2);
+      expect(service.tasks, hasLength(2));
+    });
+  });
+
+  group('bounded blocking wait (issue #143)', () {
+    test(
+      'wait: true answers the running task after the grace window',
+      () async {
+        orbs.listResult = [_runningOrb()];
+        scriptDispatch(); // The turn never ends.
+        waitGrace = const Duration(milliseconds: 30);
+
+        final stopwatch = Stopwatch()..start();
+        final answer = await newService().spawn(
+          task: 'long work',
+          callerSession: 'ses_caller',
+        );
+        stopwatch.stop();
+
+        expect(answer.status, 'running');
+        expect(answer.isDone, isFalse);
+        expect(answer.orbName, 'worker');
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
       },
     );
   });
