@@ -268,6 +268,7 @@ void main() {
       void Function(String)? emit,
       GhRunner? gh,
       Future<String?> Function(String projectId)? repoFor,
+      Future<List<OrbCredential>> Function()? hostCredentials,
     }) {
       final (run, spawn) = docker.bind();
       return OrbService(
@@ -282,6 +283,7 @@ void main() {
         hostIp: () async => '10.1.2.3',
         gh: gh,
         repoFor: repoFor,
+        hostCredentials: hostCredentials,
         bootTimeout: bootTimeout ?? const Duration(minutes: 10),
         pollInterval: pollInterval ?? const Duration(milliseconds: 5),
       );
@@ -1386,6 +1388,243 @@ void main() {
         // is host-authoritative.
         final (id: id, gh: _) = await createWithGh(hostGh());
         expect(File('${stateRoot.path}/$id/gh/hosts.yml').existsSync(), isTrue);
+      });
+    });
+
+    group('the provider-credential sync (issue #138)', () {
+      /// A fake orb server script: answers `GET /api/credential` with
+      /// [stored] and records every `POST /api/credential` body. Requests
+      /// to any other path answer 200 (the descriptor verification).
+      Future<({HttpServer http, List<Map<String, Object?>> posts})> orbServer({
+        List<Map<String, Object?>> stored = const [],
+      }) async {
+        final posts = <Map<String, Object?>>[];
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          if (request.uri.path == '/api/credential' &&
+              request.method == 'GET') {
+            request.response
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode({'data': stored}));
+          } else if (request.uri.path == '/api/credential' &&
+              request.method == 'POST') {
+            unawaited(
+              request
+                  .cast<List<int>>()
+                  .transform(const Utf8Decoder())
+                  .join()
+                  .then((body) {
+                    posts.add(jsonDecode(body) as Map<String, Object?>);
+                    request.response.statusCode = 200;
+                    unawaited(request.response.close());
+                  }),
+            );
+            return;
+          } else {
+            request.response.statusCode = 200;
+          }
+          unawaited(request.response.close());
+        });
+        return (http: http, posts: posts);
+      }
+
+      void bootAgainst(int port) {
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+        docker.logs = 'server password pw\n';
+      }
+
+      test('create pushes the host credentials into the orb server', () async {
+        hostConfig(withPlugins: false);
+        final (http: http, posts: posts) = await orbServer();
+        bootAgainst(http.port);
+        var reads = 0;
+        final record = await service(
+          hostCredentials: () async {
+            reads++;
+            return const [
+              OrbCredential(
+                integrationId: 'amd',
+                value: {'type': 'key', 'key': 'rc-secret'},
+                label: 'AMD',
+              ),
+            ];
+          },
+        ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+        await http.close(force: true);
+
+        expect(record.state, 'running');
+        expect(reads, 1);
+        expect(posts, [
+          {
+            'integrationID': 'amd',
+            'value': {'type': 'key', 'key': 'rc-secret'},
+            'activate': true,
+            'label': 'AMD',
+          },
+        ]);
+      });
+
+      test(
+        'a credential the orb already holds unchanged is not reposted',
+        () async {
+          hostConfig(withPlugins: false);
+          final (http: http, posts: posts) = await orbServer(
+            stored: const [
+              {
+                'id': 'cred-1',
+                'integrationID': 'amd',
+                'label': 'AMD',
+                'active': true,
+                'value': {'type': 'key', 'key': 'rc-secret'},
+              },
+            ],
+          );
+          bootAgainst(http.port);
+          await service(
+            hostCredentials: () async => const [
+              OrbCredential(
+                integrationId: 'amd',
+                value: {'type': 'key', 'key': 'rc-secret'},
+                label: 'AMD',
+              ),
+            ],
+          ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+          await http.close(force: true);
+          expect(posts, isEmpty);
+        },
+      );
+
+      test('a rotated host value IS reposted (host-authoritative)', () async {
+        hostConfig(withPlugins: false);
+        final (http: http, posts: posts) = await orbServer(
+          stored: const [
+            {
+              'id': 'cred-1',
+              'integrationID': 'amd',
+              'active': true,
+              'value': {'type': 'key', 'key': 'old-key'},
+            },
+          ],
+        );
+        bootAgainst(http.port);
+        await service(
+          hostCredentials: () async => const [
+            OrbCredential(
+              integrationId: 'amd',
+              value: {'type': 'key', 'key': 'new-key'},
+            ),
+          ],
+        ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+        await http.close(force: true);
+        expect(posts.single['value'], {'type': 'key', 'key': 'new-key'});
+        expect(posts.single['activate'], true);
+      });
+
+      test(
+        'no host credentials: the create proceeds, nothing is posted',
+        () async {
+          hostConfig(withPlugins: false);
+          final (http: http, posts: posts) = await orbServer();
+          bootAgainst(http.port);
+          final events = <Map<String, Object?>>[];
+          final record = await service(
+            emit: (payload) =>
+                events.add(jsonDecode(payload) as Map<String, Object?>),
+            hostCredentials: () async => const [],
+          ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+          await http.close(force: true);
+          expect(record.state, 'running');
+          expect(posts, isEmpty);
+          // No warning: an empty host store is not a failure.
+          expect(
+            events
+                .map(
+                  (e) => '${(e['data'] as Map<String, Object?>)['line'] ?? ''}',
+                )
+                .where((l) => l.contains('credential')),
+            isEmpty,
+          );
+        },
+      );
+
+      test('a failing host read never fails the boot — it warns', () async {
+        hostConfig(withPlugins: false);
+        final (http: http, posts: posts) = await orbServer();
+        bootAgainst(http.port);
+        final events = <Map<String, Object?>>[];
+        final record = await service(
+          emit: (payload) =>
+              events.add(jsonDecode(payload) as Map<String, Object?>),
+          hostCredentials: () async => throw StateError('descriptor gone'),
+        ).create(project: 'proj-1', name: 'dev', checkout: checkout.path);
+        await http.close(force: true);
+        expect(record.state, 'running');
+        expect(posts, isEmpty);
+        expect(
+          events
+              .map(
+                (e) => '${(e['data'] as Map<String, Object?>)['line'] ?? ''}',
+              )
+              .where((l) => l.contains('credential sync')),
+          isNotEmpty,
+        );
+      });
+
+      test('the default reader takes the credentials from the host service '
+          'descriptor', () async {
+        hostConfig(withPlugins: false);
+        // The host's shared-service descriptor + its credential route.
+        final hostService = await HttpServer.bind('127.0.0.1', 0);
+        hostService.listen((request) {
+          if (request.uri.path == '/api/credential') {
+            request.response
+              ..headers.contentType = ContentType.json
+              ..write(
+                jsonEncode({
+                  'data': [
+                    {
+                      'id': 'cred-1',
+                      'integrationID': 'amd',
+                      'label': 'AMD',
+                      'active': true,
+                      'value': {'type': 'key', 'key': 'rc-secret'},
+                    },
+                  ],
+                }),
+              );
+          } else {
+            request.response.statusCode = 200;
+          }
+          unawaited(request.response.close());
+        });
+        Directory('${home.path}/.local/state/opencode')
+            .createSync(recursive: true);
+        File('${home.path}/.local/state/opencode/service.json')
+            .writeAsStringSync(
+              jsonEncode({
+                'url': 'http://127.0.0.1:${hostService.port}',
+                'password': 'host-pw',
+              }),
+            );
+        final (http: http, posts: posts) = await orbServer();
+        bootAgainst(http.port);
+        // No hostCredentials seam: the descriptor-backed default reads.
+        await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        );
+        await http.close(force: true);
+        await hostService.close(force: true);
+        expect(posts, [
+          {
+            'integrationID': 'amd',
+            'value': {'type': 'key', 'key': 'rc-secret'},
+            'activate': true,
+            'label': 'AMD',
+          },
+        ]);
       });
     });
 

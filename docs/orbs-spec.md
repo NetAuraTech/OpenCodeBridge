@@ -276,6 +276,10 @@ After starting the declared services, the entrypoint waits until **all** declare
 
 Unified in the image: the boot scripts (with the Dockerfile) live in the app-owned build-context dir (§5.2) and are **baked into the image** (part of the tag hash). **scripts-as-config**: changing boot behavior = editing those global files (the §5 "edit the files" model) — no separate knobs file, no app/bridge settings surface for boot prep. The global opencode plugin tool (§8) stays in `~/.config/opencode/plugins/`, untouched — two config domains, each file where its reader finds it.
 
+### 6.7 Provider-credential sync — bridge, after every successful boot
+
+opencode v2 keeps provider credentials in the service's own DB, not in the legacy `auth.json` the §6.2 copy carries — an orb booted with the copy alone has **no** provider keys, and a dispatched agent dies on its first step with `Login required` ([#138](https://github.com/NetAuraTech/OpenCodeBridge/issues/138)). After a successful boot wait (create/wake/update — the same three paths), the bridge reads the **host** service's stored credentials (`GET /api/credential` on the shared-service descriptor) and posts each one into the **orb's** server (`POST /api/credential`, activated). Host-authoritative like §6.2/§4 (re-synced every start — a rotated token replaces the orb's; a value the orb already holds unchanged is skipped). The DB itself is never copied: the orb shares the host's *credentials*, never the host's *sessions* or project state. A sync failure (no descriptor, unreachable route) is a **boot-log warning, never a failed boot** — a credential-less orb is a degraded orb, and a host without the shared service must still get orbs. The secret crosses bridge→orb-server only — never through the bridge's API surface (ADR-0001).
+
 ## 7. Bridge architecture
 
 ### 7.1 Per-orb service descriptor — no descriptor file
