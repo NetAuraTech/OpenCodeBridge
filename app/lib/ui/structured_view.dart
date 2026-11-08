@@ -150,6 +150,14 @@ Future<ClipboardImageRead> _readClipboardImage() async {
 /// and the prompt input enabled at any time (spec §5, endpoint 7: a mid-turn
 /// prompt is queued by the service with `delivery: steer`).
 ///
+/// The panel is embeddable (issue #130): it renders its own header and
+/// surface and assumes nothing about owning the screen — it can sit in a
+/// full-screen route (through [StructuredSessionScreen]) or inside an
+/// arbitrary parent widget (a right-hand pane of a `Row`). Its lifecycle —
+/// the event subscription, the scroll, the pending permission banner — is
+/// bound to its own mount, and the navigation commands that used to close
+/// the view call [onClose] instead of assuming a navigator pop.
+///
 /// The view is event-driven (spec §8): while a turn runs,
 /// `session.text.delta` / `session.reasoning.delta` grow the in-flight
 /// message token by token, `session.tool.*` update its tool cards,
@@ -158,8 +166,8 @@ Future<ClipboardImageRead> _readClipboardImage() async {
 /// boundary (`session.execution.*`) re-fetches the service's authoritative
 /// state. Events arrive on the shared [EventSource] stream and are filtered
 /// to this session.
-class StructuredSessionScreen extends StatefulWidget {
-  const StructuredSessionScreen({
+class StructuredSessionPanel extends StatefulWidget {
+  const StructuredSessionPanel({
     super.key,
     required this.sessionId,
     required this.title,
@@ -168,6 +176,7 @@ class StructuredSessionScreen extends StatefulWidget {
     this.gaps,
     this.onNewSession,
     this.onOpenSettings,
+    this.onClose,
     this.settings,
     this.onThemeModeChanged,
     this.imageReader,
@@ -201,6 +210,14 @@ class StructuredSessionScreen extends StatefulWidget {
   /// `/settings`: open the app's Settings tab.
   final FutureOr<void> Function()? onOpenSettings;
 
+  /// Closes this view (issue #130): what the navigation commands (`/new`,
+  /// `/sessions`, `/open`, `/clear`, `/settings`) do before running the
+  /// flow behind them. The full-screen route wires it to the navigator
+  /// pop; an embedded pane wires it to whatever dismisses the pane, or
+  /// `null` when closing is not a thing the panel can do (the flow then
+  /// runs with the view kept in place).
+  final FutureOr<void> Function()? onClose;
+
   /// The app's settings (issue #49): `/themes` reads and persists the theme
   /// choice from here. `null` leaves `/themes` a note that it is
   /// unavailable.
@@ -222,11 +239,89 @@ class StructuredSessionScreen extends StatefulWidget {
   final DateTime Function() clock;
 
   @override
-  State<StructuredSessionScreen> createState() =>
-      _StructuredSessionScreenState();
+  State<StructuredSessionPanel> createState() => _StructuredSessionPanelState();
 }
 
-class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
+/// The full-screen route's wrapper (issue #130): the panel on a
+/// [Scaffold], closing with a navigator pop — the route the list opens
+/// today, unchanged until the two-pane layout lands. All the view's
+/// behavior lives in [StructuredSessionPanel].
+class StructuredSessionScreen extends StatelessWidget {
+  const StructuredSessionScreen({
+    super.key,
+    required this.sessionId,
+    required this.title,
+    required this.client,
+    this.events,
+    this.gaps,
+    this.onNewSession,
+    this.onOpenSettings,
+    this.settings,
+    this.onThemeModeChanged,
+    this.imageReader,
+    this.clock = DateTime.now,
+  });
+
+  /// The session to view (the bridge's `/api/sessions/{id}` family).
+  final String sessionId;
+
+  /// The session's title, shown in the header.
+  final String title;
+
+  /// The bridge's sessions API client (endpoints 5–9).
+  final SessionsClient client;
+
+  /// Every event off the bridge's unified stream (spec §8), or `null` for
+  /// initial-state-only rendering.
+  final Stream<BridgeEvent>? events;
+
+  /// Durable-seq gaps for this session's source, when it reports them.
+  final Stream<SessionGap>? gaps;
+
+  /// The `/` menu's navigation commands (`/new`, `/sessions`, `/open`,
+  /// `/clear`): the route closes and the app runs the flow.
+  final FutureOr<void> Function()? onNewSession;
+
+  /// `/settings`: open the app's Settings tab.
+  final FutureOr<void> Function()? onOpenSettings;
+
+  /// The app's settings (issue #49): `/themes` reads and persists the theme
+  /// choice from here.
+  final AppSettings? settings;
+
+  /// Re-themes the whole app live after `/themes` persists the choice
+  /// (issue #49).
+  final VoidCallback? onThemeModeChanged;
+
+  /// Reads the clipboard's image on Ctrl+V in the prompt bar (issue #72),
+  /// or `null` for the default desktop-Linux reader (`xclip` / `wl-paste`).
+  final ClipboardImageReader? imageReader;
+
+  /// The wall-clock for the live turn's ticking duration (issue #122).
+  final DateTime Function() clock;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: StructuredSessionPanel(
+        sessionId: sessionId,
+        title: title,
+        client: client,
+        events: events,
+        gaps: gaps,
+        onNewSession: onNewSession,
+        onOpenSettings: onOpenSettings,
+        onClose: () => Navigator.of(context).pop(),
+        settings: settings,
+        onThemeModeChanged: onThemeModeChanged,
+        imageReader: imageReader,
+        clock: clock,
+      ),
+    );
+  }
+}
+
+class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   SessionDetail? _detail;
 
   List<SessionMessage> _messages = const [];
@@ -1968,8 +2063,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   }
 
   /// The menu's navigation commands (`/new`, `/sessions`, `/open`, and the
-  /// local `/clear`): this view closes and the app's existing "new session"
-  /// flow runs behind it, or a note when the screen has no navigation wired.
+  /// local `/clear`): this view closes (issue #130: through [onClose], not
+  /// a hardcoded navigator pop) and the app's existing "new session" flow
+  /// runs behind it, or a note when the screen has no navigation wired.
   Future<void> _goNewSession() async {
     final onNewSession = widget.onNewSession;
     if (onNewSession == null) {
@@ -1977,8 +2073,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _snackBar('Not available from this screen.');
       return;
     }
-    // Close this view first, then run the flow on the tab behind it.
-    Navigator.of(context).pop();
+    // Close this view first (when closing is wired at all), then run the
+    // flow behind it.
+    await widget.onClose?.call();
     await onNewSession();
   }
 
@@ -2083,8 +2180,9 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           _snackBar('Settings is not available from this screen.');
           return;
         }
-        // Close this view, then let the shell land on the Settings tab.
-        Navigator.of(context).pop();
+        // Close this view (when closing is wired at all), then let the
+        // shell land on the Settings tab.
+        await widget.onClose?.call();
         await onOpenSettings();
         return;
       case 'themes':
@@ -2249,202 +2347,227 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(_title)),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _loadError != null
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text(_loadError!, textAlign: TextAlign.center),
-              ),
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _CostBar(
-                  detail: _detail,
-                  contextUsed: _contextUsed,
-                  prefill: _prefill,
-                  decode: _decode,
-                ),
-                Expanded(
-                  // The chat list and the prompt bar share the height left
-                  // by the cost bar: with the keyboard up on
-                  // a phone, the open command menu shrinks rather than the
-                  // prompt being pushed off screen. The prompt bar is capped
-                  // at this height so its command menu can flex to fit (a
-                  // non-flex column child otherwise gets unbounded height and
-                  // its inner Flexible would never shrink).
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Expanded(
-                            child: Stack(
+    // The panel owns its surface and header (issue #130): it renders the
+    // same header/cost-bar/list/prompt stack embedded (a right-hand pane of
+    // a Row) or full-screen (through StructuredSessionScreen). The AppBar
+    // inside the body consumes the status-bar padding exactly as a
+    // Scaffold's appBar slot would, and its auto-implied leading back
+    // button follows the route: shown on a pushed route, absent when the
+    // panel is embedded in the root route.
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AppBar(title: Text(_title)),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _loadError != null
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(_loadError!, textAlign: TextAlign.center),
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _CostBar(
+                        detail: _detail,
+                        contextUsed: _contextUsed,
+                        prefill: _prefill,
+                        decode: _decode,
+                      ),
+                      Expanded(
+                        // The chat list and the prompt bar share the height
+                        // left by the cost bar: with the keyboard up on
+                        // a phone, the open command menu shrinks rather
+                        // than the prompt being pushed off screen. The
+                        // prompt bar is capped at this height so its
+                        // command menu can flex to fit (a non-flex column
+                        // child otherwise gets unbounded height and its
+                        // inner Flexible would never shrink).
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
-                                Positioned.fill(
-                                  // Lazy, reversed chat list: the newest message is the
-                                  // anchor (offset 0, the bottom of the screen), so the
-                                  // open lands on the newest for free — no settle, no
-                                  // crawl. Only the visible messages build and lay out;
-                                  // the earlier ones are pulled in as the user scrolls
-                                  // up through the history.
-                                  child: ListView.builder(
-                                    controller: _scroll,
-                                    reverse: true,
-                                    padding: const EdgeInsets.fromLTRB(
-                                      16,
-                                      8,
-                                      16,
-                                      8,
-                                    ),
-                                    itemCount: _messages.isEmpty
-                                        ? 1
-                                        : _messages.length,
-                                    itemBuilder: (context, index) {
-                                      if (_messages.isEmpty) {
-                                        return const _CenteredMessage(
-                                          text: 'No messages yet.',
-                                        );
-                                      }
-                                      // The list is reversed (newest at the anchor), so
-                                      // map the list index back to the chronological
-                                      // history index.
-                                      final i = _messages.length - 1 - index;
-                                      final message = _messages[i];
-                                      // The completed turn's stats footer (issue
-                                      // #121) rides on the history's last row —
-                                      // the idle marker closing the turn when the
-                                      // history carries one, else the turn's last
-                                      // message (legacy history).
-                                      final footer = i == _messages.length - 1
-                                          ? _turnStatsText
-                                          : null;
-                                      if (message.role == 'idle') {
-                                        // The turn-boundary marker carries no
-                                        // content of its own.
-                                        return _TurnStatsFooter(label: footer);
-                                      }
-                                      if (message.role == 'compaction') {
-                                        return Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            _CompactionPane(
-                                              message: message,
-                                              inFlight:
-                                                  _compacting &&
-                                                  i == _compactionIndex,
-                                            ),
-                                            _TurnStatsFooter(label: footer),
-                                          ],
-                                        );
-                                      }
-                                      final inFlight =
-                                          _turnActive &&
-                                          message.id != null &&
-                                          _liveMessages.containsKey(message.id);
-                                      return Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          _MessagePane(
-                                            message: message,
-                                            inFlight: inFlight,
+                                Expanded(
+                                  child: Stack(
+                                    children: [
+                                      Positioned.fill(
+                                        // Lazy, reversed chat list: the newest message is
+                                        // the anchor (offset 0, the bottom of the screen),
+                                        // so the open lands on the newest for free — no
+                                        // settle, no crawl. Only the visible messages
+                                        // build and lay out; the earlier ones are pulled
+                                        // in as the user scrolls up through the history.
+                                        child: ListView.builder(
+                                          controller: _scroll,
+                                          reverse: true,
+                                          padding: const EdgeInsets.fromLTRB(
+                                            16,
+                                            8,
+                                            16,
+                                            8,
                                           ),
-                                          _TurnStatsFooter(label: footer),
-                                        ],
-                                      );
-                                    },
+                                          itemCount: _messages.isEmpty
+                                              ? 1
+                                              : _messages.length,
+                                          itemBuilder: (context, index) {
+                                            if (_messages.isEmpty) {
+                                              return const _CenteredMessage(
+                                                text: 'No messages yet.',
+                                              );
+                                            }
+                                            // The list is reversed (newest at the anchor), so
+                                            // map the list index back to the chronological
+                                            // history index.
+                                            final i =
+                                                _messages.length - 1 - index;
+                                            final message = _messages[i];
+                                            // The completed turn's stats footer (issue
+                                            // #121) rides on the history's last row —
+                                            // the idle marker closing the turn when the
+                                            // history carries one, else the turn's last
+                                            // message (legacy history).
+                                            final footer =
+                                                i == _messages.length - 1
+                                                ? _turnStatsText
+                                                : null;
+                                            if (message.role == 'idle') {
+                                              // The turn-boundary marker carries no
+                                              // content of its own.
+                                              return _TurnStatsFooter(
+                                                label: footer,
+                                              );
+                                            }
+                                            if (message.role == 'compaction') {
+                                              return Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  _CompactionPane(
+                                                    message: message,
+                                                    inFlight:
+                                                        _compacting &&
+                                                        i == _compactionIndex,
+                                                  ),
+                                                  _TurnStatsFooter(
+                                                    label: footer,
+                                                  ),
+                                                ],
+                                              );
+                                            }
+                                            final inFlight =
+                                                _turnActive &&
+                                                message.id != null &&
+                                                _liveMessages.containsKey(
+                                                  message.id,
+                                                );
+                                            return Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                _MessagePane(
+                                                  message: message,
+                                                  inFlight: inFlight,
+                                                ),
+                                                _TurnStatsFooter(label: footer),
+                                              ],
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      // The user scrolled up (or the initial settle hasn't
+                                      // reached the end yet): float the jump-to-end button
+                                      // over the list, just above the prompt bar.
+                                      if (!_atBottom)
+                                        Positioned(
+                                          right: 12,
+                                          bottom: 12,
+                                          child: FloatingActionButton.small(
+                                            key: const ValueKey(
+                                              'structured-jump-to-end',
+                                            ),
+                                            tooltip: 'Go to the end',
+                                            onPressed: _jumpToEnd,
+                                            child: const Icon(
+                                              Icons.vertical_align_bottom,
+                                            ),
+                                          ),
+                                        ),
+                                      // The pending question forms (issue #50) float over the
+                                      // list, just above the prompt bar — like the TUI
+                                      // prompts above the input, so the header and the cost
+                                      // bar never shift. The list is lazy, so the panel
+                                      // scrolls when a long form is taller than the room.
+                                      Positioned(
+                                        left: 0,
+                                        right: 0,
+                                        bottom: 0,
+                                        child: SingleChildScrollView(
+                                          child: QuestionPanel(
+                                            pending: _questions,
+                                            onSubmit: _submitAnswers,
+                                            onDismiss: _dismissQuestion,
+                                            busyId: _answerBusyId,
+                                          ),
+                                        ),
+                                      ),
+                                      // The pending permission requests (issue #62)
+                                      // float over the list, just above the prompt
+                                      // bar — like the TUI prompts above the input,
+                                      // so the header and the cost bar never shift.
+                                      // The banner scrolls when a pending request is
+                                      // taller than the room.
+                                      Positioned(
+                                        left: 0,
+                                        right: 0,
+                                        bottom: 0,
+                                        child: SingleChildScrollView(
+                                          child: PermissionBanner(
+                                            pending: _pending,
+                                            onReply: _reply,
+                                            replyBusyId: _replyBusyId,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                // The user scrolled up (or the initial settle hasn't
-                                // reached the end yet): float the jump-to-end button
-                                // over the list, just above the prompt bar.
-                                if (!_atBottom)
-                                  Positioned(
-                                    right: 12,
-                                    bottom: 12,
-                                    child: FloatingActionButton.small(
-                                      key: const ValueKey(
-                                        'structured-jump-to-end',
-                                      ),
-                                      tooltip: 'Go to the end',
-                                      onPressed: _jumpToEnd,
-                                      child: const Icon(
-                                        Icons.vertical_align_bottom,
-                                      ),
-                                    ),
+                                ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    maxHeight: constraints.maxHeight,
                                   ),
-                                // The pending question forms (issue #50) float over the
-                                // list, just above the prompt bar — like the TUI
-                                // prompts above the input, so the header and the cost
-                                // bar never shift. The list is lazy, so the panel
-                                // scrolls when a long form is taller than the room.
-                                Positioned(
-                                  left: 0,
-                                  right: 0,
-                                  bottom: 0,
-                                  child: SingleChildScrollView(
-                                    child: QuestionPanel(
-                                      pending: _questions,
-                                      onSubmit: _submitAnswers,
-                                      onDismiss: _dismissQuestion,
-                                      busyId: _answerBusyId,
-                                    ),
-                                  ),
-                                ),
-                                // The pending permission requests (issue #62)
-                                // float over the list, just above the prompt
-                                // bar — like the TUI prompts above the input,
-                                // so the header and the cost bar never shift.
-                                // The banner scrolls when a pending request is
-                                // taller than the room.
-                                Positioned(
-                                  left: 0,
-                                  right: 0,
-                                  bottom: 0,
-                                  child: SingleChildScrollView(
-                                    child: PermissionBanner(
-                                      pending: _pending,
-                                      onReply: _reply,
-                                      replyBusyId: _replyBusyId,
-                                    ),
+                                  child: _PromptBar(
+                                    controller: _prompt,
+                                    busy: _promptBusy || _commandBusy,
+                                    onSend: _sendPrompt,
+                                    menus: _menus,
+                                    mentions: [
+                                      for (final mention in _mentions)
+                                        mention.text,
+                                      for (final image in _images)
+                                        '[Image ${image.label}]',
+                                    ],
+                                    onMenuOpened: _onMenuOpened,
+                                    onToggleMode: _toggleMode,
+                                    onCycleVariant: _cycleVariant,
+                                    onPasteFromClipboard: _pasteFromClipboard,
                                   ),
                                 ),
                               ],
-                            ),
-                          ),
-                          ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxHeight: constraints.maxHeight,
-                            ),
-                            child: _PromptBar(
-                              controller: _prompt,
-                              busy: _promptBusy || _commandBusy,
-                              onSend: _sendPrompt,
-                              menus: _menus,
-                              mentions: [
-                                for (final mention in _mentions) mention.text,
-                                for (final image in _images)
-                                  '[Image ${image.label}]',
-                              ],
-                              onMenuOpened: _onMenuOpened,
-                              onToggleMode: _toggleMode,
-                              onCycleVariant: _cycleVariant,
-                              onPasteFromClipboard: _pasteFromClipboard,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
+                            );
+                          },
+                        ),
+                      ),
+                    ],
                   ),
-                ),
-              ],
-            ),
+          ),
+        ],
+      ),
     );
   }
 }
