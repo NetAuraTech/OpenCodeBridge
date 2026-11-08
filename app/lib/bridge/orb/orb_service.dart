@@ -329,15 +329,19 @@ class OrbDeletionRefusedError implements Exception {
 }
 
 /// A single session could not be moved (its export or its import failed,
-/// issue #97): [detail] is the CLI's error output.
+/// issue #97): [detail] is the CLI's error output — and for a failed
+/// import, the staged export file's shape too (size and first/last bytes,
+/// issue #137), since the CLI's bare schema errors describe only what the
+/// file is not.
 class OrbSessionMoveError implements Exception {
   const OrbSessionMoveError(this.session, this.detail);
 
   /// The session id the move failed on.
   final String session;
 
-  /// The CLI's error detail (the stderr, or the stdout when the stderr is
-  /// empty).
+  /// The failure's detail: the CLI's error output (both channels for an
+  /// import, the stderr for an export), with the staged file's shape
+  /// appended when an import rejected it (issue #137).
   final String detail;
 
   @override
@@ -1081,6 +1085,113 @@ class OrbService {
     return result.stdout.trim();
   }
 
+  /// The CLI's full output (both channels) for a failure report (issue
+  /// #137): [_cliDetail] alone hides the stdout half of a CLI that errors
+  /// on both channels.
+  String _cliOutput(OpencodeCliResult result) {
+    final out = result.stdout.trim();
+    final err = result.stderr.trim();
+    if (out.isEmpty && err.isEmpty) return '(no output)';
+    final parts = <String>[
+      if (err.isNotEmpty) 'stderr: $err',
+      if (out.isNotEmpty) 'stdout: $out',
+    ];
+    return parts.join('\n');
+  }
+
+  /// A bounded excerpt of [payload] for an error report (issue #137): the
+  /// first and last bytes with the size between them — the shape that
+  /// distinguishes an empty export from banner noise around the document.
+  String _payloadExcerpt(String payload) {
+    const edge = 192;
+    if (payload.length <= edge * 2) {
+      return '${payload.length} bytes: ${_flatText(payload)}';
+    }
+    final middle = payload.length - edge * 2;
+    return '${payload.length} bytes: first [${_flatText(payload.substring(0, edge))}] '
+        '… $middle elided … '
+        'last [${_flatText(payload.substring(payload.length - edge))}]';
+  }
+
+  /// Escapes control characters so a payload excerpt reads on one line.
+  static String _flatText(String s) =>
+      s.replaceAll('\r', r'\r').replaceAll('\n', r'\n').replaceAll('\t', r'\t');
+
+  /// The bare JSON document the CLI's `session import` accepts — the export
+  /// stdout reduced to the single JSON object it carries (issue #137). The
+  /// import schema parses its file argument as one JSON document, and every
+  /// other shape (an empty file, banner or log lines around the document,
+  /// ANSI codes, the document wrapped as one JSON string) aborts it with a
+  /// bare `SchemaError: Expected a valid JSON string`. `null` when no such
+  /// document is there: the caller reports the payload instead of staging a
+  /// file the import can only reject.
+  String? _bareExportDocument(String exportStdout) {
+    final trimmed = exportStdout.trim();
+    if (trimmed.isEmpty) return null;
+    Object? decoded;
+    try {
+      decoded = jsonDecode(trimmed);
+    } on FormatException {
+      decoded = null;
+    }
+    if (decoded is Map) return trimmed;
+    // The wrapped payload: the document's JSON text as one JSON string.
+    if (decoded is String) {
+      final inner = decoded.trim();
+      try {
+        if (jsonDecode(inner) is Map) return inner;
+      } on FormatException {
+        // Not a document inside — fall through to the noise scan.
+      }
+    }
+    // Noise around the document (banner or log lines, ANSI included): the
+    // widest outermost `{…}` slice that parses. A file of several documents
+    // never parses as one and stays refused — which document to move is not
+    // the bridge's guess.
+    final first = trimmed.indexOf('{');
+    final last = trimmed.lastIndexOf('}');
+    if (first != -1 && last > first) {
+      final slice = trimmed.substring(first, last + 1);
+      try {
+        if (jsonDecode(slice) is Map) return slice;
+      } on FormatException {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /// The staged export file's shape for a failed import (issue #137): the
+  /// size and the first and last bytes, read from the file the import
+  /// actually parsed (a large export never reaches the error whole).
+  String _stagedFileSummary(File file) {
+    try {
+      final length = file.lengthSync();
+      const edge = 192;
+      final random = file.openSync();
+      try {
+        if (length <= edge * 2) {
+          final all = utf8.decode(
+            random.readSync(length),
+            allowMalformed: true,
+          );
+          return 'staged file ${file.path}: ${_payloadExcerpt(all)}';
+        }
+        final head = utf8.decode(random.readSync(edge), allowMalformed: true);
+        random.setPositionSync(length - edge);
+        final tail = utf8.decode(random.readSync(edge), allowMalformed: true);
+        return 'staged file ${file.path}: $length bytes: '
+            'first [${_flatText(head)}] '
+            '… ${length - edge * 2} elided … '
+            'last [${_flatText(tail)}]';
+      } finally {
+        random.closeSync();
+      }
+    } on FileSystemException {
+      return 'staged file ${file.path} is no longer readable';
+    }
+  }
+
   /// Whether a failed session import is the idempotent 409 (the session
   /// already exists on the target — a move re-run, issue #97).
   bool _isImport409(OpencodeCliResult result) {
@@ -1095,11 +1206,12 @@ class OrbService {
   /// death path. It is unguarded (lossless — the guard exists only on
   /// delete): it exports every session on the orb (top-level plus
   /// child/subagent, one by one — an in-flight session as its history up to
-  /// now), imports each into the host checkout (idempotent — a 409 is the
-  /// session already there), deletes it from the orb only after its import
-  /// succeeded, then `docker stop`s the container last and sets the
-  /// `ocb.stopped` marker (the wake's gate). A re-issue while stopped is a
-  /// safe no-op.
+  /// now) into a bare JSON document the host CLI's import accepts (issue
+  /// #137), imports each into the host checkout parent-first (idempotent —
+  /// a 409 is the session already there), deletes them from the orb
+  /// child-first once every import has landed, then `docker stop`s the
+  /// container last and sets the `ocb.stopped` marker (the wake's gate). A
+  /// re-issue while stopped is a safe no-op.
   Future<void> stop(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
@@ -1143,46 +1255,45 @@ class OrbService {
           '${Directory.systemTemp.path}/ocb-stop-$id-${session.id}.json',
         )..createSync();
         try {
-          final export = await cli([
-            'session',
-            'export',
+          await _exportStaged(
+            cli,
+            file,
             session.id,
-            ..._serverArgs(url),
-          ], env: _passwordEnv(password));
-          if (export.exitCode != 0) {
-            throw OrbSessionMoveError(session.id, _cliDetail(export));
-          }
-          await file.writeAsString(export.stdout);
+            server: url,
+            password: password,
+          );
           files[session.id] = file;
         } catch (_) {
           if (file.existsSync()) await file.delete();
           rethrow;
         }
       }
-      // Phase 2: per session, import into the host checkout (409 = already
-      // there, idempotent), then delete it from the orb only after its
-      // import succeeded.
-      for (final session in all) {
-        final file = files[session.id]!;
-        final import = await cli([
-          'session',
-          'import',
-          file.path,
-          '--directory',
-          checkoutPath,
-        ]);
-        if (import.exitCode != 0 && !_isImport409(import)) {
-          throw OrbSessionMoveError(session.id, _cliDetail(import));
-        }
-        try {
-          await service.deleteSession(session.id);
-        } catch (error) {
-          throw OrbSessionMoveError(
-            session.id,
-            'the session import succeeded but the deletion from the orb '
-            'failed: $error',
-          );
-        }
+      // Phase 2: import every session into the host checkout (a 409 is the
+      // session already there — a re-run), parent-first (issue #137): the
+      // CLI rejects a child session whose parent is not yet on the target,
+      // and the service list is newest-first — exactly backwards.
+      final ordered = _parentsFirst(all, files);
+      for (final session in ordered) {
+        await _importStaged(
+          cli,
+          files[session.id]!,
+          session.id,
+          targetArgs: ['--directory', checkoutPath],
+        );
+      }
+      // Phase 3: delete from the orb only once every import has landed —
+      // child-first, the reverse of the import order (issue #137): the
+      // orb-side delete of a parent cascades to its children, so deleting
+      // a parent mid-list could strand a not-yet-imported child with only
+      // its temp file left. A session already gone (404 — a cascade from
+      // an earlier run, a startup reconciliation) is the move's end state.
+      for (final session in ordered.reversed) {
+        await _deleteMoved(
+          service,
+          session.id,
+          'the session import succeeded but the deletion from the orb '
+          'failed',
+        );
       }
       // `docker stop` last — only after every session has moved to the
       // host.
@@ -1194,6 +1305,133 @@ class OrbService {
         if (file.existsSync()) await file.delete();
       }
     }
+  }
+
+  /// The export of [session] staged into [file] for a later `session
+  /// import` (issue #137): the CLI's stdout reduced to the bare JSON
+  /// document the import schema parses (banner noise stripped, a wrapped
+  /// payload unwrapped). An export that exits 0 without one fails here,
+  /// with the payload excerpt in the error — an empty or noisy staged file
+  /// would only reach the import as a bare `SchemaError`.
+  Future<void> _exportStaged(
+    OpencodeCliRunner cli,
+    File file,
+    String session, {
+    String? server,
+    String? password,
+  }) async {
+    final export = await cli([
+      'session',
+      'export',
+      session,
+      ..._serverArgs(server),
+    ], env: _passwordEnv(password));
+    if (export.exitCode != 0) {
+      throw OrbSessionMoveError(session, _cliDetail(export));
+    }
+    final document = _bareExportDocument(export.stdout);
+    if (document == null) {
+      throw OrbSessionMoveError(
+        session,
+        'the session export exited 0 without a bare JSON document the '
+        'import can read — ${_payloadExcerpt(export.stdout)}\n'
+        '${_cliOutput(export)}',
+      );
+    }
+    await file.writeAsString(document);
+  }
+
+  /// The staged [file] imported on the target CLI (issue #97: a 409 is the
+  /// session already there — a move re-run). A failed import reports the
+  /// staged file the CLI actually parsed (size, first and last bytes) next
+  /// to the CLI's own output, not the bare `SchemaError` (issue #137).
+  Future<void> _importStaged(
+    OpencodeCliRunner cli,
+    File file,
+    String session, {
+    required List<String> targetArgs,
+    String? server,
+    String? password,
+  }) async {
+    final import = await cli([
+      'session',
+      'import',
+      file.path,
+      ...targetArgs,
+      ..._serverArgs(server),
+    ], env: _passwordEnv(password));
+    if (import.exitCode != 0 && !_isImport409(import)) {
+      throw OrbSessionMoveError(
+        session,
+        '${_cliOutput(import)}\n${_stagedFileSummary(file)}',
+      );
+    }
+  }
+
+  /// The source-side delete after a successful import: the moved session is
+  /// removed from [source]. A 404 is tolerated — the session is already
+  /// gone there (the parent's delete cascades to children on the orb, or a
+  /// startup reconciliation removed it first; issue #137): the move's end
+  /// state either way.
+  Future<void> _deleteMoved(
+    OpencodeService source,
+    String session,
+    String failure,
+  ) async {
+    try {
+      await source.deleteSession(session);
+    } on OpencodeServiceError catch (error) {
+      if (error.statusCode != HttpStatus.notFound) {
+        throw OrbSessionMoveError(session, '$failure: $error');
+      }
+    } catch (error) {
+      throw OrbSessionMoveError(session, '$failure: $error');
+    }
+  }
+
+  /// [all] in parent-first import order (issue #137): a child session's
+  /// export document names its parent (`info.parentID`), and the CLI's
+  /// import rejects a child whose parent is not yet on the target — while
+  /// the service's session list is newest-first. The parents of the set
+  /// import before the children that reference them; a cycle (impossible
+  /// in the service's tree, cheap to defend) keeps the remaining order.
+  List<OpencodeSession> _parentsFirst(
+    List<OpencodeSession> all,
+    Map<String, File> files,
+  ) {
+    final parents = <String, String?>{};
+    for (final entry in files.entries) {
+      String? parent;
+      try {
+        final info =
+            (jsonDecode(entry.value.readAsStringSync()) as Map)['info'];
+        if (info is Map) parent = info['parentID'] as String?;
+      } on Object {
+        // Unreadable (it was staged from a parsed document, so this is not
+        // expected): no ordering constraint on it.
+      }
+      parents[entry.key] = parent;
+    }
+    final ids = {for (final session in all) session.id};
+    final ordered = <OpencodeSession>[];
+    final done = <String>{};
+    final remaining = [...all];
+    while (remaining.isNotEmpty) {
+      final ready = remaining.where((s) {
+        final parent = parents[s.id];
+        return parent == null || !ids.contains(parent) || done.contains(parent);
+      }).toList();
+      if (ready.isEmpty) {
+        ordered.addAll(remaining);
+        break;
+      }
+      for (final session in ready) {
+        ordered.add(session);
+        done.add(session.id);
+        remaining.remove(session);
+      }
+    }
+    return ordered;
   }
 
   /// The startup auto-wake (issue #102, spec §2.11): the bridge owns every
@@ -1390,36 +1628,27 @@ class OrbService {
       '${Directory.systemTemp.path}/ocb-move-$session-${DateTime.now().millisecondsSinceEpoch}.json',
     );
     try {
-      final export = await cli([
-        'session',
-        'export',
+      await _exportStaged(
+        cli,
+        file,
         session,
-        ..._serverArgs(source.server),
-      ], env: _passwordEnv(source.password));
-      if (export.exitCode != 0) {
-        throw OrbSessionMoveError(session, _cliDetail(export));
-      }
-      await file.writeAsString(export.stdout);
-      final import = await cli([
-        'session',
-        'import',
-        file.path,
-        '--directory',
-        directory,
-        ..._serverArgs(target.server),
-      ], env: _passwordEnv(target.password));
-      if (import.exitCode != 0 && !_isImport409(import)) {
-        throw OrbSessionMoveError(session, _cliDetail(import));
-      }
-      try {
-        await source.service.deleteSession(session);
-      } catch (error) {
-        throw OrbSessionMoveError(
-          session,
-          'the session import succeeded but the deletion from the source '
-          'failed: $error',
-        );
-      }
+        server: source.server,
+        password: source.password,
+      );
+      await _importStaged(
+        cli,
+        file,
+        session,
+        targetArgs: ['--directory', directory],
+        server: target.server,
+        password: target.password,
+      );
+      await _deleteMoved(
+        source.service,
+        session,
+        'the session import succeeded but the deletion from the source '
+        'failed',
+      );
     } finally {
       if (file.existsSync()) await file.delete();
     }
@@ -1617,34 +1846,8 @@ class OrbService {
     final container = 'orb-$id';
     final state = await _inspectState(container);
     if (state == 'running') {
-      final status = await run([
-        'exec',
-        container,
-        'git',
-        '-C',
-        '/workspace',
-        'status',
-        '--porcelain',
-      ]);
-      if (status.exitCode != 0) {
-        return const OrbDeletionGuard(evaluable: false);
-      }
-      final unpushed = await run([
-        'exec',
-        container,
-        'git',
-        '-C',
-        '/workspace',
-        'rev-list',
-        '--count',
-        'HEAD',
-        '--not',
-        '--remotes',
-      ]);
-      if (unpushed.exitCode != 0) {
-        return const OrbDeletionGuard(evaluable: false);
-      }
-      return _guardResult(status.stdout, unpushed.stdout);
+      // The running container is probed in place.
+      return _guardProbe(['exec', container, 'git', '-C', '/workspace']);
     }
     // The container exists but is not running: a throwaway container over
     // the same workspace volume.
@@ -1655,7 +1858,7 @@ class OrbService {
     if (image == null) {
       return const OrbDeletionGuard(evaluable: false);
     }
-    final status = await run([
+    return _guardProbe([
       'run',
       '--rm',
       '--entrypoint',
@@ -1665,48 +1868,56 @@ class OrbService {
       image,
       '-C',
       '/ws',
-      'status',
-      '--porcelain',
     ]);
+  }
+
+  /// The guard's git probe under [git] (the docker argv prefix that runs
+  /// git in the orb's clone, spec §2.7): the dirty tree and the unpushed
+  /// count; any git failure is unevaluable. When the count is not zero the
+  /// probe fetches `origin` once and re-counts (issue #137): a branch the
+  /// host pushed leaves the orb's clone without a
+  /// `refs/remotes/origin/<branch>`, and `rev-list --not --remotes` then
+  /// counts those pushed commits as unpushed — a false refusal. A failed
+  /// fetch (no network, no credentials in the throwaway container) keeps
+  /// the first count: the guard fails closed, never delete the unverifiable.
+  Future<OrbDeletionGuard> _guardProbe(List<String> git) async {
+    final status = await run([...git, 'status', '--porcelain']);
     if (status.exitCode != 0) {
       return const OrbDeletionGuard(evaluable: false);
     }
-    final unpushed = await run([
-      'run',
-      '--rm',
-      '--entrypoint',
-      'git',
-      '-v',
-      'orb-$id-workspace:/ws',
-      image,
-      '-C',
-      '/ws',
-      'rev-list',
-      '--count',
-      'HEAD',
-      '--not',
-      '--remotes',
-    ]);
-    if (unpushed.exitCode != 0) {
+    Future<int?> count() async {
+      final out = await run([
+        ...git,
+        'rev-list',
+        '--count',
+        'HEAD',
+        '--not',
+        '--remotes',
+      ]);
+      if (out.exitCode != 0) return null;
+      return int.tryParse(out.stdout.trim());
+    }
+
+    var unpushed = await count();
+    if (unpushed == null) {
       return const OrbDeletionGuard(evaluable: false);
     }
-    return _guardResult(status.stdout, unpushed.stdout);
-  }
-
-  /// The guard from two git outputs: the porcelain lines and the unpushed
-  /// count — a parse failure of the count is unevaluable (never delete the
-  /// unverifiable).
-  OrbDeletionGuard _guardResult(String statusOut, String unpushedOut) {
-    int count;
-    try {
-      count = int.parse(unpushedOut.trim());
-    } on FormatException {
-      return const OrbDeletionGuard(evaluable: false);
+    if (unpushed > 0) {
+      final fetched = await run([...git, 'fetch', 'origin']);
+      if (fetched.exitCode == 0) {
+        // After a successful fetch the re-count is authoritative — an
+        // unreadable one leaves the state unverifiable.
+        final recounted = await count();
+        if (recounted == null) {
+          return const OrbDeletionGuard(evaluable: false);
+        }
+        unpushed = recounted;
+      }
     }
     return OrbDeletionGuard(
       evaluable: true,
-      dirty: _lines(statusOut),
-      unpushedCount: count,
+      dirty: _lines(status.stdout),
+      unpushedCount: unpushed,
     );
   }
 
