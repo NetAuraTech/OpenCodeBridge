@@ -58,6 +58,7 @@ CompositeOpencodeEventService makeComposite({
   Future<List<OrbRecord>> Function()? orbs,
   Future<String?> Function(String)? passwords,
   Map<String, FakeEventService>? upstreams,
+  Duration? bootRetryInterval,
 }) {
   final upstreamMap = upstreams ?? const {};
   return CompositeOpencodeEventService(
@@ -72,6 +73,7 @@ CompositeOpencodeEventService makeComposite({
       return fake;
     },
     refreshInterval: const Duration(milliseconds: 5),
+    bootRetryInterval: bootRetryInterval ?? const Duration(milliseconds: 5),
   );
 }
 
@@ -219,6 +221,43 @@ void main() {
           message: 'expected the rotated upstream to take over',
         );
         expect(seen.single.raw, '{"type":"session.idle"}');
+        await subscription.cancel();
+        await composite.close();
+      },
+    );
+
+    test(
+      'an orb still booting (no password yet) is attached shortly after '
+      'its log line lands, without waiting for the next full refresh',
+      () async {
+        final host = FakeEventService();
+        final orb1 = FakeEventService();
+        final password = <String?>[null]; // Running, no `server password` yet.
+        final composite = CompositeOpencodeEventService(
+          host: host,
+          orbList: () async => [runningOrb('orb1')],
+          orbPassword: (_) async => password.single,
+          upstreamFactory: (baseUrl, _) => orb1,
+          // A full pass so rare the boot retry is the only thing that can
+          // attach the orb within this
+          refreshInterval: const Duration(seconds: 30),
+          bootRetryInterval: const Duration(milliseconds: 5),
+        );
+        final seen = <OpencodeEvent>[];
+        final subscription = composite.events.listen(seen.add);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(orb1.hasListener, isFalse);
+
+        // The orb finishes booting: the log now carries its password.
+        password[0] = 'pw1';
+        await _until(
+          () => orb1.hasListener,
+          message: 'the boot retry to attach the orb upstream',
+        );
+
+        orb1.emit(event('session.created', aggregateID: 'ses_orb'));
+        await _until(() => seen.isNotEmpty, message: 'the orb event');
+        expect(seen.single.aggregateID, 'ses_orb');
         await subscription.cancel();
         await composite.close();
       },

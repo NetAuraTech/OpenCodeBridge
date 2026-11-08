@@ -62,6 +62,19 @@ class Session {
   /// sessions, including sessions moved onto the host from an orb).
   final String? orb;
 
+  /// The row with the given fields replaced: the home list patches rows in
+  /// place from live events (a title the agent assigns, the active dot moving)
+  /// without a refetch.
+  Session copyWith({String? title, bool? active}) => Session(
+    id: id,
+    title: title ?? this.title,
+    project: project,
+    created: created,
+    location: location,
+    active: active ?? this.active,
+    orb: orb,
+  );
+
   Map<String, Object?> toJson() => {
     'id': id,
     'title': title,

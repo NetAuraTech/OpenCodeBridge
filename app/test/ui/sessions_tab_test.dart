@@ -63,6 +63,18 @@ const _orbOne = Session(
   orb: 'orb_1',
 );
 
+/// A session living on a running orb (spec §9.2), built per call so each test
+/// gets its own list (a `const` fixture would be canonicalised in the cache).
+Session _orbSession() => Session(
+  id: 'ses_orb1',
+  title: 'working in the orb',
+  project: SessionProject(id: 'p1', name: 'app'),
+  created: 100,
+  location: '/code/app',
+  active: false,
+  orb: 'orb_1',
+);
+
 /// A scripted [SessionsClient] for the tab tests.
 class _FakeSessionsClient extends SessionsClient {
   _FakeSessionsClient({this.rows = const []})
@@ -276,6 +288,10 @@ class _FakeEventsSource implements EventSource {
     await _controller.close();
     await _gaps.close();
   }
+
+  /// Emits a bridge event on the stream frontier (the tab's own list
+  /// subscription and the detail pane's both hear it).
+  void emit(BridgeEvent event) => _controller.add(event);
 
   /// How often the tab forced a fresh connection (issue #41, foreground).
   var reconnectCalls = 0;
@@ -1153,6 +1169,144 @@ void main() {
           ),
           findsOneWidget,
         );
+      });
+    });
+
+    group('live session list (the unified event stream)', () {
+      /// An opencode event as the bridge fans it out: the durable aggregate id
+      /// is the session id (the shape every session-scoped event carries).
+      BridgeEvent session(
+        String type,
+        String sessionId, {
+        Map<String, Object?> data = const {},
+      }) => BridgeEvent(
+        id: 'evt_$type',
+        created: 0,
+        type: type,
+        data: data,
+        durable: Durable(aggregateID: sessionId, seq: 1),
+      );
+
+      testWidgets(
+        'a session created on an orb appears without any user action',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_one], events: events);
+          expect(client.listCalls, 1);
+          expect(find.text('working in the orb'), findsNothing);
+
+          // The agent spawned an orb: the bridge's unified stream now carries the
+          // new session on the orb's service.
+          client.rows.insert(0, _orbSession());
+          events.emit(session('session.created', 'ses_orb1'));
+          await tester.pumpAndSettle();
+
+          expect(client.listCalls, 2);
+          expect(find.text('working in the orb'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'the title the agent assigns lands in the list (session.renamed)',
+        (tester) async {
+          const untitled = Session(
+            id: 'ses_new',
+            title: '',
+            project: SessionProject(id: 'p1', name: 'app'),
+            created: 500,
+            location: '/code/app',
+            active: false,
+          );
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [untitled],
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          // A just-created session has no title yet: its directory stands in,
+          // rather than a blank row.
+          expect(find.text('/code/app'), findsWidgets);
+
+          client.rows[0] = untitled.copyWith(title: 'fix the flaky test');
+          events.emit(
+            session(
+              'session.renamed',
+              'ses_new',
+              data: {'title': 'fix the flaky test'},
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          // Patched in place: no refetch needed to show the agent's title.
+          expect(client.listCalls, 1);
+          expect(find.text('fix the flaky test'), findsOneWidget);
+        },
+      );
+
+      testWidgets('a burst of session events coalesces into one reload', (
+        tester,
+      ) async {
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(tester, rows: [_one], events: events);
+        expect(client.listCalls, 1);
+
+        client.rows.insert(0, _orbSession());
+        events
+          ..emit(session('session.created', 'ses_orb1'))
+          ..emit(
+            session(
+              'session.renamed',
+              'ses_orb1',
+              data: {'title': 'working in the orb'},
+            ),
+          )
+          ..emit(session('session.execution.started', 'ses_orb1'));
+        await tester.pumpAndSettle();
+
+        expect(client.listCalls, 2);
+        expect(find.text('working in the orb'), findsOneWidget);
+      });
+
+      testWidgets('the turn boundaries move the row active dot in place', (
+        tester,
+      ) async {
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(tester, rows: [_one], events: events);
+        expect(find.byKey(const ValueKey('active-ses_1')), findsNothing);
+
+        events.emit(session('session.execution.started', 'ses_1'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('active-ses_1')), findsOneWidget);
+
+        events.emit(session('session.execution.succeeded', 'ses_1'));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('active-ses_1')), findsNothing);
+        expect(client.listCalls, 1);
+      });
+
+      testWidgets('a bridge session.closed drops the row', (tester) async {
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(
+          tester,
+          rows: [_one, _three],
+          events: events,
+        );
+        expect(find.text('fix the flaky test'), findsOneWidget);
+
+        client.rows.removeWhere((row) => row.id == 'ses_1');
+        events.emit(
+          const BridgeEvent(
+            id: 'evt_closed',
+            created: 0,
+            type: 'session.closed',
+            data: {'sessionID': 'ses_1'},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('fix the flaky test'), findsNothing);
+        expect(find.text('docker logs'), findsOneWidget);
       });
     });
   });
