@@ -99,6 +99,8 @@ class TurnStatsIngredients {
     required this.compactions,
     required this.tokens,
     required this.streamedMillis,
+    required this.completedTokens,
+    required this.completedStreamedMillis,
     required this.incomplete,
     required this.hasAssistant,
   });
@@ -121,11 +123,43 @@ class TurnStatsIngredients {
   final int? streamedMillis;
 
   /// Whether any step lacks a streamed timestamp (which drops the
-  /// throughput, even if the others streamed).
+  /// frozen [tokensPerSecond], even if the others streamed).
   final bool incomplete;
 
   /// Whether the window holds an assistant step at all.
   final bool hasAssistant;
+
+  /// The frozen throughput: the window's tokens over its provider-active
+  /// streaming time, aggregated before dividing so the steps are weighted by
+  /// active time; `null` while any step lacks a streamed timestamp (the
+  /// window is not folded yet) or no step streamed.
+  double? get tokensPerSecond =>
+      !incomplete &&
+          tokens != null &&
+          streamedMillis != null &&
+          streamedMillis! > 0
+      ? tokens! / (streamedMillis! / 1000)
+      : null;
+
+  /// The live throughput while the Turn runs (issue #124): the tokens of the
+  /// steps that have already completed over their streaming time. The step
+  /// still streaming is excluded — its totals are not final yet — so the
+  /// live footer keeps a throughput the moment the first step completes,
+  /// where the frozen [tokensPerSecond] would wait for the whole window to
+  /// fold. `null` while no completed step is timestamped.
+  double? get liveTokensPerSecond =>
+      completedTokens != null &&
+          completedStreamedMillis != null &&
+          completedStreamedMillis! > 0
+      ? completedTokens! / (completedStreamedMillis! / 1000)
+      : null;
+
+  /// The summed tokens of the completed, timestamped steps (the live
+  /// throughput's numerator), or `null` when no step completed.
+  final int? completedTokens;
+
+  /// Their summed provider-active streaming time in milliseconds, or `null`.
+  final int? completedStreamedMillis;
 
   /// The Turn's frozen [TurnStats], or `null` when the window holds no
   /// assistant step (a turn with no output yet has no stats to show).
@@ -133,15 +167,6 @@ class TurnStatsIngredients {
     if (!hasAssistant) return null;
     final duration = firstPrompt != null && lastCompleted != null
         ? Duration(milliseconds: lastCompleted! - firstPrompt!)
-        : null;
-    // Aggregate before dividing so the steps are weighted by provider-active
-    // time; omit the stat while any step lacks a streamed timestamp.
-    final tokensPerSecond =
-        !incomplete &&
-            tokens != null &&
-            streamedMillis != null &&
-            streamedMillis! > 0
-        ? tokens! / (streamedMillis! / 1000)
         : null;
     return TurnStats(
       duration: duration,
@@ -163,6 +188,8 @@ TurnStatsIngredients turnStatsIngredients(
   int? lastCompleted;
   int? tokens;
   int? streamedMillis;
+  int? completedTokens;
+  int? completedStreamedMillis;
   var incomplete = false;
   var hasAssistant = false;
   for (var i = start; i < end; i++) {
@@ -186,6 +213,17 @@ TurnStatsIngredients turnStatsIngredients(
               (tokens ?? 0) + message.outputTokens! + message.reasoningTokens!;
           streamedMillis =
               (streamedMillis ?? 0) + (message.streamed! - message.created!);
+          // The completed, timestamped steps are the live throughput's window
+          // (issue #124): the streaming step's totals are not final yet.
+          if (message.completed != null) {
+            completedTokens =
+                (completedTokens ?? 0) +
+                message.outputTokens! +
+                message.reasoningTokens!;
+            completedStreamedMillis =
+                (completedStreamedMillis ?? 0) +
+                (message.streamed! - message.created!);
+          }
         }
     }
   }
@@ -195,6 +233,8 @@ TurnStatsIngredients turnStatsIngredients(
     compactions: compactions,
     tokens: tokens,
     streamedMillis: streamedMillis,
+    completedTokens: completedTokens,
+    completedStreamedMillis: completedStreamedMillis,
     incomplete: incomplete,
     hasAssistant: hasAssistant,
   );
@@ -214,14 +254,19 @@ TurnStats? computeTurnStats(List<SessionMessage> messages) {
 /// once that Turn is fully loaded: the newest Turn always, an older Turn once
 /// its opening `idle` marker has loaded (the very first Turn, which has no
 /// opening marker, only once [oldestLoaded] reports the whole history is in).
-/// [running] is true while the Turn is active: its content is everything after
-/// the newest `idle` marker, so the closed turn that marker ended stays
-/// footer-less while the running turn takes over its row. Returns only the
-/// rows that carry a label.
+/// [active] is true while the Turn is Active: its content is everything after
+/// the newest `idle` marker (the last prompt, on a legacy history with no
+/// markers — the same bound [currentTurnRange] gives the frozen footer), so
+/// the closed Turn that marker ended keeps its own footer while the Active
+/// Turn takes over the last row. [now] (epoch millis) turns the Active Turn's
+/// label live: its duration ticks to [now] and its throughput counts only the
+/// steps that have already completed; left null, the Active Turn's label is
+/// the frozen stats so far. Returns only the rows that carry a label.
 Map<int, String> computeTurnFooters(
   List<SessionMessage> messages, {
   required bool oldestLoaded,
-  bool running = false,
+  bool active = false,
+  int? now,
 }) {
   final result = <int, String>{};
   if (messages.isEmpty) return result;
@@ -232,19 +277,39 @@ Map<int, String> computeTurnFooters(
   final lastIdle = idleAt.isEmpty ? -1 : idleAt.last;
   // The newest (current) Turn's footer always rides on the last row: the
   // closing `idle` marker when the session is idle, the turn's last message
-  // while it runs. Only its stats window differs by state.
-  if (running) {
-    // The running Turn is the content after the newest `idle` marker (or the
-    // whole history when there is none); its footer rides on the last row.
-    final start = lastIdle + 1;
+  // while it is Active. Only its stats window differs by state.
+  if (active) {
+    // The Active Turn's content: everything after the newest `idle` marker
+    // (empty when the loaded history still ends on it — the turn started but
+    // persisted nothing yet, so the closed Turn's own footer stands); on a
+    // legacy history with no markers, from its last prompt — the bound that
+    // keeps a live label off the earlier turns' accumulated stats.
+    final start = idleAt.isEmpty ? currentTurnRange(messages).$1 : lastIdle + 1;
     if (start < messages.length) {
-      _addTurnFooter(
-        result,
-        messages,
-        start,
-        messages.length,
-        footerRow: messages.length - 1,
-      );
+      final ing = turnStatsIngredients(messages, start, messages.length);
+      final TurnStats stats;
+      if (now != null) {
+        // The live label (issue #124): the duration ticks from the Turn's
+        // first prompt to now, the throughput is the completed steps'
+        // provider-active average (the step still streaming is excluded).
+        stats = TurnStats(
+          duration: ing.firstPrompt != null
+              ? Duration(milliseconds: (now - ing.firstPrompt!).clamp(0, now))
+              : null,
+          compactions: ing.compactions,
+          tokensPerSecond: ing.liveTokensPerSecond,
+        );
+      } else {
+        stats =
+            ing.toStats() ??
+            const TurnStats(
+              duration: null,
+              compactions: 0,
+              tokensPerSecond: null,
+            );
+      }
+      final label = stats.label;
+      if (label != null) result[messages.length - 1] = label;
     }
   } else {
     final (start, end) = currentTurnRange(messages);
@@ -256,13 +321,13 @@ Map<int, String> computeTurnFooters(
       footerRow: end == messages.length ? messages.length - 1 : end,
     );
   }
-  // Every `idle` marker that does not open the running Turn closes the Turn
+  // Every `idle` marker that does not open the Active Turn closes the Turn
   // before it; its footer rides on the marker, fully loaded once its opening
   // marker (the previous `idle`) is in the window — or, for the first Turn,
   // once the history is fully loaded.
-  // When running, the newest `idle` closes the previous Turn (the running one
+  // When Active, the newest `idle` closes the previous Turn (the Active one
   // is after it); when idle, it closes the current Turn (handled above).
-  final lastClosed = running
+  final lastClosed = active
       ? idleAt.length
       : (idleAt.isEmpty ? 0 : idleAt.length - 1);
   for (var k = lastClosed - 1; k >= 0; k--) {
@@ -287,40 +352,59 @@ void _addTurnFooter(
 }
 
 /// Reads the session's current Turn newest-first via [fetchPage], issuing at
-/// most the pages needed to cover it (issue #124): the read stops once the
-/// Turn's opener `idle` marker is in a page. The newest message's role decides
-/// how many markers bound the Turn — an `idle` newest message closes the Turn
-/// (so the opener is the next-older idle: two to see), otherwise the first
-/// idle seen opens it (one to see). Returns the loaded history (oldest-first,
-/// possibly one page past the Turn's opener) and the cursor to the next older
-/// page (`null` when the history is exhausted).
-Future<(List<SessionMessage> messages, String? nextCursor)> loadCurrentTurn({
+/// most the pages needed to cover it (issue #124). A marker-carrying history
+/// stops once the Turn's opener `idle` marker is in a page; the newest
+/// message's role decides how many markers bound the Turn — an `idle` newest
+/// message closes the Turn (so the opener is the next-older idle: two to
+/// see), otherwise the first idle seen opens it (one to see). A history no
+/// marker was ever seen in (legacy) stops at the Turn's last prompt instead —
+/// the same bound [currentTurnRange] gives it — plus one overshoot page that
+/// settles the ambiguity against a just-not-yet-seen opener. A deep legacy
+/// history is therefore never read whole just to open the view. Returns the
+/// loaded history (oldest-first, possibly one page past the Turn's opener)
+/// with the cursor to the next older page (`null` when the history is
+/// exhausted).
+Future<MessagePage> loadCurrentTurn({
   required Future<MessagePage> Function(String? cursor) fetchPage,
 }) async {
-  var loaded = const <SessionMessage>[];
+  var loaded = const MessagePage(messages: [], nextCursor: null);
   var idlesSeen = 0;
-  int? target;
+  var prompted = false;
+  var promptBound = false;
+  int? idlesNeeded;
   String? cursor;
-  String? next;
   var first = true;
   while (true) {
     final page = await fetchPage(cursor);
-    // This page is older than everything already loaded: prepend it.
-    loaded = [...page.messages, ...loaded];
+    // This page is older than everything already loaded: it carries the
+    // older cursor, and the loaded messages append after it.
+    loaded = page.appendNewer(loaded.messages);
     if (first) {
       first = false;
-      final newest = page.messages.isEmpty ? null : page.messages.last.role;
-      target = newest == 'idle' ? 2 : 1;
+      // The newest loaded message bounds the Turn from above: an `idle`
+      // closes it, so its opener is the next-older marker — two to see.
+      idlesNeeded = page.messages.isEmpty || page.messages.last.role == 'idle'
+          ? 2
+          : 1;
     }
     for (final message in page.messages) {
       if (message.role == 'idle') idlesSeen++;
+      if (message.role == 'user' || message.role == 'synthetic') {
+        prompted = true;
+      }
     }
-    next = page.nextCursor;
-    if (idlesSeen >= (target ?? 1)) break;
-    if (next == null) break; // History exhausted before the Turn was bounded.
-    cursor = next;
+    if (idlesSeen >= (idlesNeeded ?? 1)) break;
+    if (promptBound) break; // The legacy overshoot page is in.
+    if (idlesSeen == 0 && prompted) {
+      // No marker anywhere yet and the Turn's last prompt is in: a legacy
+      // history would end here — take one more page to tell that from an
+      // opener marker sitting one page older, and stop after it.
+      promptBound = true;
+    }
+    if (loaded.nextCursor == null) break; // History exhausted.
+    cursor = loaded.nextCursor;
   }
-  return (loaded, next);
+  return loaded;
 }
 
 /// The duration as the footer shows it: `3.4s` under a minute, `1m 23s` at

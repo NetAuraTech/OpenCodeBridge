@@ -419,10 +419,10 @@ void main() {
           step(10000, id: 'a1', completed: 12000),
         ],
         oldestLoaded: true,
-        running: true,
+        active: true,
       );
       // The closed turn's marker (2) keeps its footer; the running turn [3,5)
-      // labels its last row (4) live.
+      // labels its last row (4).
       expect(footers, {
         2: '1.5s · 0 compactions · 100.0 tok/s',
         4: '2.0s · 0 compactions · 100.0 tok/s',
@@ -438,11 +438,59 @@ void main() {
           SessionMessage(id: 'u1', role: 'user', created: 10000),
         ],
         oldestLoaded: true,
-        running: true,
+        active: true,
       );
       // The closed turn's marker (2) keeps its footer; the running turn has no
       // step yet, so nothing labels its rows.
       expect(footers, {2: '1.5s · 0 compactions · 100.0 tok/s'});
+    });
+
+    test("now makes the running turn's label live", () {
+      final footers = computeTurnFooters(
+        [
+          SessionMessage(id: 'u1', role: 'user', created: 10000),
+          // The step still streaming: no `completed`, and its partial
+          // token totals stay out of the live throughput.
+          SessionMessage(
+            id: 'a1',
+            role: 'assistant',
+            created: 10000,
+            streamed: 10500,
+            outputTokens: 50,
+            reasoningTokens: 0,
+          ),
+        ],
+        oldestLoaded: true,
+        active: true,
+        now: 15000,
+      );
+      // Duration ticks from the prompt (10000) to now (15000); the streaming
+      // step carries no completed stats yet, so no tok/s.
+      expect(footers, {1: '5.0s · 0 compactions'});
+    });
+
+    test('the live throughput counts only the completed steps', () {
+      final footers = computeTurnFooters(
+        [
+          SessionMessage(id: 'u1', role: 'user', created: 10000),
+          step(10000, id: 'a1', completed: 12000), // 100 tokens / 1000ms
+          // Still streaming: excluded from the live average.
+          SessionMessage(
+            id: 'a2',
+            role: 'assistant',
+            created: 13000,
+            streamed: 13500,
+            outputTokens: 900,
+            reasoningTokens: 0,
+          ),
+        ],
+        oldestLoaded: true,
+        active: true,
+        now: 14000,
+      );
+      // 4.0s of wall clock; the frozen tok/s would drop (a step is still
+      // streaming), the live one keeps the completed step's 100.0.
+      expect(footers, {2: '4.0s · 0 compactions · 100.0 tok/s'});
     });
   });
 
@@ -499,21 +547,21 @@ void main() {
         }
         const pageSize = 3; // Small pages so the turn (4 msgs) spans > 1 page.
         final requests = <int>[];
-        final (messages, next) = await loadCurrentTurn(
+        final page = await loadCurrentTurn(
           fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
         );
         // The last turn is the 4 newest messages; the read covers it plus the
         // overshoot page. It must not read the whole 12-message history: two
         // pages of 3 suffice (the current turn's opener idle is in the second).
         expect(requests.length, 2);
-        expect(messages.length, 6);
+        expect(page.messages.length, 6);
         // The window of the loaded messages is the current (last) turn.
-        final (start, end) = currentTurnRange(messages);
+        final (start, end) = currentTurnRange(page.messages);
         expect(
           end - start,
           3,
         ); // prompt + 2 steps (the closing idle is at end).
-        expect(next, isNotNull); // older pages remain for lazy loading.
+        expect(page.nextCursor, isNotNull); // older pages remain.
       },
     );
 
@@ -540,13 +588,13 @@ void main() {
       ];
       const pageSize = 2;
       final requests = <int>[];
-      final (messages, _) = await loadCurrentTurn(
+      final page = await loadCurrentTurn(
         fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
       );
       // The active turn is 2 messages; with the opener idle it spans two
       // pages of 2 (not the full 5-message history).
       expect(requests.length, 2);
-      final (start, end) = currentTurnRange(messages);
+      final (start, end) = currentTurnRange(page.messages);
       expect(end - start, 2); // prompt + 1 step.
     });
 
@@ -564,21 +612,57 @@ void main() {
       ];
       const pageSize = 3;
       final requests = <int>[];
-      final (messages, next) = await loadCurrentTurn(
+      final page = await loadCurrentTurn(
         fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
       );
       expect(requests.length, 1);
-      expect(messages, history);
-      expect(next, isNull);
+      expect(page.messages, history);
+      expect(page.nextCursor, isNull);
+    });
+
+    test('a deep legacy history stops at its last prompt', () async {
+      // No idle markers anywhere (legacy): 100 old turns then the running
+      // one. The read must bound at the last prompt, not walk the history.
+      final history = <SessionMessage>[];
+      for (var t = 0; t < 100; t++) {
+        history.add(
+          SessionMessage(id: 'u$t', role: 'user', created: t * 10000),
+        );
+        history.add(
+          _step(
+            id: 'a$t',
+            created: t * 10000,
+            streamed: t * 10000 + 1000,
+            completed: t * 10000 + 2000,
+            output: 10,
+          ),
+        );
+      }
+      history.add(SessionMessage(id: 'u999', role: 'user', created: 999000));
+      const pageSize = 10;
+      final requests = <int>[];
+      final page = await loadCurrentTurn(
+        fetchPage: (cursor) => fetch(history, pageSize, requests, cursor),
+      );
+      // First page: 5 older turns' content (no prompt? no: prompts every 2)
+      // — the first page holds prompts, so the prompt bound triggers the
+      // overshoot page and the stop: two pages, never the 201-message walk.
+      expect(requests.length, 2);
+      expect(page.messages.length, 20);
+      // The loaded window's Turn is the running one: its last prompt is the
+      // first loaded message's newest prompt.
+      final (start, end) = currentTurnRange(page.messages);
+      expect(page.messages.sublist(start, end).first.role, 'user');
+      expect(page.nextCursor, isNotNull); // the rest stays lazy.
     });
 
     test('an empty history reads nothing', () async {
       final requests = <int>[];
-      final (messages, next) = await loadCurrentTurn(
+      final page = await loadCurrentTurn(
         fetchPage: (cursor) => fetch(const [], 5, requests, cursor),
       );
-      expect(messages, isEmpty);
-      expect(next, isNull);
+      expect(page.messages, isEmpty);
+      expect(page.nextCursor, isNull);
       expect(requests.length, 1);
     });
   });

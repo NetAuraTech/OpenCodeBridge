@@ -710,15 +710,21 @@ void main() {
       final events = await _pump(tester, client: client);
       expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
 
-      // The next turn starts: the frozen stats disappear while the agent
-      // works (the live footer is issue #122).
+      // The next turn starts: the closed turn's frozen footer stays (issue
+      // #124 — the live footer rides on the turn's own last row, which the
+      // scripted fake never grows, so only the settled footer shows).
       events.add(_event('session.execution.started', aggregateID: 'ses_1'));
       await tester.pump();
       await tester.pump();
-      expect(find.byKey(const ValueKey('turn-stats')), findsNothing);
+      expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+      // The turn is Active: its live footer rides on the last row — the
+      // duration ticks from the turn's first prompt, no tok/s yet (the
+      // scripted fake streams no steps). The closed turn's frozen footer
+      // gave its row to the live one.
+      expect(find.text('1.5s · 0 compactions'), findsOneWidget);
 
-      // The turn ends and the normalize settles the history: the footer
-      // comes back.
+      // The turn ends and the normalize settles the history: the same
+      // frozen footer stands.
       events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
       await tester.pump();
       await tester.pump();

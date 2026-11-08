@@ -1654,7 +1654,9 @@ class BridgeServer {
       return;
     }
     try {
-      final detail = await sessions.getDetail(id);
+      // Issue #124: the view's detail read carries the session's live
+      // Active fact alongside the service's detail.
+      final detail = await sessions.detailWithActive(id);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode(detail.toJson()));
     } on OpencodeServiceError catch (e) {

@@ -344,6 +344,14 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// lazy load as the reader scrolls up).
   bool _loadingOlder = false;
 
+  /// The history generation (issue #124): bumped whenever an authoritative
+  /// read (the initial load or a normalize) replaces the history. An older
+  /// page fetched under an older generation is stale — the normalize already
+  /// re-read the turn and moved the cursor — and its result is dropped rather
+  /// than blindly prepended (which would duplicate messages and desync the
+  /// cursor).
+  int _historyGeneration = 0;
+
   /// The current time (epoch millis) the running turn's live footer ticks
   /// from (issue #124): refreshed by [_liveTick] while the turn is active.
   int? _liveNow;
@@ -501,19 +509,16 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _flush = null;
       _pendingDeltas.clear();
       _pendingReasoning.clear();
-      final turn = results[1] as (List<SessionMessage>, String?);
       setState(() {
         _detail = results.first as SessionDetail;
-        _messages = turn.$1;
-        _oldestCursor = turn.$2;
-        _oldestLoaded = turn.$2 == null;
+        _applyTurn(results[1] as MessagePage);
         _pending = results[2] as List<PermissionRequest>;
         _questions = results[3] as List<QuestionForm>;
         _loading = false;
         _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
-        _setTurnActive(_openedMidTurn());
+        _reconcileTurnActive(results.first as SessionDetail);
       });
       // The newest message is the list's anchor (offset 0), so the open
       // lands on it for free — no settle, no crawl.
@@ -540,7 +545,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// newest-first pages that cover it, oldest-first, plus the cursor to the
   /// next older page (the lazy-load continuation) — `null` once the history
   /// is exhausted.
-  Future<(List<SessionMessage>, String?)> _loadTurn() => loadCurrentTurn(
+  Future<MessagePage> _loadTurn() => loadCurrentTurn(
     fetchPage: (cursor) => widget.client.getMessagesPage(
       widget.sessionId,
       limit: _turnPageLimit,
@@ -548,12 +553,41 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     ),
   );
 
+  /// Re-derives the Active state from a freshly-read state (issue #124).
+  /// While Active, only the authoritative history closes the Turn: the
+  /// re-fetch ending on its `idle` marker (the end event may have been
+  /// missed across a stream gap — the live footer can never tick on a
+  /// finished Turn). While settled, the detail's Active fact (the service's
+  /// active list) or a mid-Turn history activates it: a Turn whose newest
+  /// persisted step has just completed (shape cannot tell) still shows the
+  /// live footer.
+  void _reconcileTurnActive(SessionDetail detail) {
+    if (_turnActive) {
+      // The history ends closed AND the service no longer lists the session
+      // Active: only then does a re-fetch deactivate (a normalize racing
+      // just after the turn started may still see the old closing marker).
+      if (_openedIdle() && !detail.active) _setTurnActive(false);
+      return;
+    }
+    if (detail.active || _openedMidTurn()) _setTurnActive(true);
+  }
+
+  /// Whether the loaded history ends on the `idle` marker that closed the
+  /// Turn.
+  bool _openedIdle() {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      if (_messages[i].role == 'compaction') continue;
+      return _messages[i].role == 'idle';
+    }
+    return false;
+  }
+
   /// Whether the view opened on a session mid-Turn (issue #124): the newest
-  /// message is an assistant step that has not completed (it is still
+  /// content row is an assistant step that has not completed (it is still
   /// streaming), or the prompt that just started the Turn — so the Turn is
-  /// running and the live footer shows immediately, with the duration
-  /// measured from the Turn's first prompt (not the open time). A completed
-  /// step or an `idle` marker means the Turn has settled.
+  /// Active and the live footer shows immediately, with the duration
+  /// measured from the Turn's first prompt (not the open time). An `idle`
+  /// marker at the newest end means the Turn has settled.
   bool _openedMidTurn() {
     for (var i = _messages.length - 1; i >= 0; i--) {
       final message = _messages[i];
@@ -571,6 +605,17 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       }
     }
     return false;
+  }
+
+  /// Installs the page of an authoritative turn read (issue #124): the
+  /// bounded load and the normalize both replace the history with it and
+  /// rearm the lazy older-page cursor from it. Bumps the history generation
+  /// so an older page still in flight is recognized as stale.
+  void _applyTurn(MessagePage turn) {
+    _historyGeneration++;
+    _messages = turn.messages;
+    _oldestCursor = turn.nextCursor;
+    _oldestLoaded = turn.nextCursor == null;
   }
 
   /// Sets the running state, starting the live footer's ticking timer while
@@ -593,42 +638,6 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   void _stopLiveTick() {
     _liveTick?.cancel();
     _liveTick = null;
-  }
-
-  /// The running Turn's live footer label (issue #124): the duration ticks
-  /// from the Turn's first prompt, the throughput is the completed steps'
-  /// provider-active average, and the compactions are the Turn's markers.
-  String? _liveTurnFooter() {
-    if (_messages.isEmpty) return null;
-    final lastIdle = _lastIdleIndex();
-    final start = lastIdle + 1;
-    if (start >= _messages.length) return null;
-    final ing = turnStatsIngredients(_messages, start, _messages.length);
-    if (!ing.hasAssistant && ing.firstPrompt == null) return null;
-    final now = _liveNow ?? DateTime.now().millisecondsSinceEpoch;
-    final duration = ing.firstPrompt != null
-        ? Duration(milliseconds: (now - ing.firstPrompt!).clamp(0, now))
-        : null;
-    final tokensPerSecond =
-        !ing.incomplete &&
-            ing.tokens != null &&
-            ing.streamedMillis != null &&
-            ing.streamedMillis! > 0
-        ? ing.tokens! / (ing.streamedMillis! / 1000)
-        : null;
-    return TurnStats(
-      duration: duration,
-      compactions: ing.compactions,
-      tokensPerSecond: tokensPerSecond,
-    ).label;
-  }
-
-  /// The index of the newest `idle` marker, or `-1` when there is none.
-  int _lastIdleIndex() {
-    for (var i = _messages.length - 1; i >= 0; i--) {
-      if (_messages[i].role == 'idle') return i;
-    }
-    return -1;
   }
 
   /// (Re-)indexes the loaded history so the live maps track every message
@@ -1206,17 +1215,18 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       _flush = null;
       _pendingDeltas.clear();
       _pendingReasoning.clear();
-      final turn = results[1] as (List<SessionMessage>, String?);
       setState(() {
         _detail = results.first as SessionDetail;
-        _messages = turn.$1;
-        _oldestCursor = turn.$2;
-        _oldestLoaded = turn.$2 == null;
+        _applyTurn(results[1] as MessagePage);
         _pending = results[2] as List<PermissionRequest>;
         _questions = results[3] as List<QuestionForm>;
         _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
+        // The re-fetch is the authoritative word on whether the Turn is
+        // still Active (issue #124): a missed end event (a stream gap)
+        // cannot leave the live footer ticking on a finished Turn.
+        _reconcileTurnActive(results.first as SessionDetail);
       });
       // A following reader sits on the anchor (offset 0), which is the new
       // newest message — nothing to re-settle.
@@ -1238,6 +1248,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     final cursor = _oldestCursor;
     if (cursor == null || _loadingOlder) return;
     _loadingOlder = true;
+    final generation = _historyGeneration;
     try {
       final page = await widget.client.getMessagesPage(
         widget.sessionId,
@@ -1245,6 +1256,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         cursor: cursor,
       );
       if (!mounted) return;
+      // A normalize (turn boundary, gap) replaced the history while this
+      // page was in flight: its cursor belongs to the old read — dropping
+      // the page keeps the history and the cursor coherent (issue #124).
+      if (generation != _historyGeneration) return;
       setState(() {
         _messages = [...page.messages, ..._messages];
         _oldestCursor = page.nextCursor;
@@ -2267,24 +2282,16 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// proportional to the loaded history, never more.
   Map<int, String> _turnFooters() {
     if (_messages.isEmpty) return const {};
-    final footers = computeTurnFooters(
+    // The Active turn's row carries the live label (its duration ticks to
+    // [_liveNow]); the settled turns keep their frozen ones.
+    return computeTurnFooters(
       _messages,
       oldestLoaded: _oldestLoaded,
-      running: _turnActive,
+      active: _turnActive,
+      now: _turnActive
+          ? _liveNow ?? DateTime.now().millisecondsSinceEpoch
+          : null,
     );
-    if (_turnActive) {
-      // The running turn's footer rides on the last row; swap its frozen
-      // label for the live one (or drop it when the turn has nothing to show
-      // yet).
-      final row = _messages.length - 1;
-      final live = _liveTurnFooter();
-      if (live != null) {
-        footers[row] = live;
-      } else {
-        footers.remove(row);
-      }
-    }
-    return footers;
   }
 
   @override

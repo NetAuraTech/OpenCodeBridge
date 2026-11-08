@@ -305,10 +305,10 @@ class MessagePage {
   /// The cursor to the next (older) page, or `null` at the oldest page.
   final String? nextCursor;
 
-  /// The page's messages with [older] (an already-loaded, newer page)
-  /// prepended in chronological order.
-  MessagePage prepend(List<SessionMessage> older) =>
-      MessagePage(messages: [...older, ...messages], nextCursor: nextCursor);
+  /// This page with the already-loaded [newer] messages appended in
+  /// chronological order, carrying this (older) page's cursor.
+  MessagePage appendNewer(List<SessionMessage> newer) =>
+      MessagePage(messages: [...messages, ...newer], nextCursor: nextCursor);
 
   @override
   bool operator ==(Object other) =>

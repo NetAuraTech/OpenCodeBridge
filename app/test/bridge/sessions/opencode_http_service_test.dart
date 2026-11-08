@@ -880,6 +880,33 @@ void main() {
       expect(messageOffsets, [0, 200]);
     });
 
+    test('getMessagesPage fetches exactly one page, chronologically', () async {
+      // Issue #124's bounded read at the service seam: one request per page
+      // (counted against the fake opencode server), no full walk — the
+      // newest raw items are served newest-first and the page comes back
+      // chronological, with the cursor to the older page.
+      messageOffsets.clear();
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      // The 200 synthetic fillers are the newest raw items: a small newest
+      // page maps to nothing the view renders, but it is still exactly one
+      // request and the cursor promises the older pages.
+      final newest = await service.getMessagesPage('ses_1', limit: 3);
+      expect(messageOffsets, [0]);
+      expect(newest.messages, isEmpty);
+      expect(newest.nextCursor, '3');
+      // Past the fillers sits the turn's content: one page, back in
+      // chronological order despite the newest-first service, the `system`
+      // item dropped, the cursor exhausted at the oldest page.
+      final turn = await service.getMessagesPage(
+        'ses_1',
+        limit: 200,
+        cursor: '200',
+      );
+      expect(messageOffsets, [0, 200]);
+      expect(turn.messages.map((m) => m.id), ['m1', 'm2', 'm4', 'm5']);
+      expect(turn.nextCursor, isNull);
+    });
+
     test('prompt posts the text with delivery steer', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       await service.prompt('ses_1', 'hello');
