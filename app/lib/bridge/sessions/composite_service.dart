@@ -257,12 +257,18 @@ class CompositeOpencodeService implements OpencodeService {
   Future<List<OpencodeProject>> projects() => host.projects();
 
   @override
-  Future<OpencodeSession> createSession(String projectId) =>
-      host.createSession(projectId);
+  Future<OpencodeSession> createSession(
+    String projectId, {
+    ModelRef? model,
+    String? agent,
+  }) => host.createSession(projectId, model: model, agent: agent);
 
   @override
-  Future<OpencodeSession> createSessionInDirectory(String directory) =>
-      host.createSessionInDirectory(directory);
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) => host.createSessionInDirectory(directory, model: model, agent: agent);
 
   @override
   Future<List<OpencodeCommand>> listCommands() => host.listCommands();

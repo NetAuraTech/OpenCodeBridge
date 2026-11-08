@@ -9,6 +9,7 @@ import 'package:opencodebridge/bridge/orb/orb_image_builder.dart';
 import 'package:opencodebridge/bridge/orb/orb_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_cli.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/model/command.dart';
 
 /// A deep-equal index lookup ([List.indexOf] compares list elements by
 /// identity, which never matches a fresh literal).
@@ -368,7 +369,11 @@ class _FakeOpencode implements OpencodeService {
   Future<List<OpencodeSession>> listSessions() async => List.of(sessions);
 
   @override
-  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     createdDirectories.add(directory);
     return nextCreated!;
   }

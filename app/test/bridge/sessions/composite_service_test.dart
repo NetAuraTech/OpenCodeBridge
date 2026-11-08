@@ -60,13 +60,21 @@ class FakeService implements OpencodeService {
   }
 
   @override
-  Future<OpencodeSession> createSession(String projectId) async {
+  Future<OpencodeSession> createSession(
+    String projectId, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     createCalls++;
     throw const OpencodeServiceError(500, 'not scripted');
   }
 
   @override
-  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     createInCalls++;
     throw const OpencodeServiceError(500, 'not scripted');
   }

@@ -10,6 +10,7 @@ import '../events/bridge_event.dart';
 import '../sessions/opencode_cli.dart';
 import '../sessions/opencode_http_service.dart';
 import '../sessions/opencode_service.dart';
+import '../../model/command.dart';
 import 'orb_image_builder.dart';
 
 /// The result of one short git CLI invocation.
@@ -1495,7 +1496,13 @@ class OrbService {
     }
     final url = await _orbUrl(id, record);
     final service = _orbService(url, password);
-    final session = await service.createSessionInDirectory('/workspace');
+    final defaults = await _defaultModelAndAgent(service);
+    final session = await service.createSessionInDirectory(
+      '/workspace',
+      model: defaults.model,
+      agent: defaults.agent,
+    );
+    await _applyDefaultModel(service, session.id, defaults.model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return Session(
@@ -1510,6 +1517,44 @@ class OrbService {
       active: active.contains(session.id),
       orb: id,
     );
+  }
+
+  /// The model (with its thinking level / variant) and agent to apply to a
+  /// new orb session, copied from the orb's most recent session that has a
+  /// model. Best-effort.
+  Future<({ModelRef? model, String? agent})> _defaultModelAndAgent(
+    OpencodeService service,
+  ) async {
+    try {
+      final sessions = await service.listSessions();
+      sessions.sort((a, b) => b.created.compareTo(a.created));
+      for (final candidate in sessions.take(8)) {
+        try {
+          final detail = await service.getDetail(candidate.id);
+          if (detail.model != null) {
+            return (model: detail.model, agent: detail.agent);
+          }
+        } catch (_) {
+          // Try the next candidate.
+        }
+      }
+    } catch (_) {
+      // No defaults available.
+    }
+    return (model: null, agent: null);
+  }
+
+  Future<void> _applyDefaultModel(
+    OpencodeService service,
+    String id,
+    ModelRef? model,
+  ) async {
+    if (model == null) return;
+    try {
+      await service.setModel(id, model);
+    } catch (_) {
+      // Best-effort.
+    }
   }
 
   // ------------------------------------------------------------------------

@@ -20,6 +20,7 @@ class FakeOpencodeService implements OpencodeService {
     this.createdSession,
     this.createdInDirectory,
     this.detail,
+    this.detailById = const {},
     this.messages = const [],
     this.permissions = const [],
   });
@@ -36,14 +37,17 @@ class FakeOpencodeService implements OpencodeService {
   final OpencodeSession? createdInDirectory;
 
   final SessionDetail? detail;
+  final Map<String, SessionDetail> detailById;
   final List<SessionMessage> messages;
   final List<PermissionRequest> permissions;
 
   final List<String> deleted = [];
 
   final List<String> created = [];
+  final List<(ModelRef?, String?)> createdWith = [];
 
   final List<String> createdIn = [];
+  final List<(ModelRef?, String?)> createdInWith = [];
 
   final List<
     (String, String, List<Map<String, Object?>>?, List<Map<String, Object?>>?)
@@ -65,8 +69,13 @@ class FakeOpencodeService implements OpencodeService {
   Future<List<OpencodeProject>> projects() async => allProjects;
 
   @override
-  Future<OpencodeSession> createSession(String projectId) async {
+  Future<OpencodeSession> createSession(
+    String projectId, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     created.add(projectId);
+    createdWith.add((model, agent));
     final session = createdSession;
     if (session == null) {
       throw const OpencodeServiceError(500, 'no created session scripted');
@@ -75,8 +84,13 @@ class FakeOpencodeService implements OpencodeService {
   }
 
   @override
-  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     createdIn.add(directory);
+    createdInWith.add((model, agent));
     final session = createdInDirectory;
     if (session == null) {
       throw const OpencodeServiceError(
@@ -94,7 +108,7 @@ class FakeOpencodeService implements OpencodeService {
 
   @override
   Future<SessionDetail> getDetail(String id) async {
-    final d = detail;
+    final d = detailById[id] ?? detail;
     if (d == null) throw const OpencodeServiceError(404, 'no detail scripted');
     return d;
   }
@@ -421,6 +435,59 @@ void main() {
         ),
       );
     });
+
+    test(
+      'applies the model and thinking level from the most recent session',
+      () async {
+        const model = ModelRef(
+          id: 'gpt',
+          providerId: 'openai',
+          variant: 'high',
+        );
+        final created = const OpencodeSession(
+          id: 'ses_new',
+          title: 'new',
+          projectId: 'p1',
+          created: 400,
+          location: '/one',
+        );
+        final existing = const OpencodeSession(
+          id: 'ses_old',
+          title: 'old',
+          projectId: 'p1',
+          created: 100,
+          location: '/one',
+        );
+        final service = FakeOpencodeService(
+          sessions: [created, existing],
+          names: {'p1': 'one'},
+          createdSession: created,
+          detailById: {
+            'ses_old': SessionDetail(
+              id: 'ses_old',
+              title: 'old',
+              location: '/one',
+              cost: 0,
+              tokens: const TokenUsage(
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+              ),
+              model: model,
+              agent: 'build',
+            ),
+          },
+        );
+        final backend = SessionsBackend(service: service);
+
+        await backend.create('p1');
+
+        expect(service.createdWith.single, (model, 'build'));
+        expect(service.modelsSet, [('ses_new', model)]);
+      },
+    );
   });
 
   group('SessionsBackend.createInDirectory', () {

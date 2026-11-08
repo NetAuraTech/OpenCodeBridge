@@ -91,7 +91,11 @@ class OpencodeHttpService implements OpencodeService {
   }
 
   @override
-  Future<OpencodeSession> createSession(String projectId) async {
+  Future<OpencodeSession> createSession(
+    String projectId, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     OpencodeProject? project;
     for (final p in await projects()) {
       if (p.id == projectId) {
@@ -104,9 +108,7 @@ class OpencodeHttpService implements OpencodeService {
     }
     final body = await _post(
       _base.replace(path: '/api/session'),
-      jsonEncode({
-        'location': {'directory': project.canonical},
-      }),
+      jsonEncode(_createBody(project.canonical, model: model, agent: agent)),
     );
     final decoded = jsonDecode(body);
     final outer = decoded is Map<String, Object?>
@@ -121,12 +123,14 @@ class OpencodeHttpService implements OpencodeService {
   }
 
   @override
-  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     final body = await _post(
       _base.replace(path: '/api/session'),
-      jsonEncode({
-        'location': {'directory': directory},
-      }),
+      jsonEncode(_createBody(directory, model: model, agent: agent)),
     );
     final decoded = jsonDecode(body);
     final outer = decoded is Map<String, Object?>
@@ -139,6 +143,20 @@ class OpencodeHttpService implements OpencodeService {
     final map = data is Map<String, Object?> ? data : outer;
     return _sessionFrom(map);
   }
+
+  /// The `POST /api/session` body for a new session at [directory]. [model]
+  /// and [agent], when provided, are applied on creation so the session
+  /// carries its model and thinking level (variant) — matching a session
+  /// created directly in opencode — instead of starting with no model.
+  static Map<String, Object?> _createBody(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) => {
+    'location': {'directory': directory},
+    if (model != null) 'model': model.toJson(),
+    if (agent != null && agent.isNotEmpty) 'agent': agent,
+  };
 
   @override
   Future<Set<String>> activeSessionIds() async {
