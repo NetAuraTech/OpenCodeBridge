@@ -97,7 +97,7 @@ Wake = re-run the full start path on the same container/volumes/state: `.env*` r
 
 **Stop is the single trigger for every orb death path** — manual stop, merged-PR end of life (§3.2), automated stop (§2.10). All of them run the same sequence ([#83](https://github.com/NetAuraTech/OpenCodeBridge/issues/83), ADR-0006). It is **unguarded** (lossless — the guard exists only on delete, §2.7):
 
-1. **Export all** sessions — top-level plus child/subagent sessions, one by one: `OPENCODE_PASSWORD=<pw> opencode session export <id> --server http://127.0.0.1:<orb-port>` → JSON `{ info: { id, projectID, …, location: { directory } }, messages: […] }`.
+1. **Export all** sessions — top-level plus child/subagent sessions, one by one: `OPENCODE_PASSWORD=<pw> opencode session export <id> --server http://127.0.0.1:<orb-port>` → JSON `{ info: { id, projectID, …, location: { directory } }, messages: […] }`. The stdout may carry banner/log noise or the document wrapped as a JSON string (stripped/unwrapped, [#137](https://github.com/NetAuraTech/OpenCodeBridge/issues/137)), and it may carry a **JSON array of documents** instead of one object ([#144](https://github.com/NetAuraTech/OpenCodeBridge/issues/144)): every object element is a session to move (a single-element array is the bare document). A payload with no readable document refuses the stop with the payload excerpt, before `docker stop`.
 2. **Import each to the host**: `opencode session import <file> --directory <host-checkout>` (connects to the host background service); **the same session id is preserved**; an id collision returns 409, handled gracefully → the operation is **idempotent**.
 3. **Delete each session from the orb** — only after its import succeeded.
 4. **`docker stop` last**, then set `ocb.stopped`.

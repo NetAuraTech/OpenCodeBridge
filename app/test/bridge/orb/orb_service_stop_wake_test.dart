@@ -1437,6 +1437,280 @@ void main() {
     });
 
     // ----------------------------------------------------------------------
+    // The array-shaped export (issue #144)
+
+    group('stop (the export stdout is a JSON array, issue #144)', () {
+      test('a two-session orb whose exports carry the array shape moves both '
+          'sessions to the host and stops', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.addAll([_session('s-parent'), _session('s-child')]);
+        final imports = <String>[];
+        final staged = <String>[];
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            // The observed payload (issue #144), verbatim: the CLI exits 0
+            // and emits the document as a one-element JSON array.
+            final asked = argv[2];
+            final parent = asked == 's-child'
+                ? ',\n    "parentID": "s-parent"'
+                : '';
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout:
+                  '[\n  {\n    "info": {\n      "id": "$asked"$parent\n'
+                  '    },\n    "messages": []\n  }\n]',
+              stderr: '',
+            );
+          }
+          imports.add(File(argv[2]).readAsStringSync());
+          staged.add(argv[2]);
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        // Each document element is staged bare, the array is not the file
+        // (the document re-encoded compactly).
+        expect(imports, [
+          jsonEncode({
+            'info': {'id': 's-parent'},
+            'messages': [],
+          }),
+          jsonEncode({
+            'info': {'id': 's-child', 'parentID': 's-parent'},
+            'messages': [],
+          }),
+        ]);
+        expect(orb.deleted, ['s-child', 's-parent']);
+        expect(docker.runArgs, contains(equals(['stop', container])));
+        expect(markerPresent(), isTrue);
+      });
+
+      test('a single element array unwraps: the import is handed the same '
+          'bare document a bare export stages', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        const doc = '{"info":{"id":"s-1"},"messages":[]}';
+        final staged = <String>[];
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: jsonEncode([jsonDecode(doc)]),
+              stderr: '',
+            );
+          }
+          staged.add(File(argv[2]).readAsStringSync());
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        expect(staged, [doc]);
+        expect(orb.deleted, ['s-1']);
+        expect(markerPresent(), isTrue);
+      });
+
+      test('a truncated array payload fails with the excerpt, before '
+          'docker stop, with no session deleted from the orb', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return const OpencodeCliResult(
+              exitCode: 0,
+              stdout: '[{"info":{"id":"s-1"},"messa',
+              stderr: '',
+            );
+          }
+          return _importOk;
+        });
+
+        await expectLater(
+          service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId),
+          throwsA(
+            isA<OrbSessionMoveError>()
+                .having((e) => e.session, 'session', 's-1')
+                .having((e) => e.detail, 'detail', contains('28 bytes'))
+                .having((e) => e.detail, 'detail', contains('"id":"s-1"')),
+          ),
+        );
+        // The export ran, no import and no delete were attempted.
+        expect(cli.argvs.map((a) => a[1]), ['export']);
+        expect(orb.deleted, isEmpty);
+        expect(docker.runArgs.where((a) => a.first == 'stop'), isEmpty);
+        expect(markerPresent(), isFalse);
+      });
+
+      test('an empty array is refused like an array of no document, before '
+          'docker stop', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return const OpencodeCliResult(
+              exitCode: 0,
+              stdout: '[]',
+              stderr: '',
+            );
+          }
+          return _importOk;
+        });
+
+        await expectLater(
+          service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId),
+          throwsA(
+            isA<OrbSessionMoveError>()
+                .having((e) => e.session, 'session', 's-1')
+                .having((e) => e.detail, 'detail', contains('2 bytes'))
+                .having((e) => e.detail, 'detail', contains(']')),
+          ),
+        );
+        expect(orb.deleted, isEmpty);
+        expect(docker.runArgs.where((a) => a.first == 'stop'), isEmpty);
+        expect(markerPresent(), isFalse);
+      });
+
+      test('an array of non-objects stages no document: refused with the '
+          'excerpt, before docker stop', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return const OpencodeCliResult(
+              exitCode: 0,
+              stdout: '[1, true, null, "noise"]',
+              stderr: '',
+            );
+          }
+          return _importOk;
+        });
+
+        await expectLater(
+          service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId),
+          throwsA(
+            isA<OrbSessionMoveError>().having(
+              (e) => e.detail,
+              'detail',
+              contains('[1, true, null, "noise"]'),
+            ),
+          ),
+        );
+        expect(cli.argvs.map((a) => a[1]), ['export']);
+        expect(orb.deleted, isEmpty);
+        expect(docker.runArgs.where((a) => a.first == 'stop'), isEmpty);
+        expect(markerPresent(), isFalse);
+      });
+
+      test('a wrapped or banner-surrounded array payload stages its '
+          'documents too', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.addAll([_session('s-1'), _session('s-2')]);
+        const doc = '{"info":{"id":"s-2"},"messages":[]}';
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: argv[2] == 's-1'
+                  ? jsonEncode('[$doc]')
+                  : 'opencode v2.1.4\n[$doc]\nimported ok\n',
+              stderr: '',
+            );
+          }
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        expect(orb.deleted, ['s-2', 's-1']);
+      });
+
+      test('the #137 ordering holds across one export\'s several documents: '
+          'an extra parent document imports before its listed child', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        // The service lists the child only; the export carries both.
+        orb.sessions.add(_session('s-child'));
+        const parentDoc = '{"info":{"id":"s-parent"},"messages":[]}';
+        const childDoc =
+            '{"info":{"id":"s-child","parentID":"s-parent"},"messages":[]}';
+        final imports = <String>[];
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: '[$childDoc,$parentDoc]',
+              stderr: '',
+            );
+          }
+          final staged = File(argv[2]).readAsStringSync();
+          final id = RegExp(r'"id":"(s-\w+)"').firstMatch(staged)!.group(1)!;
+          if (id == 's-child' && !imports.contains('s-parent')) {
+            return const OpencodeCliResult(
+              exitCode: 1,
+              stdout: '',
+              stderr: 'Error: Failed to import session: Not Found',
+            );
+          }
+          imports.add(id);
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        expect(imports, ['s-parent', 's-child']);
+        expect(markerPresent(), isTrue);
+      });
+    });
+    // ----------------------------------------------------------------------
     // moveSession
 
     group('moveSession (the generic primitive, spec §2.5)', () {

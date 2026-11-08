@@ -1117,48 +1117,88 @@ class OrbService {
   static String _flatText(String s) =>
       s.replaceAll('\r', r'\r').replaceAll('\n', r'\n').replaceAll('\t', r'\t');
 
-  /// The bare JSON document the CLI's `session import` accepts — the export
-  /// stdout reduced to the single JSON object it carries (issue #137). The
-  /// import schema parses its file argument as one JSON document, and every
-  /// other shape (an empty file, banner or log lines around the document,
-  /// ANSI codes, the document wrapped as one JSON string) aborts it with a
-  /// bare `SchemaError: Expected a valid JSON string`. `null` when no such
-  /// document is there: the caller reports the payload instead of staging a
-  /// file the import can only reject.
-  String? _bareExportDocument(String exportStdout) {
+  /// The bare JSON documents the CLI's `session import` accepts: the
+  /// export stdout reduced to every document it carries (issues #137,
+  /// #144). The import schema parses its file argument as one JSON document,
+  /// and every other shape (an empty file, banner or log lines around the
+  /// document, ANSI codes, the document wrapped as one JSON string) aborts
+  /// it with a bare `SchemaError: Expected a valid JSON string`. The CLI
+  /// also emits a JSON array (the session document plus more elements):
+  /// each object element is a document of its own, the single-element array
+  /// unwrapping to the bare document. `null` when the payload carries no
+  /// document: the caller reports the payload instead of staging a file the
+  /// import can only reject.
+  List<String>? _exportDocuments(String exportStdout) {
     final trimmed = exportStdout.trim();
     if (trimmed.isEmpty) return null;
-    Object? decoded;
-    try {
-      decoded = jsonDecode(trimmed);
-    } on FormatException {
-      decoded = null;
-    }
-    if (decoded is Map) return trimmed;
-    // The wrapped payload: the document's JSON text as one JSON string.
-    if (decoded is String) {
-      final inner = decoded.trim();
-      try {
-        if (jsonDecode(inner) is Map) return inner;
-      } on FormatException {
-        // Not a document inside — fall through to the noise scan.
-      }
-    }
+    final whole = _documentsOf(_tryDecode(trimmed));
+    if (whole != null) return whole;
     // Noise around the document (banner or log lines, ANSI included): the
-    // widest outermost `{…}` slice that parses. A file of several documents
-    // never parses as one and stays refused — which document to move is not
+    // widest outermost `{...}` slice, or `[...]` array, that parses as the
+    // document or the array of them. A payload of several bare documents
+    // never parses as one and stays refused: which document to move is not
     // the bridge's guess.
-    final first = trimmed.indexOf('{');
-    final last = trimmed.lastIndexOf('}');
-    if (first != -1 && last > first) {
-      final slice = trimmed.substring(first, last + 1);
-      try {
-        if (jsonDecode(slice) is Map) return slice;
-      } on FormatException {
-        return null;
-      }
+    for (final (open, close) in const [('{', '}'), ('[', ']')]) {
+      final first = trimmed.indexOf(open);
+      final last = trimmed.lastIndexOf(close);
+      if (first == -1 || last <= first) continue;
+      final sliced = _documentsOf(
+        _tryDecode(trimmed.substring(first, last + 1)),
+      );
+      if (sliced != null) return sliced;
     }
     return null;
+  }
+
+  /// [decoded], a parsed export payload, reduced to the bare document texts
+  /// it carries (issue #144): a JSON object is one document; a JSON array is
+  /// one document per object element, its nested arrays and wrapped strings
+  /// flattened (so a nested array and a wrapped element stage their
+  /// documents too); a JSON string is the wrapped text of either. `null` for
+  /// anything else: no document to move.
+  List<String>? _documentsOf(Object? decoded) {
+    if (decoded is Map) return [jsonEncode(decoded)];
+    if (decoded is String) {
+      final inner = decoded;
+      if (inner.trim().isEmpty) return null;
+      final parsed = _tryDecode(inner);
+      if (parsed is Map) return [inner];
+      if (parsed is List) return _documentsOf(parsed);
+      return null;
+    }
+
+    if (decoded is! List) return null;
+    final documents = <String>[];
+    for (final element in decoded) {
+      if (element is Map) {
+        documents.add(jsonEncode(element));
+        continue;
+      }
+      final nested = _documentsOf(element);
+      if (nested != null) documents.addAll(nested);
+    }
+    return documents.isEmpty ? null : documents;
+  }
+
+  /// [text] parsed as JSON, or `null` when it does not parse.
+  Object? _tryDecode(String text) {
+    try {
+      return jsonDecode(text);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// The session id the export [document] names (`info.id`), or `null` when
+  /// it names none (issue #144): an extra document of an array payload is
+  /// staged and ordered by the id it names.
+  String? _exportDocumentId(String document) {
+    final decoded = _tryDecode(document);
+    if (decoded is! Map) return null;
+    final info = decoded['info'];
+    if (info is! Map) return null;
+    final id = info['id'];
+    return id is String && id.isNotEmpty ? id : null;
   }
 
   /// The staged export file's shape for a failed import (issue #137): the
@@ -1249,22 +1289,40 @@ class OrbService {
     // Staged in the system temp, never in the per-orb state dir (that dir
     // is bind-mounted into the container as /root/.local).
     final files = <String, File>{};
+    final order = <String>[for (final session in all) session.id];
     try {
       for (final session in all) {
         final file = File(
           '${Directory.systemTemp.path}/ocb-stop-$id-${session.id}.json',
-        )..createSync();
+        );
+        final extras = <String>[];
         try {
-          await _exportStaged(
-            cli,
-            file,
-            session.id,
-            server: url,
-            password: password,
+          extras.addAll(
+            await _exportStaged(
+              cli,
+              file,
+              session.id,
+              server: url,
+              password: password,
+            ),
           );
           files[session.id] = file;
+          for (var i = 0; i < extras.length; i++) {
+            final documentId =
+                _exportDocumentId(extras[i]) ?? '${session.id}-document-$i';
+            if (files.containsKey(documentId)) continue;
+            final documentFile = File(
+              '${Directory.systemTemp.path}/'
+              'ocb-stop-$id-$documentId-$i.json',
+            );
+            await documentFile.writeAsString(extras[i]);
+            files[documentId] = documentFile;
+            order.add(documentId);
+          }
         } catch (_) {
-          if (file.existsSync()) await file.delete();
+          for (final staged in files.values) {
+            if (staged.existsSync()) await staged.delete();
+          }
           rethrow;
         }
       }
@@ -1272,12 +1330,12 @@ class OrbService {
       // session already there — a re-run), parent-first (issue #137): the
       // CLI rejects a child session whose parent is not yet on the target,
       // and the service list is newest-first — exactly backwards.
-      final ordered = _parentsFirst(all, files);
-      for (final session in ordered) {
+      final ordered = _parentsFirst(order, files);
+      for (final id in ordered) {
         await _importStaged(
           cli,
-          files[session.id]!,
-          session.id,
+          files[id]!,
+          id,
           targetArgs: ['--directory', checkoutPath],
         );
       }
@@ -1287,10 +1345,10 @@ class OrbService {
       // a parent mid-list could strand a not-yet-imported child with only
       // its temp file left. A session already gone (404 — a cascade from
       // an earlier run, a startup reconciliation) is the move's end state.
-      for (final session in ordered.reversed) {
+      for (final id in ordered.reversed) {
         await _deleteMoved(
           service,
-          session.id,
+          id,
           'the session import succeeded but the deletion from the orb '
           'failed',
         );
@@ -1309,11 +1367,13 @@ class OrbService {
 
   /// The export of [session] staged into [file] for a later `session
   /// import` (issue #137): the CLI's stdout reduced to the bare JSON
-  /// document the import schema parses (banner noise stripped, a wrapped
-  /// payload unwrapped). An export that exits 0 without one fails here,
+  /// documents the import schema parses (banner noise stripped, a wrapped
+  /// payload unwrapped, a JSON array split per element of which the first
+  /// is [file] — issues #137, #144). The further documents are returned. An
+  /// export that exits 0 without one fails here,
   /// with the payload excerpt in the error — an empty or noisy staged file
   /// would only reach the import as a bare `SchemaError`.
-  Future<void> _exportStaged(
+  Future<List<String>> _exportStaged(
     OpencodeCliRunner cli,
     File file,
     String session, {
@@ -1329,8 +1389,8 @@ class OrbService {
     if (export.exitCode != 0) {
       throw OrbSessionMoveError(session, _cliDetail(export));
     }
-    final document = _bareExportDocument(export.stdout);
-    if (document == null) {
+    final documents = _exportDocuments(export.stdout);
+    if (documents == null) {
       throw OrbSessionMoveError(
         session,
         'the session export exited 0 without a bare JSON document the '
@@ -1338,7 +1398,8 @@ class OrbService {
         '${_cliOutput(export)}',
       );
     }
-    await file.writeAsString(document);
+    await file.writeAsString(documents.first);
+    return documents.sublist(1);
   }
 
   /// The staged [file] imported on the target CLI (issue #97: a 409 is the
@@ -1389,16 +1450,15 @@ class OrbService {
     }
   }
 
-  /// [all] in parent-first import order (issue #137): a child session's
-  /// export document names its parent (`info.parentID`), and the CLI's
-  /// import rejects a child whose parent is not yet on the target — while
-  /// the service's session list is newest-first. The parents of the set
-  /// import before the children that reference them; a cycle (impossible
-  /// in the service's tree, cheap to defend) keeps the remaining order.
-  List<OpencodeSession> _parentsFirst(
-    List<OpencodeSession> all,
-    Map<String, File> files,
-  ) {
+  /// Every staged id in parent-first import order (issue #137): a child
+  /// session's export document names its parent (`info.parentID`), and the
+  /// CLI's import rejects a child whose parent is not yet on the target —
+  /// while the service's session list is newest-first. All parents import
+  /// before all children, in the service's own order; a cycle (impossible in
+  /// the service's tree, cheap to defend) keeps the remaining order. Issue
+  /// #144: the ids are read from every staged file, so round-robin or grand-
+  /// child lists order correctly; a document naming no id is imported last.
+  List<String> _parentsFirst(List<String> all, Map<String, File> files) {
     final parents = <String, String?>{};
     for (final entry in files.entries) {
       String? parent;
@@ -1412,23 +1472,32 @@ class OrbService {
       }
       parents[entry.key] = parent;
     }
-    final ids = {for (final session in all) session.id};
-    final ordered = <OpencodeSession>[];
+    final ids = all.toSet();
+    final ordered = <String>[];
     final done = <String>{};
-    final remaining = [...all];
-    while (remaining.isNotEmpty) {
-      final ready = remaining.where((s) {
-        final parent = parents[s.id];
-        return parent == null || !ids.contains(parent) || done.contains(parent);
-      }).toList();
+    while (done.length < all.length) {
+      final ready =
+          [
+            for (final id in all)
+              if (!done.contains(id)) id,
+          ].where((id) {
+            final parent = parents[id];
+            return parent == null ||
+                !ids.contains(parent) ||
+                done.contains(parent);
+          }).toList();
       if (ready.isEmpty) {
-        ordered.addAll(remaining);
+        for (final id in all) {
+          if (!done.contains(id)) {
+            ordered.add(id);
+            done.add(id);
+          }
+        }
         break;
       }
-      for (final session in ready) {
-        ordered.add(session);
-        done.add(session.id);
-        remaining.remove(session);
+      for (final id in ready) {
+        ordered.add(id);
+        done.add(id);
       }
     }
     return ordered;
