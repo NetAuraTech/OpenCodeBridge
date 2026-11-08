@@ -879,8 +879,11 @@ String _stateWord(String state) {
 }
 
 /// The state's detail line: the current boot stage while preparing, the
-/// missing part when broken, the reason when cleanup is pending.
-String? _stateDetail(String state) {
+/// missing part when broken, the reason when cleanup is pending, the
+/// broken push when the branch is not reaching the remote (issue #120 —
+/// the orb works, but the return channel is down; the louder state
+/// details win when there is one).
+String? _stateDetail(String state, {bool pushFailing = false}) {
   if (state.startsWith('preparing:')) {
     return 'stage: ${state.substring(state.indexOf(':') + 1)}';
   }
@@ -895,6 +898,7 @@ String? _stateDetail(String state) {
   if (state.startsWith('cleanup_pending:')) {
     return state.substring('cleanup_pending:'.length);
   }
+  if (pushFailing) return 'push to the remote is failing';
   return null;
 }
 
@@ -967,7 +971,7 @@ class _OrbCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final detail = _stateDetail(orb.state);
+    final detail = _stateDetail(orb.state, pushFailing: orb.pushFailing);
     return Material(
       color: Colors.transparent,
       child: InkWell(

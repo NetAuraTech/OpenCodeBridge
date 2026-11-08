@@ -62,134 +62,183 @@ class TurnStats {
 String? turnStatsLabel(List<SessionMessage> messages) =>
     computeTurnStats(messages)?.label;
 
-/// The index range `[start, end)` of the history's current (last) Turn:
-/// `end` sits just past the trailing `idle` markers (the newest closes the
-/// Turn when the session is idle), and `start` just past the previous `idle`
-/// marker (the Turn's opener) — or at the Turn's last prompt when the history
-/// carries no `idle` markers (legacy). The walk back is proportional to the
-/// Turn's size, never the whole history.
-(int start, int end) currentTurnRange(List<SessionMessage> messages) {
+/// The task stats of the history's last Turn: walk back from the end to the
+/// previous `idle` marker (the walk stops at the Turn's first prompt: its
+/// cost is proportional to the Turn's size, never the whole history), then
+/// fold the Turn's steps into duration, compactions and throughput.
+///
+/// Returns `null` when the history holds no assistant step at all — a turn
+/// with no assistant output yet has no stats to show. A history without
+/// `idle` markers is the session's undivided first Turn: every prompt in it
+/// was steered into the execution that has not closed yet.
+///
+/// A queued prompt opens the NEXT Turn (issue #123): once the previous Turn
+/// closed at its `idle` marker, the prompt waits alone in the trailing
+/// window. That window has no step yet, so the frozen stats fall back to the
+/// Turn the prompt has not replaced — the previous footer stays frozen until
+/// the queued prompt's own Turn produces its first step (and the view's live
+/// fold has taken it over while it runs). A steered prompt needs no
+/// fallback: it never closed a Turn, so it sits in the same window as the
+/// prompt it steers.
+TurnStats? computeTurnStats(List<SessionMessage> messages) {
+  var (start, end) = turnWindow(messages);
+  while (true) {
+    final fold = _fold(messages, start, end, live: false);
+    if (fold.hasAssistant) return _statsFrom(fold);
+    final previous = _previousTurnWindow(messages, start);
+    if (previous == null) return null;
+    (start, end) = previous;
+  }
+}
+
+/// The LIVE task stats of the Turn that is running in [messages] (issue
+/// #122), read at wall-clock [now] (epoch millis). It is the same fold as
+/// [computeTurnStats] — the same weighted streaming-duration throughput and
+/// the same compaction count — so it freezes into the identical value once
+/// the Turn ends, but it is live in two ways:
+///
+/// - The duration runs from the Turn's first prompt to [now] (ticking), not
+///   to the last completed step.
+/// - The in-flight step (started but not yet completed) is still streaming:
+///   it is not yet counted toward the throughput, and its still-missing
+///   fields are not treated as a deficit, so the footer ticks from the first
+///   prompt onward and the throughput settles in as each step completes.
+///
+/// Returns `null` when the footer would carry no real number (no first
+/// prompt known and no throughput yet — a compaction count alone is noise).
+TurnStats? liveTurnStats(List<SessionMessage> messages, {required int now}) {
+  final (start, end) = turnWindow(messages);
+  final fold = _fold(messages, start, end, live: true);
+  final duration = fold.firstPrompt != null
+      ? Duration(milliseconds: (now - fold.firstPrompt!).clamp(0, 1 << 30))
+      : null;
+  if (duration == null && fold.tokensPerSecond == null) return null;
+  return TurnStats(
+    duration: duration,
+    compactions: fold.compactions,
+    tokensPerSecond: fold.tokensPerSecond,
+  );
+}
+
+/// The Turn's window `[start, end)` of [messages]: `end` is past the trailing
+/// `idle` markers (the last one closes the Turn), and `start` is at the
+/// previous `idle` marker + 1. The walk is proportional to the Turn's size,
+/// never the whole history.
+///
+/// With no `idle` marker anywhere the session has never closed a Turn: the
+/// one it shows is its first, still running (only a Turn's end writes an
+/// `idle` marker), and every prompt the history holds was delivered INTO it
+/// — a steer is an inbox delivery into the running execution (issue #123),
+/// never a new boundary. The Turn therefore starts at its FIRST prompt. (A
+/// queued prompt cannot contradict this: it reaches the history only after
+/// an `idle` marker closed the Turn before it.)
+(int start, int end) turnWindow(List<SessionMessage> messages) {
   var end = messages.length;
   while (end > 0 && messages[end - 1].role == 'idle') {
     end--;
   }
-  int? lastPrompt;
   for (var i = end - 1; i >= 0; i--) {
-    final role = messages[i].role;
-    if (role == 'idle') {
+    if (messages[i].role == 'idle') {
       // The Turn is the window after the boundary; a steer prompt reuses the
-      // same Turn, so its fold starts at the window's first prompt.
+      // same Turn, so the fold below starts it at its first prompt.
       return (i + 1, end);
     }
-    if (role == 'user' || role == 'synthetic') lastPrompt ??= i;
   }
-  // No idle marker anywhere (legacy history): every prompt was its own Turn
-  // without a boundary marker, so the Turn starts at its last prompt.
-  return (lastPrompt ?? 0, end);
+  // No `idle` marker anywhere: the session's first, undivided Turn — it
+  // starts at its first prompt.
+  for (var i = 0; i < end; i++) {
+    final role = messages[i].role;
+    if (role == 'user' || role == 'synthetic') return (i, end);
+  }
+  return (0, end);
 }
 
-/// The Turn's window `[start, end)` folded into its stats ingredients: the
-/// first prompt's creation, the compaction count, and the provider-active
-/// token/streaming sums (the throughput's numerator and denominator, `null`
-/// while any step lacks a streamed timestamp).
-class TurnStatsIngredients {
-  const TurnStatsIngredients({
+/// The Turn's window closed right before the one starting at [start], or
+/// `null` when the history holds no earlier Turn. The window at [start] is
+/// the one a queued prompt opened without running it (issue #123): skipping
+/// the `idle` markers that close the earlier Turn, that Turn is the window
+/// after the next `idle` marker back — or, with none, the whole stretch
+/// before them: the session's undivided first Turn, its steers included
+/// (the same read [turnWindow] gives a history without any marker).
+(int start, int end)? _previousTurnWindow(
+  List<SessionMessage> messages,
+  int start,
+) {
+  if (start == 0) return null;
+  var end = start;
+  while (end > 0 && messages[end - 1].role == 'idle') {
+    end--;
+  }
+  for (var i = end - 1; i >= 0; i--) {
+    if (messages[i].role == 'idle') return (i + 1, end);
+  }
+  return (0, end);
+}
+
+/// The raw parts of the Turn's stats, folded over the window [start, end):
+/// the first prompt's time, the last completed step's time, the compaction
+/// count, the summed output tokens, the summed provider-active streaming
+/// time, whether any finished step lacks a field, and whether the window
+/// holds any assistant step at all.
+class _TurnFold {
+  const _TurnFold({
     required this.firstPrompt,
     required this.lastCompleted,
     required this.compactions,
     required this.tokens,
     required this.streamedMillis,
-    required this.completedTokens,
-    required this.completedStreamedMillis,
     required this.incomplete,
     required this.hasAssistant,
   });
 
-  /// The earliest prompt's creation, or `null` when none is timestamped.
   final int? firstPrompt;
 
-  /// The last completed assistant step's completion, or `null`.
   final int? lastCompleted;
 
-  /// The compaction markers the Turn ran through.
   final int compactions;
 
-  /// The summed output + reasoning tokens of the completed, timestamped
-  /// steps, or `null` when no step is complete.
   final int? tokens;
 
-  /// The summed provider-active streaming time of those steps, in
-  /// milliseconds, or `null`.
   final int? streamedMillis;
 
-  /// Whether any step lacks a streamed timestamp (which drops the
-  /// frozen [tokensPerSecond], even if the others streamed).
+  /// True when a finished step lacks a field the throughput needs.
   final bool incomplete;
 
-  /// Whether the window holds an assistant step at all.
   final bool hasAssistant;
 
-  /// The frozen throughput: the window's tokens over its provider-active
-  /// streaming time, aggregated before dividing so the steps are weighted by
-  /// active time; `null` while any step lacks a streamed timestamp (the
-  /// window is not folded yet) or no step streamed.
-  double? get tokensPerSecond =>
-      !incomplete &&
-          tokens != null &&
-          streamedMillis != null &&
-          streamedMillis! > 0
-      ? tokens! / (streamedMillis! / 1000)
-      : null;
-
-  /// The live throughput while the Turn runs (issue #124): the tokens of the
-  /// steps that have already completed over their streaming time. The step
-  /// still streaming is excluded — its totals are not final yet — so the
-  /// live footer keeps a throughput the moment the first step completes,
-  /// where the frozen [tokensPerSecond] would wait for the whole window to
-  /// fold. `null` while no completed step is timestamped.
-  double? get liveTokensPerSecond =>
-      completedTokens != null &&
-          completedStreamedMillis != null &&
-          completedStreamedMillis! > 0
-      ? completedTokens! / (completedStreamedMillis! / 1000)
-      : null;
-
-  /// The summed tokens of the completed, timestamped steps (the live
-  /// throughput's numerator), or `null` when no step completed.
-  final int? completedTokens;
-
-  /// Their summed provider-active streaming time in milliseconds, or `null`.
-  final int? completedStreamedMillis;
-
-  /// The Turn's frozen [TurnStats], or `null` when the window holds no
-  /// assistant step (a turn with no output yet has no stats to show).
-  TurnStats? toStats() {
-    if (!hasAssistant) return null;
-    final duration = firstPrompt != null && lastCompleted != null
-        ? Duration(milliseconds: lastCompleted! - firstPrompt!)
+  /// Output + reasoning tokens over the provider-active streaming time, the
+  /// steps weighted by their active time: aggregate before dividing. `null`
+  /// while any finished step lacks a streamed timestamp, or no step streamed.
+  double? get tokensPerSecond {
+    final tokens = this.tokens;
+    final streamedMillis = this.streamedMillis;
+    return !incomplete &&
+            tokens != null &&
+            streamedMillis != null &&
+            streamedMillis > 0
+        ? tokens / (streamedMillis / 1000)
         : null;
-    return TurnStats(
-      duration: duration,
-      compactions: compactions,
-      tokensPerSecond: tokensPerSecond,
-    );
   }
 }
 
-/// Folds the window `[start, end)` of [messages] into a
-/// [TurnStatsIngredients].
-TurnStatsIngredients turnStatsIngredients(
+/// Folds the Turn's window `[start, end)` into a [_TurnFold].
+///
+/// When [live] is true the in-flight step (started but not yet completed) is
+/// skipped: it is still streaming, so it neither counts toward the throughput
+/// nor drops it for its still-missing fields. When [live] is false (the
+/// frozen, turn-ended stats) every assistant step is a finished one and any
+/// of them lacking a field drops the throughput.
+_TurnFold _fold(
   List<SessionMessage> messages,
   int start,
-  int end,
-) {
+  int end, {
+  required bool live,
+}) {
   var compactions = 0;
   int? firstPrompt;
   int? lastCompleted;
   int? tokens;
   int? streamedMillis;
-  int? completedTokens;
-  int? completedStreamedMillis;
   var incomplete = false;
   var hasAssistant = false;
   for (var i = start; i < end; i++) {
@@ -202,6 +251,10 @@ TurnStatsIngredients turnStatsIngredients(
         compactions++;
       case 'assistant':
         hasAssistant = true;
+        if (live && message.completed == null) {
+          // The in-flight step: still streaming, not yet a number.
+          continue;
+        }
         if (message.completed != null) lastCompleted = message.completed;
         if (message.created == null ||
             message.streamed == null ||
@@ -213,38 +266,31 @@ TurnStatsIngredients turnStatsIngredients(
               (tokens ?? 0) + message.outputTokens! + message.reasoningTokens!;
           streamedMillis =
               (streamedMillis ?? 0) + (message.streamed! - message.created!);
-          // The completed, timestamped steps are the live throughput's window
-          // (issue #124): the streaming step's totals are not final yet.
-          if (message.completed != null) {
-            completedTokens =
-                (completedTokens ?? 0) +
-                message.outputTokens! +
-                message.reasoningTokens!;
-            completedStreamedMillis =
-                (completedStreamedMillis ?? 0) +
-                (message.streamed! - message.created!);
-          }
         }
     }
   }
-  return TurnStatsIngredients(
+  return _TurnFold(
     firstPrompt: firstPrompt,
     lastCompleted: lastCompleted,
     compactions: compactions,
     tokens: tokens,
     streamedMillis: streamedMillis,
-    completedTokens: completedTokens,
-    completedStreamedMillis: completedStreamedMillis,
     incomplete: incomplete,
     hasAssistant: hasAssistant,
   );
 }
 
-/// The task stats of the history's last Turn (issue #121). Returns `null`
-/// when the window holds no assistant step.
-TurnStats? computeTurnStats(List<SessionMessage> messages) {
-  final (start, end) = currentTurnRange(messages);
-  return turnStatsIngredients(messages, start, end).toStats();
+/// Builds the frozen [TurnStats] from a [_TurnFold]: the duration runs to the
+/// last completed step.
+TurnStats _statsFrom(_TurnFold fold) {
+  final duration = fold.firstPrompt != null && fold.lastCompleted != null
+      ? Duration(milliseconds: fold.lastCompleted! - fold.firstPrompt!)
+      : null;
+  return TurnStats(
+    duration: duration,
+    compactions: fold.compactions,
+    tokensPerSecond: fold.tokensPerSecond,
+  );
 }
 
 /// The per-Turn footer labels keyed by the row index the footer rides on
@@ -254,14 +300,12 @@ TurnStats? computeTurnStats(List<SessionMessage> messages) {
 /// once that Turn is fully loaded: the newest Turn always, an older Turn once
 /// its opening `idle` marker has loaded (the very first Turn, which has no
 /// opening marker, only once [oldestLoaded] reports the whole history is in).
-/// [active] is true while the Turn is Active: its content is everything after
-/// the newest `idle` marker (the last prompt, on a legacy history with no
-/// markers — the same bound [currentTurnRange] gives the frozen footer), so
-/// the closed Turn that marker ended keeps its own footer while the Active
-/// Turn takes over the last row. [now] (epoch millis) turns the Active Turn's
-/// label live: its duration ticks to [now] and its throughput counts only the
-/// steps that have already completed; left null, the Active Turn's label is
-/// the frozen stats so far. Returns only the rows that carry a label.
+/// [active] is true while the Turn is Active: its footer rides on the last
+/// row as the LIVE label read at [now] (epoch millis, issue #122's ticking
+/// duration), and the closed Turn the newest `idle` marker ends keeps its own
+/// frozen footer. While Active but with [now] left null (no clock to tick
+/// against), the newest Turn's label is its frozen stats so far. Returns only
+/// the rows that carry a label.
 Map<int, String> computeTurnFooters(
   List<SessionMessage> messages, {
   required bool oldestLoaded,
@@ -274,52 +318,23 @@ Map<int, String> computeTurnFooters(
     for (var i = 0; i < messages.length; i++)
       if (messages[i].role == 'idle') i,
   ];
-  final lastIdle = idleAt.isEmpty ? -1 : idleAt.last;
   // The newest (current) Turn's footer always rides on the last row: the
-  // closing `idle` marker when the session is idle, the turn's last message
-  // while it is Active. Only its stats window differs by state.
+  // closing `idle` marker when the session is idle, the Turn's last message
+  // while it is Active. Only its stats differ by state.
   if (active) {
-    // The Active Turn's content: everything after the newest `idle` marker
-    // (empty when the loaded history still ends on it — the turn started but
-    // persisted nothing yet, so the closed Turn's own footer stands); on a
-    // legacy history with no markers, from its last prompt — the bound that
-    // keeps a live label off the earlier turns' accumulated stats.
-    final start = idleAt.isEmpty ? currentTurnRange(messages).$1 : lastIdle + 1;
-    if (start < messages.length) {
-      final ing = turnStatsIngredients(messages, start, messages.length);
-      final TurnStats stats;
-      if (now != null) {
-        // The live label (issue #124): the duration ticks from the Turn's
-        // first prompt to now, the throughput is the completed steps'
-        // provider-active average (the step still streaming is excluded).
-        stats = TurnStats(
-          duration: ing.firstPrompt != null
-              ? Duration(milliseconds: (now - ing.firstPrompt!).clamp(0, now))
-              : null,
-          compactions: ing.compactions,
-          tokensPerSecond: ing.liveTokensPerSecond,
-        );
-      } else {
-        stats =
-            ing.toStats() ??
-            const TurnStats(
-              duration: null,
-              compactions: 0,
-              tokensPerSecond: null,
-            );
-      }
-      final label = stats.label;
+    // The live label (issue #122/#124) over the live Turn's window: a
+    // duration ticking from the Turn's first prompt, a throughput that
+    // excludes the still-streaming step. When the loaded history still ends
+    // on its `idle` marker (the Turn started but persisted nothing yet) the
+    // window is empty and nothing labels the last row.
+    if (now != null) {
+      final label = liveTurnStats(messages, now: now)?.label;
       if (label != null) result[messages.length - 1] = label;
+    } else {
+      _addCurrentTurnFooter(result, messages);
     }
   } else {
-    final (start, end) = currentTurnRange(messages);
-    _addTurnFooter(
-      result,
-      messages,
-      start,
-      end,
-      footerRow: end == messages.length ? messages.length - 1 : end,
-    );
+    _addCurrentTurnFooter(result, messages);
   }
   // Every `idle` marker that does not open the Active Turn closes the Turn
   // before it; its footer rides on the marker, fully loaded once its opening
@@ -333,22 +348,55 @@ Map<int, String> computeTurnFooters(
   for (var k = lastClosed - 1; k >= 0; k--) {
     if (k == 0 && !oldestLoaded) continue;
     final closer = idleAt[k];
-    _addTurnFooter(result, messages, (k > 0 ? idleAt[k - 1] : -1) + 1, closer);
+    _addFrozenFooter(
+      result,
+      messages,
+      (k > 0 ? idleAt[k - 1] : -1) + 1,
+      closer,
+    );
   }
   return result;
 }
 
-void _addTurnFooter(
+/// Adds the newest (current) Turn's frozen footer: its window is
+/// [turnWindow]'s; a window that holds no assistant step falls back through
+/// the earlier Turns exactly like [computeTurnStats] (a queued prompt's
+/// empty window keeps the previous Turn's footer, issue #123). The label
+/// rides on the window's closing `idle` marker, or the last row when the
+/// window has none (a still-running or legacy window).
+void _addCurrentTurnFooter(
+  Map<int, String> result,
+  List<SessionMessage> messages,
+) {
+  var (start, end) = turnWindow(messages);
+  while (true) {
+    final fold = _fold(messages, start, end, live: false);
+    if (fold.hasAssistant) {
+      final row = end == messages.length ? messages.length - 1 : end;
+      final label = _statsFrom(fold).label;
+      if (label != null && row >= 0 && row < messages.length) {
+        result[row] = label;
+      }
+      return;
+    }
+    final previous = _previousTurnWindow(messages, start);
+    if (previous == null) return;
+    (start, end) = previous;
+  }
+}
+
+/// A closed Turn's frozen footer, riding on its closing `idle` marker row.
+void _addFrozenFooter(
   Map<int, String> result,
   List<SessionMessage> messages,
   int start,
-  int end, {
-  int? footerRow,
-}) {
-  final row = footerRow ?? end;
-  if (row < 0 || row >= messages.length) return;
-  final label = turnStatsIngredients(messages, start, end).toStats()?.label;
-  if (label != null) result[row] = label;
+  int end,
+) {
+  if (end < 0 || end >= messages.length) return;
+  final fold = _fold(messages, start, end, live: false);
+  if (!fold.hasAssistant) return;
+  final label = _statsFrom(fold).label;
+  if (label != null) result[end] = label;
 }
 
 /// Reads the session's current Turn newest-first via [fetchPage], issuing at
@@ -358,12 +406,13 @@ void _addTurnFooter(
 /// message closes the Turn (so the opener is the next-older idle: two to
 /// see), otherwise the first idle seen opens it (one to see). A history no
 /// marker was ever seen in (legacy) stops at the Turn's last prompt instead —
-/// the same bound [currentTurnRange] gives it — plus one overshoot page that
-/// settles the ambiguity against a just-not-yet-seen opener. A deep legacy
-/// history is therefore never read whole just to open the view. Returns the
-/// loaded history (oldest-first, possibly one page past the Turn's opener)
-/// with the cursor to the next older page (`null` when the history is
-/// exhausted).
+/// the window [turnWindow] gives a marker-less loaded history starts at its
+/// first prompt, and a deeper Turn is served by the lazy older pages — plus
+/// one overshoot page that settles the ambiguity against a just-not-yet-seen
+/// opener. A deep legacy history is therefore never read whole just to open
+/// the view. Returns the loaded history (oldest-first, possibly one page past
+/// the Turn's opener) with the cursor to the next older page (`null` when
+/// the history is exhausted).
 Future<MessagePage> loadCurrentTurn({
   required Future<MessagePage> Function(String? cursor) fetchPage,
 }) async {

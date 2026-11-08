@@ -171,6 +171,7 @@ class StructuredSessionScreen extends StatefulWidget {
     this.settings,
     this.onThemeModeChanged,
     this.imageReader,
+    this.clock = DateTime.now,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -215,6 +216,11 @@ class StructuredSessionScreen extends StatefulWidget {
   /// Injectable so the view's tests can fake the read.
   final ClipboardImageReader? imageReader;
 
+  /// The wall-clock for the live turn's ticking duration (issue #122),
+  /// epoch-millis since Unix; injectable so the view's tests can drive the
+  /// tick deterministically. Defaults to the real clock.
+  final DateTime Function() clock;
+
   @override
   State<StructuredSessionScreen> createState() =>
       _StructuredSessionScreenState();
@@ -255,6 +261,16 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// `session.execution.started` to its end event): the streaming events
   /// apply to the in-flight message while it is set.
   bool _turnActive = false;
+
+  /// The live turn's ticking clock (issue #122): re-renders the footer while
+  /// the turn is active so its duration ticks even across a step with no
+  /// streamed tokens (a long tool call). Cancelled when the turn ends.
+  Timer? _turnTick;
+
+  /// How often the live turn's duration re-renders: the label's sub-second
+  /// precision needs updates finer than a second, but a coarser cadence keeps
+  /// the rebuilds well below the text-delta flush (48 ms).
+  static const Duration _turnTickPeriod = Duration(milliseconds: 200);
 
   /// The tokens the last model call sent to the model (the context the call
   /// used), from the last `session.step.ended` seen; `null` until a step
@@ -352,14 +368,6 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
   /// cursor).
   int _historyGeneration = 0;
 
-  /// The current time (epoch millis) the running turn's live footer ticks
-  /// from (issue #124): refreshed by [_liveTick] while the turn is active.
-  int? _liveNow;
-
-  /// The timer that refreshes [_liveNow] (the live footer's ticking duration)
-  /// while a turn is running.
-  Timer? _liveTick;
-
   /// The small page size the bounded turn read and the lazy older loads use
   /// (issue #124): small enough that a read covers the current turn plus a
   /// little overshoot, never the whole history.
@@ -439,7 +447,7 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _events?.cancel();
     _gapsSub?.cancel();
     _flush?.cancel();
-    _liveTick?.cancel();
+    _turnTick?.cancel();
     _prompt.removeListener(_onPromptCleared);
     _prompt.dispose();
     _scroll.dispose();
@@ -518,6 +526,10 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
         _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
+        // Reopened mid-turn (issues #122/#124): the freshly-read detail and
+        // history decide whether the Turn is running; when it is, the live
+        // footer shows immediately, its duration measured from the Turn's
+        // first prompt — not from the open.
         _reconcileTurnActive(results.first as SessionDetail);
       });
       // The newest message is the list's anchor (offset 0), so the open
@@ -553,14 +565,14 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     ),
   );
 
-  /// Re-derives the Active state from a freshly-read state (issue #124).
+  /// Re-derives the Active state from a freshly-read state (issues #122/#124).
   /// While Active, only the authoritative history closes the Turn: the
   /// re-fetch ending on its `idle` marker (the end event may have been
   /// missed across a stream gap — the live footer can never tick on a
   /// finished Turn). While settled, the detail's Active fact (the service's
-  /// active list) or a mid-Turn history activates it: a Turn whose newest
-  /// persisted step has just completed (shape cannot tell) still shows the
-  /// live footer.
+  /// active list) or a mid-Turn history activates it. A lone prompt after
+  /// the newest marker is the queued-vs-just-started ambiguity (issue #129):
+  /// only the detail's Active fact can settle it.
   void _reconcileTurnActive(SessionDetail detail) {
     if (_turnActive) {
       // The history ends closed AND the service no longer lists the session
@@ -582,12 +594,13 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     return false;
   }
 
-  /// Whether the view opened on a session mid-Turn (issue #124): the newest
-  /// content row is an assistant step that has not completed (it is still
-  /// streaming), or the prompt that just started the Turn — so the Turn is
-  /// Active and the live footer shows immediately, with the duration
-  /// measured from the Turn's first prompt (not the open time). An `idle`
-  /// marker at the newest end means the Turn has settled.
+  /// Whether the freshly-read history shows a Turn mid-flight. An incomplete
+  /// newest assistant step means it is streaming; a newest prompt means the
+  /// Turn is running only when a step already precedes it in the window — a
+  /// steer is delivered into the running execution (issue #123). A prompt
+  /// alone after the newest `idle` marker is the queued-vs-just-started
+  /// ambiguity (issue #129) — shape cannot tell, so the detail's Active fact
+  /// decides. An `idle` marker at the newest end means the Turn has settled.
   bool _openedMidTurn() {
     for (var i = _messages.length - 1; i >= 0; i--) {
       final message = _messages[i];
@@ -596,7 +609,17 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
           return message.completed == null;
         case 'user':
         case 'synthetic':
-          return true;
+          for (var j = i - 1; j >= 0; j--) {
+            switch (_messages[j].role) {
+              case 'assistant':
+                return true; // A steer: the Turn's steps precede it.
+              case 'idle':
+                return false; // A lone prompt: queued or just started.
+              default:
+                continue;
+            }
+          }
+          return false;
         case 'idle':
           // The newest marker closes the Turn: the session is settled.
           return false;
@@ -618,26 +641,28 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     _oldestLoaded = turn.nextCursor == null;
   }
 
-  /// Sets the running state, starting the live footer's ticking timer while
-  /// the Turn is active and stopping it otherwise (issue #124).
+  /// Sets the Active state, running the live footer's ticking clock while the
+  /// Turn is Active (issues #122/#124).
   void _setTurnActive(bool active) {
-    if (active && !_turnActive) _startLiveTick();
-    if (!active && _turnActive) _stopLiveTick();
-    if (mounted) setState(() => _turnActive = active);
+    if (active) _startTurnTick();
+    if (!active) _stopTurnTick();
+    if (mounted && _turnActive != active) setState(() => _turnActive = active);
   }
 
-  void _startLiveTick() {
-    _stopLiveTick();
-    _liveNow = DateTime.now().millisecondsSinceEpoch;
-    _liveTick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() => _liveNow = DateTime.now().millisecondsSinceEpoch);
+  /// Starts the live turn's ticking clock (issue #122), if not already
+  /// ticking: re-renders the footer on a short cadence so its duration ticks
+  /// even across a step that streams no tokens (a long tool call).
+  void _startTurnTick() {
+    if (_turnTick != null) return;
+    _turnTick = Timer.periodic(_turnTickPeriod, (_) {
+      if (mounted && _turnActive) setState(() {});
     });
   }
 
-  void _stopLiveTick() {
-    _liveTick?.cancel();
-    _liveTick = null;
+  /// Stops the live turn's ticking clock (the Turn ended or the view closed).
+  void _stopTurnTick() {
+    _turnTick?.cancel();
+    _turnTick = null;
   }
 
   /// (Re-)indexes the loaded history so the live maps track every message
@@ -692,26 +717,36 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     if (!_forSession(event)) return;
     switch (event.type) {
       case 'session.execution.started':
-        // The turn is about to run: the live footer takes over (issue #124),
-        // and the service's authoritative state is re-fetched so a prompt sent
-        // from another client (whose user message the service persisted before
-        // the turn started) is visible here without a manual reload. The
-        // streamed in-flight content that arrives after this re-fetch keeps
-        // growing the message it lands in.
+        // The turn is about to run: the live footer takes over, ticking from
+        // the turn's first prompt (issues #122/#124), and the service's
+        // authoritative state is re-fetched so a prompt sent from another
+        // client (whose user message the service persisted before the turn
+        // started) is visible here without a manual reload. The streamed
+        // in-flight content that arrives after this re-fetch keeps growing
+        // the message it lands in.
         _setTurnActive(true);
         _normalize();
         break;
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.interrupted':
+        // The turn ended: freeze the live footer into its final value (the
+        // normalize below replaces the streamed steps with the history, so
+        // the frozen stats read the identical window).
         _setTurnActive(false);
         _normalize();
         break;
       case 'session.usage.updated':
         _applyUsage(event.data);
         break;
+      case 'session.step.started':
+        _applyStepStarted(event.data);
+        break;
+      case 'session.step.streamed':
+        _applyStepStreamed(event);
+        break;
       case 'session.step.ended':
-        _applyStepEnded(event.data);
+        _applyStepEnded(event);
         break;
       case 'session.compaction.delta':
         _applyCompactionDelta(event.data);
@@ -831,6 +866,41 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     outputTokens: message.outputTokens,
     reasoningTokens: message.reasoningTokens,
   );
+
+  /// Fills in the in-flight step [id]'s turn-stats fields (issue #122) from
+  /// the live `session.step.*` events, keeping everything else: the live
+  /// footer reads them off the message list with the exact same fold as the
+  /// frozen stats, so each non-null field here must match what the service's
+  /// history will carry for that step (`created`/`streamed`/`completed` are
+  /// its `time.*`; the tokens its `tokens.output`/`reasoning`). A field the
+  /// event does not carry keeps its previous value.
+  void _setLiveStepStats(
+    String id, {
+    int? created,
+    int? streamed,
+    int? completed,
+    int? outputTokens,
+    int? reasoningTokens,
+  }) {
+    final index = _ensureLiveMessage(id);
+    final message = _messages[index];
+    _setMessageAt(
+      index,
+      SessionMessage(
+        id: message.id,
+        role: message.role,
+        text: message.text,
+        reasoning: message.reasoning,
+        contextTokens: message.contextTokens,
+        tools: message.tools,
+        created: created ?? message.created,
+        streamed: streamed ?? message.streamed,
+        completed: completed ?? message.completed,
+        outputTokens: outputTokens ?? message.outputTokens,
+        reasoningTokens: reasoningTokens ?? message.reasoningTokens,
+      ),
+    );
+  }
 
   /// A part (`reasoning:0`, `text:1`, …) starts: from the next delta on, the
   /// streamed content is a new part, so it joins the history with the part
@@ -1098,22 +1168,60 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
     setState(() => _detail = detail.withUsage(cost: cost, tokens: tokens));
   }
 
-  /// The context the model call used: the call's total input — the fresh
-  /// input plus the prompt-cache reads and writes (the `input` alone is
-  /// only the uncached slice, which read the context as nearly empty).
-  void _applyStepEnded(Map<String, Object?> data) {
+  /// The step began (issue #122): the in-flight assistant step's `created`
+  /// (its `time.created`) is the `started` field, so the live footer's
+  /// per-step streaming window and the duration's origin are anchored to the
+  /// service's own timestamp, not the app's clock.
+  void _applyStepStarted(Map<String, Object?> data) {
+    final id = _messageId(data);
+    if (id == null || !mounted) return;
+    final started = (data['started'] as num?)?.toInt();
+    if (started == null) return;
+    setState(() => _setLiveStepStats(id, created: started));
+  }
+
+  /// The step's first streamed token (issue #122): the envelope's `created`
+  /// is the step's `streamed` (its `time.streamed`), the end of the
+  /// provider-active streaming window the throughput weighs the step by.
+  void _applyStepStreamed(BridgeEvent event) {
+    final id = _messageId(event.data);
+    if (id == null || !mounted) return;
+    setState(() => _setLiveStepStats(id, streamed: event.created));
+  }
+
+  /// The step finished (issue #122): records its billed output/reasoning
+  /// tokens and completion time on the in-flight step (so the live footer
+  /// can fold it in), and records the context the model call used. The
+  /// envelope's `created` is the step's `completed` (its `time.completed`).
+  void _applyStepEnded(BridgeEvent event) {
+    final data = event.data;
+    final id = _messageId(data);
+    if (id == null || !mounted) return;
     final tokens = data['tokens'];
-    if (tokens is! Map<String, Object?>) return;
-    final input = (tokens['input'] as num?)?.toInt();
-    if (input == null || !mounted) return;
-    final cache = tokens['cache'] is Map<String, Object?>
-        ? tokens['cache'] as Map<String, Object?>
+    final map = tokens is Map<String, Object?>
+        ? tokens
         : const <String, Object?>{};
-    final used =
-        input +
-        ((cache['read'] as num?)?.toInt() ?? 0) +
-        ((cache['write'] as num?)?.toInt() ?? 0);
-    setState(() => _contextUsed = used);
+    setState(() {
+      _setLiveStepStats(
+        id,
+        completed: event.created,
+        outputTokens: (map['output'] as num?)?.toInt(),
+        reasoningTokens: (map['reasoning'] as num?)?.toInt(),
+      );
+      // The context the model call used: the call's total input — the fresh
+      // input plus the prompt-cache reads and writes (the `input` alone is
+      // only the uncached slice, which read the context as nearly empty).
+      final input = (map['input'] as num?)?.toInt();
+      if (input != null) {
+        final cache = map['cache'] is Map<String, Object?>
+            ? map['cache'] as Map<String, Object?>
+            : const <String, Object?>{};
+        _contextUsed =
+            input +
+            ((cache['read'] as num?)?.toInt() ?? 0) +
+            ((cache['write'] as num?)?.toInt() ?? 0);
+      }
+    });
   }
 
   /// Seeds the context gauge from the history: the last assistant message
@@ -1334,8 +1442,15 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
       final oldMax = _scroll.hasClients
           ? _scroll.position.maxScrollExtent
           : 0.0;
+      // The prompt's creation is now: it anchors the live footer's duration
+      // (issue #122) immediately on send, and the turn-start normalize
+      // later replaces it with the service's own (a few ms earlier).
+      final now = DateTime.now().millisecondsSinceEpoch;
       setState(() {
-        _messages = [..._messages, SessionMessage(role: 'user', text: text)];
+        _messages = [
+          ..._messages,
+          SessionMessage(role: 'user', text: text, created: now),
+        ];
       });
       _compensateGrow(oldScroll, oldMax);
     } on SessionsClientError catch (e) {
@@ -2275,22 +2390,22 @@ class _StructuredSessionScreenState extends State<StructuredSessionScreen> {
 
   /// The per-Turn footer labels keyed by the history row they ride on
   /// (issue #121's frozen footers, issue #124's running turn and the lazy
-  /// older Turns). While a turn is active, the running turn's label is the
-  /// live one (its duration ticks from the turn's first prompt, not the last
-  /// completed step); the older Turns' frozen footers fill in as their
-  /// messages page into view (gated by [_oldestLoaded]). The walk back is
-  /// proportional to the loaded history, never more.
+  /// older Turns). While a turn is active, its label is the LIVE one
+  /// (issue #122: a ticking duration from the turn's first prompt, the
+  /// throughput settling in as each step completes, the live fold freezing
+  /// into the identical value at the turn's end); the older Turns' frozen
+  /// footers fill in as their messages page into view (gated by
+  /// [_oldestLoaded]). The walk back is proportional to the loaded history,
+  /// never more.
   Map<int, String> _turnFooters() {
     if (_messages.isEmpty) return const {};
     // The Active turn's row carries the live label (its duration ticks to
-    // [_liveNow]); the settled turns keep their frozen ones.
+    // the injected clock); the settled turns keep their frozen ones.
     return computeTurnFooters(
       _messages,
       oldestLoaded: _oldestLoaded,
       active: _turnActive,
-      now: _turnActive
-          ? _liveNow ?? DateTime.now().millisecondsSinceEpoch
-          : null,
+      now: _turnActive ? widget.clock().millisecondsSinceEpoch : null,
     );
   }
 

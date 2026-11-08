@@ -176,7 +176,8 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   ///   1. first start only: clone the project remote into the fresh
   ///      workspace and install the `orb/<id>` post-commit hook (spec §6.1);
   ///   2. every start: the container-local gitconfig (identity + the gh
-  ///      credential helper — spec §4) and the SSH known-hosts fallback;
+  ///      credential helper — spec §4), the staged gh credentials when the
+  ///      bridge staged them (issue #120), and the SSH known-hosts fallback;
   ///   3. first start only: the installers (spec §6.3) — `npm ci` when the
   ///      lockfile is present else `npm install`, `composer install`,
   ///      `flutter pub get` — triggered by file presence, non-fatal;
@@ -224,7 +225,8 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
 #   1. first start only: clone the project remote into the fresh workspace
 #      and install the `orb/<id>` post-commit hook (spec §6.1);
 #   2. every start: the container-local gitconfig (identity + the gh
-#      credential helper — spec §4), and the SSH known-hosts fallback;
+#      credential helper — spec §4), the staged gh credentials when the
+#      bridge staged them (issue #120), and the SSH known-hosts fallback;
 #   3. first start only: the installers (spec §6.3), triggered by file
 #      presence, non-fatal (log + continue);
 #   4. every start: the local services (spec §6.4) — postgres, redis,
@@ -281,10 +283,27 @@ if [ ! -d "$WORKSPACE/.git" ]; then
         git -C "$WORKSPACE" checkout -f "$(git -C "$WORKSPACE" symbolic-ref --short refs/remotes/origin/HEAD)"
     fi
     hook="$WORKSPACE/.git/hooks/post-commit"
-    printf '%s\n' \
-        '#!/bin/sh' \
-        "git push origin HEAD:refs/heads/orb/${ORB_ID}" \
-        > "$hook"
+    # The push-failed marker (issue #120): a hook push that fails must not
+    # leave the orb looking healthy — the branch is the return channel
+    # (spec §3). git ignores a post-commit hook's exit code (the commit
+    # stands, exit 0 — verified live), so the push failure reaches the
+    # committing agent through the hook's OUTPUT (git streams it) and the
+    # durable signal is the marker on the state mount: the bridge reads it
+    # host-side and surfaces the orb. A successful push removes it. When
+    # the bridge staged the gh credentials (the keyring host case, §4),
+    # the hook carries their config dir itself.
+    marker="$STATE_DIR/push-failed"
+    hook_body="if git push origin HEAD:refs/heads/orb/${ORB_ID}; then
+    rm -f '$marker'
+else
+    printf '%s\n' 'git push origin HEAD:refs/heads/orb/${ORB_ID} failed -- the branch is not on the remote' | tee '$marker' >&2
+    exit 1
+fi"
+    printf '%s\n' '#!/bin/sh' > "$hook"
+    if [ -f "$STATE_DIR/gh/hosts.yml" ]; then
+        printf '%s\n' "export GH_CONFIG_DIR='$STATE_DIR/gh'" >> "$hook"
+    fi
+    printf '%s\n' "$hook_body" >> "$hook"
     chmod +x "$hook"
 fi
 
@@ -299,6 +318,20 @@ git config --global --unset-all credential.https://github.com.helper || true
 git config --global --add "credential.https://github.com.helper" '!gh auth git-credential'
 git config --global --unset-all credential.https://gist.github.com.helper || true
 git config --global --add "credential.https://gist.github.com.helper" '!gh auth git-credential'
+
+# --- The staged gh credentials (issue #120, spec §4) ------------------------
+# On a host whose gh keeps its token in the Secret-Service keyring, the
+# read-only `~/.config/gh` mount carries no token and every https push/gh
+# call in the orb fails. The bridge reads the host token (the bridge CAN
+# reach the keyring) and stages a container-local gh config on the state
+# mount before every start; pointing GH_CONFIG_DIR at it (exported for the
+# whole boot, so opencode — and every shell it spawns: the push hook, the
+# agent's `gh pr create` — inherits it) makes the container's gh and the
+# credential helper self-sufficient. No staged config: the mount stays the
+# surface, gh keeps its default dir.
+if [ -f "$STATE_DIR/gh/hosts.yml" ]; then
+    export GH_CONFIG_DIR="$STATE_DIR/gh"
+fi
 
 # --- SSH fallback (spec §4) ------------------------------------------------
 # The mounted `~/.ssh` is read-only, so a `github.com` entry missing there

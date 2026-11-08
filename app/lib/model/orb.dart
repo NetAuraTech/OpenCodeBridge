@@ -51,6 +51,7 @@ class OrbRecord {
     this.url,
     this.pr,
     this.base,
+    this.pushFailing = false,
   });
 
   /// The technical identifier (label `ocb.id`): names the branch, the
@@ -95,6 +96,13 @@ class OrbRecord {
   /// `null` for an unseeded orb (its PR base is the remote's default).
   final String? base;
 
+  /// Whether the orb's post-commit push to the remote is failing (issue
+  /// #120): the branch is not reaching GitHub, so the return channel
+  /// (§3.1/§3.2 — seed, PR, the deletion guard's pushed side) silently
+  /// degrades. Composed from the state dir's `push-failed` marker, written
+  /// by the orb's post-commit hook.
+  final bool pushFailing;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
@@ -105,6 +113,7 @@ class OrbRecord {
     if (url != null) 'url': url,
     if (pr != null) 'pr': pr!.toJson(),
     if (base != null) 'base': base,
+    if (pushFailing) 'pushFailing': true,
   };
 
   factory OrbRecord.fromJson(Object? json) {
@@ -119,6 +128,7 @@ class OrbRecord {
       url: map['url'] as String?,
       pr: map['pr'] == null ? null : OrbPr.fromJson(map['pr']),
       base: map['base'] as String?,
+      pushFailing: map['pushFailing'] == true,
     );
   }
 
@@ -133,11 +143,22 @@ class OrbRecord {
       other.created == created &&
       other.url == url &&
       other.pr == pr &&
-      other.base == base;
+      other.base == base &&
+      other.pushFailing == pushFailing;
 
   @override
-  int get hashCode =>
-      Object.hash(id, name, project, branch, state, created, url, pr, base);
+  int get hashCode => Object.hash(
+    id,
+    name,
+    project,
+    branch,
+    state,
+    created,
+    url,
+    pr,
+    base,
+    pushFailing,
+  );
 
   @override
   String toString() => 'OrbRecord(id: $id, name: $name, state: $state)';

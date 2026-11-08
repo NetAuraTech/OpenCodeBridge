@@ -197,7 +197,7 @@ class _Harness {
   void _writeFakes() {
     const fakes = <String, String>{
       'opencode': r'''
-echo "opencode $*" >> "$FAKE_LOG"
+echo "opencode $* ghconfig=${GH_CONFIG_DIR:-unset}" >> "$FAKE_LOG"
 exit 0
 ''',
       'git': r'''
@@ -207,6 +207,9 @@ if [ "$1" = "init" ]; then
     exit 0
 fi
 for a in "$@"; do
+    if [ "$a" = "push" ]; then
+        exit "${FAKE_GIT_PUSH_EXIT:-0}"
+    fi
     if [ "$a" = "symbolic-ref" ]; then
         echo "origin/main"
         exit 0
@@ -817,6 +820,89 @@ void main() {
         File('${h.state.path}/orb-ssh/known_hosts').readAsStringSync(),
         contains('github.com'),
       );
+    });
+  });
+
+  group('the staged gh credentials (issue #120)', () {
+    test('a staged gh config redirects gh: GH_CONFIG_DIR is exported and '
+        'baked into the hook', () async {
+      // The bridge staged the container-local gh credentials before the
+      // start (the state dir mount carries them, host-authoritative).
+      Directory('${h.state.path}/gh').createSync(recursive: true);
+      File('${h.state.path}/gh/hosts.yml').writeAsStringSync(
+        'github.com:\n    users:\n        u:\n            oauth_token: t\n'
+        '    user: u\n',
+      );
+      final r = await h.run(firstStart: true);
+      expect(r.exitCode, 0);
+      // opencode (and every shell it spawns — the hook, the agent's gh)
+      // inherits the config dir pointing at the staged credentials.
+      expect(r.lastCallTo('opencode'), contains('ghconfig=${h.state.path}/gh'));
+      // The hook carries it too: a hook run outside opencode's shell
+      // still finds the credentials.
+      final hook = File('${h.workspace.path}/.git/hooks/post-commit');
+      expect(hook.readAsStringSync(), contains('GH_CONFIG_DIR'));
+      expect(hook.readAsStringSync(), contains('${h.state.path}/gh'));
+    });
+
+    test(
+      'no staged gh config: gh keeps the default (mounted) config',
+      () async {
+        // A host whose gh config is self-sufficient (or has no token at
+        // all): nothing is staged, nothing is redirected — the §4 mount
+        // stays the surface.
+        final r = await h.run(firstStart: true);
+        expect(r.exitCode, 0);
+        expect(r.lastCallTo('opencode'), contains('ghconfig=unset'));
+        final hook = File('${h.workspace.path}/.git/hooks/post-commit');
+        expect(hook.readAsStringSync(), isNot(contains('GH_CONFIG_DIR')));
+      },
+    );
+  });
+
+  group('the post-commit push marker (issue #120)', () {
+    /// Runs the installed hook the way git would: `sh <hook>` with the
+    /// fake toolchain on PATH. [pushExit] scripts the fake `git push`.
+    Future<int> runHook(_Harness h, {String pushExit = '0'}) async {
+      final result = await Process.run(
+        '/bin/sh',
+        ['${h.workspace.path}/.git/hooks/post-commit'],
+        environment: {
+          'PATH': '${h.bin.path}:${Platform.environment['PATH']!}',
+          'HOME': '${h.root.path}/home',
+          'FAKE_LOG': h.callLog.path,
+          'FAKE_GIT_PUSH_EXIT': pushExit,
+        },
+      );
+      return result.exitCode;
+    }
+
+    test(
+      'a failed push marks the state dir and still fails the hook',
+      () async {
+        final r = await h.run(firstStart: true);
+        expect(r.exitCode, 0);
+        final marker = File('${h.state.path}/push-failed');
+        expect(marker.existsSync(), isFalse);
+
+        final exit = await runHook(h, pushExit: '1');
+        // The hook still reports the failure to the committing agent.
+        expect(exit, isNot(0));
+        // And the bridge-readable marker names the branch.
+        expect(marker.existsSync(), isTrue);
+        expect(marker.readAsStringSync(), contains('orb/testorb1'));
+      },
+    );
+
+    test('a successful push after a failure clears the marker', () async {
+      final r = await h.run(firstStart: true);
+      expect(r.exitCode, 0);
+      final marker = File('${h.state.path}/push-failed');
+      await runHook(h, pushExit: '1');
+      expect(marker.existsSync(), isTrue);
+
+      expect(await runHook(h, pushExit: '0'), 0);
+      expect(marker.existsSync(), isFalse);
     });
   });
 }
