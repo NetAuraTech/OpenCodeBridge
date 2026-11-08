@@ -77,8 +77,25 @@ class SessionsBackend {
   // pass-throughs to the service seam, so they are exposed directly.
   Future<SessionDetail> getDetail(String id) => service.getDetail(id);
 
+  /// The detail endpoint's read (issue #124): the session's detail plus its
+  /// live Active fact (the service's active list), which the structured
+  /// view's live turn footer needs when the persisted history alone is
+  /// ambiguous. Kept off [getDetail] proper: the orb task watcher polls that
+  /// one, and it needs no active-list round-trip.
+  Future<SessionDetail> detailWithActive(String id) async {
+    final detail = await service.getDetail(id);
+    final active = await service.activeSessionIds();
+    return detail.copyWithActive(active.contains(id));
+  }
+
   Future<List<SessionMessage>> getMessages(String id) =>
       service.getMessages(id);
+
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) => service.getMessagesPage(id, limit: limit, cursor: cursor);
 
   Future<void> prompt(
     String id,

@@ -97,6 +97,13 @@ class FakeService implements OpencodeService {
   Future<List<SessionMessage>> getMessages(String id) async => const [];
 
   @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async => const MessagePage(messages: [], nextCursor: null);
+
+  @override
   Future<void> prompt(
     String id,
     String text, {

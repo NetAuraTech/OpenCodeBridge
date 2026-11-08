@@ -266,6 +266,71 @@ void main() {
     });
 
     test(
+      'GET /api/sessions/{id}/messages/page returns a bounded page',
+      () async {
+        // Issue #124's paged read: the wrapper body, the service's page.
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/messages/page',
+          query: 'limit=10',
+        );
+        expect(status, 200);
+        final decoded = jsonDecode(body) as Map<String, Object?>;
+        expect(decoded['messages'], [for (final m in messages) m.toJson()]);
+        expect(decoded['cursor'], isNull);
+        // The limit and cursor reach the service.
+        expect(service.lastPageLimit, 10);
+        expect(service.lastPageCursor, isNull);
+      },
+    );
+
+    test('GET /api/sessions/{id}/messages/page forwards the cursor', () async {
+      final (status, body) = await _get(
+        base,
+        'api/sessions/ses_one/messages/page',
+        query: 'limit=5&cursor=5',
+      );
+      expect(status, 200);
+      expect(jsonDecode(body), isA<Map<String, Object?>>());
+      expect(service.lastPageLimit, 5);
+      expect(service.lastPageCursor, '5');
+    });
+
+    test(
+      'GET /api/sessions/{id}/messages/page is 404 for an unknown session',
+      () async {
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_missing/messages/page',
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+      },
+    );
+
+    test(
+      'GET /api/sessions/{id}/messages/page is 502 on a service failure',
+      () async {
+        service.failMessages = true;
+        final (status, body) = await _get(
+          base,
+          'api/sessions/ses_one/messages/page',
+        );
+        expect(status, 502);
+        expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      },
+    );
+
+    test('GET /api/sessions/{id} carries the service Active fact', () async {
+      // Issue #124: the backend folds the service's active list into the
+      // detail the structured view reads. The fake's active list holds
+      // ses_three, not the detail's ses_one.
+      final (status, body) = await _get(base, 'api/sessions/ses_one');
+      expect(status, 200);
+      expect((jsonDecode(body) as Map<String, Object?>)['active'], false);
+    });
+
+    test(
       'GET /api/sessions/{id}/messages is 404 for an unknown session',
       () async {
         final (status, body) = await _get(
@@ -2610,6 +2675,23 @@ class _FakeService implements OpencodeService {
     if (failMessages) throw const OpencodeServiceError(0, 'service down');
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     return messages;
+  }
+
+  /// The last [getMessagesPage] call's limit and cursor (issue #124).
+  int? lastPageLimit;
+  String? lastPageCursor;
+
+  @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    lastPageLimit = limit;
+    lastPageCursor = cursor;
+    if (failMessages) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    return MessagePage(messages: messages, nextCursor: null);
   }
 
   @override

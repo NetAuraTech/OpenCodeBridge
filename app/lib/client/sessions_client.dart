@@ -216,6 +216,45 @@ class SessionsClient {
     }
   }
 
+  /// One page of the session's history, oldest-first within the page, with
+  /// the cursor to the next (older) page (issue #124's bounded read). The
+  /// first call (no [cursor]) fetches the newest page.
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    final client = HttpClient();
+    try {
+      final params = <String, String>{'limit': '$limit'};
+      if (cursor != null) params['cursor'] = cursor;
+      final uri = _base.replace(
+        path: 'api/sessions/${Uri.encodeComponent(id)}/messages/page',
+        queryParameters: params,
+      );
+      final response = await bridgeRequest(client, 'GET', uri, auth: _auth);
+      final body = await response.transform(const Utf8Decoder()).join();
+      if (response.statusCode != HttpStatus.ok) {
+        throw SessionsClientError(response.statusCode, body);
+      }
+      final decoded = jsonDecode(body);
+      final map = decoded is Map<String, Object?> ? decoded : const {};
+      final list = map['messages'] is List
+          ? map['messages']!
+          : const <Object?>[];
+      return MessagePage(
+        messages: [for (final item in list) SessionMessage.fromJson(item)],
+        nextCursor: map['cursor'] is String ? map['cursor'] as String : null,
+      );
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Send a prompt (spec section 5, endpoint 7). The prompt is enabled at
   /// any time: the bridge forwards it to the service with `delivery:
   /// steer`, which queues a mid-turn prompt. [files] and [skills] are the

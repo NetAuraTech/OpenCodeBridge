@@ -84,6 +84,7 @@ class SessionDetail {
     this.contextLimit,
     this.model,
     this.agent,
+    this.active = false,
   });
 
   final String id;
@@ -116,6 +117,11 @@ class SessionDetail {
   /// chip.
   final String? agent;
 
+  /// Whether the session's agent is Active right now (the service's active
+  /// list, issue #124): the structured view's authoritative signal for the
+  /// live turn footer when the persisted history alone is ambiguous.
+  final bool active;
+
   /// This detail with [cost] and [tokens] replaced (the live
   /// `session.usage.updated` refresh keeps the other facts).
   SessionDetail withUsage({required double cost, required TokenUsage tokens}) =>
@@ -129,7 +135,23 @@ class SessionDetail {
         contextLimit: contextLimit,
         model: model,
         agent: agent,
+        active: active,
       );
+
+  /// This detail with [active] replaced (the backend folds the service's
+  /// active list into the detail read, issue #124).
+  SessionDetail copyWithActive(bool active) => SessionDetail(
+    id: id,
+    title: title,
+    location: location,
+    cost: cost,
+    tokens: tokens,
+    outcome: outcome,
+    contextLimit: contextLimit,
+    model: model,
+    agent: agent,
+    active: active,
+  );
 
   Map<String, Object?> toJson() => {
     'id': id,
@@ -141,6 +163,7 @@ class SessionDetail {
     'contextLimit': contextLimit,
     'model': model?.toJson(),
     'agent': agent,
+    'active': active,
   };
 
   factory SessionDetail.fromJson(Object? json) {
@@ -156,6 +179,7 @@ class SessionDetail {
       contextLimit: (map['contextLimit'] as num?)?.toInt(),
       model: model is Map<String, Object?> ? ModelRef.fromJson(model) : null,
       agent: map['agent'] is String ? map['agent'] as String : null,
+      active: map['active'] == true,
     );
   }
 
@@ -170,7 +194,8 @@ class SessionDetail {
       other.outcome == outcome &&
       other.contextLimit == contextLimit &&
       other.model == model &&
-      other.agent == agent;
+      other.agent == agent &&
+      other.active == active;
 
   @override
   int get hashCode => Object.hash(
@@ -183,11 +208,13 @@ class SessionDetail {
     contextLimit,
     model,
     agent,
+    active,
   );
 
   @override
   String toString() =>
       'SessionDetail(id: $id, title: $title, location: $location, '
       'cost: $cost, tokens: $tokens, outcome: $outcome, '
-      'contextLimit: $contextLimit, model: $model, agent: $agent)';
+      'contextLimit: $contextLimit, model: $model, agent: $agent, '
+      'active: $active)';
 }

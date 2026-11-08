@@ -441,6 +441,37 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// True while a turn-boundary re-fetch (normalize) is in flight.
   bool _normalizing = false;
 
+  /// The cursor to the next OLDER page of the history (issue #124): the
+  /// bounded turn read left it where the current Turn's opener was, and the
+  /// lazy loads follow it as the reader scrolls up. `null` once the oldest
+  /// page is loaded.
+  String? _oldestCursor;
+
+  /// True when the whole history is loaded (no older page remains): the first
+  /// Turn's footer is only shown then (its opening marker does not exist).
+  bool _oldestLoaded = false;
+
+  /// True while an older page of the history is being fetched (issue #124's
+  /// lazy load as the reader scrolls up).
+  bool _loadingOlder = false;
+
+  /// The history generation (issue #124): bumped whenever an authoritative
+  /// read (the initial load or a normalize) replaces the history. An older
+  /// page fetched under an older generation is stale — the normalize already
+  /// re-read the turn and moved the cursor — and its result is dropped rather
+  /// than blindly prepended (which would duplicate messages and desync the
+  /// cursor).
+  int _historyGeneration = 0;
+
+  /// The small page size the bounded turn read and the lazy older loads use
+  /// (issue #124): small enough that a read covers the current turn plus a
+  /// little overshoot, never the whole history.
+  static const int _turnPageLimit = 50;
+
+  /// How far up from the oldest loaded message (in px) the lazy load kicks
+  /// in as the reader scrolls through the history.
+  static const double _olderLoadMargin = 300;
+
   final TextEditingController _prompt = TextEditingController();
 
   /// The title shown in the app bar: the route's title at first, replaced by
@@ -529,6 +560,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       _atBottom = atBottom;
       if (mounted) setState(() {});
     }
+    // The reader has scrolled up toward the oldest loaded message: pull in
+    // the next older page so the earlier Turns fill in (issue #124).
+    if (position.pixels >= position.maxScrollExtent - _olderLoadMargin) {
+      _loadOlder();
+    }
   }
 
   /// After content grows at the newest end (the list's anchor at offset 0),
@@ -559,13 +595,14 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     );
   }
 
-  /// The initial state: detail (costs), history (tools in flight), and the
-  /// pending permission requests (endpoints 5, 6, 8).
+  /// The initial state: detail (costs), the current Turn's history (bounded
+  /// read, issue #124 — never the whole history), and the pending permission
+  /// requests (endpoints 5, 6, 8).
   Future<void> _loadInitial() async {
     try {
       final results = await Future.wait<Object?>([
         widget.client.getDetail(widget.sessionId),
-        widget.client.getMessages(widget.sessionId),
+        _loadTurn(),
         widget.client.getPermissions(widget.sessionId),
         widget.client.getQuestions(widget.sessionId),
       ]);
@@ -577,20 +614,19 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       _pendingReasoning.clear();
       setState(() {
         _detail = results.first as SessionDetail;
-        _messages = results[1] as List<SessionMessage>;
+        _applyTurn(results[1] as MessagePage);
         _pending = results[2] as List<PermissionRequest>;
         _questions = results[3] as List<QuestionForm>;
         _loading = false;
         _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
-        // Reopened mid-turn (issue #122): the history's last turn has no
-        // closing `idle` marker yet, so it is still running. Show its live
-        // footer, with the duration from the turn's first prompt — not from
-        // the open.
-        _turnActive = _isMidTurn(_messages);
+        // Reopened mid-turn (issues #122/#124): the freshly-read detail and
+        // history decide whether the Turn is running; when it is, the live
+        // footer shows immediately, its duration measured from the Turn's
+        // first prompt — not from the open.
+        _reconcileTurnActive(results.first as SessionDetail);
       });
-      if (_turnActive) _startTurnTick();
       // The newest message is the list's anchor (offset 0), so the open
       // lands on it for free — no settle, no crawl.
       _stick = true;
@@ -612,13 +648,101 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     }
   }
 
-  /// True when [messages] shows a Turn that is still running: the last turn's
-  /// closing `idle` marker is not there yet. An empty history has no turn.
-  /// (The service appends the `idle` marker only when a Turn ends, so its
-  /// absence means the Turn is in flight — the same boundary the frozen stats
-  /// use, so the live and frozen footers describe the same window.)
-  static bool _isMidTurn(List<SessionMessage> messages) =>
-      messages.isNotEmpty && messages.last.role != 'idle';
+  /// The bounded read of the session's current Turn (issue #124): the
+  /// newest-first pages that cover it, oldest-first, plus the cursor to the
+  /// next older page (the lazy-load continuation) — `null` once the history
+  /// is exhausted.
+  Future<MessagePage> _loadTurn() => loadCurrentTurn(
+    fetchPage: (cursor) => widget.client.getMessagesPage(
+      widget.sessionId,
+      limit: _turnPageLimit,
+      cursor: cursor,
+    ),
+  );
+
+  /// Re-derives the Active state from a freshly-read state (issues #122/#124).
+  /// While Active, only the authoritative history closes the Turn: the
+  /// re-fetch ending on its `idle` marker (the end event may have been
+  /// missed across a stream gap — the live footer can never tick on a
+  /// finished Turn). While settled, the detail's Active fact (the service's
+  /// active list) or a mid-Turn history activates it. A lone prompt after
+  /// the newest marker is the queued-vs-just-started ambiguity (issue #129):
+  /// only the detail's Active fact can settle it.
+  void _reconcileTurnActive(SessionDetail detail) {
+    if (_turnActive) {
+      // The history ends closed AND the service no longer lists the session
+      // Active: only then does a re-fetch deactivate (a normalize racing
+      // just after the turn started may still see the old closing marker).
+      if (_openedIdle() && !detail.active) _setTurnActive(false);
+      return;
+    }
+    if (detail.active || _openedMidTurn()) _setTurnActive(true);
+  }
+
+  /// Whether the loaded history ends on the `idle` marker that closed the
+  /// Turn.
+  bool _openedIdle() {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      if (_messages[i].role == 'compaction') continue;
+      return _messages[i].role == 'idle';
+    }
+    return false;
+  }
+
+  /// Whether the freshly-read history shows a Turn mid-flight. An incomplete
+  /// newest assistant step means it is streaming; a newest prompt means the
+  /// Turn is running only when a step already precedes it in the window — a
+  /// steer is delivered into the running execution (issue #123). A prompt
+  /// alone after the newest `idle` marker is the queued-vs-just-started
+  /// ambiguity (issue #129) — shape cannot tell, so the detail's Active fact
+  /// decides. An `idle` marker at the newest end means the Turn has settled.
+  bool _openedMidTurn() {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      final message = _messages[i];
+      switch (message.role) {
+        case 'assistant':
+          return message.completed == null;
+        case 'user':
+        case 'synthetic':
+          for (var j = i - 1; j >= 0; j--) {
+            switch (_messages[j].role) {
+              case 'assistant':
+                return true; // A steer: the Turn's steps precede it.
+              case 'idle':
+                return false; // A lone prompt: queued or just started.
+              default:
+                continue;
+            }
+          }
+          return false;
+        case 'idle':
+          // The newest marker closes the Turn: the session is settled.
+          return false;
+        default:
+          continue; // `compaction` carries no signal.
+      }
+    }
+    return false;
+  }
+
+  /// Installs the page of an authoritative turn read (issue #124): the
+  /// bounded load and the normalize both replace the history with it and
+  /// rearm the lazy older-page cursor from it. Bumps the history generation
+  /// so an older page still in flight is recognized as stale.
+  void _applyTurn(MessagePage turn) {
+    _historyGeneration++;
+    _messages = turn.messages;
+    _oldestCursor = turn.nextCursor;
+    _oldestLoaded = turn.nextCursor == null;
+  }
+
+  /// Sets the Active state, running the live footer's ticking clock while the
+  /// Turn is Active (issues #122/#124).
+  void _setTurnActive(bool active) {
+    if (active) _startTurnTick();
+    if (!active) _stopTurnTick();
+    if (mounted && _turnActive != active) setState(() => _turnActive = active);
+  }
 
   /// Starts the live turn's ticking clock (issue #122), if not already
   /// ticking: re-renders the footer on a short cadence so its duration ticks
@@ -688,16 +812,14 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     if (!_forSession(event)) return;
     switch (event.type) {
       case 'session.execution.started':
-        if (mounted) setState(() => _turnActive = true);
-        // The turn is running: start the live footer's ticking clock (issue
-        // #122). Its duration counts from the turn's first prompt, which the
-        // normalize below brings in.
-        _startTurnTick();
-        // The turn is about to run: re-fetch the service's authoritative
-        // state so a prompt sent from another client (whose user message the
-        // service persisted before the turn started) is visible here without
-        // a manual reload. The streamed in-flight content that arrives after
-        // this re-fetch keeps growing the message it lands in.
+        // The turn is about to run: the live footer takes over, ticking from
+        // the turn's first prompt (issues #122/#124), and the service's
+        // authoritative state is re-fetched so a prompt sent from another
+        // client (whose user message the service persisted before the turn
+        // started) is visible here without a manual reload. The streamed
+        // in-flight content that arrives after this re-fetch keeps growing
+        // the message it lands in.
+        _setTurnActive(true);
         _normalize();
         break;
       case 'session.execution.succeeded':
@@ -706,8 +828,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         // The turn ended: freeze the live footer into its final value (the
         // normalize below replaces the streamed steps with the history, so
         // the frozen stats read the identical window).
-        _stopTurnTick();
-        if (mounted) setState(() => _turnActive = false);
+        _setTurnActive(false);
         _normalize();
         break;
       case 'session.usage.updated':
@@ -1287,7 +1408,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     try {
       final results = await Future.wait<Object?>([
         widget.client.getDetail(widget.sessionId),
-        widget.client.getMessages(widget.sessionId),
+        _loadTurn(),
         widget.client.getPermissions(widget.sessionId),
         widget.client.getQuestions(widget.sessionId),
       ]);
@@ -1299,12 +1420,16 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       _pendingReasoning.clear();
       setState(() {
         _detail = results.first as SessionDetail;
-        _messages = results[1] as List<SessionMessage>;
+        _applyTurn(results[1] as MessagePage);
         _pending = results[2] as List<PermissionRequest>;
         _questions = results[3] as List<QuestionForm>;
         _compacting = false;
         _seedLiveMessages();
         _seedContextUsed();
+        // The re-fetch is the authoritative word on whether the Turn is
+        // still Active (issue #124): a missed end event (a stream gap)
+        // cannot leave the live footer ticking on a finished Turn.
+        _reconcileTurnActive(results.first as SessionDetail);
       });
       // A following reader sits on the anchor (offset 0), which is the new
       // newest message — nothing to re-settle.
@@ -1315,6 +1440,41 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       // Same: a normalize failure never breaks the view.
     } finally {
       _normalizing = false;
+    }
+  }
+
+  /// The lazy load (issue #124): fetches the next older page of the history
+  /// and prepends it, so the reader scrolling up sees the earlier Turns (and
+  /// their footers) fill in. One page at a time keeps the scroll smooth and
+  /// never re-fetches what is already loaded.
+  Future<void> _loadOlder() async {
+    final cursor = _oldestCursor;
+    if (cursor == null || _loadingOlder) return;
+    _loadingOlder = true;
+    final generation = _historyGeneration;
+    try {
+      final page = await widget.client.getMessagesPage(
+        widget.sessionId,
+        limit: _turnPageLimit,
+        cursor: cursor,
+      );
+      if (!mounted) return;
+      // A normalize (turn boundary, gap) replaced the history while this
+      // page was in flight: its cursor belongs to the old read — dropping
+      // the page keeps the history and the cursor coherent (issue #124).
+      if (generation != _historyGeneration) return;
+      setState(() {
+        _messages = [...page.messages, ..._messages];
+        _oldestCursor = page.nextCursor;
+        _oldestLoaded = page.nextCursor == null;
+        _seedLiveMessages();
+      });
+    } on SessionsClientError {
+      // Keep the history on screen; the next scroll retry.
+    } catch (_) {
+      // Same: a failed load never breaks the view.
+    } finally {
+      _loadingOlder = false;
     }
   }
 
@@ -2326,23 +2486,25 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// The turn's stats footer text: the LIVE stats (issue #122) while the turn
-  /// is active — a ticking duration from the turn's first prompt, the
-  /// throughput that settles in as each step completes, and the compaction
-  /// count — and the frozen, history-derived stats (issue #121) once the
-  /// turn ends. The live fold is the frozen fold, so the footer freezes into
-  /// the identical value at the turn's end. `null` while there is nothing
-  /// real to show. The walk back is proportional to the turn's size, never
-  /// the whole history.
-  String? get _turnStatsText {
-    if (_turnActive) {
-      return liveTurnStats(
-        _messages,
-        now: widget.clock().millisecondsSinceEpoch,
-      )?.label;
-    }
-    if (_messages.isEmpty) return null;
-    return turnStatsLabel(_messages);
+  /// The per-Turn footer labels keyed by the history row they ride on
+  /// (issue #121's frozen footers, issue #124's running turn and the lazy
+  /// older Turns). While a turn is active, its label is the LIVE one
+  /// (issue #122: a ticking duration from the turn's first prompt, the
+  /// throughput settling in as each step completes, the live fold freezing
+  /// into the identical value at the turn's end); the older Turns' frozen
+  /// footers fill in as their messages page into view (gated by
+  /// [_oldestLoaded]). The walk back is proportional to the loaded history,
+  /// never more.
+  Map<int, String> _turnFooters() {
+    if (_messages.isEmpty) return const {};
+    // The Active turn's row carries the live label (its duration ticks to
+    // the injected clock); the settled turns keep their frozen ones.
+    return computeTurnFooters(
+      _messages,
+      oldestLoaded: _oldestLoaded,
+      active: _turnActive,
+      now: _turnActive ? widget.clock().millisecondsSinceEpoch : null,
+    );
   }
 
   @override
@@ -2354,6 +2516,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // Scaffold's appBar slot would, and its auto-implied leading back
     // button follows the route: shown on a pushed route, absent when the
     // panel is embedded in the root route.
+    // The per-Turn footers, computed once per build (issue #124): the
+    // running turn's live label and the loaded Turns' frozen labels, keyed
+    // by the row each rides on.
+    final footers = _turnFooters();
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: Column(
@@ -2427,15 +2593,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                             final i =
                                                 _messages.length - 1 - index;
                                             final message = _messages[i];
-                                            // The completed turn's stats footer (issue
-                                            // #121) rides on the history's last row —
-                                            // the idle marker closing the turn when the
-                                            // history carries one, else the turn's last
-                                            // message (legacy history).
-                                            final footer =
-                                                i == _messages.length - 1
-                                                ? _turnStatsText
-                                                : null;
+                                            // The Turn's stats footer (issue #121's
+                                            // frozen footers, issue #124's live one and
+                                            // the lazy older Turns): keyed by the row it
+                                            // rides on, computed once for the build.
+                                            final footer = footers[i];
                                             if (message.role == 'idle') {
                                               // The turn-boundary marker carries no
                                               // content of its own.

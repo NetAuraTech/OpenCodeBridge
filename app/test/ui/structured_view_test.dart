@@ -312,6 +312,23 @@ class _FakeClient extends SessionsClient {
     return messageLists[index];
   }
 
+  /// The paged read (issue #124): the scripted history served as a single
+  /// newest page (no older page), so the view's bounded turn read takes it in
+  /// one fetch. Mirrors [getMessages]' per-call behaviour and call count.
+  @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    messageCalls++;
+    final index = messageCalls - 1 < messageLists.length
+        ? messageCalls - 1
+        : messageLists.length - 1;
+    final list = messageLists.isEmpty ? messages : messageLists[index];
+    return MessagePage(messages: list, nextCursor: null);
+  }
+
   @override
   Future<void> prompt(
     String id,
@@ -385,6 +402,38 @@ class _FakeClient extends SessionsClient {
     final error = questionError;
     if (error is Object) throw error;
     questionDismissals.add((id, formID));
+  }
+}
+
+/// A [SessionsClient] double serving a history newest-first in fixed pages
+/// (issue #124's paged read): the view's bounded turn read and lazy older
+/// loads walk the real cursor chain, counting every fetch.
+class _PagedClient extends _FakeClient {
+  _PagedClient({required this.history}) : super(details: const [_detail0]);
+
+  final List<SessionMessage> history;
+
+  /// Page size the history is served in.
+  static const int pageSize = 4;
+
+  /// Every `getMessagesPage` call, newest page first.
+  int pageCalls = 0;
+
+  @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    pageCalls++;
+    final offset = cursor == null ? 0 : int.parse(cursor);
+    final newestFirst = history.reversed.toList();
+    final slice = newestFirst.skip(offset).take(pageSize).toList();
+    final next = offset + pageSize < history.length
+        ? '${offset + pageSize}'
+        : null;
+    // The page is chronological within itself (the real endpoint's contract).
+    return MessagePage(messages: slice.reversed.toList(), nextCursor: next);
   }
 }
 
@@ -747,19 +796,23 @@ void main() {
       expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
       expect(find.text('1.5s · 0 compactions · 100.0 tok/s'), findsOneWidget);
 
-      // The next turn starts: the footer goes LIVE (ticking from the new
-      // prompt), not empty.
+      // The next turn starts: its live footer rides on the turn's own last
+      // row (ticking from the new prompt), while the closed turn's frozen
+      // footer stays on its marker (issue #124's per-turn footers) — two
+      // footers, on two rows.
       events.add(_event('session.execution.started', aggregateID: 'ses_1'));
       await tester.pump();
       await tester.pump();
-      expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+      expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
+      expect(find.text('1.5s · 0 compactions · 100.0 tok/s'), findsOneWidget);
 
-      // The turn ends and the normalize settles the history: the footer
-      // freezes on the new turn's history-derived value.
+      // The turn ends and the normalize settles the history: the live
+      // footer freezes on the new turn's history-derived value, and both
+      // closed turns keep their own frozen footer (issue #124).
       events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
       await tester.pump();
       await tester.pump();
-      expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+      expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
       expect(find.text('1.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
       await events.close();
     });
@@ -1177,12 +1230,13 @@ void main() {
         expect(find.text('2.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
 
         // The queued prompt's Turn starts: a fresh LIVE footer begins AT the
-        // queued prompt, not at the Turn before.
+        // queued prompt, not at the Turn before — and the completed Turn's
+        // frozen footer stays on its own marker (issue #124).
         events.add(_event('session.execution.started', aggregateID: 'ses_1'));
         now = 5500;
         await tester.pump();
         await tester.pump();
-        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
         expect(find.text('0.5s · 0 compactions'), findsOneWidget);
 
         // The new Turn ends: the footer freezes on ITS window (5000 -> 6000,
@@ -2486,6 +2540,125 @@ void main() {
       }
 
       expect(find.textContaining('message 0'), findsOneWidget);
+    });
+  });
+
+  group('StructuredSessionScreen lazy turn pages (issue #124)', () {
+    /// A settled five-turn history: each turn is a prompt, a completed step
+    /// and an `idle` marker; every turn's duration is distinct (turn i runs
+    /// i*10000 -> i*10000 + 5500 + i*100, so the footers read 5.5s…5.9s,
+    /// always 100.0 tok/s).
+    List<SessionMessage> fiveTurns() => [
+      for (var i = 0; i < 5; i++) ...[
+        SessionMessage(
+          id: 'u$i',
+          role: 'user',
+          text: 'q$i',
+          created: i * 10000,
+        ),
+        SessionMessage(
+          id: 'a$i',
+          role: 'assistant',
+          // Long enough that one loaded page overshoots the viewport: the
+          // lazy list has a real scroll extent to hit the older-load edge.
+          // The first turn stays short so its footer row fits on screen once
+          // the reader is at the oldest end.
+          text: i == 0
+              ? 'a0 done'
+              : List.filled(40, 'lorem ipsum dolor sit amet').join(' '),
+          created: i * 10000,
+          streamed: i * 10000 + 1000,
+          completed: i * 10000 + 5500 + i * 100,
+          outputTokens: 100,
+          reasoningTokens: 0,
+        ),
+        SessionMessage(id: 'i$i', role: 'idle', created: i * 10000 + 5501),
+      ],
+    ];
+
+    testWidgets('opening loads one page: only the current turn has a footer', (
+      tester,
+    ) async {
+      final client = _PagedClient(history: fiveTurns());
+      await _pump(tester, client: client);
+
+      // The bounded read stopped once the turn's opener `idle` was in.
+      expect(client.pageCalls, 1);
+      // The current turn's frozen footer is on screen at once.
+      expect(find.text('5.9s · 0 compactions · 100.0 tok/s'), findsOneWidget);
+      // The older turns are not loaded: no footers, no messages.
+      expect(find.text('5.8s · 0 compactions · 100.0 tok/s'), findsNothing);
+      expect(find.textContaining('a3 '), findsNothing);
+      expect(find.text('q0'), findsNothing);
+    });
+
+    testWidgets('scrolling up pages the history in: frozen footers fill in', (
+      tester,
+    ) async {
+      final client = _PagedClient(history: fiveTurns());
+      await _pump(tester, client: client);
+      await tester.pumpAndSettle();
+
+      expect(find.text('5.5s · 0 compactions · 100.0 tok/s'), findsNothing);
+
+      // Scroll up toward the oldest loaded message; each edge pulls the
+      // next older page until the history is exhausted. The list is lazy,
+      // so a footer is on screen only while its row is: track what each
+      // step revealed.
+      final seen = <String>{};
+      void recordFooters() {
+        for (final m in tester.widgetList<Text>(
+          find.byKey(const ValueKey('turn-stats')),
+        )) {
+          seen.add(m.data!);
+        }
+      }
+
+      recordFooters();
+      for (var i = 0; i < 40 && find.text('q0').evaluate().isEmpty; i++) {
+        await tester.drag(find.byType(ListView), const Offset(0, 400));
+        await tester.pumpAndSettle();
+        recordFooters();
+      }
+
+      // The whole history is in: the first turn's prompt is on screen.
+      expect(find.text('q0'), findsOneWidget);
+
+      // Sweep the remaining scroll range so every footer row passes through
+      // the viewport (a tall step can hide the row between two stops).
+      final pos = tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(ListView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      for (var p = pos.pixels; p >= 0; p -= 100) {
+        pos.jumpTo(p);
+        await tester.pumpAndSettle();
+        recordFooters();
+      }
+
+      // Every turn's frozen footer filled in as its opener loaded.
+      expect(
+        seen,
+        containsAll(<String>[
+          '5.5s · 0 compactions · 100.0 tok/s',
+          '5.6s · 0 compactions · 100.0 tok/s',
+          '5.7s · 0 compactions · 100.0 tok/s',
+          '5.8s · 0 compactions · 100.0 tok/s',
+          '5.9s · 0 compactions · 100.0 tok/s',
+        ]),
+      );
+
+      // The oldest page settled: further scrolls fetch nothing more.
+      final calls = client.pageCalls;
+      await tester.drag(find.byType(ListView), const Offset(0, 1000));
+      await tester.pumpAndSettle();
+      expect(client.pageCalls, calls);
     });
   });
 

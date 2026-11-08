@@ -293,6 +293,169 @@ TurnStats _statsFrom(_TurnFold fold) {
   );
 }
 
+/// The per-Turn footer labels keyed by the row index the footer rides on
+/// (issue #124): a completed Turn's label rides on its closing `idle` marker,
+/// the newest Turn's on the history's last row. Older Turns' footers are
+/// filled in as their messages page into view — a Turn's footer is shown only
+/// once that Turn is fully loaded: the newest Turn always, an older Turn once
+/// its opening `idle` marker has loaded (the very first Turn, which has no
+/// opening marker, only once [oldestLoaded] reports the whole history is in).
+/// [active] is true while the Turn is Active: its footer rides on the last
+/// row as the LIVE label read at [now] (epoch millis, issue #122's ticking
+/// duration), and the closed Turn the newest `idle` marker ends keeps its own
+/// frozen footer. While Active but with [now] left null (no clock to tick
+/// against), the newest Turn's label is its frozen stats so far. Returns only
+/// the rows that carry a label.
+Map<int, String> computeTurnFooters(
+  List<SessionMessage> messages, {
+  required bool oldestLoaded,
+  bool active = false,
+  int? now,
+}) {
+  final result = <int, String>{};
+  if (messages.isEmpty) return result;
+  final idleAt = <int>[
+    for (var i = 0; i < messages.length; i++)
+      if (messages[i].role == 'idle') i,
+  ];
+  // The newest (current) Turn's footer always rides on the last row: the
+  // closing `idle` marker when the session is idle, the Turn's last message
+  // while it is Active. Only its stats differ by state.
+  if (active) {
+    // The live label (issue #122/#124) over the live Turn's window: a
+    // duration ticking from the Turn's first prompt, a throughput that
+    // excludes the still-streaming step. When the loaded history still ends
+    // on its `idle` marker (the Turn started but persisted nothing yet) the
+    // window is empty and nothing labels the last row.
+    if (now != null) {
+      final label = liveTurnStats(messages, now: now)?.label;
+      if (label != null) result[messages.length - 1] = label;
+    } else {
+      _addCurrentTurnFooter(result, messages);
+    }
+  } else {
+    _addCurrentTurnFooter(result, messages);
+  }
+  // Every `idle` marker that does not open the Active Turn closes the Turn
+  // before it; its footer rides on the marker, fully loaded once its opening
+  // marker (the previous `idle`) is in the window — or, for the first Turn,
+  // once the history is fully loaded.
+  // When Active, the newest `idle` closes the previous Turn (the Active one
+  // is after it); when idle, it closes the current Turn (handled above).
+  final lastClosed = active
+      ? idleAt.length
+      : (idleAt.isEmpty ? 0 : idleAt.length - 1);
+  for (var k = lastClosed - 1; k >= 0; k--) {
+    if (k == 0 && !oldestLoaded) continue;
+    final closer = idleAt[k];
+    _addFrozenFooter(
+      result,
+      messages,
+      (k > 0 ? idleAt[k - 1] : -1) + 1,
+      closer,
+    );
+  }
+  return result;
+}
+
+/// Adds the newest (current) Turn's frozen footer: its window is
+/// [turnWindow]'s; a window that holds no assistant step falls back through
+/// the earlier Turns exactly like [computeTurnStats] (a queued prompt's
+/// empty window keeps the previous Turn's footer, issue #123). The label
+/// rides on the window's closing `idle` marker, or the last row when the
+/// window has none (a still-running or legacy window).
+void _addCurrentTurnFooter(
+  Map<int, String> result,
+  List<SessionMessage> messages,
+) {
+  var (start, end) = turnWindow(messages);
+  while (true) {
+    final fold = _fold(messages, start, end, live: false);
+    if (fold.hasAssistant) {
+      final row = end == messages.length ? messages.length - 1 : end;
+      final label = _statsFrom(fold).label;
+      if (label != null && row >= 0 && row < messages.length) {
+        result[row] = label;
+      }
+      return;
+    }
+    final previous = _previousTurnWindow(messages, start);
+    if (previous == null) return;
+    (start, end) = previous;
+  }
+}
+
+/// A closed Turn's frozen footer, riding on its closing `idle` marker row.
+void _addFrozenFooter(
+  Map<int, String> result,
+  List<SessionMessage> messages,
+  int start,
+  int end,
+) {
+  if (end < 0 || end >= messages.length) return;
+  final fold = _fold(messages, start, end, live: false);
+  if (!fold.hasAssistant) return;
+  final label = _statsFrom(fold).label;
+  if (label != null) result[end] = label;
+}
+
+/// Reads the session's current Turn newest-first via [fetchPage], issuing at
+/// most the pages needed to cover it (issue #124). A marker-carrying history
+/// stops once the Turn's opener `idle` marker is in a page; the newest
+/// message's role decides how many markers bound the Turn — an `idle` newest
+/// message closes the Turn (so the opener is the next-older idle: two to
+/// see), otherwise the first idle seen opens it (one to see). A history no
+/// marker was ever seen in (legacy) stops at the Turn's last prompt instead —
+/// the window [turnWindow] gives a marker-less loaded history starts at its
+/// first prompt, and a deeper Turn is served by the lazy older pages — plus
+/// one overshoot page that settles the ambiguity against a just-not-yet-seen
+/// opener. A deep legacy history is therefore never read whole just to open
+/// the view. Returns the loaded history (oldest-first, possibly one page past
+/// the Turn's opener) with the cursor to the next older page (`null` when
+/// the history is exhausted).
+Future<MessagePage> loadCurrentTurn({
+  required Future<MessagePage> Function(String? cursor) fetchPage,
+}) async {
+  var loaded = const MessagePage(messages: [], nextCursor: null);
+  var idlesSeen = 0;
+  var prompted = false;
+  var promptBound = false;
+  int? idlesNeeded;
+  String? cursor;
+  var first = true;
+  while (true) {
+    final page = await fetchPage(cursor);
+    // This page is older than everything already loaded: it carries the
+    // older cursor, and the loaded messages append after it.
+    loaded = page.appendNewer(loaded.messages);
+    if (first) {
+      first = false;
+      // The newest loaded message bounds the Turn from above: an `idle`
+      // closes it, so its opener is the next-older marker — two to see.
+      idlesNeeded = page.messages.isEmpty || page.messages.last.role == 'idle'
+          ? 2
+          : 1;
+    }
+    for (final message in page.messages) {
+      if (message.role == 'idle') idlesSeen++;
+      if (message.role == 'user' || message.role == 'synthetic') {
+        prompted = true;
+      }
+    }
+    if (idlesSeen >= (idlesNeeded ?? 1)) break;
+    if (promptBound) break; // The legacy overshoot page is in.
+    if (idlesSeen == 0 && prompted) {
+      // No marker anywhere yet and the Turn's last prompt is in: a legacy
+      // history would end here — take one more page to tell that from an
+      // opener marker sitting one page older, and stop after it.
+      promptBound = true;
+    }
+    if (loaded.nextCursor == null) break; // History exhausted.
+    cursor = loaded.nextCursor;
+  }
+  return loaded;
+}
+
 /// The duration as the footer shows it: `3.4s` under a minute, `1m 23s` at
 /// or above.
 String _durationText(Duration duration) {

@@ -88,6 +88,7 @@ void main() {
         'contextLimit': 200000,
         'model': {'id': 'flint', 'providerID': 'opencode', 'variant': 'high'},
         'agent': 'build',
+        'active': false,
       });
     });
 

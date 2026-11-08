@@ -103,6 +103,13 @@ class FakeOpencodeService implements OpencodeService {
   Future<List<SessionMessage>> getMessages(String id) async => messages;
 
   @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async => MessagePage(messages: messages, nextCursor: null);
+
+  @override
   Future<void> prompt(
     String id,
     String text, {
