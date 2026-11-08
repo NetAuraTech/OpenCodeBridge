@@ -86,6 +86,7 @@ class OrbTaskService {
     required this.sessions,
     required this.file,
     this.pollInterval = const Duration(seconds: 2),
+    this.waitGrace = defaultWaitGrace,
     Random? random,
   }) : _random = random ?? Random() {
     _load();
@@ -107,6 +108,19 @@ class OrbTaskService {
   /// The completion poll pace; also the test seam (tests drive completion
   /// with a scripted session detail rather than wall time).
   final Duration pollInterval;
+
+  /// How long `wait: true` holds its response before answering the dispatched
+  /// task as running (issue #143): the caller's transport (the agent tool's
+  /// fetch through Code Mode hop) has its own timeout, and a blocking spawn
+  /// that outlives it looks *unreachable* — the agent retries, and the retry
+  /// must not (and now cannot) duplicate the task. The grace window sits
+  /// under those timeouts; the caller then polls with other waits.
+  final Duration waitGrace;
+
+  /// [waitGrace]'s default: a long task is normal (a blocking spawn commonly
+  /// runs for many minutes), but the agent tool's fetch gives up well before
+  /// that, so a bounded answer must come first.
+  static const Duration defaultWaitGrace = Duration(seconds: 20);
 
   final Random _random;
 
@@ -187,7 +201,7 @@ class OrbTaskService {
     _spawningByProject[projectId] = done.future;
     final dispatched = await result;
     if (!wait) return dispatched;
-    return _awaitCompletion(dispatched);
+    return _awaitCompletion(dispatched, grace: waitGrace);
   }
 
   Future<OrbTask> _spawnLocked({
@@ -205,6 +219,14 @@ class OrbTaskService {
       orb,
       seed,
     );
+
+    // The idempotent dispatch (issue #143): a retry of a dispatch that is
+    // already running on the target orb returns that task — a retried spawn
+    // (the caller's transport timed out, or a deliberate repeat) is not a
+    // second task. The text is compared normalized, and the per-project
+    // serialization above makes check-then-dispatch race-free.
+    final retried = _runningTaskOn(record.id, task);
+    if (retried != null) return retried;
 
     // The task's session on the orb's service (one session per task, so the
     // turn outcome is unambiguous for completion detection).
@@ -224,6 +246,7 @@ class OrbTaskService {
     final dispatched = OrbTask(
       id: 'task_${_token()}',
       orb: record.id,
+      project: record.project,
       orbName: record.name,
       branch: record.branch,
       session: session.id,
@@ -256,6 +279,14 @@ class OrbTaskService {
   /// already-completed task returns immediately). Used by `wait: true` and
   /// by the tool-facing `orb_wait`.
   ///
+  /// [grace] (the bounded blocking wait, issue #143) caps how long the call
+  /// holds: when set and the task is still running at the deadline, the task
+  /// is returned **as it stands** (`status: running`) — the watcher keeps
+  /// polling, so a later `orb_wait` still sees the task through.
+  ///
+  /// `wait: true` passes [waitGrace]; `orb_wait` passes `null`
+  /// (an explicit wait is expected to block).
+  ///
   /// [callerSession] (issue #100, spec §8.4) scopes the wait right to the
   /// caller's spawn tree: an agent waits for the tasks of its own tree —
   /// and always for a task it dispatched itself (the `wait: false` →
@@ -272,11 +303,12 @@ class OrbTaskService {
     return _awaitCompletion(found);
   }
 
-  Future<OrbTask> _awaitCompletion(OrbTask target) async {
+  Future<OrbTask> _awaitCompletion(OrbTask target, {Duration? grace}) async {
     if (target.isDone) return target;
     // Poll the shared record — any path that completes the task (this call,
     // the watcher, a concurrent waiter) settles this one too. A closed
     // service ends the wait with the record as it stands.
+    final deadline = grace == null ? null : DateTime.now().add(grace);
     while (!target.isDone && !_closed) {
       try {
         await _check(target);
@@ -284,10 +316,40 @@ class OrbTaskService {
         // A transient service failure: the next pass retries.
       }
       if (target.isDone) break;
+      if (deadline != null && !DateTime.now().isBefore(deadline)) break;
       await Future<void>.delayed(pollInterval);
     }
     return target;
   }
+
+  /// The running task of orb [orbId] whose text is [task] (normalized), or
+  /// `null` (issue #143): the idempotent dispatch's already-running match.
+  ///
+  /// A record that still says `running` is trusted: the watcher settles
+  /// completions on its own pace (the poll interval), while a retry arrives
+  /// within the caller's timeout — so shrinking the window on the live
+  /// session listing is unnecessary.
+  OrbTask? _runningTaskOn(String orbId, String task) {
+    final normalized = _normalized(task);
+    final candidates = [
+      for (final running in _tasks)
+        if (running.orb == orbId &&
+            !running.isDone &&
+            _normalized(running.task) == normalized)
+          running,
+    ];
+    if (candidates.isEmpty) return null;
+    return candidates.first;
+  }
+
+  /// The task text as the idempotent dispatch compares it: lowercased,
+  /// whitespace-collapsed, with punctuation dropped — the same instruction
+  /// retyped is the same task.
+  String _normalized(String task) => task
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^\w\s]', unicode: true), '')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
 
   /// The project's orb for the spawn (spec §8.2's targeting + §3.3's seed),
   /// as `(record, created)` — [created] true when this call created the orb
@@ -659,6 +721,34 @@ class OrbTaskService {
       await Future<void>.delayed(pollInterval);
     }
     _watching = false;
+  }
+
+  /// The host project id behind the recent tasks an agent-facing spawn is
+  /// asking about (issue #143): the explicit [project] id, else the project
+  /// whose canonical checkout is [directory] — or the project of the task
+  /// dispatched from that directory and still running (a directory the
+  /// service no longer lists still names its project through the record).
+  /// `null` when neither resolves (the tool answers "nothing recent").
+  /// [project] wins over [directory].
+  Future<String?> recentProject({String? project, String? directory}) async {
+    final id = project?.trim();
+    if (id != null && id.isNotEmpty) return id;
+    final dir = directory?.trim();
+    if (dir != null && dir.isNotEmpty) {
+      try {
+        for (final row in await sessions.projects()) {
+          if (row.canonical == dir) return row.id;
+        }
+      } on OpencodeServiceError {
+        // The service is unreachable: fall through to the records.
+      }
+      for (final row in _tasks) {
+        if (!row.isDone && row.callerDirectory == dir) {
+          return row.project.isEmpty ? null : row.project;
+        }
+      }
+    }
+    return null;
   }
 
   /// One completion check: when the orb session reports a turn outcome, the

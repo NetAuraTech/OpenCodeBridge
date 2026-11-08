@@ -335,9 +335,11 @@ Idempotent **wake-or-create** on the project's workspace orb. The project is **n
 |---|---|---|
 | `task` | yes | Free text given to the orb's agent |
 | `model` | no | Default = the calling session's model |
-| `wait` | no | Boolean, default `true`: when true the tool blocks until the task completes and returns the structured result; when false the tool returns the orb handle immediately |
+| `wait` | no | Boolean, default `true`: when true the tool blocks until the task completes and returns the structured result, **bounded** to a grace window ([#143](https://github.com/NetAuraTech/OpenCodeBridge/issues/143)) -- a longer task answers as `running` and the caller polls with `orb_wait`; when false the tool returns the orb handle immediately |
 | `orb` | no | **Name** of the target orb ([#84](https://github.com/NetAuraTech/OpenCodeBridge/issues/84)) — see targeting below |
 | `seed` | no | **Name** of the orb to clone from ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)) — see §3.3 |
+
+**Idempotent dispatch** ([#143](https://github.com/NetAuraTech/OpenCodeBridge/issues/143)): a spawn whose task text matches (normalized) a task **still running** on the target orb returns that task instead of dispatching a second one -- the retry of a call whose transport timed out is not duplicate work. A deliberately different task still dispatches normally. The timeout-aware plugin asks the bridge for the project's recent tasks (`POST /api/orb/tasks`) before reporting a failed fetch, so the caller learns the dispatch landed and waits on it rather than retrying blind.
 
 **`orb` targeting**: omitted → the project's single orb (wake it); several orbs exist → the tool **refuses and lists** the project's orbs (the agent retries with an explicit name); none → **create** (name derived from the task). An explicit name not yet taken → **additional orb** (fresh clone, fresh `orb/<id>` branch), attached to the calling agent's spawn tree.
 

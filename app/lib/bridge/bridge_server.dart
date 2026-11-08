@@ -152,6 +152,12 @@ class BridgeServer {
   /// structured result (behind the global `orb_wait` tool).
   static const String orbWaitPath = '/api/orb/wait';
 
+  /// The spawn surface's recent tasks (issue #143): `POST` with the body
+  /// `{"directory"?: "…", "project"?: "<project id>", "limit"?: <n>}` — the
+  /// project's tasks, newest first, behind the timeout-aware `orb_spawn`
+  /// tool.
+  static const String orbTasksPath = '/api/orb/tasks';
+
   /// The spawn surface's agent-facing orb controls (issue #100, spec §8.4):
   /// `POST` with the body `{"orb": "<name>", "session"?: "…", "directory"?: "…", "force"?: true}`
   /// — the stop / delete / export of the orbs inside the calling agent's
@@ -1124,6 +1130,11 @@ class BridgeServer {
       if (request.method == 'POST' &&
           request.uri.path == BridgeServer.orbWaitPath) {
         await BridgeServer._handleOrbWait(request, tasks);
+        return;
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == BridgeServer.orbTasksPath) {
+        await BridgeServer._handleOrbTasks(request, tasks);
         return;
       }
       // The spawn surface's agent-facing orb controls (issue #100, spec
@@ -2871,6 +2882,52 @@ class BridgeServer {
     } on OrbPermissionError catch (e) {
       response.statusCode = HttpStatus.forbidden;
       response.write(jsonEncode({'error': 'permission_denied', 'orb': e.orb}));
+    }
+    await response.close();
+  }
+
+  /// The spawn surface's recent tasks (issue #143): `POST /api/orb/tasks`
+  /// with the body `{"directory"?: "…", "project"?: "prj_1",
+  /// "limit"?: number}` answers `{"project": "prj_1", "tasks": [task…]}`,
+  /// newest first (at most `limit`, 1..50, default 20), or `{"tasks": []}`
+  /// when no project resolves (a directory unknown to the host). The
+  /// timeout-aware `orb_spawn` tool reads it before reporting the bridge
+  /// unreachable, so a dispatch that landed is reported, not lost.
+  static Future<void> _handleOrbTasks(
+    HttpRequest request,
+    OrbTaskService? tasks,
+  ) async {
+    final response = request.response;
+    if (tasks == null) {
+      BridgeServer._unavailable(response);
+      await response.close();
+      return;
+    }
+    final body = await BridgeServer._jsonBody(request);
+    final limitField = body?['limit'];
+    final requested = limitField is num ? limitField.toInt() : 20;
+    final limit = requested < 1 || requested > 50 ? 20 : requested;
+    try {
+      final project = await tasks.recentProject(
+        project: BridgeServer._stringField(body, 'project'),
+        directory: BridgeServer._stringField(body, 'directory'),
+      );
+      response.statusCode = HttpStatus.ok;
+      response.write(
+        jsonEncode({
+          'project': project,
+          'tasks': project == null
+              ? const []
+              : tasks.tasks
+                    .where((task) => task.project == project)
+                    .take(limit)
+                    .map((task) => task.toJson())
+                    .toList(),
+        }),
+      );
+    } on OrbSpawnProjectError {
+      response.statusCode = HttpStatus.badRequest;
+      response.write(jsonEncode({'error': 'project_unknown'}));
     }
     await response.close();
   }
