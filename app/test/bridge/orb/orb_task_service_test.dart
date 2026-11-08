@@ -250,12 +250,19 @@ void main() {
   });
 
   tearDown(() async {
-    // The watchers first (they still persist into the temp dir), then it.
+    // The watchers first: an in-flight completion pass (done before close
+    // bites) still persists into the temp dir, so it settles before the
+    // dir goes. The delete then tolerates a straggler write outright.
     for (final created in services) {
       created.close();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
     }
     services.clear();
-    await temp.delete(recursive: true);
+    try {
+      await temp.delete(recursive: true);
+    } on FileSystemException {
+      // A watcher write landed mid-delete: the OS reaps the dir.
+    }
   });
 
   /// Script the dispatch seams: a task session on orb `a1b2c3` whose turn
