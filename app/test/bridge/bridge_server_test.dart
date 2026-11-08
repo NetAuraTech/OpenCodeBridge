@@ -2619,7 +2619,11 @@ class _FakeService implements OpencodeService {
   }
 
   @override
-  Future<OpencodeSession> createSession(String projectId) async {
+  Future<OpencodeSession> createSession(
+    String projectId, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     if (failCreate) throw const OpencodeServiceError(0, 'service down');
     final session = created[projectId];
     if (session == null) {
@@ -2631,7 +2635,11 @@ class _FakeService implements OpencodeService {
   /// The session [createSessionInDirectory] mints, at [directory] (issue
   /// #54's "New project").
   @override
-  Future<OpencodeSession> createSessionInDirectory(String directory) async {
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
     if (failCreateInDirectory) {
       throw const OpencodeServiceError(0, 'service down');
     }

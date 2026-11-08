@@ -96,15 +96,27 @@ abstract class OpencodeService {
 
   /// Create a new session in [projectId]'s project (`POST /api/session` with
   /// the project's canonical directory as its `location.directory`). The
-  /// session has no TUI attached yet.
-  Future<OpencodeSession> createSession(String projectId);
+  /// session has no TUI attached yet. [model] and [agent], when provided, are
+  /// applied to the new session (opencode's create accepts them); the bridge
+  /// passes the current/default model so the session shows its model and
+  /// thinking level (variant) like a session created directly in opencode.
+  Future<OpencodeSession> createSession(
+    String projectId, {
+    ModelRef? model,
+    String? agent,
+  });
 
   /// Create a new session whose working directory is [directory] as-is
   /// (`POST /api/session` with [directory] as its `location.directory`): the
   /// service auto-creates a project for a directory it has never seen and
   /// reuses the existing project for one it has. The session has no TUI
-  /// attached yet.
-  Future<OpencodeSession> createSessionInDirectory(String directory);
+  /// attached yet. [model] and [agent], when provided, are applied to the new
+  /// session.
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  });
 
   /// Delete a session (and its child sessions) on the service.
   Future<void> deleteSession(String id);

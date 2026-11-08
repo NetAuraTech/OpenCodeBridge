@@ -25,9 +25,17 @@ class SessionsBackend {
   Future<List<OpencodeProject>> projects() => service.projects();
 
   /// Create a session (spec §5 fill-in †): the service `POST /api/session`
-  /// in [projectId]'s project.
+  /// in [projectId]'s project. The bridge applies the current/default model
+  /// (including its thinking level / variant) so the new session shows its
+  /// model like one created directly in opencode.
   Future<Session> create(String projectId) async {
-    final session = await service.createSession(projectId);
+    final defaults = await _defaultModelAndAgent();
+    final session = await service.createSession(
+      projectId,
+      model: defaults.model,
+      agent: defaults.agent,
+    );
+    await _applyDefaultModel(session.id, defaults.model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return _row(session, names, active);
@@ -36,7 +44,8 @@ class SessionsBackend {
   /// Create a session at [directory] (issue #54's "New project"):
   /// [directory] is the working directory as-is, and the service auto-creates
   /// a project for a directory it has never seen. A [directory] missing on
-  /// this host is a clear 404, not a service round-trip.
+  /// this host is a clear 404, not a service round-trip. The bridge applies
+  /// the current/default model (including its thinking level / variant).
   Future<Session> createInDirectory(String directory) async {
     if (!Directory(directory).existsSync()) {
       throw const OpencodeServiceError(
@@ -44,10 +53,55 @@ class SessionsBackend {
         'no such directory',
       );
     }
-    final session = await service.createSessionInDirectory(directory);
+    final defaults = await _defaultModelAndAgent();
+    final session = await service.createSessionInDirectory(
+      directory,
+      model: defaults.model,
+      agent: defaults.agent,
+    );
+    await _applyDefaultModel(session.id, defaults.model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return _row(session, names, active);
+  }
+
+  /// The model (with its thinking level / variant) and agent to apply to a
+  /// new session: copied from the most recently created session that already
+  /// has a model, which mirrors opencode's "current model" behavior. Best-
+  /// effort — a lookup failure yields no defaults rather than failing the
+  /// create.
+  Future<({ModelRef? model, String? agent})> _defaultModelAndAgent() async {
+    try {
+      final sessions = await service.listSessions();
+      sessions.sort((a, b) => b.created.compareTo(a.created));
+      for (final candidate in sessions.take(8)) {
+        try {
+          final detail = await service.getDetail(candidate.id);
+          if (detail.model != null) {
+            return (model: detail.model, agent: detail.agent);
+          }
+        } catch (_) {
+          // Try the next candidate.
+        }
+      }
+    } catch (_) {
+      // No defaults available; the session is still created.
+    }
+    return (model: null, agent: null);
+  }
+
+  /// Ensures [id] carries [model] (including its variant / thinking level)
+  /// after creation. The model is passed on create and also set explicitly,
+  /// so the session shows its model even when the service ignores the
+  /// create-time model field. Best-effort — never fails the create.
+  Future<void> _applyDefaultModel(String id, ModelRef? model) async {
+    if (model == null) return;
+    try {
+      await service.setModel(id, model);
+    } catch (_) {
+      // The model was also passed on create; if neither stuck the session
+      // still exists and the user can pick a model.
+    }
   }
 
   /// Whether the service still has [id] (the reopen guard).
