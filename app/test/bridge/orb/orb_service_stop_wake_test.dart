@@ -397,6 +397,23 @@ class _FakeOpencode implements OpencodeService {
       throw UnimplementedError('${invocation.memberName}');
 }
 
+/// A fake orb service whose delete of an id in [gone] answers the real
+/// service's 404 (`OpencodeServiceError(404)`): the session is already
+/// gone there — the parent's delete cascades to children, or the startup
+/// reconciliation removed it first (issue #137).
+class _CascadeOpencode extends _FakeOpencode {
+  final Set<String> gone = {};
+
+  @override
+  Future<void> deleteSession(String id) async {
+    if (gone.contains(id)) {
+      throw OpencodeServiceError(404, 'delete of $id was not accepted');
+    }
+    deleted.add(id);
+    sessions.removeWhere((s) => s.id == id);
+  }
+}
+
 /// A scripted opencode CLI (the export/import of the stop and the moves).
 class _Cli {
   _Cli(this.respond);
@@ -711,9 +728,11 @@ void main() {
         expect(cli.envs[2], isNull);
         expect(cli.envs[3], isNull);
 
-        // Delete-after-import, per session: both deleted from the orb,
-        // none on the host.
-        expect(orb.deleted, ['s-parent', 's-child']);
+        // Delete-after-import (issue #137 ordering): every import lands
+        // first, then the orb-side deletes run child-first — the reverse
+        // of the import order, so a parent's cascading delete can never
+        // take a session whose import has not landed yet. None on the host.
+        expect(orb.deleted, ['s-child', 's-parent']);
         expect(host.deleted, isEmpty);
 
         // The temp files are cleaned.
@@ -927,6 +946,233 @@ void main() {
         expect(docker.runArgs, contains(equals(['stop', container])));
         expect(markerPresent(), isTrue);
       });
+
+      // The SchemaError family (issue #137): `session import` parses the
+      // staged file as one bare JSON document — banner or log lines around
+      // the document, a double-encoded payload, or an empty file abort it
+      // with a bare `SchemaError: Expected a valid JSON string`. The stop
+      // now stages a bare document (noise stripped, a wrapped payload
+      // unwrapped) and refuses an export it cannot stage — with the payload
+      // in the error instead of the CLI's bare schema message.
+
+      test('an export with banner noise around the document still stages a '
+          'bare JSON document and completes the stop', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        const doc = '{"info":{"id":"s-1"},"messages":[]}';
+        final staged = <String>{};
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return const OpencodeCliResult(
+              exitCode: 0,
+              stdout: 'opencode v2.1.4\n$doc\nimported ok\n',
+              stderr: '',
+            );
+          }
+          staged.add(File(argv[2]).readAsStringSync());
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        // What the import was handed is the bare document, noise stripped.
+        expect(staged, {doc});
+        expect(orb.deleted, ['s-1']);
+        expect(docker.runArgs, contains(equals(['stop', container])));
+        expect(markerPresent(), isTrue);
+      });
+
+      test('a double-encoded export payload (the JSON text wrapped as one '
+          'JSON string) is unwrapped before the import', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        const doc = '{"info":{"id":"s-1"},"messages":[]}';
+        final staged = <String>{};
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            // The shape `session import` rejects with `SchemaError:
+            // Expected object`: the document's JSON text as one JSON string.
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: jsonEncode(doc),
+              stderr: '',
+            );
+          }
+          staged.add(File(argv[2]).readAsStringSync());
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        expect(staged, {doc});
+        expect(orb.deleted, ['s-1']);
+        expect(markerPresent(), isTrue);
+      });
+
+      test('an export that exits 0 with no readable document refuses with '
+          'the payload summary in the error — the empty file never reaches '
+          'the import', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        final cli = _Cli((argv, env) async {
+          return const OpencodeCliResult(exitCode: 0, stdout: '', stderr: '');
+        });
+
+        await expectLater(
+          service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId),
+          throwsA(
+            isA<OrbSessionMoveError>()
+                .having((e) => e.session, 'session', 's-1')
+                .having((e) => e.detail, 'detail', contains('0 bytes')),
+          ),
+        );
+        // The export ran, no import was attempted.
+        expect(cli.argvs.map((a) => a[1]), ['export']);
+        expect(orb.deleted, isEmpty);
+        expect(docker.runArgs.where((a) => a.first == 'stop'), isEmpty);
+        expect(markerPresent(), isFalse);
+      });
+
+      test('a failed import reports the staged file (size, first and last '
+          'bytes) and the CLI output, not just the bare SchemaError', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        const doc = '{"info":{"id":"s-1"},"messages":[]}';
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return const OpencodeCliResult(
+              exitCode: 0,
+              stdout: doc,
+              stderr: '',
+            );
+          }
+          return const OpencodeCliResult(
+            exitCode: 1,
+            stdout: '',
+            stderr:
+                'SchemaError: Expected a valid JSON string\n'
+                '    at cli.session.import',
+          );
+        });
+
+        await expectLater(
+          service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId),
+          throwsA(
+            isA<OrbSessionMoveError>()
+                .having((e) => e.session, 'session', 's-1')
+                .having((e) => e.detail, 'detail', contains('SchemaError'))
+                .having(
+                  (e) => e.detail,
+                  'detail',
+                  contains('${doc.length} bytes'),
+                )
+                .having((e) => e.detail, 'detail', contains(doc)),
+          ),
+        );
+        expect(orb.deleted, isEmpty);
+        expect(markerPresent(), isFalse);
+      });
+
+      test('the import order is parent-first: a subagent session imports '
+          'only after its parent is on the host (the CLI rejects the child '
+          'before it)', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        // The service list is newest-first: the child leads its parent.
+        orb.sessions.addAll([_session('s-child'), _session('s-parent')]);
+        const parentDoc = '{"info":{"id":"s-parent"},"messages":[]}';
+        const childDoc =
+            '{"info":{"id":"s-child","parentID":"s-parent"},"messages":[]}';
+        final imports = <String>[];
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: argv[2] == 's-child' ? childDoc : parentDoc,
+              stderr: '',
+            );
+          }
+          final id = RegExp(r'ocb-stop-\w+-(s-\w+)\.json')
+              .firstMatch(argv[2])!
+              .group(1)!;
+          imports.add(id);
+          if (id == 's-child' && !imports.contains('s-parent')) {
+            // The real CLI: a child whose parent is not on the target yet.
+            return const OpencodeCliResult(
+              exitCode: 1,
+              stdout: '',
+              stderr: 'Error: Failed to import session: Not Found',
+            );
+          }
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        expect(imports, ['s-parent', 's-child']);
+        // The orb-side delete runs child-first, the reverse of the order.
+        expect(orb.deleted, ['s-child', 's-parent']);
+        expect(markerPresent(), isTrue);
+      });
+
+      test(
+        'a session already gone from the orb (the parent delete cascades '
+        'to children, or a reconciliation removed it) is a tolerated 404',
+        () async {
+          addOrb(port: 49153);
+          stateDir();
+          final orb = _CascadeOpencode()..gone.add('s-child');
+          orb.sessions.addAll([_session('s-child'), _session('s-parent')]);
+          final cli = _Cli((argv, env) async {
+            return argv[1] == 'export' ? _exportOk : _importOk;
+          });
+
+          await service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId);
+
+          expect(orb.deleted, ['s-parent']);
+          expect(docker.runArgs, contains(equals(['stop', container])));
+          expect(markerPresent(), isTrue);
+        },
+      );
 
       test('a failed deletion from the orb is an OrbSessionMoveError: no '
           'stop, no marker', () async {
@@ -1371,11 +1617,10 @@ void main() {
               directory: '/workspace',
             ),
             throwsA(
-              isA<OrbSessionMoveError>().having(
-                (e) => e.detail,
-                'detail',
-                'import boom',
-              ),
+              isA<OrbSessionMoveError>()
+                  .having((e) => e.detail, 'detail', contains('import boom'))
+                  // Issue #137: the failed import reports the staged file.
+                  .having((e) => e.detail, 'detail', contains('staged')),
             ),
           );
           expect(host.deleted, isEmpty);

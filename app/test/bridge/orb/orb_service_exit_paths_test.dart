@@ -902,6 +902,140 @@ void main() {
         },
       );
 
+      // The unpushed false positive (issue #137): a branch the host pushed
+      // leaves the orb's clone without a `refs/remotes/origin/<branch>`, so
+      // `rev-list --not --remotes` counts the pushed commits as unpushed.
+      // The guard fetches and re-counts once before it refuses; a failed
+      // fetch keeps the first count (never delete the unverifiable).
+
+      test('a running orb whose commits turn out pushed after the fetch is '
+          'deletable (the false positive is cleared)', () async {
+        addOrb(port: 49101);
+        var counts = 0;
+        docker.execRespond = (argv) {
+          if (argv.last == '--porcelain') {
+            return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+          }
+          if (argv.last == 'origin') {
+            return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+          }
+          counts++;
+          return DockerCliResult(
+            exitCode: 0,
+            stdout: counts == 1 ? '1\n' : '0\n',
+            stderr: '',
+          );
+        };
+
+        final guard = await service().deleteGuard(orbId);
+
+        expect(guard.evaluable, isTrue);
+        expect(guard.unpushedCount, 0);
+        expect(guard.canDelete, isTrue);
+        expect(guard.reasons, isEmpty);
+        // The fetch ran inside the orb, and the count ran twice.
+        expect(
+          argsIndex(docker.runArgs, [
+            'exec',
+            container,
+            'git',
+            '-C',
+            '/workspace',
+            'fetch',
+            'origin',
+          ]),
+          isNonNegative,
+        );
+        expect(
+          docker.runArgs.where((a) => a.contains('rev-list')),
+          hasLength(2),
+        );
+      });
+
+      test('a failed fetch keeps the unpushed refusal (fail closed)', () async {
+        addOrb(port: 49101);
+        docker.execRespond = (argv) {
+          if (argv.last == '--porcelain') {
+            return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+          }
+          if (argv.last == 'origin') {
+            return const DockerCliResult(
+              exitCode: 128,
+              stdout: '',
+              stderr: 'could not read Username',
+            );
+          }
+          return const DockerCliResult(exitCode: 0, stdout: '1\n', stderr: '');
+        };
+
+        final guard = await service().deleteGuard(orbId);
+
+        expect(guard.evaluable, isTrue);
+        expect(guard.unpushedCount, 1);
+        expect(guard.canDelete, isFalse);
+        expect(guard.reasons, ['unpushed_commits']);
+        // The count ran once — the failed fetch skips the re-count.
+        expect(
+          docker.runArgs.where((a) => a.contains('rev-list')),
+          hasLength(1),
+        );
+      });
+
+      test('a clean fully pushed orb never fetches (the common path is '
+          'unchanged)', () async {
+        addOrb(port: 49101);
+        docker.execRespond = (argv) {
+          if (argv.last == '--porcelain') {
+            return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+          }
+          return const DockerCliResult(exitCode: 0, stdout: '0\n', stderr: '');
+        };
+
+        final guard = await service().deleteGuard(orbId);
+
+        expect(guard.canDelete, isTrue);
+        expect(docker.runArgs.any((a) => a.contains('fetch')), isFalse);
+      });
+
+      test('the stopped-orb guard fetches through the throwaway git '
+          'container before refusing on unpushed commits', () async {
+        addOrb(state: 'exited');
+        stateDir();
+        docker.containerImage = 'orb:abc123';
+        var counts = 0;
+        docker.runRespond = (argv) {
+          if (argv.contains('--porcelain')) {
+            return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+          }
+          if (argv.last == 'origin') {
+            return const DockerCliResult(exitCode: 0, stdout: '', stderr: '');
+          }
+          counts++;
+          return DockerCliResult(
+            exitCode: 0,
+            stdout: counts == 1 ? '1\n' : '0\n',
+            stderr: '',
+          );
+        };
+
+        final guard = await service().deleteGuard(orbId);
+
+        expect(guard.canDelete, isTrue);
+        expect(docker.runArgs.firstWhere((a) => a.contains('fetch')), [
+          'run',
+          '--rm',
+          '--entrypoint',
+          'git',
+          '-v',
+          'orb-$orbId-workspace:/ws',
+          'orb:abc123',
+          '-C',
+          '/ws',
+          'fetch',
+          'origin',
+        ]);
+      });
+
       test('an unknown id throws OrbNotFoundError', () {
         expect(
           () => service().deleteGuard('unknown-id'),
