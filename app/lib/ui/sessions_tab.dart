@@ -165,6 +165,11 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// successful one.
   String? _deepLinkPending;
 
+  /// The session shown in the detail pane (issue #131): `null` shows the
+  /// empty-state hint. Selecting a row (or a deep link, or a newly created
+  /// session) swaps the pane in place; the list stays visible.
+  Session? _selectedSession;
+
   @override
   void initState() {
     super.initState();
@@ -236,9 +241,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   /// A tapped notification targeted a session (issue #24): open it in the
-  /// structured view, whose banner shows the pending permission. Consumed
-  /// immediately (the caller clears the target); when the list has not
-  /// loaded yet, the target waits for it in [_deepLinkPending].
+  /// detail pane (issue #131), whose banner shows the pending permission.
+  /// Consumed immediately (the caller clears the target); when the list has
+  /// not loaded yet, the target waits for it in [_deepLinkPending].
   void _openDeepLink(String id) {
     widget.onDeepLinkSessionConsumed?.call();
     final rows = _rows;
@@ -253,7 +258,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     _deepLinkPending = null;
     final row = rows.where((session) => session.id == id).firstOrNull;
     if (row == null) return; // The session is gone (deleted in the meantime).
-    unawaited(_openStructured(row));
+    _selectSession(row);
   }
 
   @override
@@ -303,6 +308,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       setState(() {
         _rows = rows;
         _loading = false;
+        _reconcileSelection(rows);
       });
       if (pending != null) _openDeepLinkRow(pending, rows);
       unawaited(_loadOrbs());
@@ -321,6 +327,16 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         _loading = false;
       });
     }
+  }
+
+  /// Keeps the detail pane's selection in sync with the freshly loaded rows
+  /// (issue #131): refreshes the selected row's data when it still exists,
+  /// clears the selection when it is gone (e.g. deleted).
+  void _reconcileSelection(List<Session> rows) {
+    final selected = _selectedSession;
+    if (selected == null) return;
+    final fresh = rows.where((s) => s.id == selected.id).firstOrNull;
+    _selectedSession = fresh;
   }
 
   /// The orb list for the rows' chips (spec §9.2): the orb names and state
@@ -402,29 +418,23 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
-  /// Opens [session] in the structured view (spec §6: *External* →
-  /// structured view). The structured view is fully usable on its own: the
-  /// session stays sendable after the view closes. When the view closes, the
-  /// list re-loads.
+  /// Selects [session] in the detail pane (issue #131): swaps the pane in
+  /// place, with no navigator push/pop. The list stays visible.
+  void _selectSession(Session session) {
+    if (!mounted) return;
+    setState(() => _selectedSession = session);
+  }
+
+  void _clearSelection() {
+    if (!mounted) return;
+    setState(() => _selectedSession = null);
+  }
+
+  /// Opens [session] in the detail pane (issue #131). Kept as the
+  /// post-create/open entry point; callers that used to await a route pop no
+  /// longer need to — the pane follows the selection.
   Future<void> _openStructured(Session session) async {
-    final client = _client;
-    if (client == null) return;
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (context) => StructuredSessionScreen(
-          sessionId: session.id,
-          title: session.title.isNotEmpty ? session.title : session.location,
-          client: client,
-          events: _events?.events,
-          gaps: _events?.gaps,
-          onNewSession: _newProject,
-          onOpenSettings: widget.onOpenSettings,
-          settings: widget.settings,
-          onThemeModeChanged: widget.onThemeModeChanged,
-        ),
-      ),
-    );
-    if (mounted) await _load();
+    _selectSession(session);
   }
 
   Future<void> _confirmDelete(Session session) async {
@@ -498,10 +508,46 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       final error = _error ?? 'Could not load the session list.';
       return _ErrorState(message: error, onRetry: _load);
     }
-    final rows = _rows!;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth >= 720;
+        final list = _buildListPane();
+        final detail = _buildDetailPane(showClose: !wide);
+        if (!wide) {
+          return _selectedSession == null
+              ? list
+              : KeyedSubtree(
+                  key: const ValueKey('sessions-detail-pane'),
+                  child: detail,
+                );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              key: const ValueKey('sessions-list-pane'),
+              width: 320,
+              child: list,
+            ),
+            const VerticalDivider(width: 1, thickness: 1),
+            Expanded(
+              child: KeyedSubtree(
+                key: const ValueKey('sessions-detail-pane'),
+                child: detail,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildListPane() {
+    final rows = _rows ?? const <Session>[];
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(
+        key: const ValueKey('sessions-list'),
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.only(top: 8),
         children: [
@@ -540,6 +586,31 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
             ),
         ],
       ),
+    );
+  }
+
+  Widget _buildDetailPane({required bool showClose}) {
+    final session = _selectedSession;
+    final client = _client;
+    if (session == null || client == null) {
+      return const _CenteredMessage(
+        key: ValueKey('sessions-detail-empty'),
+        text: 'Select a session to view its details.',
+      );
+    }
+    return StructuredSessionPanel(
+      key: const ValueKey('sessions-detail-panel'),
+      sessionId: session.id,
+      title: session.title.isNotEmpty ? session.title : session.location,
+      client: client,
+      events: _events?.events,
+      gaps: _events?.gaps,
+      onNewSession: _newProject,
+      onOpenSettings: widget.onOpenSettings,
+      onClose: _clearSelection,
+      showCloseButton: showClose,
+      settings: widget.settings,
+      onThemeModeChanged: widget.onThemeModeChanged,
     );
   }
 
@@ -688,7 +759,7 @@ class _GroupNewSessionButton extends StatelessWidget {
 }
 
 class _CenteredMessage extends StatelessWidget {
-  const _CenteredMessage({required this.text});
+  const _CenteredMessage({super.key, required this.text});
 
   final String text;
 

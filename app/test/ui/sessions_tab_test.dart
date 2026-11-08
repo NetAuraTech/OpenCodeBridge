@@ -294,6 +294,9 @@ Future<_FakeSessionsClient> _pumpTab(
   _FakeFsClient? fs,
   _FakeOrbsClient? orbs,
   ValueChanged<String>? onOrbChipTapped,
+  String? deepLinkSession,
+  VoidCallback? onDeepLinkSessionConsumed,
+  FutureOr<void> Function()? onOpenSettings,
 }) async {
   final client = _FakeSessionsClient(rows: List<Session>.of(rows));
   await tester.pumpWidget(
@@ -307,6 +310,9 @@ Future<_FakeSessionsClient> _pumpTab(
           events: events ?? _FakeEventsSource(),
           access: access,
           onOrbChipTapped: onOrbChipTapped,
+          deepLinkSession: deepLinkSession,
+          onDeepLinkSessionConsumed: onDeepLinkSessionConsumed,
+          onOpenSettings: onOpenSettings,
         ),
       ),
     ),
@@ -440,16 +446,14 @@ void main() {
         expect(fs.subdirectoriesCalls, ['/proj']);
 
         // "Create here" creates at the directory on screen; the
-        // structured view opens on the new session.
+        // structured view opens on the new session in the detail pane.
         await tester.tap(find.byKey(const ValueKey('new-project-create')));
         await tester.pumpAndSettle();
 
         expect(client.createdIn, ['/proj']);
-        expect(find.byType(StructuredSessionScreen), findsOneWidget);
-
-        // Going back returns to the list with the new row.
-        await tester.pageBack();
-        await tester.pumpAndSettle();
+        expect(find.byType(StructuredSessionScreen), findsNothing);
+        expect(find.byType(StructuredSessionPanel), findsOneWidget);
+        expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
         expect(
           find.byKey(const ValueKey('session-ses_new_dir')),
           findsOneWidget,
@@ -465,16 +469,15 @@ void main() {
           await tester.pumpAndSettle();
 
           // No dialog: created straight in the group's project, and the
-          // structured view opens on the new session.
+          // structured view opens on the new session in the detail pane.
           expect(
             find.byKey(const ValueKey('new-project-dialog')),
             findsNothing,
           );
           expect(client.created, ['p1']);
-          expect(find.byType(StructuredSessionScreen), findsOneWidget);
-
-          await tester.pageBack();
-          await tester.pumpAndSettle();
+          expect(find.byType(StructuredSessionScreen), findsNothing);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
           expect(find.byKey(const ValueKey('session-ses_new')), findsOneWidget);
         },
       );
@@ -520,48 +523,88 @@ void main() {
     });
 
     group('row taps', () {
-      testWidgets('tapping a live row opens the structured view', (
-        tester,
-      ) async {
-        await _pumpTab(tester, rows: [_four]);
+      testWidgets(
+        'tapping a row shows its structured view in the right pane and the '
+        'list stays visible (issue #131)',
+        (tester) async {
+          await _pumpTab(tester, rows: [_four]);
 
-        await tester.tap(find.byKey(const ValueKey('session-ses_4')));
-        await tester.pumpAndSettle();
+          // No session selected yet: the empty-state hint is shown.
+          expect(
+            find.byKey(const ValueKey('sessions-detail-empty')),
+            findsOneWidget,
+          );
 
-        expect(find.byType(StructuredSessionScreen), findsOneWidget);
+          await tester.tap(find.byKey(const ValueKey('session-ses_4')));
+          await tester.pumpAndSettle();
 
-        await tester.pageBack();
-        await tester.pumpAndSettle();
-        expect(find.byType(StructuredSessionScreen), findsNothing);
-      });
+          // The detail opens in the pane (no navigator push); the list stays.
+          expect(find.byType(StructuredSessionScreen), findsNothing);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('sessions-detail-empty')),
+            findsNothing,
+          );
+          // The session row is still visible in the list.
+          expect(find.byKey(const ValueKey('session-ses_4')), findsOneWidget);
+        },
+      );
 
-      testWidgets('tapping an external row opens the structured view', (
-        tester,
-      ) async {
-        await _pumpTab(tester, rows: [_one, _three]);
+      testWidgets(
+        'tapping an external row shows the history, cost bar, and prompt in '
+        'the pane (issue #131)',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one, _three]);
 
-        await tester.tap(find.byKey(const ValueKey('session-ses_1')));
-        await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+          await tester.pumpAndSettle();
 
-        // The structured view shows the history, the cost bar, and the
-        // always-enabled prompt input.
-        expect(find.byType(StructuredSessionScreen), findsOneWidget);
-        expect(find.text('You'), findsOneWidget);
-        expect(find.text('hello'), findsOneWidget);
-        expect(find.text('Cost \$0.0100'), findsOneWidget);
-        expect(
-          find.byKey(const ValueKey('structured-prompt-input')),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('structured-prompt-send')),
-          findsOneWidget,
-        );
+          // The structured view shows the history, the cost bar, and the
+          // always-enabled prompt input — in the pane, no navigator route.
+          expect(find.byType(StructuredSessionScreen), findsNothing);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.text('You'), findsOneWidget);
+          expect(find.text('hello'), findsOneWidget);
+          expect(find.text('Cost \$0.0100'), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('structured-prompt-input')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('structured-prompt-send')),
+            findsOneWidget,
+          );
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+        },
+      );
 
-        await tester.pageBack();
-        await tester.pumpAndSettle();
-        expect(find.byType(StructuredSessionScreen), findsNothing);
-      });
+      testWidgets(
+        'selecting another session swaps the detail pane in place, no push/pop '
+        '(issue #131)',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one, _three]);
+
+          await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+          await tester.pumpAndSettle();
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          // The panel shows ses_1's title in its header.
+          expect(find.text('fix the flaky test'), findsWidgets);
+
+          // Select a different session: the pane swaps in place.
+          await tester.tap(find.byKey(const ValueKey('session-ses_3')));
+          await tester.pumpAndSettle();
+
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.byType(StructuredSessionScreen), findsNothing);
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+          // The pane now shows ses_3's title.
+          expect(find.text('docker logs'), findsWidgets);
+          // The list still shows both rows.
+          expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+          expect(find.byKey(const ValueKey('session-ses_3')), findsOneWidget);
+        },
+      );
     });
 
     group('delete', () {
@@ -883,6 +926,74 @@ void main() {
 
         expect(client.listCalls, 2);
         expect(events.reconnectCalls, 1);
+      });
+    });
+
+    group('two-pane deep link and settings (issue #131)', () {
+      testWidgets(
+        'a deep link selects the targeted session in the detail pane',
+        (tester) async {
+          final client = _FakeSessionsClient(rows: [_one, _three]);
+          final fs = _FakeFsClient();
+          final orbs = _FakeOrbsClient();
+          final events = _FakeEventsSource();
+          var consumed = 0;
+          Future<void> pump(String? target) => tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: SessionsTab(
+                  key: const ValueKey('sessions-tab'),
+                  apiBase: Uri.parse('http://bridge.test/'),
+                  client: client,
+                  fs: fs,
+                  orbs: orbs,
+                  events: events,
+                  deepLinkSession: target,
+                  onDeepLinkSessionConsumed: () => consumed++,
+                ),
+              ),
+            ),
+          );
+
+          await pump(null);
+          await tester.pump();
+
+          await pump('ses_3');
+          await tester.pumpAndSettle();
+
+          expect(consumed, 1);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+          expect(find.byType(StructuredSessionScreen), findsNothing);
+          expect(find.text('docker logs'), findsWidgets);
+        },
+      );
+
+      testWidgets('onOpenSettings is wired through to the detail pane', (
+        tester,
+      ) async {
+        var opened = 0;
+        await _pumpTab(tester, rows: [_one], onOpenSettings: () => opened++);
+
+        await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+        await tester.pumpAndSettle();
+
+        // The panel is rendered with the onOpenSettings callback. Invoke the
+        // /settings path by typing the command (the panel's slash command
+        // flow: close then open settings).
+        final prompt = find.byKey(const ValueKey('structured-prompt-input'));
+        expect(prompt, findsOneWidget);
+        await tester.enterText(prompt, '/settings');
+        await tester.pump();
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pumpAndSettle();
+
+        expect(opened, 1);
+        // /settings closes the detail view (deselects) then opens settings.
+        expect(
+          find.byKey(const ValueKey('sessions-detail-empty')),
+          findsOneWidget,
+        );
       });
     });
 
