@@ -948,11 +948,7 @@ class OrbTaskService {
   /// settle's own reason when there is none to report), the PR, persistence,
   /// and the completion injection. Guarded: a concurrent pass may have
   /// settled the task across the event loop.
-  Future<void> _settle(
-    OrbTask target,
-    String status,
-    String summary,
-  ) async {
+  Future<void> _settle(OrbTask target, String status, String summary) async {
     _idleSince.remove(target.id);
     _missingSince.remove(target.id);
     if (target.isDone) return;

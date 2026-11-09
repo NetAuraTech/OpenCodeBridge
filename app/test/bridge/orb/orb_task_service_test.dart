@@ -1621,73 +1621,75 @@ void main() {
   });
 
   group('the bounded orb_wait (issue #169)', () {
-    test('an explicit wait answers the running task at the grace window', () async {
-      orbs.listResult = [_runningOrb()];
-      scriptDispatch(); // The turn never ends.
-      waitGrace = const Duration(milliseconds: 30);
-
-      final tasks = newService();
-      final dispatched = await tasks.spawn(
-        task: 'long work',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-
-      // The held wait ends bounded with the record as it stands — the call
-      // that used to hang past the agent tool's own timeout.
-      final stopwatch = Stopwatch()..start();
-      final answer = await tasks.wait(dispatched.id);
-      stopwatch.stop();
-
-      expect(answer, same(dispatched));
-      expect(answer.status, 'running');
-      expect(answer.isDone, isFalse);
-      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
-    });
-
-    test('a wait that sees the completion still answers the settled result',
-        () async {
-      scriptCompletedTask();
-      waitGrace = const Duration(seconds: 5);
-
-      final tasks = newService();
-      final dispatched = await tasks.spawn(
-        task: 'do the thing',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-      final settled = await tasks.wait(dispatched.id);
-
-      expect(settled.status, 'succeeded');
-      expect(settled.summary, 'All done.');
-    });
-  });
-
-  group('the settle windows (issue #169)', () {
     test(
-      'an idle outcome-less session settles the task succeeded after the '
-      'window',
+      'an explicit wait answers the running task at the grace window',
       () async {
         orbs.listResult = [_runningOrb()];
-        scriptDispatch(); // 200 without an outcome, not active, forever.
-        settleIdleWindow = const Duration(milliseconds: 30);
+        scriptDispatch(); // The turn never ends.
+        waitGrace = const Duration(milliseconds: 30);
 
         final tasks = newService();
-        final task = await tasks.spawn(
-          task: 'orphaned work',
+        final dispatched = await tasks.spawn(
+          task: 'long work',
           wait: false,
           callerSession: 'ses_caller',
         );
-        await until(() => task.isDone);
 
-        expect(task.status, 'succeeded');
-        expect(task.summary, contains('no outcome was reported'));
-        // The completion injection carries the settle, as any completion.
-        await until(
-          () => backend.opencode.prompts.any((p) => p.$1 == 'ses_caller'),
-        );
+        // The held wait ends bounded with the record as it stands — the call
+        // that used to hang past the agent tool's own timeout.
+        final stopwatch = Stopwatch()..start();
+        final answer = await tasks.wait(dispatched.id);
+        stopwatch.stop();
+
+        expect(answer, same(dispatched));
+        expect(answer.status, 'running');
+        expect(answer.isDone, isFalse);
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
       },
     );
+
+    test(
+      'a wait that sees the completion still answers the settled result',
+      () async {
+        scriptCompletedTask();
+        waitGrace = const Duration(seconds: 5);
+
+        final tasks = newService();
+        final dispatched = await tasks.spawn(
+          task: 'do the thing',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        final settled = await tasks.wait(dispatched.id);
+
+        expect(settled.status, 'succeeded');
+        expect(settled.summary, 'All done.');
+      },
+    );
+  });
+
+  group('the settle windows (issue #169)', () {
+    test('an idle outcome-less session settles the task succeeded after the '
+        'window', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch(); // 200 without an outcome, not active, forever.
+      settleIdleWindow = const Duration(milliseconds: 30);
+
+      final tasks = newService();
+      final task = await tasks.spawn(
+        task: 'orphaned work',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      await until(() => task.isDone);
+
+      expect(task.status, 'succeeded');
+      expect(task.summary, contains('no outcome was reported'));
+      // The completion injection carries the settle, as any completion.
+      await until(
+        () => backend.opencode.prompts.any((p) => p.$1 == 'ses_caller'),
+      );
+    });
 
     test('an active session is never settled by the idle window', () async {
       orbs.listResult = [_runningOrb()];
@@ -1729,7 +1731,11 @@ void main() {
         callerSession: 'ses_caller',
       );
       await Future<void>.delayed(const Duration(milliseconds: 150));
-      expect(task.isDone, isFalse, reason: 'a parked question is not a done turn');
+      expect(
+        task.isDone,
+        isFalse,
+        reason: 'a parked question is not a done turn',
+      );
 
       // The human answers: the window restarts and the settle goes through.
       backend.opencode.pendingPermissionsResult = const [];
@@ -1738,28 +1744,30 @@ void main() {
       expect(task.status, 'succeeded');
     });
 
-    test('a missing session settles the task failed after the window',
-        () async {
-      orbs.listResult = [_runningOrb()];
-      scriptDispatch();
-      settleMissingWindow = const Duration(milliseconds: 30);
+    test(
+      'a missing session settles the task failed after the window',
+      () async {
+        orbs.listResult = [_runningOrb()];
+        scriptDispatch();
+        settleMissingWindow = const Duration(milliseconds: 30);
 
-      final tasks = newService();
-      final task = await tasks.spawn(
-        task: 'gone work',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-      // The session is deleted (the orb died and the session went with it).
-      backend.opencode.detailError = const OpencodeServiceError(
-        404,
-        'no such session',
-      );
-      await until(() => task.isDone);
+        final tasks = newService();
+        final task = await tasks.spawn(
+          task: 'gone work',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        // The session is deleted (the orb died and the session went with it).
+        backend.opencode.detailError = const OpencodeServiceError(
+          404,
+          'no such session',
+        );
+        await until(() => task.isDone);
 
-      expect(task.status, 'failed');
-      expect(task.summary, contains('no longer exists'));
-    });
+        expect(task.status, 'failed');
+        expect(task.summary, contains('no longer exists'));
+      },
+    );
 
     test('a transient service error never settles the task', () async {
       orbs.listResult = [_runningOrb()];
@@ -1789,23 +1797,25 @@ void main() {
       expect(task.status, 'succeeded');
     });
 
-    test('a settled zombie is persisted and stops the watcher spinning',
-        () async {
-      orbs.listResult = [_runningOrb()];
-      scriptDispatch();
-      settleIdleWindow = const Duration(milliseconds: 30);
+    test(
+      'a settled zombie is persisted and stops the watcher spinning',
+      () async {
+        orbs.listResult = [_runningOrb()];
+        scriptDispatch();
+        settleIdleWindow = const Duration(milliseconds: 30);
 
-      final tasks = newService();
-      final task = await tasks.spawn(
-        task: 'zombie work',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-      await until(() => task.isDone);
+        final tasks = newService();
+        final task = await tasks.spawn(
+          task: 'zombie work',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        await until(() => task.isDone);
 
-      final decoded = jsonDecode(tasksFile.readAsStringSync());
-      expect(decoded[0]['status'], 'succeeded');
-      expect(decoded[0]['completed'], isNotNull);
-    });
+        final decoded = jsonDecode(tasksFile.readAsStringSync());
+        expect(decoded[0]['status'], 'succeeded');
+        expect(decoded[0]['completed'], isNotNull);
+      },
+    );
   });
 }

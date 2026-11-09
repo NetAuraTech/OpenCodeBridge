@@ -518,44 +518,41 @@ void main() {
       }
     });
 
-    test(
-      'a never-ending task answers running at the grace window, not a held '
-      'connection (issue #169)',
-      () async {
-        final tasks = OrbTaskService(
-          orbs: orbs,
-          sessions: backend,
-          file: tasksFile,
-          pollInterval: const Duration(milliseconds: 5),
-          waitGrace: const Duration(milliseconds: 50),
+    test('a never-ending task answers running at the grace window, not a held '
+        'connection (issue #169)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+        pollInterval: const Duration(milliseconds: 5),
+        waitGrace: const Duration(milliseconds: 50),
+      );
+      backend.opencode.detailOf = (id) => _detail(id); // Never settles.
+      final server = await serverWith(tasks: tasks);
+      try {
+        final (_, spawnBody) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "long work", "wait": false, "session": "ses_caller"}',
         );
-        backend.opencode.detailOf = (id) => _detail(id); // Never settles.
-        final server = await serverWith(tasks: tasks);
-        try {
-          final (_, spawnBody) = await _postRaw(
-            server.baseUri,
-            '/api/orb/spawn',
-            '{"task": "long work", "wait": false, "session": "ses_caller"}',
-          );
-          final id = jsonDecode(spawnBody)['id'] as String;
+        final id = jsonDecode(spawnBody)['id'] as String;
 
-          final stopwatch = Stopwatch()..start();
-          final (status, body) = await _postRaw(
-            server.baseUri,
-            '/api/orb/wait',
-            jsonEncode({'id': id}),
-          );
-          stopwatch.stop();
+        final stopwatch = Stopwatch()..start();
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/wait',
+          jsonEncode({'id': id}),
+        );
+        stopwatch.stop();
 
-          expect(status, 200); // An answer, not a timeout waiting for one.
-          final row = jsonDecode(body);
-          expect(row['status'], 'running');
-          expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
-        } finally {
-          await server.stop();
-        }
-      },
-    );
+        expect(status, 200); // An answer, not a timeout waiting for one.
+        final row = jsonDecode(body);
+        expect(row['status'], 'running');
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+      } finally {
+        await server.stop();
+      }
+    });
 
     test(
       'waits the dispatched task and answers the structured result',
