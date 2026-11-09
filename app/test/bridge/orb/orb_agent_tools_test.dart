@@ -64,10 +64,29 @@ void main() {
       // tasks (by the tool's directory), and a non-empty answer points at
       // the dispatched task instead of the blind "unreachable" error.
       expect(source, contains('/api/orb/tasks'));
-      expect(source, contains('recentTasks(context?.directory)'));
+      // The read is scoped to this session's own dispatches (issue #147).
+      expect(
+        source,
+        contains('recentTasks(context?.directory, context?.sessionID)'),
+      );
       expect(source, contains('orb_wait with the matching task_id'));
     },
   );
+
+  test('the dispatched text is the caller task plus the return contract '
+      '(issue #147)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The bridge prompts the orb with exactly what the tool sends, so the
+    // commit/push and PR contract travels in the tool's own text — not
+    // glued on by the bridge.
+    expect(source, contains('task: fullySpecified(args.task)'));
+    expect(source, contains('function fullySpecified(task)'));
+    expect(source, contains('post-commit hook pushes them'));
+    expect(source, contains('gh pr create'));
+    expect(source, contains('One PR per orb'));
+  });
 
   test('materialize never overwrites an edited copy (on-disk wins)', () async {
     final file = File('${temp.path}/opencodebridge_orbs.ts')

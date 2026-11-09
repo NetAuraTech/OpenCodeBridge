@@ -93,8 +93,11 @@ class _FakeBackend extends SessionsBackend {
 
   final _FakeOpencode opencode;
 
+  /// A second caller in the same project (issue #147's attribution rows).
+  Session? otherCaller;
+
   @override
-  Future<List<Session>> list() async => [_callerRow];
+  Future<List<Session>> list() async => [_callerRow, ?otherCaller];
 }
 
 class _FakeOrbs implements OrbService {
@@ -605,6 +608,92 @@ void main() {
         await server.stop();
       }
     });
+
+    test(
+      'two different dispatches are two tasks, each owned (issue #147)',
+      () async {
+        final tasks = OrbTaskService(
+          orbs: orbs,
+          sessions: backend,
+          file: tasksFile,
+        );
+        backend.opencode.detailOf = (id) => _detail(id);
+        final server = await serverWith(tasks: tasks);
+        try {
+          backend.otherCaller = Session(
+            id: 'ses_b',
+            title: 'caller B',
+            project: const SessionProject(id: 'prj_1', name: 'shop'),
+            created: 101,
+            location: '/home/dev/shop',
+            active: false,
+          );
+
+          Future<String> dispatch(String task, String session) async {
+            final (status, body) = await _postRaw(
+              server.baseUri,
+              '/api/orb/spawn',
+              jsonEncode({'task': task, 'wait': false, 'session': session}),
+            );
+            expect(status, 201);
+            return body;
+          }
+
+          // Caller A's running task, then caller B's follow-up whose text
+          // contains A's, then B's own task: each dispatch with a different
+          // raw text (or a different caller) is a task of its own — none is
+          // collapsed into A's running task (issue #147).
+          final firstBody = await dispatch('Fix the login form', 'ses_caller');
+          final secondBody = await dispatch(
+            'Fix the login form and the signup form',
+            'ses_b',
+          );
+          final thirdBody = await dispatch('Fix the login form', 'ses_b');
+          final rows = {
+            for (final body in [firstBody, secondBody, thirdBody])
+              jsonDecode(body)['id'] as String: jsonDecode(body),
+          };
+
+          expect(rows, hasLength(3));
+          expect(jsonDecode(firstBody)['caller'], 'ses_caller');
+          expect(jsonDecode(secondBody)['caller'], 'ses_b');
+          expect(jsonDecode(thirdBody)['caller'], 'ses_b');
+          expect(
+            jsonDecode(secondBody)['task'],
+            'Fix the login form and the signup form',
+          );
+
+          // The recent-tasks read answers all of them, so a retry can find its
+          // own id rather than the earlier task's.
+          final (status, body) = await _postRaw(
+            server.baseUri,
+            '/api/orb/tasks',
+            '{"project": "prj_1"}',
+          );
+          expect(status, 200);
+          final recent = jsonDecode(body)['tasks'] as List<dynamic>;
+          expect(recent, hasLength(3));
+          expect(
+            {for (final row in recent) row['caller']},
+            {'ses_caller', 'ses_b'},
+          );
+
+          // A caller-scoped read (issue #147) answers only B's own tasks: A's
+          // running task is never offered as B's retry target.
+          final (scopedStatus, scopedBody) = await _postRaw(
+            server.baseUri,
+            '/api/orb/tasks',
+            '{"project": "prj_1", "session": "ses_b"}',
+          );
+          expect(scopedStatus, 200);
+          final scoped = jsonDecode(scopedBody)['tasks'] as List<dynamic>;
+          expect(scoped, hasLength(2));
+          expect({for (final row in scoped) row['caller']}, {'ses_b'});
+        } finally {
+          await server.stop();
+        }
+      },
+    );
 
     test('an unknown directory answers no tasks', () async {
       final tasks = OrbTaskService(
