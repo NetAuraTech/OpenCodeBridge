@@ -241,6 +241,34 @@ class OrbTaskService {
     final retried = _retriedTaskOn(record.id, task, callerSession, dispatchId);
     if (retried != null) return retried;
 
+    // The orb's boot proved the agent cannot execute (issue #149, spec §6.8):
+    // an existing orb's refusal already fired in the targeting, and an orb
+    // this spawn just created can boot straight into `broken:shell`. The
+    // surface's answer is a settled `refused` record — nothing is dispatched
+    // onto it, and `orb_wait`/the card carry the boot's own reason.
+    if (record.hasNoShell) {
+      final refused = OrbTask(
+        id: 'task_${_token()}',
+        orb: record.id,
+        project: record.project,
+        orbName: record.name,
+        branch: record.branch,
+        session: '',
+        callerSession: callerSession,
+        callerDirectory: callerDirectory,
+        callerOrb: await _hostOrbOf(callerSession ?? ''),
+        createdOrb: created,
+        task: task,
+        created: DateTime.now().millisecondsSinceEpoch,
+        status: 'refused',
+        summary: record.bootReason ?? 'no usable shell',
+        completed: DateTime.now().millisecondsSinceEpoch,
+      );
+      _tasks.insert(0, refused);
+      _persist();
+      return refused;
+    }
+
     // The task's session on the orb's service (one session per task, so the
     // turn outcome is unambiguous for completion detection).
     final session = await orbs.createSessionOnOrb(record.id);
@@ -472,6 +500,10 @@ class OrbTaskService {
   /// used as-is (idempotent wake), a stopped one is woken, any other state
   /// refuses.
   Future<OrbRecord> _wakeOrUse(OrbRecord row) async {
+    // A shell-less orb is refused before the wake: waking it cannot help
+    // (the probe fails on every start — the entrypoint's stage §6.8), and
+    // the refusal must carry the boot's own reason (issue #149).
+    if (row.hasNoShell) throw _noShellRefusal(row);
     if (row.state == 'running') return row;
     if (row.isStoppedLike) return orbs.wake(row.id);
     throw OrbRefusalError(
@@ -479,6 +511,16 @@ class OrbTaskService {
       'the project orb ${row.name} is ${row.state} — spawn refused',
     );
   }
+
+  /// The spawn refusal of an orb whose agent cannot run a command (issue
+  /// #149, spec §6.8): the caller gets "spawned, works nowhere" said with
+  /// the cause, never a dispatch that buys a well-written "I can't".
+  OrbRefusalError _noShellRefusal(OrbRecord row) => OrbRefusalError(
+    OrbRefusalError.noShell,
+    row.bootReason ??
+        'the orb ${row.name} failed its boot shell probe: its agent cannot '
+            'run a command, so no code task can land on it',
+  );
 
   /// The additional orb (fresh clone of the project's default branch).
   Future<OrbRecord> _createOrb(String projectId, String name) async {

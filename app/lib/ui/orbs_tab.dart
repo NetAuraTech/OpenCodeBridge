@@ -883,7 +883,11 @@ String _stateWord(String state) {
 /// broken push when the branch is not reaching the remote (issue #120 —
 /// the orb works, but the return channel is down; the louder state
 /// details win when there is one).
-String? _stateDetail(String state, {bool pushFailing = false}) {
+String? _stateDetail(
+  String state, {
+  bool pushFailing = false,
+  String? bootReason,
+}) {
   if (state.startsWith('preparing:')) {
     return 'stage: ${state.substring(state.indexOf(':') + 1)}';
   }
@@ -892,6 +896,10 @@ String? _stateDetail(String state, {bool pushFailing = false}) {
       return 'workspace volume missing';
     case 'broken:state':
       return 'state directory missing';
+    case 'broken:shell':
+      // The boot's own reason, verbatim (issue #149): the card says what the
+      // refusal says — an orb whose agent cannot run a command (spec §6.8).
+      return bootReason ?? 'the agent cannot run a command';
     case 'orphan':
       return 'volumes without a container';
   }
@@ -903,7 +911,8 @@ String? _stateDetail(String state, {bool pushFailing = false}) {
 }
 
 /// The card's state dot (spec §9.4): amber preparing / cleanup pending,
-/// green running, red broken, grey stopped / orphan.
+/// green running, red broken (the shell-less orb included — it boots, but its
+/// agent cannot execute, issue #149), grey stopped / orphan.
 Color _stateColor(String state) {
   switch (state.split(':').first) {
     case 'running':
@@ -971,7 +980,11 @@ class _OrbCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final detail = _stateDetail(orb.state, pushFailing: orb.pushFailing);
+    final detail = _stateDetail(
+      orb.state,
+      pushFailing: orb.pushFailing,
+      bootReason: orb.bootReason,
+    );
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -1131,6 +1144,11 @@ class _OrbCard extends StatelessWidget {
         return [forceDelete];
       case 'broken:state':
         return [forceDelete, freshState];
+      case 'broken:shell':
+        // The boot proved the agent cannot execute (issue #149, §6.8): the
+        // volumes and state dir are intact, so there is nothing to freshen —
+        // force-delete is the exit, and the human re-creates on a fixed image.
+        return [forceDelete];
       case 'orphan':
         return [
           _CardAction(

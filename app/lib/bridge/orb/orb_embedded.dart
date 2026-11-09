@@ -192,10 +192,17 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   ///      declared service to become healthy (SERVICE_HEALTH_TIMEOUT_SECONDS,
   ///      ~30 s) before serving; a timeout exits non-zero and the bridge
   ///      surfaces the failure with the boot log tail (issue #93);
-  ///   6. serve opencode on the fixed in-container port (spec §2.9).
+  ///   6. every start: the shell probe (issue #149, spec §6.8) — the
+  ///      agent's code tasks (run the tests, typecheck, build, `git commit`,
+  ///      `gh pr create`) need a shell to run a command in. The spawn prompt
+  ///      asks for them, so the orb must prove command execution before it
+  ///      serves opencode: `/bin/sh -c 'printf ok'` (no auth, no network). A
+  ///      missing or broken shell fails the boot and the bridge surfaces it
+  ///      as `broken:shell` — never `running`;
+  ///   7. serve opencode on the fixed in-container port (spec §2.9).
   /// Each boot stage streams as a `[orb] stage: <word>` line (cloning,
-  /// installing, services, health, ready) so the preparing state can show
-  /// the stage (spec §9.3/§9.4).
+  /// installing, services, health, shell, ready) so the preparing state can
+  /// show the stage (spec §9.3/§9.4).
   ///
   /// The env the bridge passes at `docker create` (spec §2.3): `ORB_ID`
   /// (the orb id, which the hook bakes into its push refspec),
@@ -238,7 +245,9 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
 #      service to become healthy (SERVICE_HEALTH_TIMEOUT_SECONDS) before
 #      serving; a timeout exits non-zero, the bridge surfaces the failure
 #      with the boot log tail (issue #93);
-#   6. serve opencode on the fixed in-container port (spec §2.9).
+#   6. every start: the shell probe (issue #149, spec §6.8) — the agent's
+#      code tasks need a shell to run a command in; the orb proves it can
+#      before it serves opencode, else the boot fails (broken:shell).
 #
 # Scripts-as-config (spec §6.6): this file lives in the app-owned build
 # context and is baked into the image — there is no app/bridge knob. The
@@ -249,9 +258,14 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
 # state can show it (spec §9.3/§9.4).
 set -eu
 
-# --- Named constants (spec §2.9, §6.5) ------------------------------------
+# --- Named constants (spec §2.9, §6.5, §6.8) ------------------------------
 OPENCODE_PORT=4096
 SERVICE_HEALTH_TIMEOUT_SECONDS=30
+# The shell the agent's commands run in (spec §6.8): the image's own sh,
+# resolved on PATH, so a code task's `printf ok` smoke test proves the same
+# execution path the agent will use — no host binary, no dependency beyond
+# the base image.
+AGENT_SHELL=${ORB_PROBE_SHELL:-sh}
 
 # --- Container paths (defaults = the container layout) --------------------
 WORKSPACE=${ORB_WORKSPACE:-/workspace}
@@ -592,7 +606,41 @@ if [ -n "$declared" ]; then
     done
 fi
 
-# --- 6. Serve opencode (spec §2.9) -------------------------------------------
+# --- 6. Every start: the shell probe (issue #149, spec §6.8) ----------------
+# The spawn prompt asks the agent to run the tests, typecheck, build them,
+# commit (the post-commit hook pushes) and open the PR — all of it through a
+# shell. An orb whose agent has no shell must not come up "ready": it would
+# answer succeeded on a well-written "I can't" and every code task would die
+# on arrival. The probe is the agent's own execution path, checked *before*
+# opencode serves: $AGENT_SHELL -c 'printf ok' must exit 0 and print ok — no
+# auth, no network. A failure fails the boot (the bridge surfaces it as
+# broken:shell with this log tail), never a silently shell-less ready.
+log "stage: shell"
+# The probe must observe the shell's own failure: `set -e` exits on the
+# command substitution's status before the check below runs, so the call is
+# guarded by `if` (a non-zero status is the shell-less orb, not a crash).
+if shell_out=$("$AGENT_SHELL" -c 'printf ok' 2>&1); then
+    shell_status=0
+else
+    shell_status=$?
+fi
+if [ "$shell_status" -ne 0 ] || [ "$shell_out" != "ok" ]; then
+    log "FATAL: no usable shell — the agent could not run a command"
+    log "shell: tried $AGENT_SHELL -c 'printf ok'"
+    log "shell: exit $shell_status"
+    [ -n "$shell_out" ] && log "shell: output: $shell_out"
+    log "shell: an orb whose agent cannot execute is not offered as a workspace (issue #149)"
+    # The durable signal, like the push marker (issue #120): a host-side
+    # read on the state mount, so the bridge classifies the orb without a
+    # `docker logs` on every list. Cleared on a boot that passes the probe.
+    printf '%s\n' "no usable shell: $AGENT_SHELL -c 'printf ok' exited $shell_status" \
+        > "$STATE_DIR/no-shell"
+    exit 1
+fi
+rm -f "$STATE_DIR/no-shell"
+log "shell: usable ($AGENT_SHELL -c 'printf ok')"
+
+# --- 7. Serve opencode (spec §2.9) -------------------------------------------
 log "stage: ready"
 # 0.0.0.0: the container is only reachable through the docker port mapping,
 # which binds to the container's network address, never loopback.

@@ -52,7 +52,9 @@ jobs:
 
       - name: Run Flutter tests
         working-directory: app
-        run: flutter test
+        # The `docker` tag boots REAL containers (the orb shell probe, #149):
+        # it needs a daemon and a built orb:<hash> image, so it is opt-in.
+        run: flutter test --exclude-tags docker
 
   build-linux:
     runs-on: ubuntu-latest

@@ -178,10 +178,16 @@ class OrbRefusalError implements Exception {
   /// the seed only parameterizes a new orb's clone (issue #100, spec §3.3).
   static const String seedConflict = 'seed_conflict';
 
+  /// The target orb cannot run a command — its boot died at the shell probe
+  /// (`broken:shell`, issue #149, spec §6.8). [message] is the boot's own
+  /// reason. The caller says "spawned, works nowhere": the orb exists, but no
+  /// code task can land on it.
+  static const String noShell = 'no_shell';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
   /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
   /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`,
-  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`).
+  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`, `no_shell`).
   final String code;
 
   /// The clear message for the app.
@@ -789,6 +795,18 @@ class OrbService {
       final checked = _withBrokenState(row, volumeNames);
       if (checked.state != 'stopped') {
         rows[i] = checked;
+        continue;
+      }
+      // The boot failed at the shell probe (issue #149, spec §6.8): the
+      // container's volumes are all there, but its last boot died before
+      // serving opencode — the agent cannot run a command. That is not a
+      // clean `stopped` orb: it is never surfaced as ready for a code task.
+      // The entrypoint leaves the reason as a `no-shell` marker on the state
+      // mount (a cheap host-side read, never a container probe: the list is
+      // the composite services' hot path, spec §2.2).
+      final marker = _noShellMarker(row.id);
+      if (marker != null) {
+        rows[i] = _withBootReason(_replacedState(row, 'broken:shell'), marker);
         continue;
       }
       final reason = _cleanupReason(row.id);
@@ -2703,6 +2721,40 @@ class OrbService {
     return stage;
   }
 
+  /// The reason a boot died at the entrypoint's shell probe (issue #149,
+  /// spec §6.8): the `[orb] FATAL: no usable shell …` line and the `[orb]
+  /// shell: …` detail lines right after it, joined — `null` when [log] holds
+  /// no such failure (a healthy boot, or a boot that failed elsewhere).
+  ///
+  /// The log is the ground truth, not an assumption: a boot that reached
+  /// `[orb] stage: ready` has its shell, whatever else the log says.
+  static String? noShellReason(String log) {
+    final lines = const LineSplitter().convert(log);
+    var ready = false;
+    for (final line in lines) {
+      if (line.startsWith('[orb] stage: ready')) ready = true;
+    }
+    if (ready) return null;
+    final reason = <String>[];
+    for (final line in lines) {
+      if (!line.startsWith('[orb] ')) {
+        // The FATAL and its details are one contiguous block (a log line
+        // each); any foreign line ends it.
+        if (reason.isNotEmpty) break;
+        continue;
+      }
+      final body = line.substring('[orb] '.length).trim();
+      if (body.startsWith('FATAL: no usable shell')) {
+        reason.add(body);
+      } else if (body.startsWith('shell:') && reason.isNotEmpty) {
+        reason.add(body);
+      } else if (reason.isNotEmpty) {
+        break;
+      }
+    }
+    return reason.isEmpty ? null : reason.join(' — ');
+  }
+
   /// The `owner/repo` a GitHub remote url encodes — the four forms
   /// [isGitHubRemote] accepts (https, http, scp-like, ssh://), with or
   /// without the `.git` suffix — or `null` when the url is not one of them
@@ -3089,9 +3141,12 @@ class OrbService {
       final state = await _inspectState(container);
       if (state == 'exited' || state == 'dead') {
         final log = await _fullLog(container);
+        // The shell probe's failure is the boot's own reason (issue #149,
+        // spec §6.8): a generic "exited during boot" would leave the caller
+        // guessing why the orb it spawned can never do a code task.
         throw OrbBootError(
           id,
-          'the orb container exited during boot',
+          noShellReason(log) ?? 'the orb container exited during boot',
           _logTail(log),
         );
       }
@@ -3423,6 +3478,23 @@ class OrbService {
     );
   }
 
+  /// The shell-probe failure reason of orb [id], read from the state mount's
+  /// `no-shell` marker the entrypoint writes (spec §6.8, issue #149), or `null`
+  /// when that boot passed the probe. A host-side read only — the marker is
+  /// cleared by the next passing boot, exactly like `push-failed` (#120).
+  String? _noShellMarker(String id) {
+    final file = File('${stateRoot.path}/$id/no-shell');
+    if (!file.existsSync()) return null;
+    try {
+      final reason = file.readAsStringSync().trim();
+      return reason.isEmpty ? 'no usable shell' : reason;
+    } on FileSystemException {
+      // Unreadable for a moment (a boot rewriting it): no verdict beats a
+      // wrong one, and the next list reads it again.
+      return null;
+    }
+  }
+
   OrbRecord _withBrokenState(OrbRecord record, List<String> volumeNames) {
     if (!volumeNames.contains('orb-${record.id}-workspace')) {
       return _replacedState(record, 'broken:workspace');
@@ -3443,6 +3515,23 @@ class OrbService {
     url: null,
     pr: record.pr,
     base: record.base,
+    bootReason: record.bootReason,
+  );
+
+  /// [record] with its boot-failure reason set (issue #149: the shell probe's
+  /// `FATAL` line, read back from the container log).
+  OrbRecord _withBootReason(OrbRecord record, String reason) => OrbRecord(
+    id: record.id,
+    name: record.name,
+    project: record.project,
+    branch: record.branch,
+    state: record.state,
+    created: record.created,
+    url: record.url,
+    pr: record.pr,
+    base: record.base,
+    pushFailing: record.pushFailing,
+    bootReason: reason,
   );
 
   /// The orb id a labeled volume name encodes (`orb-<id>-workspace` /

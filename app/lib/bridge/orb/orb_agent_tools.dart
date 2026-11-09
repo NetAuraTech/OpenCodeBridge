@@ -87,7 +87,11 @@ function describe(row) {
   lines.push(`Branch: ${row.branch}`)
   if (row.summary) lines.push("", row.summary)
   if (row.pr) lines.push("", `PR: ${row.pr}`)
-  if (row.status === "running") {
+  if (row.status === "refused") {
+    // Issue #149: the orb exists but its agent cannot execute — nothing ran,
+    // and the reason (the boot's own) is the answer.
+    lines.push("", "Refused: this orb cannot run commands, so no work happened there.")
+  } else if (row.status === "running") {
     lines.push("", `To wait for this task later, call orb_wait with task_id "${row.id}".`)
   }
   return lines.join("\n")
@@ -246,6 +250,19 @@ export default {
             }
             if (code === "not_running") {
               return { output: "Orb spawn refused: the project's orb is broken. Fix or delete it from the app's Orbs tab." }
+            }
+            if (code === "no_shell") {
+              // Issue #149: the orb exists, but its agent cannot run a
+              // command — no commit, no push, no PR can come out of a task
+              // dispatched onto it. Say so instead of dispatching.
+              return {
+                output:
+                  "Orb spawn refused (no_shell): no task was dispatched — the orb's agent cannot run a shell " +
+                  "command, so it cannot commit, push or open the PR. The boot reported: " +
+                  (row.details || "no usable shell") +
+                  " Nothing is running there. Do the work in this session instead, or fix the orb (delete and " +
+                  "re-create it) from the app's Orbs tab.",
+              }
             }
             if (code === "seed_not_found" || code === "seed_not_pushed" || code === "seed_conflict") {
               return { output: "Orb spawn refused (" + code + "): " + (row.details || "see the seed rules, spec §3.3.") }
