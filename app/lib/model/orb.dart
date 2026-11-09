@@ -52,6 +52,7 @@ class OrbRecord {
     this.pr,
     this.base,
     this.pushFailing = false,
+    this.ghAuthFailed,
     this.bootReason,
   });
 
@@ -119,6 +120,14 @@ class OrbRecord {
   /// by the orb's post-commit hook.
   final bool pushFailing;
 
+  /// The cause of the orb's gh authentication failure (issue #145), read
+  /// from the state dir's `gh-auth-failed` marker the bridge writes when it
+  /// cannot stage usable gh credentials for the start; `null` when the
+  /// staging succeeded (or the host has no gh at all — the ssh mount then
+  /// still pushes, nothing to blame on credentials). The agent's every API
+  /// call would answer 401: the card says why instead.
+  final String? ghAuthFailed;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
@@ -130,6 +139,7 @@ class OrbRecord {
     if (pr != null) 'pr': pr!.toJson(),
     if (base != null) 'base': base,
     if (pushFailing) 'pushFailing': true,
+    if (ghAuthFailed != null) 'ghAuthFailed': ghAuthFailed,
     if (bootReason != null) 'bootReason': bootReason,
   };
 
@@ -146,6 +156,7 @@ class OrbRecord {
       pr: map['pr'] == null ? null : OrbPr.fromJson(map['pr']),
       base: map['base'] as String?,
       pushFailing: map['pushFailing'] == true,
+      ghAuthFailed: map['ghAuthFailed'] as String?,
       bootReason: map['bootReason'] as String?,
     );
   }
@@ -163,6 +174,7 @@ class OrbRecord {
       other.pr == pr &&
       other.base == base &&
       other.pushFailing == pushFailing &&
+      other.ghAuthFailed == ghAuthFailed &&
       other.bootReason == bootReason;
 
   @override
@@ -177,6 +189,7 @@ class OrbRecord {
     pr,
     base,
     pushFailing,
+    ghAuthFailed,
     bootReason,
   );
 

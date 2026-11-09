@@ -135,6 +135,18 @@ const _pushFailing = OrbRecord(
   pushFailing: true,
 );
 
+/// A running orb whose gh credentials could not be staged (issue #145): the
+/// agent's every `gh` API call would answer 401 — the card says why.
+const _ghAuthFailing = OrbRecord(
+  id: 'orb_13',
+  name: 'unauthenticated',
+  project: 'p1',
+  branch: 'orb/orb_13',
+  state: 'running',
+  created: '2025-01-01T00:00:00Z',
+  ghAuthFailed: 'The token in default is invalid.',
+);
+
 const _sessionA = Session(
   id: 'ses_1',
   title: 'a',
@@ -570,6 +582,48 @@ void main() {
         // detail line, not a state change.
         expect(find.text('running'), findsOneWidget);
         expect(find.text('push to the remote is failing'), findsOneWidget);
+      });
+
+      testWidgets('a gh-auth-failing card names the cause (issue #145)', (
+        tester,
+      ) async {
+        await _pumpTab(tester, orbs: [_ghAuthFailing]);
+        // The orb still runs; the dead gh is a detail line that says WHY,
+        // so the user does not discover it through 401s.
+        expect(find.text('running'), findsOneWidget);
+        expect(
+          find.text(
+            'gh authentication failed: The token in default is invalid.',
+          ),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('a dead gh outranks the push it breaks (issue #145)', (
+        tester,
+      ) async {
+        // A dead gh fails the post-commit push too: the card must name the
+        // CAUSE, not the symptom.
+        await _pumpTab(
+          tester,
+          orbs: [
+            OrbRecord(
+              id: 'orb_14',
+              name: 'both',
+              project: 'p1',
+              branch: 'orb/orb_14',
+              state: 'running',
+              created: '2025-01-01T00:00:00Z',
+              pushFailing: true,
+              ghAuthFailed: 'HTTP 401: Bad credentials',
+            ),
+          ],
+        );
+        expect(
+          find.text('gh authentication failed: HTTP 401: Bad credentials'),
+          findsOneWidget,
+        );
+        expect(find.text('push to the remote is failing'), findsNothing);
       });
 
       testWidgets('an orphan card wears the orphaned state', (tester) async {

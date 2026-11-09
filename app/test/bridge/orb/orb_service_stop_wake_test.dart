@@ -314,8 +314,29 @@ class _FakeDocker {
             return ok;
         }
     }
+    if (argv.first == 'exec') {
+      // The in-container gh check (issue #145): scripted when the test
+      // cares, else the exec carrying the staged config dir authenticates
+      // and one without it fails (docker exec does not inherit the
+      // entrypoint's export).
+      final scripted = execRespond?.call(argv);
+      if (scripted != null) return scripted;
+      if (argv.contains('-e')) {
+        return const DockerCliResult(exitCode: 0, stdout: 'dev\n', stderr: '');
+      }
+      return const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr: 'not logged into any GitHub hosts',
+      );
+    }
     throw StateError('unexpected docker argv: $argv');
   }
+
+  /// Scripts the `docker exec` inside the orb (issue #145): the custom
+  /// answer. `null` falls back to the measured default (the env-carrying exec
+  /// authenticates, a bare one does not) — see the `exec` dispatch.
+  DockerCliResult Function(List<String> argv)? execRespond;
 
   Future<DockerProcess> _spawn(
     List<String> argv, {
@@ -614,7 +635,7 @@ void main() {
               '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
           stderr: '',
         );
-        gh.results['auth token'] = const GitCliResult(
+        gh.results['auth token --user dev'] = const GitCliResult(
           exitCode: 0,
           stdout: 'gho_ROTATED\n',
           stderr: '',
@@ -646,6 +667,91 @@ void main() {
         expect(
           File('${stateRoot.path}/$orbId/gh/hosts.yml').readAsStringSync(),
           contains('oauth_token: gho_ROTATED'),
+        );
+      });
+
+      test('the probe passes GH_CONFIG_DIR explicitly: docker exec does not '
+          'inherit the entrypoint export (issue #145)', () async {
+        // Measured shape (smoke120_manual.dart:154): a bare `docker exec`
+        // reads the tokenless mount and fails for every keyring host. The
+        // probe must therefore carry the staged dir, or it flags healthy
+        // orbs. The fake fails any exec WITHOUT the env and passes those
+        // WITH it - so a probe missing the env lands the marker.
+        final http = await bootServer();
+        addOrb(state: 'exited', restartPort: http.port);
+        stateDir();
+        setMarker();
+        File('${stateRoot.path}/$orbId/gh/hosts.yml')
+            .createSync(recursive: true);
+        File('${stateRoot.path}/$orbId/gh/hosts.yml')
+            .writeAsStringSync('github.com:\n    user: dev\n');
+
+        final record = await service(gh: hostGh().run).wake(orbId);
+        await http.close(force: true);
+
+        expect(record.state, 'running');
+        final execs = docker.runArgs
+            .where((a) => a.first == 'exec')
+            .map((a) => a.join(' '))
+            .toList();
+        expect(execs, isNotEmpty, reason: 'a staged config must be probed');
+        expect(
+          execs.single,
+          contains('-e GH_CONFIG_DIR=${OrbService.inContainerGhConfigDir}'),
+          reason: 'the probe must read the STAGED config, not the mount',
+        );
+        expect(execs.single, contains('gh api user'));
+        expect(
+          File('${stateRoot.path}/$orbId/gh-auth-failed').existsSync(),
+          isFalse,
+          reason: 'the probed gh authenticated',
+        );
+      });
+
+      test('a probe whose in-container gh refuses GitHub flags the orb with '
+          'the cause, and does not fail the boot (issue #145)', () async {
+        final http = await bootServer();
+        addOrb(state: 'exited', restartPort: http.port);
+        stateDir();
+        setMarker();
+        File('${stateRoot.path}/$orbId/gh/hosts.yml')
+            .createSync(recursive: true);
+        File('${stateRoot.path}/$orbId/gh/hosts.yml')
+            .writeAsStringSync('github.com:\n    user: dev\n');
+        docker.execRespond = (argv) => const DockerCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'HTTP 401: Bad credentials (https://api.github.com/user)\n',
+        );
+
+        final record = await service(gh: hostGh().run).wake(orbId);
+        await http.close(force: true);
+
+        // The orb is still a working workspace...
+        expect(record.state, 'running');
+        // ...but its gh is flagged, with the in-container cause.
+        final marker = File('${stateRoot.path}/$orbId/gh-auth-failed');
+        expect(marker.existsSync(), isTrue);
+        expect(marker.readAsStringSync(), contains('Bad credentials'));
+      });
+
+      test('a probe whose in-container gh answers clears a stale gh-auth '
+          'flag (issue #145)', () async {
+        final http = await bootServer();
+        addOrb(state: 'exited', restartPort: http.port);
+        stateDir();
+        setMarker();
+        Directory('${stateRoot.path}/$orbId/gh').createSync(recursive: true);
+        File('${stateRoot.path}/$orbId/gh/hosts.yml')
+            .writeAsStringSync('github.com:\n    user: dev\n');
+        File('${stateRoot.path}/$orbId/gh-auth-failed').writeAsStringSync('x');
+
+        await service(gh: hostGh().run).wake(orbId);
+        await http.close(force: true);
+
+        expect(
+          File('${stateRoot.path}/$orbId/gh-auth-failed').existsSync(),
+          isFalse,
         );
       });
 
