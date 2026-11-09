@@ -92,7 +92,7 @@ function describe(row) {
     // and the reason (the boot's own) is the answer.
     lines.push("", "Refused: this orb cannot run commands, so no work happened there.")
   } else if (row.status === "running") {
-    lines.push("", `To wait for this task later, call orb_wait with task_id "${row.id}".`)
+    lines.push("", `Still running — no need to poll: this session receives a message when the task completes. To check in the same turn, call orb_wait with task_id "${row.id}".`)
   }
   return lines.join("\n")
 }
@@ -154,10 +154,14 @@ export default {
         description:
           "Dispatch a task to an orb (the Docker sandbox workspace): wakes the targeted or " +
           "project's single orb, creates one when none exists, or creates the additional orb " +
-          "when the given name is not taken yet. Sends the task to its agent, and by default " +
-          "waits for the result. The work lands on the orb's dedicated branch (orb/<id>) — the " +
-          "orb's agent commits and the branch is pushed after every commit. The project is " +
-          "not an argument: this session's project is used.",
+          "when the given name is not taken yet. Sends the task to its agent and returns the " +
+          "task as soon as the dispatch lands — the work runs in the background, and this " +
+          "session receives a message when it completes (do not poll; end your turn and the " +
+          "completion will wake you). Pass wait: true to hold this call briefly for a quick " +
+          "task (the hold is bounded; a still-running task answers as running). The work lands " +
+          "on the orb's dedicated branch (orb/<id>) — the orb's agent commits and the branch is " +
+          "pushed after every commit. The project is not an argument: this session's project " +
+          "is used.",
         input: {
           type: "object",
           properties: {
@@ -169,8 +173,8 @@ export default {
             wait: {
               type: "boolean",
               description:
-                "Block until the task completes (default true); false returns the orb handle immediately. " +
-                "The block is bounded: a long task answers as running (poll it with orb_wait), and a " +
+                "Hold the call briefly for a quick task (bounded); default false — the dispatch " +
+                "answers immediately and the completion message wakes this session later. A " +
                 "retried spawn of the very same task (the identical text from the same session, e.g. after " +
                 "a timeout) returns the already-running task — it is not duplicated. A different task " +
                 "text is always dispatched anew, even while another task runs on the orb.",
@@ -208,7 +212,7 @@ export default {
             result = await post("/api/orb/spawn", {
               task: fullySpecified(args.task),
               model,
-              wait: args.wait ?? true,
+              wait: args.wait ?? false,
               orb: args.orb,
               seed: args.seed,
               session: context?.sessionID,
@@ -275,9 +279,12 @@ export default {
       editor.add({
         name: "orb_wait",
         description:
-          "Wait for an orb task dispatched by orb_spawn (wait: false) to complete, and " +
-          "return its structured result: status, summary, the artifacts (branch, PR URL " +
-          "once the work has a PR).",
+          "Ask once whether an orb task dispatched by orb_spawn has completed, holding " +
+          "briefly for it (the hold is bounded): returns the structured result — status, " +
+          "summary, the artifacts (branch, PR URL once the work has a PR) — or the task as " +
+          "running. Prefer finishing your turn without waiting: the completion message wakes " +
+          "this session by itself; call this only when you must answer in the same turn, and " +
+          "a running answer means call it again later, not that the bridge is down.",
         input: {
           type: "object",
           properties: {

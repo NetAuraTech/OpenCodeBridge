@@ -2854,9 +2854,11 @@ class BridgeServer {
   }
 
   /// The spawn surface's wait (issue #99, spec §8.3): `POST` with the body
-  /// `{"id": "<task id>"}` — blocks until the task completes and answers the
-  /// structured result (status, summary, results, branch, PR once it
-  /// exists). An unknown task id is a 404.
+  /// `{"id": "<task id>"}` — holds briefly (the bounded grace, issue #169) and
+  /// answers the structured result (status, summary, results, branch, PR once
+  /// it exists), or the task as `running` when the hold ran out: never a
+  /// response held past the caller's own transport timeout, which reads as an
+  /// unreachable bridge. An unknown task id is a 404.
   static Future<void> _handleOrbWait(
     HttpRequest request,
     OrbTaskService? tasks,

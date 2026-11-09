@@ -108,6 +108,25 @@ void main() {
     },
   );
 
+  test(
+    'the spawn answers async by default and the wait is bounded (issue #169)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The dispatch returns as soon as it lands: the completion injection
+      // (spec §8.3) wakes the caller, so no tool call is ever held past the
+      // agent runtime's own fetch timeout.
+      expect(source, contains('wait: args.wait ?? false'));
+      // The caller is told not to poll, and a running orb_wait answer is a
+      // state, not a broken bridge.
+      expect(source, contains('do not poll'));
+      expect(source, contains('not that the bridge is down'));
+      // The running answer points at the same-turn check, not a blind retry.
+      expect(source, contains('no need to poll'));
+    },
+  );
+
   test('materialize never overwrites an edited copy (on-disk wins)', () async {
     final file = File('${temp.path}/opencodebridge_orbs.ts')
       ..writeAsStringSync('// tuned by hand');
