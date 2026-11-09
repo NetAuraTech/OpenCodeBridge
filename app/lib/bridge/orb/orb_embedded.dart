@@ -2,12 +2,12 @@
 ///
 /// The app is a built binary — there is no OpenCodeBridge checkout on the
 /// host — so the Dockerfile and the boot scripts ride in the binary as these
-/// string constants. [OrbBuildContext.materialize] writes them out,
-/// create-if-missing, into the app-owned build-context dir
-/// `~/.config/opencodebridge/orb/` at bridge startup. After materialization
-/// the on-disk copy is the single source of truth for image content: an app
-/// upgrade never overwrites an existing file, so the pinned versions are
-/// under the user's control, never under the running app's.
+/// string constants. [OrbBuildContext.materialize] writes them out into the
+/// app-owned build-context dir `~/.config/opencodebridge/orb/` at bridge
+/// startup: the app's code (the boot scripts, [OrbEmbedded.files] minus
+/// [OrbEmbedded.pinnedFiles]) re-written on every startup so an app upgrade
+/// always ships the current boot path, the user's pins ([pinnedFiles]) written
+/// create-if-missing and never overwritten.
 ///
 /// The repo copies of these files stay the reviewed source at app-build time.
 abstract class OrbEmbedded {
@@ -18,6 +18,12 @@ abstract class OrbEmbedded {
     'Dockerfile': _dockerfile,
     'orb-entrypoint.sh': _entrypoint,
   };
+
+  /// The build-context files that are the **user's**, not the app's: written
+  /// create-if-missing and never overwritten (the user's pin edits). Every
+  /// file of [files] not listed here is the app's code and is re-written
+  /// from the embedded copy at every startup (issue #145).
+  static const Set<String> pinnedFiles = {'Dockerfile'};
 
   /// The shared base image (spec §5.1). One image for all projects: node,
   /// npm, php, flutter, redis, postgres, typesense, mailhog, opencode, git —
