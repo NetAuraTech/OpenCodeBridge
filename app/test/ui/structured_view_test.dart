@@ -3608,7 +3608,9 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(_promptText(tester), 'please read @src/main.dart');
+      // The mention lands with a trailing space (issue #140), the cursor
+      // after it.
+      expect(_promptText(tester), 'please read @src/main.dart ');
       expect(_caret(tester), _promptText(tester).length);
       // The mention's own tail text is not a filter token: the menu stays
       // closed.
@@ -3631,13 +3633,18 @@ void main() {
         await tester.pump();
         await tester.pump();
 
-        // Backspace at the mention's end deletes it whole, not one char.
+        // The trailing space (issue #140) goes first, then the mention
+        // whole — not one char at a time.
         await tester.showKeyboard(find.byKey(_promptInput));
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+        await tester.pump();
+        expect(_promptText(tester), 'please read @src/main.dart');
         await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
         await tester.pump();
         expect(_promptText(tester), 'please read ');
 
-        // Delete from before the mention removes it forward.
+        // Delete from before the mention removes it forward (its trailing
+        // space is a plain character and stays).
         await _typePrompt(tester, 'please read @sr');
         await tester.pump();
         await tester.pump();
@@ -3648,7 +3655,7 @@ void main() {
         await tester.showKeyboard(find.byKey(_promptInput));
         await tester.sendKeyDownEvent(LogicalKeyboardKey.delete);
         await tester.pump();
-        expect(_promptText(tester), 'please read ');
+        expect(_promptText(tester), 'please read  ');
       },
     );
 
@@ -3673,7 +3680,7 @@ void main() {
       await tester.tap(_commandRowFinder('skill:a11y'));
       await tester.pump();
       await tester.pump();
-      expect(_promptText(tester), '@a11y');
+      expect(_promptText(tester), '@a11y ');
 
       await _typePrompt(tester, '@a11y and @');
       await tester.pump();
@@ -3681,7 +3688,7 @@ void main() {
       await tester.tap(_commandRowFinder('file:src/main.dart'));
       await tester.pump();
       await tester.pump();
-      expect(_promptText(tester), '@a11y and @src/main.dart');
+      expect(_promptText(tester), '@a11y and @src/main.dart ');
 
       await _pressEnter(tester);
       await tester.pump();
@@ -3719,6 +3726,201 @@ void main() {
         {'uri': 'file:///x/src/main.dart'},
       ]);
       expect(client.prompts.last.$4, isNull);
+    });
+  });
+
+  group('StructuredSessionScreen prompt menu taps keep the field focused '
+      '(issue #140)', () {
+    /// The prompt field's own focus node: the node a keystroke must reach.
+    FocusNode promptFocus(WidgetTester tester) =>
+        tester.widget<EditableText>(find.byType(EditableText)).focusNode;
+
+    testWidgets('tapping an @ menu row inserts the mention and the field '
+        'keeps the primary focus', (tester) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        skills: const [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ],
+        filesFound: const ['src/main.dart'],
+      );
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+      await _typePrompt(tester, 'please read @sr');
+      await tester.pump();
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+      expect(promptFocus(tester).hasPrimaryFocus, isTrue);
+
+      await tester.tap(_commandRowFinder('file:src/main.dart'));
+      await tester.pump();
+      await tester.pump();
+
+      // The menu closed, the mention landed with its trailing space, and the
+      // field never lost focus: the soft keyboard stays up, the next
+      // keystroke goes straight into the field.
+      expect(_menuFinder(), findsNothing);
+      expect(_promptText(tester), 'please read @src/main.dart ');
+      expect(
+        promptFocus(tester).hasPrimaryFocus,
+        isTrue,
+        reason: 'a row tap must not steal the field\'s primary focus',
+      );
+    });
+
+    testWidgets('tapping an @ skill row keeps the focus and lands the cursor '
+        'after the trailing space', (tester) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        skills: const [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+      await _typePrompt(tester, 'use the @a11');
+      await tester.pump();
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+
+      await tester.tap(_commandRowFinder('skill:a11y'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(_promptText(tester), 'use the @a11y ');
+      expect(_caret(tester), 'use the @a11y '.length);
+      expect(promptFocus(tester).hasPrimaryFocus, isTrue);
+      // The caret right after the inserted mention (and its space) is not a
+      // live filter token: the suppression holds, the menu stays closed.
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the trailing space goes first on Backspace, then the whole '
+        'mention', (tester) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        filesFound: const ['src/main.dart'],
+      );
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+      await _typePrompt(tester, '@sr');
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(_commandRowFinder('file:src/main.dart'));
+      await tester.pump();
+      await tester.pump();
+
+      // First Backspace: the trailing space. Next: the whole mention.
+      await tester.showKeyboard(find.byKey(_promptInput));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(_promptText(tester), '@src/main.dart');
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(_promptText(tester), isEmpty);
+    });
+
+    testWidgets('tapping a / menu row runs the command, clears the field, '
+        'and keeps the focus', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+      await _typePrompt(tester, '/compact');
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+
+      await tester.tap(_commandRowFinder('compact'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.compacts, 1);
+      expect(_promptText(tester), isEmpty);
+      expect(
+        promptFocus(tester).hasPrimaryFocus,
+        isTrue,
+        reason: 'after the command runs, typing goes straight back in',
+      );
+    });
+
+    testWidgets('tapping a / row that waits for its argument keeps the menu '
+        'held and the focus, and the argument types straight in', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+      await _typePrompt(tester, '/rename');
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+
+      await tester.tap(_commandRowFinder('rename'));
+      await tester.pump();
+      await tester.pump();
+
+      // The command waits for its argument: the menu holds, the field keeps
+      // the focus so the argument is typed without tapping again.
+      expect(_menuFinder(), findsOneWidget);
+      expect(client.renames, isEmpty);
+      expect(promptFocus(tester).hasPrimaryFocus, isTrue);
+
+      await _typePrompt(tester, '/rename my title');
+      await tester.pump();
+      await _pressEnter(tester);
+      expect(client.renames, const [('ses_1', 'my title')]);
+    });
+
+    testWidgets('after a row tap the keyboard menu controls behave as if the '
+        'row had been picked with Enter', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await tester.tap(find.byKey(_promptInput));
+      await tester.pump();
+      await _typePrompt(tester, '/re');
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+
+      // Tap the `rename` row: the argument is missing, so the menu holds —
+      // exactly as Enter on it would.
+      await tester.tap(_commandRowFinder('rename'));
+      await tester.pump();
+      await tester.pump();
+      expect(_menuFinder(), findsOneWidget);
+
+      // The arrows still drive the menu selection (the field owns the keys,
+      // the cursor does not move): down lands on `rename`, the second row.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      final editable = tester.state<EditableTextState>(
+        find.byType(EditableText),
+      );
+      expect(
+        editable.textEditingValue.selection,
+        const TextSelection.collapsed(offset: 3),
+        reason: 'the menu owns the arrows; the field cursor stays put',
+      );
+      await _pressEnter(tester);
+      expect(client.renames, isEmpty); // rename holds: no argument yet
+      expect(_promptText(tester), '/re');
+
+      // Escape still dismisses the menu by clearing the field.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(_promptText(tester), isEmpty);
+      expect(_menuFinder(), findsNothing);
     });
   });
 

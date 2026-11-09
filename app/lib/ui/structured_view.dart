@@ -3809,12 +3809,24 @@ class _PromptBarState extends State<_PromptBar> {
   /// filter token and re-open the menu; the state is consumed once.
   (String, int)? _inserted;
 
+  /// The same suppression for the state a single Backspace of the inserted
+  /// mention's trailing space lands on (issue #140): with the space gone
+  /// the caret sits on the mention's own tail text, still no filter token,
+  /// so the next Backspace deletes the whole mention; consumed once.
+  (String, int)? _insertedTail;
+
   /// The selected row in [_matches] (`-1` when there is no match).
   int _selected = -1;
 
   /// The menu list's scroll position: the keyboard keeps the selected row
   /// on screen (the TUI does the same).
   final ScrollController _menuScroll = ScrollController();
+
+  /// The prompt field's own focus node (issue #140): a menu row tap keeps
+  /// the focus on the field — the soft keyboard stays up, and the
+  /// keyboard's menu controls keep working — and [_activate] claims the
+  /// focus back for it in any case.
+  final FocusNode _fieldFocus = FocusNode(debugLabel: 'prompt-field');
 
   @override
   void initState() {
@@ -3838,6 +3850,7 @@ class _PromptBarState extends State<_PromptBar> {
   void dispose() {
     widget.controller.removeListener(_syncMenu);
     _menuScroll.dispose();
+    _fieldFocus.dispose();
     super.dispose();
   }
 
@@ -3897,6 +3910,19 @@ class _PromptBarState extends State<_PromptBar> {
       // The caret sits right after the just-inserted mention: its own tail
       // text is not a filter token; the menu stays closed.
       _inserted = null;
+      _closeMenu();
+      return;
+    }
+    final insertedTail = _insertedTail;
+    if (insertedTail != null &&
+        text == insertedTail.$1 &&
+        selection.isCollapsed &&
+        selection.baseOffset == insertedTail.$2) {
+      // The insertion's trailing space was just Backspaced away: the caret
+      // again sits on the mention's own tail text, still not a filter
+      // token; the menu stays closed and the next Backspace finds the
+      // mention atomic (issue #140).
+      _insertedTail = null;
       _closeMenu();
       return;
     }
@@ -3971,12 +3997,17 @@ class _PromptBarState extends State<_PromptBar> {
 
   /// Runs the tapped (or submitted) row. A row carrying an [insertion]
   /// (the `@` menu's mentions, issue #58) replaces its token — the trigger
-  /// and the typed token — with the mention in place, the cursor right
-  /// after it, and runs with no argument; the other rows (the `/` menu's
-  /// commands) clear the field and run with the typed argument. A
-  /// `takesArg` row with no argument yet keeps the menu open and waits for
-  /// the argument.
+  /// and the typed token — with the mention plus a trailing space (issue
+  /// #140) in place, the cursor after the space so the user keeps typing
+  /// without adding it by hand, and runs with no argument; the other rows
+  /// (the `/` menu's commands) clear the field and run with the typed
+  /// argument. A `takesArg` row with no argument yet keeps the menu open
+  /// and waits for the argument. Whichever way the row runs, the field
+  /// keeps the primary focus (issue #140): a tap on a menu row must not
+  /// drop it, so the soft keyboard stays up and the keyboard's menu
+  /// controls keep working after a tap.
   void _activate(PromptMenuRow row) {
+    _fieldFocus.requestFocus();
     final insertion = row.insertion;
     final active = _active;
     if (insertion != null && active != null) {
@@ -3987,12 +4018,21 @@ class _PromptBarState extends State<_PromptBar> {
         final caret = value.selection.isCollapsed
             ? value.selection.baseOffset
             : value.selection.extentOffset;
-        final nextCaret = span.$1 + insertion.length;
+        // The mention lands with a trailing space (issue #140): the cursor
+        // sits after it, and Backspace removes the space first, the whole
+        // mention next.
+        final nextCaret = span.$1 + insertion.length + 1;
         final nextText =
-            text.substring(0, span.$1) + insertion + text.substring(caret);
-        // The caret lands on the mention's own tail text: [_syncMenu]
-        // suppresses the re-open of the menu on that exact state.
+            '${text.substring(0, span.$1)}$insertion ${text.substring(caret)}';
+        // The caret sits right after the just-inserted mention (and its
+        // space): [_syncMenu] suppresses the re-open of the menu on that
+        // exact state, and on the state the first Backspace of the space
+        // lands on (issue #140).
         _inserted = (nextText, nextCaret);
+        _insertedTail = (
+          nextText.substring(0, nextCaret - 1) + nextText.substring(nextCaret),
+          nextCaret - 1,
+        );
         widget.controller.value = TextEditingValue(
           text: nextText,
           selection: TextSelection.collapsed(offset: nextCaret),
@@ -4147,112 +4187,121 @@ class _PromptBarState extends State<_PromptBar> {
           // inside it (the rows keep their uniform height, so the keyboard
           // scroll math still holds).
           Flexible(
-            child: Container(
-              key: const ValueKey('structured-command-menu-card'),
-              margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              decoration: BoxDecoration(
-                color: scheme.surfaceContainerLow,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: scheme.outlineVariant),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Color.fromRGBO(0, 0, 0, 0.16),
-                    blurRadius: 12,
-                    offset: Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: ClipRRect(
-                // The rows run edge to edge (the selection highlight is full
-                // width); the clip keeps them inside the card's rounded
-                // corners.
-                borderRadius: BorderRadius.circular(8),
-                child: _matches.isEmpty
-                    ? Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        child: Text(menu.emptyLabel),
-                      )
-                    : ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 280),
-                        child: ListView.builder(
-                          key: const ValueKey('structured-command-menu'),
-                          controller: _menuScroll,
-                          shrinkWrap: true,
-                          itemCount: _matches.length,
-                          itemBuilder: (context, index) {
-                            final row = _matches[index];
-                            final selected = index == _selected;
-                            return Material(
-                              color: selected
-                                  ? scheme.secondaryContainer
-                                  : Colors.transparent,
-                              child: InkWell(
-                                key: ValueKey(
-                                  'structured-command-row-${row.name}',
-                                ),
-                                onTap: () => _activate(row),
-                                child: Padding(
-                                  // The text keeps its inset now that the row
-                                  // (and its highlight) is full width.
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 8,
+            // A row tap is not a tap outside the field (issue #140): the
+            // field keeps its focus and the soft keyboard stays up.
+            child: TextFieldTapRegion(
+              child: Container(
+                key: const ValueKey('structured-command-menu-card'),
+                margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: scheme.outlineVariant),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color.fromRGBO(0, 0, 0, 0.16),
+                      blurRadius: 12,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  // The rows run edge to edge (the selection highlight is full
+                  // width); the clip keeps them inside the card's rounded
+                  // corners.
+                  borderRadius: BorderRadius.circular(8),
+                  child: _matches.isEmpty
+                      ? Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          child: Text(menu.emptyLabel),
+                        )
+                      : ConstrainedBox(
+                          constraints: const BoxConstraints(maxHeight: 280),
+                          child: ListView.builder(
+                            key: const ValueKey('structured-command-menu'),
+                            controller: _menuScroll,
+                            shrinkWrap: true,
+                            itemCount: _matches.length,
+                            itemBuilder: (context, index) {
+                              final row = _matches[index];
+                              final selected = index == _selected;
+                              return Material(
+                                color: selected
+                                    ? scheme.secondaryContainer
+                                    : Colors.transparent,
+                                child: InkWell(
+                                  // A row is not a focus target (issue #140):
+                                  // the keyboard drives the selection through
+                                  // the field, so a tap must not move the
+                                  // primary focus off the field.
+                                  canRequestFocus: false,
+                                  key: ValueKey(
+                                    'structured-command-row-${row.name}',
                                   ),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Text(
-                                            row.label,
-                                            style: TextStyle(
-                                              fontWeight: selected
-                                                  ? FontWeight.bold
-                                                  : FontWeight.w600,
-                                            ),
-                                          ),
-                                          if (row.hint != null)
+                                  onTap: () => _activate(row),
+                                  child: Padding(
+                                    // The text keeps its inset now that the row
+                                    // (and its highlight) is full width.
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          children: [
                                             Text(
-                                              ' ${row.hint}',
+                                              row.label,
                                               style: TextStyle(
-                                                color: scheme.outline,
-                                                fontSize: 13,
+                                                fontWeight: selected
+                                                    ? FontWeight.bold
+                                                    : FontWeight.w600,
                                               ),
                                             ),
-                                          const Spacer(),
-                                          if (row.badge != null)
-                                            Text(
-                                              row.badge!,
-                                              style: const TextStyle(
-                                                fontSize: 11,
+                                            if (row.hint != null)
+                                              Text(
+                                                ' ${row.hint}',
+                                                style: TextStyle(
+                                                  color: scheme.outline,
+                                                  fontSize: 13,
+                                                ),
                                               ),
-                                            ),
-                                        ],
-                                      ),
-                                      // The subtitle line is always kept so every
-                                      // row has the same height: the keyboard
-                                      // scroll math relies on it.
-                                      Text(
-                                        row.subtitle ?? '',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: scheme.outline,
-                                          fontSize: 12,
+                                            const Spacer(),
+                                            if (row.badge != null)
+                                              Text(
+                                                row.badge!,
+                                                style: const TextStyle(
+                                                  fontSize: 11,
+                                                ),
+                                              ),
+                                          ],
                                         ),
-                                      ),
-                                    ],
+                                        // The subtitle line is always kept so every
+                                        // row has the same height: the keyboard
+                                        // scroll math relies on it.
+                                        Text(
+                                          row.subtitle ?? '',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: scheme.outline,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
-                      ),
+                ),
               ),
             ),
           ),
@@ -4267,6 +4316,7 @@ class _PromptBarState extends State<_PromptBar> {
                   child: TextField(
                     key: const ValueKey('structured-prompt-input'),
                     controller: widget.controller,
+                    focusNode: _fieldFocus,
                     enabled: true,
                     autocorrect: false,
                     decoration: const InputDecoration(
