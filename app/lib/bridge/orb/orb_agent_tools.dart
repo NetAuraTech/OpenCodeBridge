@@ -99,13 +99,15 @@ const output = { type: "object", properties: { output: { type: "string" } }, req
 // The recent tasks of this session's project (issue #143), newest first: the
 // bridge's /api/orb/tasks, asked by the directory the tool runs in. Read after
 // a spawn whose transport failed, so the caller learns whether the dispatch
-// landed instead of guessing "unreachable". No project -> no tasks.
-async function recentTasks(directory) {
+// landed instead of guessing "unreachable". No project -> no tasks. Only this
+// session's own dispatches count (issue #147): another session's running task
+// is never reported as this one's.
+async function recentTasks(directory, session) {
   try {
     const response = await fetch(bridgeUrl() + "/api/orb/tasks", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ directory }),
+      body: JSON.stringify({ directory, session }),
     })
     if (!response.ok) return []
     const row = await response.json()
@@ -114,6 +116,19 @@ async function recentTasks(directory) {
   } catch {
     return []
   }
+}
+
+// The task text as the bridge receives and dispatches it: the caller's words,
+// followed by the bridge's return contract — commit (a post-commit hook pushes
+// to the orb's branch), then open the PR (head = the orb's branch, base = the
+// branch the clone started from) once the work is done, and end with the PR
+// URL. A retry of this exact text is the same dispatch (issue #143/#147: the
+// bridge dedups the raw text per calling session).
+function fullySpecified(task) {
+  return task + "\n\n" +
+    "(Orb task: work in this workspace and commit your changes — a post-commit hook pushes them. " +
+    "When the whole piece of work is done, open the PR with `gh pr create`. " +
+    "One PR per orb, later tasks push to the same branch.)"
 }
 
 async function post(pathname, body) {
@@ -152,7 +167,9 @@ export default {
               description:
                 "Block until the task completes (default true); false returns the orb handle immediately. " +
                 "The block is bounded: a long task answers as running (poll it with orb_wait), and a " +
-                "repeated spawn of a task already running on the orb returns that task — it is not duplicated.",
+                "retried spawn of the very same task (the identical text from the same session, e.g. after " +
+                "a timeout) returns the already-running task — it is not duplicated. A different task " +
+                "text is always dispatched anew, even while another task runs on the orb.",
             },
             orb: {
               type: "string",
@@ -185,7 +202,7 @@ export default {
           let result
           try {
             result = await post("/api/orb/spawn", {
-              task: args.task,
+              task: fullySpecified(args.task),
               model,
               wait: args.wait ?? true,
               orb: args.orb,
@@ -200,7 +217,7 @@ export default {
             // dispatch usually landed, and a blind error invites a duplicate
             // retry (the bridge dedups identical running tasks, but the
             // caller should not rely on it).
-            const recent = await recentTasks(context?.directory)
+            const recent = await recentTasks(context?.directory, context?.sessionID)
             if (recent.length > 0) {
               return {
                 output:

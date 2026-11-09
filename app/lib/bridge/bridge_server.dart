@@ -2776,7 +2776,9 @@ class BridgeServer {
   /// The spawn surface's dispatch (issue #99, spec §8.2): `POST` with the
   /// body `{"task": "free text", "model"?: {"id", "providerID", "variant"?},
   /// "wait"?: bool (default true), "session"?: the calling session id,
-  /// "directory"?: the calling working directory}`. The
+  /// "directory"?: the calling working directory, "dispatchId"?: the
+  /// caller's own id for this dispatch — a retry repeats it and returns the
+  /// running task, a new id dispatches anew (issue #147)}. The
   /// session/directory pair identifies the caller (the tool's context): the
   /// project is resolved from them — never an argument — and the session is
   /// the completion-injection target. `wait: true` blocks until the task
@@ -2809,6 +2811,7 @@ class BridgeServer {
         seed: BridgeServer._stringField(body, 'seed'),
         callerSession: BridgeServer._stringField(body, 'session'),
         callerDirectory: BridgeServer._stringField(body, 'directory'),
+        dispatchId: BridgeServer._stringField(body, 'dispatchId'),
       );
       response.statusCode = wait ? HttpStatus.ok : HttpStatus.created;
       response.write(jsonEncode(dispatched.toJson()));
@@ -2888,11 +2891,15 @@ class BridgeServer {
 
   /// The spawn surface's recent tasks (issue #143): `POST /api/orb/tasks`
   /// with the body `{"directory"?: "…", "project"?: "prj_1",
-  /// "limit"?: number}` answers `{"project": "prj_1", "tasks": [task…]}`,
-  /// newest first (at most `limit`, 1..50, default 20), or `{"tasks": []}`
-  /// when no project resolves (a directory unknown to the host). The
-  /// timeout-aware `orb_spawn` tool reads it before reporting the bridge
-  /// unreachable, so a dispatch that landed is reported, not lost.
+  /// "session"?: "seq_…", "limit"?: number}` answers
+  /// `{"project": "prj_1", "tasks": [task…]}`, newest first (at most `limit`,
+  /// 1..50, default 20), or `{"tasks": []}` when no project resolves (a
+  /// directory unknown to the host). A `session` keeps only that
+  /// session's own dispatches (issue #147): another session's task on the same
+  /// orb is never reported as this one's — a retry filters by it before
+  /// calling `orb_spawn` again. The timeout-aware `orb_spawn` tool reads it
+  /// before reporting the bridge unreachable, so a dispatch that landed is
+  /// reported, not lost.
   static Future<void> _handleOrbTasks(
     HttpRequest request,
     OrbTaskService? tasks,
@@ -2907,6 +2914,9 @@ class BridgeServer {
     final limitField = body?['limit'];
     final requested = limitField is num ? limitField.toInt() : 20;
     final limit = requested < 1 || requested > 50 ? 20 : requested;
+    // The caller's own task filter (issue #147; optional — the human's read
+    // carries no session and sees the whole project).
+    final caller = BridgeServer._stringField(body, 'session');
     try {
       final project = await tasks.recentProject(
         project: BridgeServer._stringField(body, 'project'),
@@ -2920,6 +2930,12 @@ class BridgeServer {
               ? const []
               : tasks.tasks
                     .where((task) => task.project == project)
+                    .where(
+                      (task) =>
+                          caller == null ||
+                          caller.isEmpty ||
+                          task.callerSession == caller,
+                    )
                     .take(limit)
                     .map((task) => task.toJson())
                     .toList(),

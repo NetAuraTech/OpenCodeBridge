@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
+
 import '../../model/command.dart';
 import '../../model/orb.dart';
 import '../sessions/backend.dart';
@@ -162,6 +164,10 @@ class OrbTaskService {
   /// tool-facing default) blocks until the task completes; false returns the
   /// dispatched record immediately — the completion watcher then persists
   /// the result and injects the completion message.
+  ///
+  /// [task] is delivered to the orb's agent exactly as given (trimmed, issue
+  /// #147) — no prompt text is prepended or appended. [callerSession] and
+  /// [dispatchId] are the dispatch identity ([OrbTaskService._retriedTaskOn]).
   Future<OrbTask> spawn({
     required String task,
     ModelRef? model,
@@ -170,6 +176,7 @@ class OrbTaskService {
     String? seed,
     String? callerSession,
     String? callerDirectory,
+    String? dispatchId,
   }) async {
     final trimmed = task.trim();
     if (trimmed.isEmpty) {
@@ -190,6 +197,7 @@ class OrbTaskService {
           seed: seed?.trim(),
           callerSession: callerSession,
           callerDirectory: callerDirectory,
+          dispatchId: dispatchId,
         );
       } finally {
         done.complete();
@@ -212,6 +220,7 @@ class OrbTaskService {
     String? seed,
     String? callerSession,
     String? callerDirectory,
+    String? dispatchId,
   }) async {
     final (record, created) = await _targetOrCreateOrb(
       projectId,
@@ -220,12 +229,16 @@ class OrbTaskService {
       seed,
     );
 
-    // The idempotent dispatch (issue #143): a retry of a dispatch that is
-    // already running on the target orb returns that task — a retried spawn
-    // (the caller's transport timed out, or a deliberate repeat) is not a
-    // second task. The text is compared normalized, and the per-project
-    // serialization above makes check-then-dispatch race-free.
-    final retried = _runningTaskOn(record.id, task);
+    // The idempotent dispatch (issue #143, tightened by #147): a retry of a
+    // dispatch that is already running on the target orb returns that task —
+    // a retried spawn (the caller's transport timed out or the agent repeat
+    // the same call) is not a second task. The identity is the raw caller text
+    // (exactly what was delivered) plus the calling session and, when the
+    // caller sends one, its dispatch id — never a lossy normalization, which
+    // bound a substring/superset/punctuation-stripped follow-up to the earlier
+    // task and ran the wrong work. The per-project serialization above makes
+    // check-then-dispatch race-free.
+    final retried = _retriedTaskOn(record.id, task, callerSession, dispatchId);
     if (retried != null) return retried;
 
     // The task's session on the orb's service (one session per task, so the
@@ -255,13 +268,15 @@ class OrbTaskService {
       callerOrb: await _hostOrbOf(callerSession ?? ''),
       createdOrb: created,
       task: task,
+      textHash: _textHash(task),
+      dispatchId: dispatchId?.trim(),
       created: DateTime.now().millisecondsSinceEpoch,
     );
     _tasks.insert(0, dispatched);
     _persist();
 
     try {
-      await sessions.prompt(session.id, _taskPrompt(record, task));
+      await sessions.prompt(session.id, task);
     } catch (e) {
       // The dispatch itself failed: the task can never run, so it settles
       // failed right here (and the caller sees the error).
@@ -286,6 +301,10 @@ class OrbTaskService {
   ///
   /// `wait: true` passes [waitGrace]; `orb_wait` passes `null`
   /// (an explicit wait is expected to block).
+  ///
+  /// [dispatchId] (issue #147) is the caller's own id for this dispatch, when
+  /// it sends one: a retry carries the same id and returns the running task
+  /// whatever its text, and a dispatch under a new id is always a new task.
   ///
   /// [callerSession] (issue #100, spec §8.4) scopes the wait right to the
   /// caller's spawn tree: an agent waits for the tasks of its own tree —
@@ -322,34 +341,57 @@ class OrbTaskService {
     return target;
   }
 
-  /// The running task of orb [orbId] whose text is [task] (normalized), or
-  /// `null` (issue #143): the idempotent dispatch's already-running match.
+  /// The running task of orb [orbId] that this dispatch retries, or `null`
+  /// (issue #143, tightened by #147): the idempotent dispatch's already-running
+  /// match.
+  ///
+  /// A dispatch is identified by the **raw caller text** [task] (trimmed —
+  /// exactly what was delivered to the agent, never a normalized or partial
+  /// form), the **caller identity** [callerSession], and [dispatchId] when the
+  /// caller sent one. So:
+  /// - two different texts are two tasks, even when one contains the other,
+  ///   differs only by punctuation, or a retyped variant dedups against the
+  ///   running one (the #147 bug bound a later follow-up to an earlier task and
+  ///   the bridge ran the wrong work);
+  /// - different callers are different tasks — a reply to caller B is never
+  ///   dropped because caller A's task is running;
+  /// - a transport retry of the *same* dispatch repeats the raw text and the
+  ///   same caller session (#143) and so returns the running task, and a
+  ///   caller-sent [dispatchId] narrows that further: the same id retries,
+  ///   a different id is a new task.
   ///
   /// A record that still says `running` is trusted: the watcher settles
   /// completions on its own pace (the poll interval), while a retry arrives
   /// within the caller's timeout — so shrinking the window on the live
   /// session listing is unnecessary.
-  OrbTask? _runningTaskOn(String orbId, String task) {
-    final normalized = _normalized(task);
-    final candidates = [
-      for (final running in _tasks)
-        if (running.orb == orbId &&
-            !running.isDone &&
-            _normalized(running.task) == normalized)
-          running,
-    ];
-    if (candidates.isEmpty) return null;
-    return candidates.first;
+  OrbTask? _retriedTaskOn(
+    String orbId,
+    String task,
+    String? callerSession,
+    String? dispatchId,
+  ) {
+    final id = dispatchId?.trim() ?? '';
+    final textHash = _textHash(task);
+    for (final running in _tasks) {
+      if (running.orb != orbId || running.isDone) continue;
+      // The text hash compares the raw bytes the agent was given — no
+      // normalization, so nothing but an identical text can collide.
+      if (running.textHash != textHash) continue;
+      if (id.isNotEmpty && running.dispatchId != id) continue;
+      // No caller (the human): the raw text is the whole identity.
+      if (running.callerSession == null) return running;
+      if (callerSession == null || callerSession.isEmpty) continue;
+      if (running.callerSession == callerSession) return running;
+    }
+    return null;
   }
 
-  /// The task text as the idempotent dispatch compares it: lowercased,
-  /// whitespace-collapsed, with punctuation dropped — the same instruction
-  /// retyped is the same task.
-  String _normalized(String task) => task
-      .toLowerCase()
-      .replaceAll(RegExp(r'[^\w\s]', unicode: true), '')
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
+  /// The dispatch text's identity in the tasks file: a SHA-256 of the raw
+  /// caller text (exactly what was delivered, issue #147), so the file
+  /// carries no instruction text twice and no lossy comparison can make two
+  /// different instructions collide.
+  static String _textHash(String task) =>
+      sha256.convert(utf8.encode(task)).toString();
 
   /// The project's orb for the spawn (spec §8.2's targeting + §3.3's seed),
   /// as `(record, created)` — [created] true when this call created the orb
@@ -564,24 +606,6 @@ class OrbTaskService {
     } catch (_) {
       return null;
     }
-  }
-
-  /// The prompt sent to the orb's agent: the task text plus the branch
-  /// contract (commit — the post-commit hook pushes; PR when the work is
-  /// done, spec §3). The PR's base is the branch the clone started from
-  /// (spec §3.2/§3.3): the remote's default for a fresh clone — gh's own
-  /// default — or the **seed's branch** for a seeded orb (the PR stacks on
-  /// the parent).
-  String _taskPrompt(OrbRecord record, String task) {
-    final base = record.base;
-    return '$task\n\n'
-        '(Orb task: work in this workspace and commit your changes — a '
-        'post-commit hook pushes them to `${record.branch}`. When the whole '
-        'piece of work is done, open the PR with `gh pr create` (head '
-        '`${record.branch}`'
-        '${base == null ? '' : ', base `$base` — this orb stacks on that '
-                  'branch, not the default'}'
-        '); one PR per orb, later tasks push to the same branch.)';
   }
 
   // ------------------------------------------------------------------------

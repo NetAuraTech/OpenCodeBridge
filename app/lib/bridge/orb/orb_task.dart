@@ -24,6 +24,8 @@ class OrbTask {
     this.summary = '',
     this.pr,
     this.completed,
+    this.textHash,
+    this.dispatchId,
   });
 
   /// The task's technical id (`task_<token>`): what `orb_wait` takes.
@@ -65,8 +67,19 @@ class OrbTask {
   /// [orb] belongs to [callerSession]'s spawn tree from this task on.
   final bool createdOrb;
 
-  /// The free-text task handed to the orb's agent.
+  /// The free-text task handed to the orb's agent (exactly the caller's text,
+  /// issue #147).
   final String task;
+
+  /// The dispatch identity of [task] (issue #147): a SHA-256 of the raw caller
+  /// text, persisted instead of a normalized copy so the idempotent dispatch
+  /// can match a retry without comparing instructions lossily.
+  final String? textHash;
+
+  /// The caller's own id for this dispatch (issue #147), when it sent one: a
+  /// retry repeats it, and a new id is always a new task. `null` when the
+  /// caller sent none — the identity is then the raw text + the caller.
+  final String? dispatchId;
 
   /// Epoch millis of the dispatch.
   final int created;
@@ -105,6 +118,8 @@ class OrbTask {
     if (callerOrb != null) 'callerOrb': callerOrb,
     if (createdOrb) 'createdOrb': true,
     'task': task,
+    if (textHash != null) 'textHash': textHash,
+    if (dispatchId != null) 'dispatchId': dispatchId,
     'created': created,
     'status': status,
     'summary': summary,
@@ -127,6 +142,8 @@ class OrbTask {
       callerOrb: map['callerOrb'] as String?,
       createdOrb: map['createdOrb'] == true,
       task: map['task'] as String? ?? '',
+      textHash: map['textHash'] as String?,
+      dispatchId: map['dispatchId'] as String?,
       created: (map['created'] as num?)?.toInt() ?? 0,
       status: map['status'] as String? ?? 'running',
       summary: map['summary'] as String? ?? '',

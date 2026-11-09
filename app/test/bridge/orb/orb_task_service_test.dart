@@ -143,6 +143,16 @@ class _FakeBackend extends SessionsBackend {
   Future<List<Session>> list() async => rows;
 }
 
+/// A second caller in the same project (issue #147's attribution rows).
+final _callerBRow = Session(
+  id: 'ses_b',
+  title: 'caller B',
+  project: const SessionProject(id: 'prj_1', name: 'shop'),
+  created: 101,
+  location: '/home/dev/shop',
+  active: false,
+);
+
 /// The scripted [OrbService]: the orb list, the wake, the create, and the
 /// per-orb session create record their calls and return scripted results.
 class _FakeOrbs implements OrbService {
@@ -197,7 +207,20 @@ class _FakeOrbs implements OrbService {
   Future<Session> createSessionOnOrb(String id) async {
     createSessionCalls++;
     createSessionOrbId = id;
-    return createSessionResult!;
+    // Every dispatch is a fresh session on the orb's service: the scripted
+    // text/fields with a distinct id (issue #147's two-task tests).
+    final result = createSessionResult!;
+    return Session(
+      id: createSessionCalls == 1
+          ? result.id
+          : '${result.id}_$createSessionCalls',
+      title: result.title,
+      project: result.project,
+      created: result.created,
+      location: result.location,
+      active: result.active,
+      orb: result.orb,
+    );
   }
 
   @override
@@ -597,10 +620,12 @@ void main() {
         expect(orbs.seedBranchCall?.$2, 'parent');
         expect(orbs.createBase, 'orb/xB');
         expect(task.orb, 'xC');
-        // The task prompt carries the stacking contract (spec §3.2): the PR
-        // base is the seed's branch, not the default.
+        // The stacking contract (spec §3.2) is the record's base: the PR
+        // stacks on the seed's branch, not the default. The orb's agent is
+        // prompted with exactly the caller's text (issue #147) — the prompt
+        // preamble is gone.
         final prompt = backend.opencode.prompts.last.$2;
-        expect(prompt, contains('base `orb/xB`'));
+        expect(prompt, 'variant work');
       },
     );
 
@@ -846,8 +871,8 @@ void main() {
         expect(task.session, 'ses_task');
         final prompt = backend.opencode.prompts.single;
         expect(prompt.$1, 'ses_task');
-        expect(prompt.$2, contains('do the thing'));
-        expect(prompt.$2, contains('orb/a1b2c3'));
+        // Exactly the caller's text (issue #147): no prompt preamble glued in.
+        expect(prompt.$2, 'do the thing');
       },
     );
 
@@ -1134,11 +1159,18 @@ void main() {
       expect(backend.opencode.prompts, hasLength(1));
     });
 
-    test('normalized text dedups (case, whitespace, punctuation)', () async {
+    test('only the raw text (trimmed) dedups, not a normalized one', () async {
+      // Issue #147: case, whitespace runs and punctuation are part of the
+      // instruction — a retyped variant is a different task.
       scriptDispatch();
 
       final first = await service.spawn(
         task: 'Fix the login form!',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final trimmed = await service.spawn(
+        task: '  Fix the login form!  ',
         wait: false,
         callerSession: 'ses_caller',
       );
@@ -1153,9 +1185,10 @@ void main() {
         callerSession: 'ses_caller',
       );
 
-      expect(second.id, first.id);
-      expect(third.id, first.id);
-      expect(orbs.createSessionCalls, 1);
+      expect(trimmed, same(first));
+      expect(second.id, isNot(first.id));
+      expect(third.id, isNot(first.id));
+      expect(orbs.createSessionCalls, 3);
     });
 
     test('a different task text dispatches a second session', () async {
@@ -1202,7 +1235,207 @@ void main() {
     });
   });
 
+  group('dispatch identity by raw text (issue #147)', () {
+    setUp(() {
+      orbs.listResult = [_runningOrb()];
+      backend.rows = [_callerRow, _callerBRow];
+    });
+
+    test('the orb prompt is exactly the caller task text', () async {
+      scriptDispatch();
+
+      const task = 'Fix the login form';
+      final dispatched = await service.spawn(
+        task: task,
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      // The orb's agent sees the caller's text, nothing glued in front or
+      // behind it (the return contract is the bridge's protocol, not part of
+      // the prompt).
+      expect(backend.opencode.prompts.single.$2, task);
+      expect(dispatched.task, task);
+    });
+
+    test('a substring of the running text is a new task', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form validation',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final second = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second.id, isNot(first.id));
+    });
+
+    test('a superset containing the running text is a new task', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final second = await service.spawn(
+        task: 'Fix the login form and then the signup form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second.id, isNot(first.id));
+      expect(second.session, isNot(first.session));
+    });
+
+    test('the running text with punctuation removed is a new task', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form!',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final second = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      final third = await service.spawn(
+        task: 'Fix the login form!!',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      expect(second.id, isNot(first.id));
+      expect(third.id, isNot(first.id));
+    });
+
+    test(
+      'two different tasks close together keep their own caller sessions',
+      () async {
+        scriptDispatch();
+
+        final first = await service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        final second = await service.spawn(
+          task: 'Fix the login form validation',
+          wait: false,
+          callerSession: 'ses_b',
+        );
+
+        expect(second.id, isNot(first.id));
+        expect(first.callerSession, 'ses_caller');
+        expect(second.callerSession, 'ses_b');
+        final firstPrompt = backend.opencode.prompts
+            .firstWhere((p) => p.$1 == first.session)
+            .$2;
+        final secondPrompt = backend.opencode.prompts
+            .firstWhere((p) => p.$1 == second.session)
+            .$2;
+        expect(firstPrompt, 'Fix the login form');
+        expect(secondPrompt, 'Fix the login form validation');
+      },
+    );
+
+    test(
+      'a transport-retried dispatch still returns the running task',
+      () async {
+        // #143's case: the caller's fetch timed out and the call repeats with
+        // the same raw text and the same calling session — a retry, not a new
+        // task. The retried match keys the raw text, so a merely
+        // whitespace-different text is its own task.
+        scriptDispatch();
+
+        final first = await service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        final retried = await service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        final whitespace = await service.spawn(
+          task: 'Fix  the  login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        final otherCaller = await service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_b',
+        );
+
+        expect(retried, same(first));
+        // The identity is the raw text's hash — persisted, never a normalized copy.
+        expect(first.textHash, isNotNull);
+        expect(retried.textHash, first.textHash);
+        expect(whitespace.id, isNot(first.id));
+        expect(whitespace.textHash, isNot(first.textHash));
+        expect(otherCaller.id, isNot(first.id));
+        expect(orbs.createSessionCalls, 3);
+      },
+    );
+
+    test('a caller dispatch id narrows the retry identity', () async {
+      scriptDispatch();
+
+      final first = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+        dispatchId: 'd_1',
+      );
+      final retried = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+        dispatchId: 'd_1',
+      );
+      final again = await service.spawn(
+        task: 'Fix the login form',
+        wait: false,
+        callerSession: 'ses_caller',
+        dispatchId: 'd_2',
+      );
+
+      expect(first.dispatchId, 'd_1');
+      expect(retried, same(first));
+      expect(again.id, isNot(first.id));
+      expect(orbs.createSessionCalls, 2);
+    });
+  });
+
   group('bounded blocking wait (issue #143)', () {
+    test('a retried wait attribute still answers the running task', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch(); // The turn never ends.
+      waitGrace = const Duration(milliseconds: 30);
+
+      final tasks = newService();
+      final first = await tasks.spawn(
+        task: 'long work',
+        callerSession: 'ses_caller',
+      );
+      final retried = await tasks.spawn(
+        task: 'long work',
+        callerSession: 'ses_caller',
+      );
+
+      expect(first.status, 'running');
+      expect(retried, same(first));
+      expect(orbs.createSessionCalls, 1);
+    });
     test(
       'wait: true answers the running task after the grace window',
       () async {
