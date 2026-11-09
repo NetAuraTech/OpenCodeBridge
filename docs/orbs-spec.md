@@ -280,6 +280,23 @@ Unified in the image: the boot scripts (with the Dockerfile) live in the app-own
 
 opencode v2 keeps provider credentials in the service's own DB, not in the legacy `auth.json` the §6.2 copy carries — an orb booted with the copy alone has **no** provider keys, and a dispatched agent dies on its first step with `Login required` ([#138](https://github.com/NetAuraTech/OpenCodeBridge/issues/138)). After a successful boot wait (create/wake/update — the same three paths), the bridge reads the **host** service's stored credentials (`GET /api/credential` on the shared-service descriptor) and posts each one into the **orb's** server (`POST /api/credential`, activated). Host-authoritative like §6.2/§4 (re-synced every start — a rotated token replaces the orb's; a value the orb already holds unchanged is skipped). The DB itself is never copied: the orb shares the host's *credentials*, never the host's *sessions* or project state. A sync failure (no descriptor, unreachable route) is a **boot-log warning, never a failed boot** — a credential-less orb is a degraded orb, and a host without the shared service must still get orbs. The secret crosses bridge→orb-server only — never through the bridge's API surface (ADR-0001).
 
+### 6.8 Shell probe — every start, before serving ([#149](https://github.com/NetAuraTech/OpenCodeBridge/issues/149))
+
+An orb's agent does code tasks **through a shell**: run the tests, typecheck, build, `git commit` (the post-commit hook pushes), `gh pr create`. The spawn prompt (§8.3) asks for exactly those, so an orb whose agent cannot run a command must never come up **ready**.
+
+**The probe** (the entrypoint, after the health gate, before `exec opencode serve`): the image's own `sh` from `PATH` (the orb's `$AGENT_SHELL`, `sh` by default) — `$AGENT_SHELL -c 'printf ok'` must exit 0 **and print `ok`**. No auth, no network: it is the agent's execution path itself, not a proxy for it. It streams as `[orb] stage: shell`, and on success `[orb] shell: usable (<the command>)`.
+
+**On failure** the boot fails (non-zero exit) with `[orb] FATAL: no usable shell — the agent could not run a command` and the details (`shell: tried …`, `shell: exit …`, `shell: output: …`). The bridge reads that back from the container log:
+
+- `OrbService.list` composes the row's state as **`broken:shell`** (never `stopped`, never `running`), and the row's **`bootReason`** is the log's `FATAL`/`shell:` block, verbatim;
+- the Orbs card renders it (red `broken`, the reason on the detail line) with **no Stop / Wake / New session** — the `broken:*` actions only (force-delete, §2.7);
+- the spawn surface (`orb_spawn`, both the targeting and the single-orb wake-or-create) **refuses before any wake/dispatch** with the refusal code **`no_shell`** and the boot's own reason as `details`: neither a task nor a session is created. The `orb_spawn` tool's text then names the reason and says nothing was dispatched ("spawned, works nowhere" is said with the cause);
+- a `create`/`wake` whose boot exits at the shell stage raises `OrbBootError` whose **detail is the boot reason**, not the generic "exited during boot" — the create wizard and the card carry it.
+
+The shell is the **image's** (`bash`/`sh` from `ubuntu:24.04`): the probe needs nothing the base image doesn't already ship, so no host-only dependency is introduced — a host dependency would show up here as a failed probe, not as a silent ready orb. The probe's failure is also **non-destructive**: the volumes and the state dir are untouched, so the human can force-delete, or re-create on a fixed image.
+
+This settles the ticket's "which shell" question: the agent runtime advertises `opencode.tool.shell` independently of the bridge config, and `POST /api/shell` runs it; but the **ground truth the bridge owns** is the boot-time `printf ok` the entrypoint runs, and the boot log is what both the card and the spawn refusal read.
+
 ## 7. Bridge architecture
 
 ### 7.1 Per-orb service descriptor — no descriptor file
@@ -387,7 +404,7 @@ A grid of **workspace cards** (280 px). **The card is the view of the orb — no
 - **running** (green);
 - **stopped** (grey);
 - **cleanup pending** (badge + reason — uncommitted / unpushed work) for guard-blocked auto-delete candidates (§2.10.2);
-- **broken** — names the missing part (workspace volume / state dir); no Wake/Stop/New session; actions: **force-delete** (always) and, when only the state dir is missing, **start with fresh state** — a normal Wake with a fresh `opencode.db`: keeps the workspace (uncommitted work included), loses the in-orb sessions (stated in the confirmation dialog) (§2.11, [#90](https://github.com/NetAuraTech/OpenCodeBridge/issues/90)).
+- **broken** — names the missing part (workspace volume / state dir) or the failed boot (**`broken:shell`**: the shell probe, §6.8 — the detail line is the boot's own `FATAL`/`shell:` reason); no Wake/Stop/New session; actions: **force-delete** (always) and, when only the state dir is missing, **start with fresh state** — a normal Wake with a fresh `opencode.db`: keeps the workspace (uncommitted work included), loses the in-orb sessions (stated in the confirmation dialog) (§2.11, [#90](https://github.com/NetAuraTech/OpenCodeBridge/issues/90)).
 - Orphaned volumes (labeled volume without container) are surfaced for **explicit** cleanup — never auto-deleted (§2.2).
 
 **Stop** renders per the vocabulary: it moves the orb's sessions to the host first, as plain host sessions with **no provenance** shown in the UI; **Wake** re-runs only the service stages.

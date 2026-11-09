@@ -52,6 +52,7 @@ class OrbRecord {
     this.pr,
     this.base,
     this.pushFailing = false,
+    this.bootReason,
   });
 
   /// The technical identifier (label `ocb.id`): names the branch, the
@@ -70,8 +71,23 @@ class OrbRecord {
   /// The composed state (spec §2.2): `running`, `stopped`,
   /// `cleanup_pending:<reason>` (a stopped orb the automated lifecycle
   /// pass surfaced as a guard-blocked auto-delete candidate, issue #101,
-  /// spec §2.10.2/§9.4), `broken:workspace`, `broken:state`, or `orphan`.
+  /// spec §2.10.2/§9.4), `broken:workspace`, `broken:state`, `broken:shell`
+  /// (the boot failed at the shell probe — the agent could not run a
+  /// command, issue #149, spec §6.8), or `orphan`.
   final String state;
+
+  /// Why the orb is broken, when its boot said so on the container log
+  /// (issue #149): the boot's fatal line, verbatim — the refusal reason the
+  /// `orb_wait` result and the card carry ("spawned, works nowhere" is said
+  /// with the cause). `null` for a healthy row and for a broken row whose
+  /// boot never logged a reason (a missing volume/dir says itself).
+  final String? bootReason;
+
+  /// Whether the orb's boot failed at the shell probe (issue #149, spec
+  /// §6.8): its agent cannot run a command, so no code task can land — it is
+  /// never surfaced as `running`/`ready`, and the spawn surface refuses it
+  /// with the [bootReason].
+  bool get hasNoShell => state == 'broken:shell';
 
   /// Whether this is a stopped orb under the badge: plain `stopped`, or
   /// `cleanup_pending:<reason>` — the same container state, the lifecycle
@@ -114,6 +130,7 @@ class OrbRecord {
     if (pr != null) 'pr': pr!.toJson(),
     if (base != null) 'base': base,
     if (pushFailing) 'pushFailing': true,
+    if (bootReason != null) 'bootReason': bootReason,
   };
 
   factory OrbRecord.fromJson(Object? json) {
@@ -129,6 +146,7 @@ class OrbRecord {
       pr: map['pr'] == null ? null : OrbPr.fromJson(map['pr']),
       base: map['base'] as String?,
       pushFailing: map['pushFailing'] == true,
+      bootReason: map['bootReason'] as String?,
     );
   }
 
@@ -144,7 +162,8 @@ class OrbRecord {
       other.url == url &&
       other.pr == pr &&
       other.base == base &&
-      other.pushFailing == pushFailing;
+      other.pushFailing == pushFailing &&
+      other.bootReason == bootReason;
 
   @override
   int get hashCode => Object.hash(
@@ -158,8 +177,11 @@ class OrbRecord {
     pr,
     base,
     pushFailing,
+    bootReason,
   );
 
   @override
-  String toString() => 'OrbRecord(id: $id, name: $name, state: $state)';
+  String toString() =>
+      'OrbRecord(id: $id, name: $name, state: $state'
+      '${bootReason == null ? '' : ', reason: $bootReason'})';
 }

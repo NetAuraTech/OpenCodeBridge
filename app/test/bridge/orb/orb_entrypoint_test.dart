@@ -313,6 +313,23 @@ case "$url" in
 esac
 exit 0
 ''',
+      // The shell the agent's commands run in (issue #149): the probe runs
+      // `<shell> -c 'printf ok'`, which must exit 0 and print ok. FAKE_SH_EXIT
+      // scripts a shell that cannot execute (the defect this guards).
+      'sh': r'''
+echo "sh $*" >> "$FAKE_LOG"
+if [ -n "${FAKE_SH_EXIT:-}" ] && [ "${FAKE_SH_EXIT}" != "0" ]; then
+    echo "sh: unable to execute" >&2
+    exit "$FAKE_SH_EXIT"
+fi
+for a in "$@"; do
+    if [ "$a" = "printf ok" ]; then
+        printf 'ok'
+        exit 0
+    fi
+done
+exec /bin/sh "$@"
+''',
     };
     const pgTools = <String, String>{
       // The fake pg_isready becomes healthy after FAKE_PG_HEALTHY_AFTER
@@ -753,6 +770,7 @@ void main() {
         'installing',
         'services',
         'health',
+        'shell',
         'ready',
       ]);
     });
@@ -762,12 +780,12 @@ void main() {
         firstStart: false,
         workspaceFiles: {'.env': 'PG_HOST=127.0.0.1\n'},
       );
-      expect(r.stages, ['services', 'health', 'ready']);
+      expect(r.stages, ['services', 'health', 'shell', 'ready']);
     });
 
     test('a wake with no declared services skips the health stage', () async {
       final r = await h.run(firstStart: false);
-      expect(r.stages, ['services', 'ready']);
+      expect(r.stages, ['services', 'shell', 'ready']);
     });
   });
 
@@ -858,6 +876,89 @@ void main() {
         expect(hook.readAsStringSync(), isNot(contains('GH_CONFIG_DIR')));
       },
     );
+  });
+
+  group('the shell probe (issue #149, spec §6.8)', () {
+    /// The probe records through the shell it runs (the image's `sh`, on the
+    /// PATH — the harness's fake): the call log line is
+    /// `sh -c printf ok` (the fake logs its whole argv, joined).
+    const probe = 'sh -c printf ok';
+
+    test('the probe runs a smoke command before opening opencode', () async {
+      final r = await h.run(firstStart: true);
+      expect(r.exitCode, 0);
+      expect(r.called(probe), isTrue, reason: 'the probe ran');
+      // It precedes the serve: an orb whose agent has no shell is never
+      // offered as a workspace.
+      final probeAt = r.calls.indexWhere((c) => c.startsWith(probe));
+      final serveAt = r.calls.indexWhere((c) => c.startsWith('opencode'));
+      expect(probeAt, lessThan(serveAt));
+      expect(r.stdout, contains('shell: usable'));
+      // The stage streams so the card can show it while preparing.
+      expect(r.stages, contains('shell'));
+      expect(r.stages.last, 'ready');
+    });
+
+    test(
+      'no usable shell: the boot fails with the reason, opencode never '
+      'serves',
+      () async {
+        // A shell that exists but cannot execute the command: exactly the
+        // silent shell-less orb the ticket reported.
+        final r = await h.run(
+          firstStart: true,
+          env: {'FAKE_SH_EXIT': '127'},
+        );
+        expect(r.exitCode, isNot(0));
+        expect(
+          r.called('opencode'),
+          isFalse,
+          reason: 'a shell-less orb must not come up ready',
+        );
+        expect(r.stdout, contains('FATAL: no usable shell'));
+        expect(r.stdout, contains("sh -c 'printf ok'"));
+        expect(r.stages, isNot(contains('ready')));
+      },
+    );
+
+    test(
+      'a failed probe leaves the no-shell marker on the state mount, a '
+      'passing one clears it',
+      () async {
+        final failed = await h.run(
+          firstStart: true,
+          env: {'FAKE_SH_EXIT': '127'},
+        );
+        expect(failed.exitCode, isNot(0));
+        final marker = File('${h.state.path}/no-shell');
+        expect(marker.existsSync(), isTrue);
+        expect(marker.readAsStringSync(), contains("sh -c 'printf ok'"));
+
+        // The next boot passes: the marker is gone (it describes this boot,
+        // like push-failed).
+        final passed = await h.run(firstStart: false);
+        expect(passed.exitCode, 0);
+        expect(marker.existsSync(), isFalse);
+      },
+    );
+
+    test('a missing shell binary fails the boot the same way', () async {
+      final r = await h.run(
+        firstStart: true,
+        env: {'ORB_PROBE_SHELL': '/bin/nosuchshell'},
+      );
+      expect(r.exitCode, isNot(0));
+      expect(r.called('opencode'), isFalse);
+      expect(r.stdout, contains('FATAL: no usable shell'));
+      expect(r.stdout, contains('/bin/nosuchshell'));
+    });
+
+    test('the probe runs on every start (create AND wake)', () async {
+      final create = await h.run(firstStart: true);
+      expect(create.called(probe), isTrue, reason: 'the create');
+      final wake = await h.run(firstStart: false);
+      expect(wake.called(probe), isTrue, reason: 'the wake');
+    });
   });
 
   group('the post-commit push marker (issue #120)', () {

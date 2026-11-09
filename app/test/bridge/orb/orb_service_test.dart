@@ -918,6 +918,37 @@ void main() {
       },
     );
 
+    test(
+      'a boot exiting at the shell probe names the reason (issue #149)',
+      () async {
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'exited\n',
+          stderr: '',
+        );
+        docker.logs =
+            '[orb] stage: shell\n'
+            '[orb] FATAL: no usable shell — the agent could not run a '
+            'command\n[orb] shell: tried sh -c \'printf ok\'\n'
+            '[orb] shell: exit 127\n';
+
+        await expectLater(
+          service().create(
+            project: 'proj-1',
+            name: 'dev',
+            checkout: checkout.path,
+          ),
+          throwsA(
+            isA<OrbBootError>().having(
+              (e) => e.detail,
+              'detail',
+              contains('no usable shell'),
+            ),
+          ),
+        );
+      },
+    );
+
     test('a boot that never comes up times out', () async {
       docker.logs = 'starting...'; // No `server password` line, ever.
 
@@ -1145,6 +1176,63 @@ void main() {
             created: created,
           ),
         ]);
+      },
+    );
+
+    test(
+      'list surfaces an orb whose boot died at the shell probe as '
+      'broken:shell with the reason (issue #149)',
+      () async {
+        const created = '2026-11-04T00:00:00.000Z';
+        String labels(String id, String name) => jsonEncode({
+          'ocb.orb': 'true',
+          'ocb.id': id,
+          'ocb.name': name,
+          'ocb.project': 'p1',
+          'ocb.branch': 'orb/$id',
+          'ocb.created': created,
+        });
+
+        const a = 'aaaaaaaaaaaaaaaa';
+        const b = 'bbbbbbbbbbbbbbbb';
+        docker.psResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-$a\norb-$b\n',
+          stderr: '',
+        );
+        docker.containerLabelsResult = DockerCliResult(
+          exitCode: 0,
+          stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
+          stderr: '',
+        );
+        // Both exited; a's boot failed at the shell probe (the entrypoint left
+        // the marker), b is a plain stopped orb.
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'exited\nexited\n',
+          stderr: '',
+        );
+        docker.ports = 'null\nnull\n';
+        docker.volumeLsResult = DockerCliResult(
+          exitCode: 0,
+          stdout:
+              'orb-$a-workspace\norb-$a-data\norb-$b-workspace\norb-$b-data\n',
+          stderr: '',
+        );
+        Directory('${stateRoot.path}/$a').createSync(recursive: true);
+        Directory('${stateRoot.path}/$b').createSync(recursive: true);
+        File('${stateRoot.path}/$a/no-shell').writeAsStringSync(
+          "no usable shell: sh -c 'printf ok' exited 127\n",
+        );
+
+        final rows = await service().list();
+
+        final byId = {for (final row in rows) row.id: row};
+        expect(byId[a]!.state, 'broken:shell');
+        expect(byId[a]!.bootReason, contains('no usable shell'));
+        expect(byId[a]!.url, isNull);
+        expect(byId[b]!.state, 'stopped');
+        expect(byId[b]!.bootReason, isNull);
       },
     );
 
