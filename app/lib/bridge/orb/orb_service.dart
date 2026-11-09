@@ -412,6 +412,13 @@ class OrbService {
   /// is ephemeral (`-p 127.0.0.1:0:<port>`); only this one is fixed.
   static const int inContainerPort = 4096;
 
+  /// The staged gh config dir inside the orb, as the entrypoint sets it
+  /// (`$STATE_DIR/gh`, the state mount being `/root/.local`; `ORB_STATE_DIR`
+  /// is never passed by the bridge). `docker exec` does not inherit the
+  /// entrypoint's export, so the in-container probe passes it explicitly
+  /// (issue #145).
+  static const String inContainerGhConfigDir = '/root/.local/gh';
+
   /// The max container-log lines kept as the boot-failure tail.
   static const int maxTailLines = 20;
 
@@ -609,6 +616,7 @@ class OrbService {
     // The container-local gh credentials (issue #120): the host's gh token
     // read bridge-side (the bridge reaches the keyring the read-only mount
     // cannot), staged on the state dir mount the entrypoint points gh at.
+    // The boot below then proves them in-container (issue #145).
     await _stageGhConfig(id);
 
     // The start: the entrypoint's first-start path (clone, hook,
@@ -622,6 +630,12 @@ class OrbService {
     _streamBootLines(id, logProcess, tail);
     try {
       final (url, password) = await _waitForBoot(id, container, tail);
+      // ... and the in-container gh check (issue #145, spec §4): a staged
+      // file is not proof, the running orb's own gh is. It never fails the
+      // boot — the orb is a working workspace — but a refusal leaves the
+      // `gh-auth-failed` cause for the list and the boot report (the 401s
+      // are then named at boot, not discovered mid-task).
+      await verifyGhAuth(id, container);
       await _syncHostCredentials(id, url, password);
       return OrbRecord(
         id: id,
@@ -833,6 +847,21 @@ class OrbService {
       }
     }
 
+    // The gh-auth surfacing (issue #145): the bridge could not stage usable
+    // gh credentials at the last create/wake/update, so the agent's gh is as
+    // good as dead and every API call answers 401 mid-task. Same host-side
+    // read as push-failed (#120) - never a container probe, the list is the
+    // services' hot path (spec 2.2). The marker describes the start, not
+    // the orb: `_stageGhConfig` clears it on the next passing stage.
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      if (row.state == 'orphan' || row.state.startsWith('broken')) {
+        continue;
+      }
+      final reason = _ghAuthFailedMarker(row.id);
+      if (reason != null) rows[i] = _withGhAuthFailure(row, reason);
+    }
+
     for (final volumeName in volumeNames) {
       final id = _volumeOrbId(volumeName);
       if (id == null || ids.contains(id)) continue;
@@ -943,6 +972,8 @@ class OrbService {
     pr: pr,
     base: record.base,
     pushFailing: record.pushFailing,
+    ghAuthFailed: record.ghAuthFailed,
+    bootReason: record.bootReason,
   );
 
   OrbRecord _withPushFailing(OrbRecord record) => OrbRecord(
@@ -956,7 +987,43 @@ class OrbService {
     pr: record.pr,
     base: record.base,
     pushFailing: true,
+    ghAuthFailed: record.ghAuthFailed,
+    bootReason: record.bootReason,
   );
+
+  /// [record] carrying its gh-auth failure cause (issue #145) - every other
+  /// field a copy, like [_withPushFailing].
+  OrbRecord _withGhAuthFailure(OrbRecord record, String reason) => OrbRecord(
+    id: record.id,
+    name: record.name,
+    project: record.project,
+    branch: record.branch,
+    state: record.state,
+    created: record.created,
+    url: record.url,
+    pr: record.pr,
+    base: record.base,
+    pushFailing: record.pushFailing,
+    ghAuthFailed: reason,
+    bootReason: record.bootReason,
+  );
+
+  /// The cause in orb [id]'s `gh-auth-failed` marker (issue #145), or `null`
+  /// when the bridge has no such marker - the credentials staged fine, or
+  /// the host has no gh. A host-side read only (like [_noShellMarker] and the
+  /// push marker): cleared by the next passing stage.
+  String? _ghAuthFailedMarker(String id) {
+    final file = File('${stateRoot.path}/$id/gh-auth-failed');
+    if (!file.existsSync()) return null;
+    try {
+      final reason = file.readAsStringSync().trim();
+      return reason.isEmpty ? 'gh could not authenticate' : reason;
+    } on FileSystemException {
+      // Unreadable for a moment (a boot rewriting it): no verdict beats a
+      // wrong one, and the next list reads it again.
+      return null;
+    }
+  }
 
   /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
   /// never auto-deleted; issue #96): removes the orphan's labeled volumes
@@ -1675,6 +1742,11 @@ class OrbService {
         tail,
         skipPasswords: stalePasswords,
       );
+      // ... and the in-container gh check (issue #145, spec §4): a staged
+      // file is not proof, the running orb's own gh is. It never fails the
+      // wake — the orb is a working workspace — but a refusal leaves the
+      // `gh-auth-failed` cause for the list and the boot report.
+      await verifyGhAuth(id, container);
       await _syncHostCredentials(id, url, password);
       await _removeStoppedMarker(id);
       await _removeCleanupMarker(id);
@@ -2221,6 +2293,11 @@ class OrbService {
     _streamBootLines(id, logProcess, tail);
     try {
       final (url, password) = await _waitForBoot(id, container, tail);
+      // ... and the in-container gh check (issue #145, spec §4): a staged
+      // file is not proof, the running orb's own gh is. It never fails the
+      // boot — the orb is a working workspace — but a refusal leaves the
+      // `gh-auth-failed` cause for the list and the boot report.
+      await verifyGhAuth(id, container);
       await _syncHostCredentials(id, url, password);
       return OrbRecord(
         id: id,
@@ -3017,45 +3094,79 @@ class OrbService {
   /// refreshed that verdict is no longer known, and the next push re-marks
   /// it if it still fails (a start without credentials keeps the marker —
   /// it fixed nothing).
-  Future<void> _stageGhConfig(String id) async {
+  Future<bool> _stageGhConfig(String id) async {
     final runner = gh;
-    if (runner == null) return;
+    // No host gh at all: the ssh mount carries the push; nothing to stage
+    // and nothing to blame on credentials (issue #145).
+    if (runner == null) return false;
     String? login;
-    String token;
+    String? token;
+    String? failure;
     try {
       // The active github.com login (hosts.yml needs the user key, and
       // `gh auth token` alone does not say whose token it is).
       final status = await runner(['auth', 'status', '--json', 'hosts']);
-      if (status.exitCode != 0) return;
-      final decoded = jsonDecode(status.stdout);
-      final hosts = decoded is Map<String, Object?> ? decoded['hosts'] : null;
-      final entries = hosts is Map<String, Object?>
-          ? hosts['github.com']
-          : null;
-      if (entries is! List) return;
-      for (final entry in entries) {
-        if (entry is Map<String, Object?> &&
-            entry['active'] == true &&
-            entry['state'] == 'success' &&
-            entry['login'] is String) {
-          login = entry['login'] as String;
-          break;
+      if (status.exitCode != 0) {
+        failure = _ghFailureLine((
+          status.exitCode,
+          status.stdout,
+          status.stderr,
+        ), 'gh auth status');
+      } else {
+        final decoded = jsonDecode(status.stdout);
+        final hosts = decoded is Map<String, Object?> ? decoded['hosts'] : null;
+        final entries = hosts is Map<String, Object?>
+            ? hosts['github.com']
+            : null;
+        if (entries is! List) {
+          // A logged-out host: nothing to stage, and the orb will fail its
+          // own probe anyway if it needs gh — say why (issue #145).
+          failure = 'no github.com login on the host';
+        } else {
+          for (final entry in entries) {
+            if (entry is Map<String, Object?> &&
+                entry['active'] == true &&
+                entry['state'] == 'success' &&
+                entry['login'] is String) {
+              login = entry['login'] as String;
+              break;
+            }
+          }
+          if (login == null) failure = 'no active github.com login on the host';
+        }
+        if (failure == null) {
+          // Scope the read to the very login verified above: on a
+          // multi-credential host, the unscoped `(default)` account is not
+          // necessarily that login, and its token may be a stale one
+          // GitHub rejects (issue #145, token the keyring returns).
+          final result = await runner(['auth', 'token', '--user', login!]);
+          if (result.exitCode == 0) {
+            token = result.stdout.trim();
+          } else {
+            failure = _ghFailureLine((
+              result.exitCode,
+              result.stdout,
+              result.stderr,
+            ), 'gh auth token');
+          }
         }
       }
-      if (login == null) return;
-      final result = await runner(['auth', 'token']);
-      if (result.exitCode != 0) return;
-      token = result.stdout.trim();
-    } on Object {
+    } on Object catch (error) {
       // No gh on the PATH anymore, or unreadable output: the mount stays
       // the surface (the create proceeds — an ssh remote still pushes).
-      return;
+      final reason = '$error'.trim().replaceAll(RegExp(r'\s+'), ' ');
+      failure = 'the host gh could not be read: $reason';
     }
     // A token/login that is not a plain scalar is not a GitHub token /
     // login: stage nothing (the staged file is YAML the container reads).
-    if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(token) ||
-        !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(login)) {
-      return;
+    if (failure == null &&
+        (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(token!) ||
+            !RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(login!))) {
+      failure = 'the host gh token read back is not a token';
+    }
+    if (failure != null) {
+      _markGhAuthFailed(id, failure);
+      return false;
     }
     final dir = Directory('${stateRoot.path}/$id/gh')
       ..createSync(recursive: true);
@@ -3068,6 +3179,7 @@ class OrbService {
       '            oauth_token: $token\n'
       '    user: $login\n',
     );
+    _clearGhAuthFailure(id);
     try {
       Process.runSync('chmod', ['600', hostsFile.path]);
     } on ProcessException {
@@ -3081,6 +3193,118 @@ class OrbService {
       // A lingering marker only over-surfaces, never hides; the state
       // dir's own removal (the deletion) takes it with it.
     }
+    return true;
+  }
+
+  /// The reason line of a failed host gh call (issue #145): its stderr's
+  /// first non-empty line (gh writes the cause there, e.g. "The token in
+  /// default is invalid."), else its stdout, else the step and the exit
+  /// code — never an empty cause.
+  static String _ghFailureLine(
+    (int exitCode, String stdout, String stderr) result,
+    String step,
+  ) {
+    for (final output in [result.$3, result.$2]) {
+      for (final line in const LineSplitter().convert(output)) {
+        final trimmed = line.trim();
+        if (trimmed.isNotEmpty) return trimmed;
+      }
+    }
+    return '$step exited ${result.$1}';
+  }
+
+  /// Record that the orb's gh credentials could not be staged (issue #145):
+  /// the cause on the state mount, host-side readable like `push-failed`
+  /// (#120) so the list composes the row's `ghAuthFailed` flag — before the
+  /// boot, so the boot report says so. Written even when the boot fails: the
+  /// marker describes the credentials, not the boot.
+  void _markGhAuthFailed(String id, String reason) {
+    final marker = File('${stateRoot.path}/$id/gh-auth-failed');
+    try {
+      marker.parent.createSync(recursive: true);
+      marker.writeAsStringSync(reason);
+    } on FileSystemException {
+      // No writable state dir: the create's own failures surface first.
+      return;
+    }
+    final emitter = emit;
+    if (emitter != null) {
+      emitter(
+        bridgeEvent(
+          type: BridgeEventType.orbBoot,
+          data: {'id': id, 'line': '[orb] gh auth: $reason'},
+        ),
+      );
+    }
+  }
+
+  /// Clear [id]'s `gh-auth-failed` marker after a successful stage (issue
+  /// #145): the #120/#149 rule — a marker describes the start that wrote it.
+  void _clearGhAuthFailure(String id) {
+    try {
+      final marker = File('${stateRoot.path}/$id/gh-auth-failed');
+      if (marker.existsSync()) marker.deleteSync();
+    } on FileSystemException {
+      // A lingering marker only over-surfaces, never hides.
+    }
+  }
+
+  /// The post-boot in-container gh check (issue #145, spec §4). A staged
+  /// `hosts.yml` merely existing is not proof: gh INSIDE the orb may still
+  /// refuse GitHub — the token GitHub revoked after the bridge read it, or a
+  /// config the container's gh does not resolve the way the host's does
+  /// (measured on `orb` v0.1: the same well-formed file was "not logged into
+  /// any GitHub hosts" from `docker exec`). So the proof is one cheap
+  /// AUTHENTICATED call, made in the container with the config the agent will
+  /// actually use: `gh api user`.
+  ///
+  /// `GH_CONFIG_DIR` must be passed explicitly: `docker exec` is not a child
+  /// of the entrypoint, so it does not inherit the entrypoint's `export`
+  /// (`smoke120_manual.dart:154` — an unpassed exec reads the tokenless mount
+  /// and fails for every keyring host). The staged dir is the entrypoint's
+  /// fixed `$STATE_DIR/gh` (`ORB_STATE_DIR` is never set by the bridge).
+  ///
+  /// Never throws and never fails the boot — the orb is a working workspace
+  /// regardless: a refusal is reported (`ok: false`) and recorded on the
+  /// state dir for the list and the boot log.
+  Future<({bool ok, String? cause})> verifyGhAuth(
+    String id,
+    String container,
+  ) async {
+    final staged = File('${stateRoot.path}/$id/gh/hosts.yml');
+    if (!staged.existsSync()) {
+      // Nothing staged: the tokenless mount is the surface (an ssh remote
+      // still pushes), and gh may legitimately have no API work to do.
+      return (ok: true, cause: null);
+    }
+    DockerCliResult result;
+    try {
+      result = await run([
+        'exec',
+        '-e',
+        'GH_CONFIG_DIR=$inContainerGhConfigDir',
+        container,
+        'gh',
+        'api',
+        'user',
+        '--jq',
+        '.login',
+      ]);
+    } on Object catch (error) {
+      // The docker CLI itself refused: a warning, never a failed boot.
+      result = DockerCliResult(exitCode: -1, stdout: '', stderr: '$error');
+    }
+    if (result.exitCode == 0 && result.stdout.trim().isNotEmpty) {
+      _clearGhAuthFailure(id);
+      return (ok: true, cause: null);
+    }
+    final cause = _ghFailureLine((
+      result.exitCode,
+      result.stdout,
+      result.stderr,
+    ), 'gh api user');
+    _markGhAuthFailed(id, cause);
+    return (ok: false, cause: cause);
   }
 
   /// The host checkout's `.env*` files, host-authoritative (spec §6.1):
@@ -3515,6 +3739,8 @@ class OrbService {
     url: null,
     pr: record.pr,
     base: record.base,
+    pushFailing: record.pushFailing,
+    ghAuthFailed: record.ghAuthFailed,
     bootReason: record.bootReason,
   );
 
@@ -3531,6 +3757,7 @@ class OrbService {
     pr: record.pr,
     base: record.base,
     pushFailing: record.pushFailing,
+    ghAuthFailed: record.ghAuthFailed,
     bootReason: reason,
   );
 

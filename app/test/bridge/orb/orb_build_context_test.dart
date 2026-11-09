@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -29,6 +30,23 @@ void main() {
       }
     });
 
+    test(
+      'the materialized boot script starts at the shebang (issue #145)',
+      () async {
+        // The bridge builds the image from this dir. A leading newline (or a
+        // BOM) before `#!/bin/sh` runs the script fine but the image's
+        // `docker exec`/`exec` form fatals with `exec format error` — the
+        // failure a hand-written context hit. The embedded value must start at
+        // byte 0 with the shebang.
+        const key = 'orb-entrypoint.sh';
+        final context = OrbBuildContext(dir: dir);
+        await context.materialize();
+        final written = File('${dir.path}/$key').readAsBytesSync();
+        expect(written.sublist(0, 10), ascii.encode('#!/bin/sh\n'));
+        expect(written, utf8.encode(OrbEmbedded.files[key]!));
+      },
+    );
+
     test('never overwrites an existing file (the on-disk copy is the source '
         'of truth)', () async {
       final context = OrbBuildContext(dir: dir);
@@ -37,6 +55,49 @@ void main() {
       await file.writeAsString('ARG OPENCODE_VERSION=9.9.9\n');
       await context.materialize();
       expect(file.readAsStringSync(), 'ARG OPENCODE_VERSION=9.9.9\n');
+    });
+
+    test('a stale boot script is replaced on the next startup, its user pins '
+        'kept (issue #145)', () async {
+      // The defect: the app's own code (the entrypoint) was written
+      // create-if-missing like the user's Dockerfile, so an install created
+      // at 2026-11-05 froze a 60-line entrypoint forever — #94's services,
+      // #120's GH_CONFIG_DIR export and #149's shell probe never reached any
+      // orb, and the image tag stayed in sync with that frozen file by
+      // construction. The app's code must follow the app; the pins are the
+      // user's.
+      final stale =
+          '#!/bin/sh\n'
+          '# Orb container entrypoint (issue #93),\n'
+          'exec opencode serve --hostname 0.0.0.0 --port 4096\n';
+      File('${dir.path}/orb-entrypoint.sh').writeAsStringSync(stale);
+      final pin = 'ARG OPENCODE_VERSION=9.9.9\n';
+      File('${dir.path}/Dockerfile').writeAsStringSync(pin);
+
+      final context = OrbBuildContext(dir: dir);
+      await context.materialize();
+
+      // The app's code follows the app...
+      expect(
+        File('${dir.path}/orb-entrypoint.sh').readAsStringSync(),
+        OrbEmbedded.files['orb-entrypoint.sh'],
+        reason: 'a stale entrypoint must be upgraded, not frozen',
+      );
+      // ... and it is NOT the stale bytes (the anti-tautology half).
+      expect(
+        File('${dir.path}/orb-entrypoint.sh').readAsStringSync(),
+        isNot(stale),
+      );
+      expect(
+        File('${dir.path}/orb-entrypoint.sh').readAsStringSync(),
+        contains('GH_CONFIG_DIR'),
+      );
+      expect(
+        File('${dir.path}/orb-entrypoint.sh').readAsStringSync(),
+        contains('stage: shell'),
+      );
+      // ... the user's pins stay theirs.
+      expect(File('${dir.path}/Dockerfile').readAsStringSync(), pin);
     });
 
     test('is stable across startups: the tag does not change', () async {

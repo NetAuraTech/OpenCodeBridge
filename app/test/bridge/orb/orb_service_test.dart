@@ -111,6 +111,11 @@ class _FakeDocker {
     stderr: 'no such container',
   );
 
+  /// Scripts the `docker exec` inside the orb (the staged-credential
+  /// check, issue #145). `null` answers: interpreted as `exit 0, no
+  /// output` — the default (a good orb).
+  DockerCliResult Function(List<String> argv)? execRespond;
+
   (DockerRunner, DockerSpawner) bind() => (_run, _spawn);
 
   Future<DockerCliResult> _run(
@@ -159,6 +164,25 @@ class _FakeDocker {
         return DockerCliResult(exitCode: 0, stdout: ports, stderr: '');
       }
       if (format == '{{json .Config.Labels}}') return containerLabelsResult;
+    }
+    if (command == 'exec') {
+      // The in-container gh check (`docker exec -e GH_CONFIG_DIR=… <c> gh
+      // api user --jq .login`, issue #145). A scripted answer wins; else an
+      // exec that carries the staged config dir authenticates (a login), and
+      // one that does not reads the tokenless mount and fails — exactly what
+      // an orb without the export does.
+      final scripted = execRespond?.call(argv);
+      if (scripted != null) return scripted;
+      if (argv.contains('-e')) {
+        return const DockerCliResult(exitCode: 0, stdout: 'dev\n', stderr: '');
+      }
+      return const DockerCliResult(
+        exitCode: 1,
+        stdout: '',
+        stderr:
+            'To get started with GitHub CLI, please run:  gh auth login\n'
+            'Alternatively, populate the GH_TOKEN environment variable',
+      );
     }
     throw StateError('unexpected docker argv: $argv');
   }
@@ -1369,7 +1393,7 @@ void main() {
               '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
           stderr: '',
         );
-        gh.results['auth token'] = GitCliResult(
+        gh.results['auth token --user dev'] = GitCliResult(
           exitCode: 0,
           stdout: token,
           stderr: '',
@@ -1406,10 +1430,12 @@ void main() {
             gh.args
                 .map((a) => a.join(' '))
                 .where(
-                  (a) => a == 'auth status --json hosts' || a == 'auth token',
+                  (a) =>
+                      a == 'auth status --json hosts' ||
+                      a == 'auth token --user dev',
                 )
                 .toList(),
-            ['auth status --json hosts', 'auth token'],
+            ['auth status --json hosts', 'auth token --user dev'],
           );
           final hosts = File('${stateRoot.path}/$id/gh/hosts.yml');
           expect(hosts.existsSync(), isTrue);
@@ -1448,20 +1474,29 @@ void main() {
         expect(Directory('${stateRoot.path}/$id/gh').existsSync(), isFalse);
       });
 
-      test('a host gh with no token (logged out) stages nothing', () async {
+      test('a login whose token is gone stages nothing and is flagged '
+          '(issue #145)', () async {
         final gh = _FakeGh();
         gh.results['auth status --json hosts'] = const GitCliResult(
           exitCode: 0,
-          stdout: '{"hosts":{}}',
+          stdout:
+              '{"hosts":{"github.com":[{"state":"success","active":true,'
+              '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
           stderr: '',
         );
-        gh.results['auth token'] = const GitCliResult(
+        gh.results['auth token --user dev'] = const GitCliResult(
           exitCode: 1,
           stdout: '',
           stderr: 'no oauth token found for github.com',
         );
         final (id: id, gh: _) = await createWithGh(gh);
         expect(Directory('${stateRoot.path}/$id/gh').existsSync(), isFalse);
+        final marker = File('${stateRoot.path}/$id/gh-auth-failed');
+        expect(marker.existsSync(), isTrue);
+        expect(
+          marker.readAsStringSync(),
+          contains('no oauth token found for github.com'),
+        );
       });
 
       test('a logged-in host gh whose config file already carries a token '
@@ -1472,6 +1507,84 @@ void main() {
         // is host-authoritative.
         final (id: id, gh: _) = await createWithGh(hostGh());
         expect(File('${stateRoot.path}/$id/gh/hosts.yml').existsSync(), isTrue);
+        expect(
+          File('${stateRoot.path}/$id/gh-auth-failed').existsSync(),
+          isFalse,
+        );
+      });
+
+      test('a multi-credential keyring stages the ACTIVE login\'s token, not '
+          'the first entry\'s (issue #145)', () async {
+        // The host keeps several credentials in the keyring; gh lists them
+        // in an order that need not put the active one first. The staged
+        // file must carry the active login and its token — the wrong token
+        // is exactly the "401 in the orb, the host is fine" report.
+        final gh = _FakeGh();
+        gh.results['auth status --json hosts'] = const GitCliResult(
+          exitCode: 0,
+          stdout:
+              '{"hosts":{"github.com":['
+              '{"state":"success","active":false,"host":"github.com",'
+              '"login":"stale","tokenSource":"keyring"},'
+              '{"state":"success","active":true,"host":"github.com",'
+              '"login":"dev","tokenSource":"keyring"},'
+              '{"state":"success","active":false,"host":"github.com",'
+              '"login":"older","tokenSource":"keyring"}]}}',
+          stderr: '',
+        );
+        gh.results['auth token --user dev'] = const GitCliResult(
+          exitCode: 0,
+          stdout: 'gho_SECRET\n',
+          stderr: '',
+        );
+
+        final (id: id, gh: _) = await createWithGh(gh);
+        final staged = await File('${stateRoot.path}/$id/gh/hosts.yml')
+            .readAsString();
+
+        expect(staged, contains('oauth_token: gho_SECRET'));
+        expect(staged, contains('user: dev'));
+
+        expect(
+          gh.args.map((a) => a.join(' ')),
+          contains('auth token --user dev'),
+          reason: 'the token read is scoped to the ACTIVE login',
+        );
+      });
+
+      test('a host gh whose token read fails leaves no silent marker: the '
+          'orb is flagged gh-auth-failed at boot (issue #145)', () async {
+        // The staging degrades SILENTLY today: `gh auth token` fails in the
+        // bridge (no keyring on its session bus, a rotated-out login…), we
+        // return without a word, the orb boots with just the tokenless
+        // read-only mount and the agent discovers a dead gh mid-task —
+        // every API call answering 401. The failure must land on the orb's
+        // state dir at boot instead, like the push marker (#120).
+        final gh = _FakeGh();
+        gh.results['auth status --json hosts'] = const GitCliResult(
+          exitCode: 0,
+          stdout:
+              '{"hosts":{"github.com":[{"state":"success","active":true,'
+              '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
+          stderr: '',
+        );
+        gh.results['auth token --user dev'] = const GitCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'The token in default is invalid.',
+        );
+
+        final (id: id, gh: _FakeGh()) = await createWithGh(gh);
+
+        expect(
+          File('${stateRoot.path}/$id/gh-auth-failed').existsSync(),
+          isTrue,
+          reason: 'a silent stage failure must surface, not be swallowed',
+        );
+        expect(
+          File('${stateRoot.path}/$id/gh/hosts.yml').existsSync(),
+          isFalse,
+        );
       });
     });
 
@@ -1774,6 +1887,106 @@ void main() {
       test('a row without the marker is not pushFailing', () async {
         final rows = await listTwoRunning();
         expect(rows.every((r) => !r.pushFailing), isTrue);
+      });
+    });
+    group('the gh-auth failure surfacing (issue #145)', () {
+      Future<List<OrbRecord>> listTwoRunning({String? ghReasonOnA}) async {
+        const created = '2026-11-04T00:00:00.000Z';
+        const a = 'aaaaaaaaaaaaaaaa';
+        const b = 'bbbbbbbbbbbbbbbb';
+        String labels(String id, String name) => jsonEncode({
+          'ocb.orb': 'true',
+          'ocb.id': id,
+          'ocb.name': name,
+          'ocb.project': 'p1',
+          'ocb.branch': 'orb/$id',
+          'ocb.created': created,
+        });
+        docker.psResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'orb-$a\norb-$b\n',
+          stderr: '',
+        );
+        docker.containerLabelsResult = DockerCliResult(
+          exitCode: 0,
+          stdout: '${labels(a, 'dev')}\n${labels(b, 'beta')}\n',
+          stderr: '',
+        );
+        for (final id in [a, b]) {
+          Directory('${stateRoot.path}/$id').createSync(recursive: true);
+        }
+        docker.stateResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: 'running\nrunning\n',
+          stderr: '',
+        );
+        docker.ports = 'null\nnull\n';
+        docker.containerLogs['orb-$a'] = 'server password pw\n';
+        docker.containerLogs['orb-$b'] = 'server password pw\n';
+        docker.volumeLsResult = const DockerCliResult(
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+        );
+        if (ghReasonOnA != null) {
+          File('${stateRoot.path}/$a/gh-auth-failed')
+              .writeAsStringSync(ghReasonOnA);
+        }
+        return service().list();
+      }
+
+      test('a row whose state dir carries the gh-auth-failed marker exposes '
+          'its cause', () async {
+        final rows = await listTwoRunning(
+          ghReasonOnA: 'The token in default is invalid.',
+        );
+        final dev = rows.firstWhere((r) => r.name == 'dev');
+        expect(
+          dev.ghAuthFailed,
+          'The token in default is invalid.',
+          reason: 'the card says why, not just that gh is broken',
+        );
+        expect(dev.state, 'running', reason: 'the cause is not the state');
+      });
+
+      test('a row without the marker has no gh-auth failure', () async {
+        final rows = await listTwoRunning();
+        expect(rows.every((r) => r.ghAuthFailed == null), isTrue);
+      });
+
+      test('an empty marker still says the failure exists', () async {
+        final rows = await listTwoRunning(ghReasonOnA: '  \n');
+        expect(
+          rows.firstWhere((r) => r.name == 'dev').ghAuthFailed,
+          'gh could not authenticate',
+        );
+      });
+
+      test('the record round-trips the cause through JSON', () {
+        const record = OrbRecord(
+          id: 'orb_1',
+          name: 'dev',
+          project: 'p1',
+          branch: 'orb/orb_1',
+          state: 'running',
+          created: '2025-01-01T00:00:00Z',
+          ghAuthFailed: 'The token in default is invalid.',
+        );
+        expect(
+          OrbRecord.fromJson(jsonDecode(jsonEncode(record.toJson())))
+              .ghAuthFailed,
+          'The token in default is invalid.',
+        );
+        // Absent for a healthy orb (the wire stays unchanged).
+        const healthy = OrbRecord(
+          id: 'orb_1',
+          name: 'dev',
+          project: 'p1',
+          branch: 'orb/orb_1',
+          state: 'running',
+          created: '2025-01-01T00:00:00Z',
+        );
+        expect(healthy.toJson().containsKey('ghAuthFailed'), isFalse);
       });
     });
 

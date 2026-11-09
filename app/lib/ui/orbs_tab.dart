@@ -886,6 +886,7 @@ String _stateWord(String state) {
 String? _stateDetail(
   String state, {
   bool pushFailing = false,
+  String? ghAuthFailed,
   String? bootReason,
 }) {
   if (state.startsWith('preparing:')) {
@@ -905,6 +906,12 @@ String? _stateDetail(
   }
   if (state.startsWith('cleanup_pending:')) {
     return state.substring('cleanup_pending:'.length);
+  }
+  // The dead gh (issue #145) is the STRONGER signal: it also breaks the
+  // push, so "push is failing" would be the symptom of this cause, not a
+  // competing verdict. Say why first.
+  if (ghAuthFailed != null && ghAuthFailed.isNotEmpty) {
+    return 'gh authentication failed: $ghAuthFailed';
   }
   if (pushFailing) return 'push to the remote is failing';
   return null;
@@ -983,6 +990,7 @@ class _OrbCard extends StatelessWidget {
     final detail = _stateDetail(
       orb.state,
       pushFailing: orb.pushFailing,
+      ghAuthFailed: orb.ghAuthFailed,
       bootReason: orb.bootReason,
     );
     return Material(

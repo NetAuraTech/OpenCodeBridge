@@ -664,7 +664,7 @@ void main() {
             '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
         stderr: '',
       );
-      gh.results['auth token'] = const GitCliResult(
+      gh.results['auth token --user dev'] = const GitCliResult(
         exitCode: 0,
         stdout: 'gho_UPDATE\n',
         stderr: '',

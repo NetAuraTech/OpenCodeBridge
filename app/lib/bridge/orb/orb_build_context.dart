@@ -10,11 +10,14 @@ import 'orb_embedded.dart';
 /// The app-embedded orb build context (spec §5.2, issue #92), materialized
 /// on the host. The app is a built binary — there is no OpenCodeBridge
 /// checkout on the host — so the Dockerfile and the boot scripts are embedded
-/// in the binary ([OrbEmbedded]) and materialized, **create-if-missing**,
-/// into the app-owned build-context dir. From then on the on-disk copy is the
-/// single source of truth for image content:
+/// in the binary ([OrbEmbedded]) and materialized into the app-owned
+/// build-context dir at every startup, under two contracts (issue #145, see
+/// [materialize]): the app's code (the boot scripts) follows the app and is
+/// re-written from the embedded copy, the user's pins ([OrbEmbedded.pinnedFiles])
+/// are create-if-missing and never overwritten. The on-disk context is the
+/// single source of truth for image content *at build time*:
 ///
-/// - an app upgrade never overwrites an existing file, so the pinned
+/// - an app upgrade never overwrites the user's pin edits, so the pinned
 ///   versions are under the user's control, never under the running app's;
 /// - the tag derives from a content hash of the on-disk context, so the
 ///   image is in sync with the files by construction (no stale state);
@@ -39,16 +42,40 @@ class OrbBuildContext {
   static const int tagHashLength = 12;
 
   /// Materialize the embedded build context ([OrbEmbedded.files]) into [dir],
-  /// creating [dir] if it is missing. **Create-if-missing, never overwrite**:
-  /// a file that already exists on disk is left untouched, because the
-  /// on-disk copy is the single source of truth for image content (the
-  /// user's pin edits). Safe to call at every startup.
+  /// creating [dir] if it is missing. Safe to call at every startup.
+  ///
+  /// **Two classes of files, two contracts** (issue #145):
+  ///
+  /// - The **app's code** ([OrbEmbedded.files] minus [OrbEmbedded.pinnedFiles]
+  ///   — here the entrypoint) is
+  ///   re-written from the embedded copy on every startup. It is the
+  ///   running app's artefact, not the user's: a copy left from an older
+  ///   install is a stale binary the user never chose and cannot see. The
+  ///   former create-if-missing froze the 2026-11-05 entrypoint forever
+  ///   (60 lines, no `GH_CONFIG_DIR`), so every merged boot fix — #94's
+  ///   services, #120's staged gh credentials, #149's shell probe —
+  ///   silently never reached an orb, and the image stayed in sync with
+  ///   that frozen file by construction.
+  /// - The **user's pins** ([OrbEmbedded.pinnedFiles] — the Dockerfile)
+  ///   stay **create-if-missing, never overwritten**: the ARG defaults are
+  ///   the user's to edit, never the running app's. Reset = delete a file;
+  ///   the next startup re-materializes the embedded copy.
+  ///
+  /// An app rewritten file whose on-disk bytes are the embedded ones writes
+  /// nothing, so the tag (and the image) is stable across startups.
   Future<void> materialize() async {
     final root = dir.path;
     await dir.create(recursive: true);
     for (final entry in OrbEmbedded.files.entries) {
       final file = File('$root/${entry.key}');
-      if (file.existsSync()) continue; // The on-disk copy wins.
+      if (OrbEmbedded.pinnedFiles.contains(entry.key)) {
+        // The user's pins: the on-disk copy wins.
+        if (file.existsSync()) continue;
+      } else if (file.existsSync() && file.readAsStringSync() == entry.value) {
+        // The app's code, already current: keep the bytes (and mtime) as they
+        // are, so the content hash is the same.
+        continue;
+      }
       await file.parent.create(recursive: true);
       await file.writeAsString(entry.value);
     }
