@@ -10,11 +10,14 @@ import 'orb_embedded.dart';
 /// The app-embedded orb build context (spec §5.2, issue #92), materialized
 /// on the host. The app is a built binary — there is no OpenCodeBridge
 /// checkout on the host — so the Dockerfile and the boot scripts are embedded
-/// in the binary ([OrbEmbedded]) and materialized, **create-if-missing**,
-/// into the app-owned build-context dir. From then on the on-disk copy is the
-/// single source of truth for image content:
+/// in the binary ([OrbEmbedded]) and materialized into the app-owned
+/// build-context dir at every startup, under two contracts (issue #145, see
+/// [materialize]): the app's code (the boot scripts) follows the app and is
+/// re-written from the embedded copy, the user's pins ([OrbEmbedded.pinnedFiles])
+/// are create-if-missing and never overwritten. The on-disk context is the
+/// single source of truth for image content *at build time*:
 ///
-/// - an app upgrade never overwrites an existing file, so the pinned
+/// - an app upgrade never overwrites the user's pin edits, so the pinned
 ///   versions are under the user's control, never under the running app's;
 /// - the tag derives from a content hash of the on-disk context, so the
 ///   image is in sync with the files by construction (no stale state);
@@ -43,7 +46,8 @@ class OrbBuildContext {
   ///
   /// **Two classes of files, two contracts** (issue #145):
   ///
-  /// - The **app's code** ([OrbEmbedded.codeFiles] — the entrypoint) is
+  /// - The **app's code** ([OrbEmbedded.files] minus [OrbEmbedded.pinnedFiles]
+  ///   — here the entrypoint) is
   ///   re-written from the embedded copy on every startup. It is the
   ///   running app's artefact, not the user's: a copy left from an older
   ///   install is a stale binary the user never chose and cannot see. The

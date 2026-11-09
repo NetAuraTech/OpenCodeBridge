@@ -299,8 +299,9 @@ class BridgeServer {
   /// its container exits re-emitted onto the event stream.
   /// [orb], when provided, serves the explicit image-rebuild endpoint
   /// (issue #92, tests); the default materializes the embedded build context
-  /// into the app-owned dir (create-if-missing) and builds an
-  /// [OrbImageBuilder] over the host docker CLI.
+  /// into the app-owned dir (the app's code re-written, the user's pins
+  /// create-if-missing — issue #145) and builds an [OrbImageBuilder] over
+  /// the host docker CLI.
   /// [orbs], when provided, serves the orbs create/list endpoints (issue
   /// #93, tests); the default builds an [OrbService] over the host docker
   /// and git CLIs, the orb state under `~/.config/opencodebridge/orbs`.
@@ -703,12 +704,12 @@ class BridgeServer {
   }
 
   /// The default orb image pipeline (issue #92): the embedded build context
-  /// materialized into the app-owned dir at startup (create-if-missing —
-  /// the on-disk copy is the single source of truth for image content), and
-  /// the image builder over the host docker CLI. Returns `null` when this
-  /// machine has no docker CLI (the rebuild endpoint then reports
-  /// `docker_unavailable`); a materialization failure likewise degrades to
-  /// `null` rather than keeping the bridge from starting.
+  /// materialized into the app-owned dir at startup (the app's boot scripts
+  /// re-written from the embedded copy, the user's pins create-if-missing —
+  /// issue #145), and the image builder over the host docker CLI. Returns
+  /// `null` when this machine has no docker CLI (the rebuild endpoint then
+  /// reports `docker_unavailable`); a materialization failure likewise
+  /// degrades to `null` rather than keeping the bridge from starting.
   static Future<OrbImageBuilder?> _defaultOrb(
     void Function(String)? emit,
   ) async {
