@@ -682,21 +682,20 @@ void main() {
         );
       });
 
-      testWidgets(
-        'a broken:shell card shows the boot reason (issue #149)',
-        (tester) async {
-          await _pumpTab(tester, orbs: [_brokenShell]);
-          // The word is "broken" like the other broken orbs: the orb exists
-          // but is not usable — and the detail line is the boot's own reason,
-          // so the human reads why no code task can land.
-          expect(find.text('broken'), findsOneWidget);
-          expect(
-            find.textContaining('no usable shell'),
-            findsOneWidget,
-            reason: 'the card says what the boot said',
-          );
-        },
-      );
+      testWidgets('a broken:shell card shows the boot reason (issue #149)', (
+        tester,
+      ) async {
+        await _pumpTab(tester, orbs: [_brokenShell]);
+        // The word is "broken" like the other broken orbs: the orb exists
+        // but is not usable — and the detail line is the boot's own reason,
+        // so the human reads why no code task can land.
+        expect(find.text('broken'), findsOneWidget);
+        expect(
+          find.textContaining('no usable shell'),
+          findsOneWidget,
+          reason: 'the card says what the boot said',
+        );
+      });
 
       testWidgets(
         'a broken:shell card carries no Wake or New session (issue #149)',

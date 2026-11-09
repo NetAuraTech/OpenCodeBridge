@@ -56,7 +56,12 @@ void main() {
     // The seed: a tiny committed repo, so the first-start clone finds a
     // branch to check out.
     final seed = Directory('${root.path}/seed')..createSync();
-    await Process.run('git', ['init', '-q', '-b', 'main'], workingDirectory: seed.path);
+    await Process.run('git', [
+      'init',
+      '-q',
+      '-b',
+      'main',
+    ], workingDirectory: seed.path);
     File('${seed.path}/README.md').writeAsStringSync('seed\n');
     await Process.run('git', ['add', '.'], workingDirectory: seed.path);
     await Process.run('git', [
@@ -77,7 +82,13 @@ void main() {
       'COPY orb-entrypoint.sh /usr/local/bin/orb-entrypoint\n'
       'RUN chmod +x /usr/local/bin/orb-entrypoint\n',
     );
-    final (build, bout, berr) = await _docker(['build', '-q', '-t', _derived, ctx.path]);
+    final (build, bout, berr) = await _docker([
+      'build',
+      '-q',
+      '-t',
+      _derived,
+      ctx.path,
+    ]);
     expect(build, 0, reason: '$bout$berr');
   });
 

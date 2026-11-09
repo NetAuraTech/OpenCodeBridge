@@ -852,82 +852,72 @@ void main() {
   });
 
   group('the shell refusal (issue #149)', () {
-    test(
-      'a shell-less orb refuses the spawn with its boot reason, settles '
-      'refused, and dispatches nothing',
-      () async {
-        // The orb's boot failed at the shell probe: it exists, but its agent
-        // cannot run a command — dispatching would only buy a well-written
-        // "I can't".
-        orbs.listResult = [
-          OrbRecord(
-            id: 'a1b2c3',
-            name: 'worker',
-            project: 'prj_1',
-            branch: 'orb/a1b2c3',
-            state: 'broken:shell',
-            bootReason:
-                'FATAL: no usable shell — the agent could not run a command',
-            created: '2026-01-01T00:00:00.000Z',
-          ),
-        ];
-
-        await expectLater(
-          service.spawn(
-            task: 'do the thing',
-            orb: 'worker',
-            wait: false,
-            callerSession: 'ses_caller',
-          ),
-          throwsA(
-            isA<OrbRefusalError>()
-                .having((e) => e.code, 'code', OrbRefusalError.noShell)
-                .having(
-                  (e) => e.message,
-                  'message',
-                  contains('no usable shell'),
-                ),
-          ),
-        );
-        // Nothing was created or dispatched onto the orb, and no task record
-        // claims it is running somewhere.
-        expect(orbs.createSessionCalls, 0);
-        expect(backend.opencode.prompts, isEmpty);
-        expect(service.tasks.where((t) => t.status == 'running'), isEmpty);
-      },
-    );
-
-    test(
-      'a create that boots shell-less settles refused with the reason and '
-      'dispatches nothing',
-      () async {
-        orbs.listResult = const [];
-        orbs.createResult = OrbRecord(
+    test('a shell-less orb refuses the spawn with its boot reason, settles '
+        'refused, and dispatches nothing', () async {
+      // The orb's boot failed at the shell probe: it exists, but its agent
+      // cannot run a command — dispatching would only buy a well-written
+      // "I can't".
+      orbs.listResult = [
+        OrbRecord(
           id: 'a1b2c3',
-          name: 'fix-login',
+          name: 'worker',
           project: 'prj_1',
           branch: 'orb/a1b2c3',
           state: 'broken:shell',
-          bootReason: 'FATAL: no usable shell',
+          bootReason:
+              'FATAL: no usable shell — the agent could not run a command',
           created: '2026-01-01T00:00:00.000Z',
-        );
+        ),
+      ];
 
-        final task = await service.spawn(
-          task: 'Fix login',
+      await expectLater(
+        service.spawn(
+          task: 'do the thing',
+          orb: 'worker',
           wait: false,
           callerSession: 'ses_caller',
-        );
-        expect(task.status, 'refused');
-        expect(task.isDone, isTrue);
-        expect(task.summary, contains('no usable shell'));
-        expect(task.session, isEmpty, reason: 'no session to attach to');
-        expect(orbs.createSessionCalls, 0);
-        expect(backend.opencode.prompts, isEmpty);
-        // It is the persisted record a later `orb_wait` reads back.
-        expect(service.task(task.id)!.status, 'refused');
-        expect(service.task(task.id)!.summary, contains('no usable shell'));
-      },
-    );
+        ),
+        throwsA(
+          isA<OrbRefusalError>()
+              .having((e) => e.code, 'code', OrbRefusalError.noShell)
+              .having((e) => e.message, 'message', contains('no usable shell')),
+        ),
+      );
+      // Nothing was created or dispatched onto the orb, and no task record
+      // claims it is running somewhere.
+      expect(orbs.createSessionCalls, 0);
+      expect(backend.opencode.prompts, isEmpty);
+      expect(service.tasks.where((t) => t.status == 'running'), isEmpty);
+    });
+
+    test('a create that boots shell-less settles refused with the reason and '
+        'dispatches nothing', () async {
+      orbs.listResult = const [];
+      orbs.createResult = OrbRecord(
+        id: 'a1b2c3',
+        name: 'fix-login',
+        project: 'prj_1',
+        branch: 'orb/a1b2c3',
+        state: 'broken:shell',
+        bootReason: 'FATAL: no usable shell',
+        created: '2026-01-01T00:00:00.000Z',
+      );
+
+      final task = await service.spawn(
+        task: 'Fix login',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      expect(task.status, 'refused');
+      expect(task.isDone, isTrue);
+      expect(task.summary, contains('no usable shell'));
+      expect(task.session, isEmpty, reason: 'no session to attach to');
+      expect(orbs.createSessionCalls, 0);
+      expect(backend.opencode.prompts, isEmpty);
+      // It is the persisted record a later `orb_wait` reads back.
+      expect(service.task(task.id)!.status, 'refused');
+      expect(service.task(task.id)!.summary, contains('no usable shell'));
+    });
 
     test(
       'the single-orb wake-or-create refuses a shell-less orb the same way',

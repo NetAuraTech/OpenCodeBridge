@@ -899,48 +899,39 @@ void main() {
       expect(r.stages.last, 'ready');
     });
 
-    test(
-      'no usable shell: the boot fails with the reason, opencode never '
-      'serves',
-      () async {
-        // A shell that exists but cannot execute the command: exactly the
-        // silent shell-less orb the ticket reported.
-        final r = await h.run(
-          firstStart: true,
-          env: {'FAKE_SH_EXIT': '127'},
-        );
-        expect(r.exitCode, isNot(0));
-        expect(
-          r.called('opencode'),
-          isFalse,
-          reason: 'a shell-less orb must not come up ready',
-        );
-        expect(r.stdout, contains('FATAL: no usable shell'));
-        expect(r.stdout, contains("sh -c 'printf ok'"));
-        expect(r.stages, isNot(contains('ready')));
-      },
-    );
+    test('no usable shell: the boot fails with the reason, opencode never '
+        'serves', () async {
+      // A shell that exists but cannot execute the command: exactly the
+      // silent shell-less orb the ticket reported.
+      final r = await h.run(firstStart: true, env: {'FAKE_SH_EXIT': '127'});
+      expect(r.exitCode, isNot(0));
+      expect(
+        r.called('opencode'),
+        isFalse,
+        reason: 'a shell-less orb must not come up ready',
+      );
+      expect(r.stdout, contains('FATAL: no usable shell'));
+      expect(r.stdout, contains("sh -c 'printf ok'"));
+      expect(r.stages, isNot(contains('ready')));
+    });
 
-    test(
-      'a failed probe leaves the no-shell marker on the state mount, a '
-      'passing one clears it',
-      () async {
-        final failed = await h.run(
-          firstStart: true,
-          env: {'FAKE_SH_EXIT': '127'},
-        );
-        expect(failed.exitCode, isNot(0));
-        final marker = File('${h.state.path}/no-shell');
-        expect(marker.existsSync(), isTrue);
-        expect(marker.readAsStringSync(), contains("sh -c 'printf ok'"));
+    test('a failed probe leaves the no-shell marker on the state mount, a '
+        'passing one clears it', () async {
+      final failed = await h.run(
+        firstStart: true,
+        env: {'FAKE_SH_EXIT': '127'},
+      );
+      expect(failed.exitCode, isNot(0));
+      final marker = File('${h.state.path}/no-shell');
+      expect(marker.existsSync(), isTrue);
+      expect(marker.readAsStringSync(), contains("sh -c 'printf ok'"));
 
-        // The next boot passes: the marker is gone (it describes this boot,
-        // like push-failed).
-        final passed = await h.run(firstStart: false);
-        expect(passed.exitCode, 0);
-        expect(marker.existsSync(), isFalse);
-      },
-    );
+      // The next boot passes: the marker is gone (it describes this boot,
+      // like push-failed).
+      final passed = await h.run(firstStart: false);
+      expect(passed.exitCode, 0);
+      expect(marker.existsSync(), isFalse);
+    });
 
     test('a missing shell binary fails the boot the same way', () async {
       final r = await h.run(

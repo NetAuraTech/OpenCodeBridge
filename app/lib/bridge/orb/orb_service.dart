@@ -3146,8 +3146,7 @@ class OrbService {
         // guessing why the orb it spawned can never do a code task.
         throw OrbBootError(
           id,
-          noShellReason(log) ??
-              'the orb container exited during boot',
+          noShellReason(log) ?? 'the orb container exited during boot',
           _logTail(log),
         );
       }

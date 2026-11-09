@@ -112,7 +112,6 @@ class _FakeOrbs implements OrbService {
   OrbRecord? wakeResult;
   String? wokenId;
 
-
   OrbRecord? createResult;
   String? createName;
   String? createBase;
@@ -393,50 +392,47 @@ void main() {
       }
     });
 
-    test(
-      'a shell-less orb is a 400 no_shell carrying the boot reason and '
-      'dispatches nothing (issue #149)',
-      () async {
-        final tasks = OrbTaskService(
-          orbs: orbs,
-          sessions: backend,
-          file: tasksFile,
+    test('a shell-less orb is a 400 no_shell carrying the boot reason and '
+        'dispatches nothing (issue #149)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      orbs.listResult = [
+        OrbRecord(
+          id: 'a1b2c3',
+          name: 'worker',
+          project: 'prj_1',
+          branch: 'orb/a1b2c3',
+          state: 'broken:shell',
+          bootReason:
+              'FATAL: no usable shell — the agent could not run a command '
+              '— shell: tried sh -c \'printf ok\'',
+          created: '2026-01-01T00:00:00.000Z',
+        ),
+      ];
+      final server = await serverWith(tasks: tasks);
+      try {
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do it", "wait": false, "session": "ses_caller"}',
         );
-        orbs.listResult = [
-          OrbRecord(
-            id: 'a1b2c3',
-            name: 'worker',
-            project: 'prj_1',
-            branch: 'orb/a1b2c3',
-            state: 'broken:shell',
-            bootReason:
-                'FATAL: no usable shell — the agent could not run a command '
-                '— shell: tried sh -c \'printf ok\'',
-            created: '2026-01-01T00:00:00.000Z',
-          ),
-        ];
-        final server = await serverWith(tasks: tasks);
-        try {
-          final (status, body) = await _postRaw(
-            server.baseUri,
-            '/api/orb/spawn',
-            '{"task": "do it", "wait": false, "session": "ses_caller"}',
-          );
-          expect(status, 400);
-          final refused = jsonDecode(body) as Map<String, Object?>;
-          expect(refused['error'], 'no_shell');
-          // The reason is the boot's, so a caller says "spawned, works
-          // nowhere — because …" rather than guessing.
-          expect(refused['details'], contains('no usable shell'));
-          // No wake, no session, no prompt: nothing ran anywhere.
-          expect(orbs.wokenId, isNull, reason: 'no wake was attempted');
-          expect(orbs.createSessionOrbId, isNull, reason: 'no session');
-          expect(backend.opencode.prompts, isEmpty);
-        } finally {
-          await server.stop();
-        }
-      },
-    );
+        expect(status, 400);
+        final refused = jsonDecode(body) as Map<String, Object?>;
+        expect(refused['error'], 'no_shell');
+        // The reason is the boot's, so a caller says "spawned, works
+        // nowhere — because …" rather than guessing.
+        expect(refused['details'], contains('no usable shell'));
+        // No wake, no session, no prompt: nothing ran anywhere.
+        expect(orbs.wokenId, isNull, reason: 'no wake was attempted');
+        expect(orbs.createSessionOrbId, isNull, reason: 'no session');
+        expect(backend.opencode.prompts, isEmpty);
+      } finally {
+        await server.stop();
+      }
+    });
 
     test('several orbs are a 409 orb_ambiguous listing the names', () async {
       final tasks = OrbTaskService(

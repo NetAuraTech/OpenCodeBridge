@@ -88,22 +88,25 @@ void main() {
     expect(source, contains('One PR per orb'));
   });
 
-  test('a shell-less orb is refused with its boot reason (issue #149)',
-      () async {
-    await OrbAgentTools.materialize(into: temp);
-    final source = File('${temp.path}/opencodebridge_orbs.ts').readAsStringSync();
-    // The spawn surface answers the bridge's no_shell refusal by naming the
-    // boot's reason and dispatching nothing — never by falling through to
-    // the generic "failed" text.
-    expect(source, contains('code === "no_shell"'));
-    expect(source, contains('no task was dispatched'));
-    expect(source, contains('row.details || "no usable shell"'));
-    expect(source, contains('cannot commit, push or open the PR'));
-    // And orb_wait surfaces the refused task as such: the summary it carries
-    // is the boot's reason.
-    expect(source, contains('row.status === "refused"'));
-    expect(source, contains('this orb cannot run commands'));
-  });
+  test(
+    'a shell-less orb is refused with its boot reason (issue #149)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The spawn surface answers the bridge's no_shell refusal by naming the
+      // boot's reason and dispatching nothing — never by falling through to
+      // the generic "failed" text.
+      expect(source, contains('code === "no_shell"'));
+      expect(source, contains('no task was dispatched'));
+      expect(source, contains('row.details || "no usable shell"'));
+      expect(source, contains('cannot commit, push or open the PR'));
+      // And orb_wait surfaces the refused task as such: the summary it carries
+      // is the boot's reason.
+      expect(source, contains('row.status === "refused"'));
+      expect(source, contains('this orb cannot run commands'));
+    },
+  );
 
   test('materialize never overwrites an edited copy (on-disk wins)', () async {
     final file = File('${temp.path}/opencodebridge_orbs.ts')
