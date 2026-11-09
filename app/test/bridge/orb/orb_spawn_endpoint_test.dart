@@ -67,8 +67,15 @@ class _FakeOpencode extends OpencodeService {
       throw StateError('getDetail not scripted');
   List<SessionMessage> messagesResult = const [];
 
+  /// The service's active list (the idle settle of issue #169 reads it
+  /// through the backend's detailWithActive).
+  Set<String> activeIds = {};
+
   @override
   Future<List<OpencodeProject>> projects() async => [_project];
+
+  @override
+  Future<Set<String>> activeSessionIds() async => activeIds;
 
   /// Every prompt delivered, (session id, text) — the shell refusal
   /// delivers none (issue #149).
@@ -506,6 +513,42 @@ void main() {
       final server = await serverWith(tasks: tasks);
       try {
         expect((await _postRaw(server.baseUri, '/api/orb/wait', '{}')).$1, 400);
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('a never-ending task answers running at the grace window, not a held '
+        'connection (issue #169)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+        pollInterval: const Duration(milliseconds: 5),
+        waitGrace: const Duration(milliseconds: 50),
+      );
+      backend.opencode.detailOf = (id) => _detail(id); // Never settles.
+      final server = await serverWith(tasks: tasks);
+      try {
+        final (_, spawnBody) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "long work", "wait": false, "session": "ses_caller"}',
+        );
+        final id = jsonDecode(spawnBody)['id'] as String;
+
+        final stopwatch = Stopwatch()..start();
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/wait',
+          jsonEncode({'id': id}),
+        );
+        stopwatch.stop();
+
+        expect(status, 200); // An answer, not a timeout waiting for one.
+        final row = jsonDecode(body);
+        expect(row['status'], 'running');
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
       } finally {
         await server.stop();
       }

@@ -134,8 +134,11 @@ class SessionsBackend {
   /// The detail endpoint's read (issue #124): the session's detail plus its
   /// live Active fact (the service's active list), which the structured
   /// view's live turn footer needs when the persisted history alone is
-  /// ambiguous. Kept off [getDetail] proper: the orb task watcher polls that
-  /// one, and it needs no active-list round-trip.
+  /// ambiguous. Kept off [getDetail] proper: the structured view's plain
+  /// detail read stays a single round-trip. The orb task watcher reads this
+  /// one (issue #169): settling an outcome-less session needs the Active
+  /// fact — a session idle and outcome-less has ended its turn, an active
+  /// one is merely between steps.
   Future<SessionDetail> detailWithActive(String id) async {
     final detail = await service.getDetail(id);
     final active = await service.activeSessionIds();

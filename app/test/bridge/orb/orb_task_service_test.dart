@@ -14,6 +14,7 @@ import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/orb.dart';
+import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
@@ -94,11 +95,25 @@ class _FakeOpencode extends OpencodeService {
   /// Session ids whose `prompt` fails (a dead calling session).
   final Set<String> failingPrompts = {};
 
+  /// The service's active list (issue #169's idle settle reads it through
+  /// the backend's detailWithActive).
+  Set<String> activeIds = {};
+
+  /// The scriptable pending-permissions answer (issue #169: a parked
+  /// permission holds the idle settle).
+  List<PermissionRequest> pendingPermissionsResult = const [];
+
+  /// Script `getDetail` to throw (issue #169's missing/transient paths).
+  Object? detailError;
+
   /// Every `prompt` the fake received: (session id, text).
   final List<(String, String)> prompts = [];
 
   @override
   Future<List<OpencodeProject>> projects() async => [_project];
+
+  @override
+  Future<Set<String>> activeSessionIds() async => activeIds;
 
   @override
   Future<void> prompt(
@@ -114,10 +129,18 @@ class _FakeOpencode extends OpencodeService {
   }
 
   @override
-  Future<SessionDetail> getDetail(String id) async => detailOf(id);
+  Future<SessionDetail> getDetail(String id) async {
+    final error = detailError;
+    if (error != null) throw error;
+    return detailOf(id);
+  }
 
   @override
   Future<List<SessionMessage>> getMessages(String id) async => messagesResult;
+
+  @override
+  Future<List<PermissionRequest>> pendingPermissions(String id) async =>
+      pendingPermissionsResult;
 
   @override
   Future<ModelRef?> currentModel(String id) async => currentModelResult;
@@ -246,6 +269,8 @@ void main() {
   late _FakeBackend backend;
   late OrbTaskService service;
   late Duration waitGrace;
+  late Duration settleIdleWindow;
+  late Duration settleMissingWindow;
 
   /// Every service a test builds (the completion watcher polls on its own):
   /// torn down with the temp dir, so no writer outlives it.
@@ -258,6 +283,8 @@ void main() {
       file: tasksFile,
       pollInterval: const Duration(milliseconds: 5),
       waitGrace: waitGrace,
+      settleIdleWindow: settleIdleWindow,
+      settleMissingWindow: settleMissingWindow,
     );
     services.add(created);
     return created;
@@ -269,6 +296,8 @@ void main() {
     orbs = _FakeOrbs();
     backend = _FakeBackend(_FakeOpencode());
     waitGrace = const Duration(seconds: 1);
+    settleIdleWindow = const Duration(seconds: 30);
+    settleMissingWindow = const Duration(seconds: 30);
     service = newService();
   });
 
@@ -1587,6 +1616,205 @@ void main() {
         expect(answer.isDone, isFalse);
         expect(answer.orbName, 'worker');
         expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      },
+    );
+  });
+
+  group('the bounded orb_wait (issue #169)', () {
+    test(
+      'an explicit wait answers the running task at the grace window',
+      () async {
+        orbs.listResult = [_runningOrb()];
+        scriptDispatch(); // The turn never ends.
+        waitGrace = const Duration(milliseconds: 30);
+
+        final tasks = newService();
+        final dispatched = await tasks.spawn(
+          task: 'long work',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+
+        // The held wait ends bounded with the record as it stands — the call
+        // that used to hang past the agent tool's own timeout.
+        final stopwatch = Stopwatch()..start();
+        final answer = await tasks.wait(dispatched.id);
+        stopwatch.stop();
+
+        expect(answer, same(dispatched));
+        expect(answer.status, 'running');
+        expect(answer.isDone, isFalse);
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      },
+    );
+
+    test(
+      'a wait that sees the completion still answers the settled result',
+      () async {
+        scriptCompletedTask();
+        waitGrace = const Duration(seconds: 5);
+
+        final tasks = newService();
+        final dispatched = await tasks.spawn(
+          task: 'do the thing',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        final settled = await tasks.wait(dispatched.id);
+
+        expect(settled.status, 'succeeded');
+        expect(settled.summary, 'All done.');
+      },
+    );
+  });
+
+  group('the settle windows (issue #169)', () {
+    test('an idle outcome-less session settles the task succeeded after the '
+        'window', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch(); // 200 without an outcome, not active, forever.
+      settleIdleWindow = const Duration(milliseconds: 30);
+
+      final tasks = newService();
+      final task = await tasks.spawn(
+        task: 'orphaned work',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      await until(() => task.isDone);
+
+      expect(task.status, 'succeeded');
+      expect(task.summary, contains('no outcome was reported'));
+      // The completion injection carries the settle, as any completion.
+      await until(
+        () => backend.opencode.prompts.any((p) => p.$1 == 'ses_caller'),
+      );
+    });
+
+    test('an active session is never settled by the idle window', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch();
+      settleIdleWindow = const Duration(milliseconds: 30);
+
+      final tasks = newService();
+      final task = await tasks.spawn(
+        task: 'working',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      // The agent is mid-turn the whole time: idle-without-outcome is simply
+      // a between-steps read, not a settled turn.
+      backend.opencode.activeIds = {task.session};
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
+      expect(task.isDone, isFalse);
+
+      // The turn ending (active, then an outcome) settles it the normal way.
+      backend.opencode.activeIds = {};
+      backend.opencode.detailOf = (id) => _detail(id, outcome: 'succeeded');
+      await until(() => task.isDone);
+      expect(task.status, 'succeeded');
+    });
+
+    test('a parked permission holds the idle settle', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch();
+      settleIdleWindow = const Duration(milliseconds: 30);
+      backend.opencode.pendingPermissionsResult = const [
+        PermissionRequest(id: 'per_1', action: 'shell', resources: ['rm -rf']),
+      ];
+
+      final tasks = newService();
+      final task = await tasks.spawn(
+        task: 'awaiting approval',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(
+        task.isDone,
+        isFalse,
+        reason: 'a parked question is not a done turn',
+      );
+
+      // The human answers: the window restarts and the settle goes through.
+      backend.opencode.pendingPermissionsResult = const [];
+      backend.opencode.detailOf = (id) => _detail(id, outcome: 'succeeded');
+      await until(() => task.isDone);
+      expect(task.status, 'succeeded');
+    });
+
+    test(
+      'a missing session settles the task failed after the window',
+      () async {
+        orbs.listResult = [_runningOrb()];
+        scriptDispatch();
+        settleMissingWindow = const Duration(milliseconds: 30);
+
+        final tasks = newService();
+        final task = await tasks.spawn(
+          task: 'gone work',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        // The session is deleted (the orb died and the session went with it).
+        backend.opencode.detailError = const OpencodeServiceError(
+          404,
+          'no such session',
+        );
+        await until(() => task.isDone);
+
+        expect(task.status, 'failed');
+        expect(task.summary, contains('no longer exists'));
+      },
+    );
+
+    test('a transient service error never settles the task', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch();
+      settleIdleWindow = const Duration(milliseconds: 30);
+      settleMissingWindow = const Duration(milliseconds: 30);
+
+      final tasks = newService();
+      final task = await tasks.spawn(
+        task: 'blip work',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      // A transport failure (status 0) is not a missing session: no settle,
+      // however long it lasts.
+      backend.opencode.detailError = const OpencodeServiceError(
+        0,
+        'SocketException',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(task.isDone, isFalse);
+
+      // The service recovers: the task settles on its real outcome.
+      backend.opencode.detailError = null;
+      backend.opencode.detailOf = (id) => _detail(id, outcome: 'succeeded');
+      await until(() => task.isDone);
+      expect(task.status, 'succeeded');
+    });
+
+    test(
+      'a settled zombie is persisted and stops the watcher spinning',
+      () async {
+        orbs.listResult = [_runningOrb()];
+        scriptDispatch();
+        settleIdleWindow = const Duration(milliseconds: 30);
+
+        final tasks = newService();
+        final task = await tasks.spawn(
+          task: 'zombie work',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        await until(() => task.isDone);
+
+        final decoded = jsonDecode(tasksFile.readAsStringSync());
+        expect(decoded[0]['status'], 'succeeded');
+        expect(decoded[0]['completed'], isNotNull);
       },
     );
   });

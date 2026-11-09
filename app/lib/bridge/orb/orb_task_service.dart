@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 
 import '../../model/command.dart';
 import '../../model/orb.dart';
+import '../../model/session_detail.dart';
 import '../sessions/backend.dart';
 import '../sessions/opencode_service.dart';
 import 'orb_service.dart';
@@ -89,6 +90,8 @@ class OrbTaskService {
     required this.file,
     this.pollInterval = const Duration(seconds: 2),
     this.waitGrace = defaultWaitGrace,
+    this.settleIdleWindow = defaultSettleIdleWindow,
+    this.settleMissingWindow = defaultSettleMissingWindow,
     Random? random,
   }) : _random = random ?? Random() {
     _load();
@@ -111,12 +114,14 @@ class OrbTaskService {
   /// with a scripted session detail rather than wall time).
   final Duration pollInterval;
 
-  /// How long `wait: true` holds its response before answering the dispatched
-  /// task as running (issue #143): the caller's transport (the agent tool's
-  /// fetch through Code Mode hop) has its own timeout, and a blocking spawn
-  /// that outlives it looks *unreachable* — the agent retries, and the retry
-  /// must not (and now cannot) duplicate the task. The grace window sits
-  /// under those timeouts; the caller then polls with other waits.
+  /// How long a blocking `orb_spawn` (`wait: true`) or an `orb_wait` holds its
+  /// response before answering the task as running (issue #143, bounded wait
+  /// extended to `orb_wait` by issue #169): the caller's transport (the agent
+  /// tool's fetch through Code Mode hop) has its own timeout, and a call that
+  /// outlives it looks *unreachable* — the agent retries, and the retry must
+  /// not (and now cannot) duplicate the task. The grace window sits under
+  /// those timeouts; the caller then polls again, or simply ends its turn and
+  /// lets the completion injection wake it (spec §8.3's async path).
   final Duration waitGrace;
 
   /// [waitGrace]'s default: a long task is normal (a blocking spawn commonly
@@ -124,7 +129,39 @@ class OrbTaskService {
   /// that, so a bounded answer must come first.
   static const Duration defaultWaitGrace = Duration(seconds: 20);
 
+  /// How long an **idle session without an outcome** must stay that way, on
+  /// the completion reads, before the task settles (issue #169): opencode
+  /// persists no `outcome` for a turn whose session was migrated to the host
+  /// when its orb stopped, so such a session answers 200 without one forever
+  /// — without this, the task would run (and the watcher poll) for the life
+  /// of the bridge. Time-based, not read-count-based: the watcher and a
+  /// concurrent waiter poll the same task, so only wall time distinguishes a
+  /// settled turn from a dispatch whose agent has not started its first step.
+  final Duration settleIdleWindow;
+
+  /// [settleIdleWindow]'s default: comfortably past any prompt-to-execution
+  /// latency, still noise against a task's minutes-long life.
+  static const Duration defaultSettleIdleWindow = Duration(seconds: 15);
+
+  /// How long a **missing session** (a 404 — the session is gone) must stay
+  /// missing, on the completion reads, before the task settles as failed
+  /// (issue #169). Transient service failures (a transport error, a 5xx, a
+  /// degraded orb pass routing the read to the host) are not counted: only
+  /// the service's own 404 is, and the window absorbs the routing settling.
+  final Duration settleMissingWindow;
+
+  /// [settleMissingWindow]'s default: a session the service has reported
+  /// gone for a full minute of polling can never report a turn outcome.
+  static const Duration defaultSettleMissingWindow = Duration(seconds: 60);
+
   final Random _random;
+
+  /// When each running task's session was first read idle-without-outcome
+  /// (issue #169's settle window); any other read clears the entry.
+  final Map<String, DateTime> _idleSince = {};
+
+  /// When each running task's session was first read missing (404).
+  final Map<String, DateTime> _missingSince = {};
 
   /// The live task records, newest first.
   final List<OrbTask> _tasks = [];
@@ -318,17 +355,21 @@ class OrbTaskService {
     return dispatched;
   }
 
-  /// Block until the task completes; returns the completed record (an
+  /// Block until the task completes; returns the settled record (an
   /// already-completed task returns immediately). Used by `wait: true` and
   /// by the tool-facing `orb_wait`.
   ///
   /// [grace] (the bounded blocking wait, issue #143) caps how long the call
   /// holds: when set and the task is still running at the deadline, the task
   /// is returned **as it stands** (`status: running`) — the watcher keeps
-  /// polling, so a later `orb_wait` still sees the task through.
+  /// polling, so a later call still sees the task through, and the
+  /// completion injection (spec §8.3) wakes the caller when it settles.
   ///
-  /// `wait: true` passes [waitGrace]; `orb_wait` passes `null`
-  /// (an explicit wait is expected to block).
+  /// Every caller passes [waitGrace] (issue #169): an unbounded wait holds the
+  /// HTTP response past the agent tool's own fetch timeout, and the caller
+  /// reads the killed connection as "the bridge is unreachable" — the bridge
+  /// is up, only its answer came too late. A long task is the norm; the wait
+  /// is bounded to match.
   ///
   /// [dispatchId] (issue #147) is the caller's own id for this dispatch, when
   /// it sends one: a retry carries the same id and returns the running task
@@ -347,7 +388,7 @@ class OrbTaskService {
         !await canControl(callerSession: callerSession, orbId: found.orb)) {
       throw OrbPermissionError(found.orb);
     }
-    return _awaitCompletion(found);
+    return _awaitCompletion(found, grace: waitGrace);
   }
 
   Future<OrbTask> _awaitCompletion(OrbTask target, {Duration? grace}) async {
@@ -819,11 +860,71 @@ class OrbTaskService {
 
   /// One completion check: when the orb session reports a turn outcome, the
   /// task completes — status, summary, PR, persistence, injection.
+  ///
+  /// A session that reports **no outcome** can still end its task (issue
+  /// #169): opencode persists no `outcome` for a turn whose session was
+  /// migrated to the host when its orb stopped, so that session answers 200
+  /// without one forever. [settleIdleWindow] of idle reads (the session not
+  /// in the service's active list either) settle the task as `succeeded` —
+  /// the turn ended, its outcome was simply never recorded. Likewise a
+  /// session the service reports **gone** (404) for [settleMissingWindow]
+  /// can never report an outcome again: its task settles `failed`. The
+  /// windows are wall time, not read counts: the watcher and a concurrent
+  /// waiter poll the same task, so only time separates a settled turn from a
+  /// dispatch whose agent has not started its first step. Any other read
+  /// error is transient (a transport failure, a degraded orb pass) and
+  /// counts for nothing — the next pass retries.
   Future<void> _check(OrbTask target) async {
     if (target.isDone) return;
-    final detail = await sessions.getDetail(target.session);
+    final now = DateTime.now();
+    final SessionDetail detail;
+    try {
+      detail = await sessions.detailWithActive(target.session);
+    } on OpencodeServiceError catch (e) {
+      _idleSince.remove(target.id);
+      if (e.statusCode == HttpStatus.notFound) {
+        final since = _missingSince.putIfAbsent(target.id, () => now);
+        if (now.difference(since) >= settleMissingWindow) {
+          // The session itself is gone: no turn outcome can ever arrive.
+          await _settle(
+            target,
+            'failed',
+            'the orb session no longer exists — its result was lost with it',
+          );
+        }
+        return;
+      }
+      rethrow;
+    }
+    _missingSince.remove(target.id);
     final outcome = detail.outcome;
-    if (outcome == null) return;
+    if (outcome == null) {
+      if (detail.active) {
+        _idleSince.remove(target.id);
+        return;
+      }
+      final since = _idleSince.putIfAbsent(target.id, () => now);
+      if (now.difference(since) < settleIdleWindow) return;
+      // A session parked on a permission question is not done: the human
+      // answering later resumes the turn, and settling now would announce a
+      // completion that never happened.
+      try {
+        if ((await sessions.pendingPermissions(target.session)).isNotEmpty) {
+          _idleSince.remove(target.id);
+          return;
+        }
+      } on OpencodeServiceError {
+        return; // Permissions unknown: the next pass retries the settle.
+      }
+      // Idle and outcome-less for a full settle window: the turn is over.
+      await _settle(
+        target,
+        'succeeded',
+        'the orb session ended its turn (no outcome was reported)',
+      );
+      return;
+    }
+    _idleSince.remove(target.id);
     // The reads below cross the event loop, so a concurrent waiter (the
     // `wait: true` path polls too) may have completed the task in the
     // meantime: the settle below is guarded on the task still being open.
@@ -840,7 +941,18 @@ class OrbTaskService {
     } catch (_) {
       // No summary is a fine degraded completion.
     }
-    target.status = outcome;
+    await _settle(target, outcome, summary);
+  }
+
+  /// The single settle path (issue #169): the status, the summary (or the
+  /// settle's own reason when there is none to report), the PR, persistence,
+  /// and the completion injection. Guarded: a concurrent pass may have
+  /// settled the task across the event loop.
+  Future<void> _settle(OrbTask target, String status, String summary) async {
+    _idleSince.remove(target.id);
+    _missingSince.remove(target.id);
+    if (target.isDone) return;
+    target.status = status;
     target.summary = summary;
     target.pr = await _prUrl(target);
     target.completed = DateTime.now().millisecondsSinceEpoch;

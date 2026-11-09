@@ -354,7 +354,7 @@ Idempotent **wake-or-create** on the project's workspace orb. The project is **n
 |---|---|---|
 | `task` | yes | Free text given to the orb's agent |
 | `model` | no | Default = the calling session's model |
-| `wait` | no | Boolean, default `true`: when true the tool blocks until the task completes and returns the structured result, **bounded** to a grace window ([#143](https://github.com/NetAuraTech/OpenCodeBridge/issues/143)) -- a longer task answers as `running` and the caller polls with `orb_wait`; when false the tool returns the orb handle immediately |
+| `wait` | no | Boolean, default `false` ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)): the tool returns the orb handle as soon as the dispatch lands and the completion injection wakes the caller (§8.3); when true the tool blocks for the structured result, **bounded** to a grace window ([#143](https://github.com/NetAuraTech/OpenCodeBridge/issues/143)) -- a longer task answers as `running` |
 | `orb` | no | **Name** of the target orb ([#84](https://github.com/NetAuraTech/OpenCodeBridge/issues/84)) — see targeting below |
 | `seed` | no | **Name** of the orb to clone from ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)) — see §3.3 |
 
@@ -364,7 +364,8 @@ Idempotent **wake-or-create** on the project's workspace orb. The project is **n
 
 ### 8.3 `orb_wait` & completion
 
-- `orb_wait` — blocks until the orb's task completes; returns the structured result: **status, summary, results, dedicated branch name** — and the **PR URL** once the work is done ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80) refinement of the [#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79) contract).
+- `orb_wait` — holds briefly (the same bounded grace as a blocking spawn, [#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)) and answers once: the structured result — **status, summary, results, dedicated branch name** — and the **PR URL** once the work is done ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80) refinement of the [#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79) contract), or the task as `running` when the hold ran out. A wait held past the agent tool's own fetch timeout reads as an unreachable bridge ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)) — it never blocks until completion anymore.
+- **Settling without an outcome** ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)): a task whose orb session reports no outcome is not left running forever — opencode persists no outcome for a turn whose session was migrated to the host when its orb stopped. A session read **idle** (not in the service's active list, no permission parked on it) without an outcome for a settle window completes the task `succeeded`; a session the service reports **gone** (404) for one settles it `failed`. Without these, a task survives its orb's death (and every bridge restart, §8.3's resume) as a permanent `running` record the completion watcher polls forever.
 - **Async path**: when the task completes, the bridge (which aggregates the orb's opencode session) **injects a message** into the calling session ("Orb X done — work on branch `orb/<id>`"). The work itself comes back via commit/push on the dedicated branch (the primary channel, §3), not via the tool.
 - **Calling session ends before the orb finishes**: the orb keeps running (it is the project's workspace, not an ephemeral process); the result is persisted; the notification to a dead session is dropped. Cleanup of such orphaned orbs belongs to the lifecycle (§2.10).
 
