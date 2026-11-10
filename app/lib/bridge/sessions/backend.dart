@@ -27,15 +27,16 @@ class SessionsBackend {
   /// Create a session (spec §5 fill-in †): the service `POST /api/session`
   /// in [projectId]'s project. The bridge applies the current/default model
   /// (including its thinking level / variant) so the new session shows its
-  /// model like one created directly in opencode.
+  /// model like one created directly in opencode. The agent is not passed —
+  /// the service picks its default (a fresh session starts on the default
+  /// agent, not the previous session's, which may be a restricted subagent).
   Future<Session> create(String projectId) async {
-    final defaults = await _defaultModelAndAgent();
+    final model = await _defaultModel();
     final session = await service.createSession(
       projectId,
-      model: defaults.model,
-      agent: defaults.agent,
+      model: model,
     );
-    await _applyDefaultModel(session.id, defaults.model);
+    await _applyDefaultModel(session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return _row(session, names, active);
@@ -45,7 +46,8 @@ class SessionsBackend {
   /// [directory] is the working directory as-is, and the service auto-creates
   /// a project for a directory it has never seen. A [directory] missing on
   /// this host is a clear 404, not a service round-trip. The bridge applies
-  /// the current/default model (including its thinking level / variant).
+  /// the current/default model (including its thinking level / variant). The
+  /// agent is not passed — the service picks its default, as in [create].
   Future<Session> createInDirectory(String directory) async {
     if (!Directory(directory).existsSync()) {
       throw const OpencodeServiceError(
@@ -53,24 +55,26 @@ class SessionsBackend {
         'no such directory',
       );
     }
-    final defaults = await _defaultModelAndAgent();
+    final model = await _defaultModel();
     final session = await service.createSessionInDirectory(
       directory,
-      model: defaults.model,
-      agent: defaults.agent,
+      model: model,
     );
-    await _applyDefaultModel(session.id, defaults.model);
+    await _applyDefaultModel(session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return _row(session, names, active);
   }
 
-  /// The model (with its thinking level / variant) and agent to apply to a
-  /// new session: copied from the most recently created session that already
-  /// has a model, which mirrors opencode's "current model" behavior. Best-
-  /// effort — a lookup failure yields no defaults rather than failing the
-  /// create.
-  Future<({ModelRef? model, String? agent})> _defaultModelAndAgent() async {
+  /// The model (with its thinking level / variant) to apply to a new
+  /// session: copied from the most recently created session that already has
+  /// a model, which mirrors opencode's "current model" behavior. The agent
+  /// is deliberately not carried over — it is a per-session explicit choice,
+  /// and inheriting the previous session's (which may be a restricted
+  /// subagent) is exactly what a fresh session in opencode does not do.
+  /// Best-effort — a lookup failure yields no default rather than failing
+  /// the create.
+  Future<ModelRef?> _defaultModel() async {
     try {
       final sessions = await service.listSessions();
       sessions.sort((a, b) => b.created.compareTo(a.created));
@@ -78,16 +82,16 @@ class SessionsBackend {
         try {
           final detail = await service.getDetail(candidate.id);
           if (detail.model != null) {
-            return (model: detail.model, agent: detail.agent);
+            return detail.model;
           }
         } catch (_) {
           // Try the next candidate.
         }
       }
     } catch (_) {
-      // No defaults available; the session is still created.
+      // No default available; the session is still created.
     }
-    return (model: null, agent: null);
+    return null;
   }
 
   /// Ensures [id] carries [model] (including its variant / thinking level)

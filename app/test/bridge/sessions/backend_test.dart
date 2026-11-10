@@ -490,7 +490,62 @@ void main() {
 
         await backend.create('p1');
 
-        expect(service.createdWith.single, (model, 'build'));
+        expect(service.createdWith.single, (model, null));
+        expect(service.modelsSet, [('ses_new', model)]);
+      },
+    );
+
+    test(
+      'does not inherit the previous session\'s subagent (issue #184)',
+      () async {
+        const model = ModelRef(
+          id: 'gpt',
+          providerId: 'openai',
+          variant: 'high',
+        );
+        final created = const OpencodeSession(
+          id: 'ses_new',
+          title: 'new',
+          projectId: 'p1',
+          created: 400,
+          location: '/one',
+        );
+        final existing = const OpencodeSession(
+          id: 'ses_old',
+          title: 'old',
+          projectId: 'p1',
+          created: 100,
+          location: '/one',
+        );
+        final service = FakeOpencodeService(
+          sessions: [created, existing],
+          names: {'p1': 'one'},
+          createdSession: created,
+          detailById: {
+            'ses_old': SessionDetail(
+              id: 'ses_old',
+              title: 'old',
+              location: '/one',
+              cost: 0,
+              tokens: const TokenUsage(
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+              ),
+              model: model,
+              agent: 'reviewer-flash', // a restricted subagent, not the default
+            ),
+          },
+        );
+        final backend = SessionsBackend(service: service);
+
+        await backend.create('p1');
+
+        // The model is inherited (the intent of #136); the agent is not —
+        // the service picks its default agent.
+        expect(service.createdWith.single, (model, null));
         expect(service.modelsSet, [('ses_new', model)]);
       },
     );
@@ -562,6 +617,61 @@ void main() {
       );
       expect(service.createdIn, isEmpty);
     });
+
+    test(
+      'does not inherit the previous session\'s subagent (issue #184)',
+      () async {
+        const model = ModelRef(
+          id: 'gpt',
+          providerId: 'openai',
+          variant: 'high',
+        );
+        final created = OpencodeSession(
+          id: 'ses_new_dir',
+          title: 'new dir',
+          projectId: 'p_dir',
+          created: 400,
+          location: dir.path,
+        );
+        final existing = const OpencodeSession(
+          id: 'ses_old',
+          title: 'old',
+          projectId: 'p1',
+          created: 100,
+          location: '/one',
+        );
+        final service = FakeOpencodeService(
+          sessions: [existing],
+          names: const {},
+          createdInDirectory: created,
+          detailById: {
+            'ses_old': SessionDetail(
+              id: 'ses_old',
+              title: 'old',
+              location: '/one',
+              cost: 0,
+              tokens: const TokenUsage(
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+              ),
+              model: model,
+              agent: 'reviewer-flash', // a restricted subagent, not the default
+            ),
+          },
+        );
+        final backend = SessionsBackend(service: service);
+
+        await backend.createInDirectory(dir.path);
+
+        // The model is inherited (the intent of #136); the agent is not —
+        // the service picks its default agent.
+        expect(service.createdInWith.single, (model, null));
+        expect(service.modelsSet, [('ses_new_dir', model)]);
+      },
+    );
   });
 
   group('SessionsBackend.projects', () {
