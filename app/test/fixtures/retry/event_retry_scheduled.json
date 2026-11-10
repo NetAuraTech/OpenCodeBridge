@@ -1,0 +1,28 @@
+{
+  "id": "evt_1c64d29db001E2SkhEDuGg3MZO",
+  "created": 1794328308187,
+  "type": "session.retry.scheduled",
+  "location": {
+    "directory": "/tmp/opencode/probe154"
+  },
+  "data": {
+    "sessionID": "ses_e39b2e51fffeuhTrW7n2daRZiV",
+    "assistantMessageID": "msg_1c64d1b4f001JjVLCFtPGSRxHA",
+    "attempt": 2,
+    "at": 1794328310507,
+    "error": {
+      "type": "provider.rate-limit",
+      "message": "Provider request failed with HTTP 429: {\"detail\":{\"error\":{\"message\":\"Model API rate limit exceeded; please retry later\",\"type\":\"rate_limit_error\",\"code\":\"token_concurrency_rate_limit_exceeded\"}}}",
+      "status": 429,
+      "response": {
+        "body": "{\"detail\":{\"error\":{\"message\":\"Model API rate limit exceeded; please retry later\",\"type\":\"rate_limit_error\",\"code\":\"token_concurrency_rate_limit_exceeded\"}}}"
+      },
+      "retryAfterMs": 1000
+    }
+  },
+  "durable": {
+    "aggregateID": "ses_e39b2e51fffeuhTrW7n2daRZiV",
+    "seq": 6,
+    "version": 1
+  }
+}
