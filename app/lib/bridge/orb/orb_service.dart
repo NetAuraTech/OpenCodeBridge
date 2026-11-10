@@ -1517,8 +1517,8 @@ class OrbService {
     if (trimmed.isEmpty) return '';
     return trimmed.startsWith('{') || trimmed.startsWith('[')
         ? ' — the export stream looks truncated: it starts a JSON '
-            'document that never closes (a CLI stdout write cut '
-            'mid-document, issue #173)'
+              'document that never closes (a CLI stdout write cut '
+              'mid-document, issue #173)'
         : '';
   }
 

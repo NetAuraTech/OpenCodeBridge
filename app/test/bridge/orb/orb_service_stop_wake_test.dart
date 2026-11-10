@@ -1189,7 +1189,8 @@ void main() {
         orb.sessions.add(_session('s-1'));
         // The full document as the service's HTTP answer (unwrapped
         // `{info, messages}`, the same shape the CLI prints): ~110 KiB.
-        final full = '{"info":{"id":"s-1"},"messages":['
+        final full =
+            '{"info":{"id":"s-1"},"messages":['
             '${List.filled(5000, '"pad-pad-pad-pad-pad-pad-pad"').join(',')}'
             ']}';
         // The CLI's stdout: the same document cut mid-string, past 64 KiB,
@@ -1199,7 +1200,11 @@ void main() {
         final staged = <String>{};
         final cli = _Cli((argv, env) async {
           if (argv[1] == 'export') {
-            return OpencodeCliResult(exitCode: 0, stdout: truncated, stderr: '');
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: truncated,
+              stderr: '',
+            );
           }
           staged.add(File(argv[2]).readAsStringSync());
           return _importOk;
