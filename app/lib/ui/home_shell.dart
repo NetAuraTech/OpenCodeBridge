@@ -16,7 +16,7 @@ import 'settings_tab.dart';
 
 /// The 4-tab information architecture (spec: section 13, section 9):
 /// Sessions (default), Orbs, Docker, Settings — with the discreet connection
-/// indicator in the app bar.
+/// indicator in the footer, right of the Settings item.
 class HomeShell extends StatefulWidget {
   const HomeShell({
     super.key,
@@ -157,104 +157,115 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('OpenCodeBridge'),
-      actions: [
-        // Rebuilds on every link-state change; the dot itself is
-        // deliberately small and unobtrusive.
-        AnimatedBuilder(
-          animation: widget.monitor,
-          builder: (context, _) => Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: ConnectionIndicator(state: widget.monitor.state),
+    // No app bar anymore: nothing else consumes the top safe-area inset, so
+    // the body keeps it out (the same geometry the former AppBar provided);
+    // the bottom inset stays with the bottom bar.
+    body: SafeArea(
+      top: true,
+      child: IndexedStack(
+        index: _tab,
+        children: [
+          SessionsTab(
+            apiBase: _apiBase,
+            settings: widget.settings,
+            onThemeModeChanged: widget.onThemeModeChanged,
+            auth: widget.auth,
+            access: widget.access,
+            deepLinkSession: _sessionTarget,
+            onDeepLinkSessionConsumed: () {
+              _sessionTarget = null;
+            },
+            // The structured view's `/settings` command (issue #46): the view
+            // closes itself, and the shell lands on the Settings tab.
+            onOpenSettings: () {
+              if (mounted) setState(() => _tab = 3);
+            },
+            // The session → orb navigation (spec §9.2): the chip reports the
+            // orb id, the shell switches to the Orbs tab and highlights it.
+            onOrbChipTapped: (orbId) {
+              if (mounted) {
+                setState(() {
+                  _orbHighlight = orbId;
+                  _tab = 1;
+                });
+              }
+            },
           ),
-        ),
-      ],
+          OrbsTab(
+            apiBase: _apiBase,
+            auth: widget.auth,
+            access: widget.access,
+            highlight: _orbHighlight,
+            onHighlightConsumed: () {
+              if (mounted) setState(() => _orbHighlight = null);
+            },
+          ),
+          DockerTab(
+            apiBase: _apiBase,
+            auth: widget.auth,
+            access: widget.access,
+            deepLinkContainer: _containerTarget,
+            onDeepLinkContainerConsumed: () {
+              _containerTarget = null;
+            },
+          ),
+          SettingsTab(
+            settings: widget.settings,
+            mode: widget.mode,
+            localBridgeUri: widget.localBridgeUri,
+            onTunnelUrlCommitted: widget.onTunnelUrlCommitted,
+            access: widget.access,
+            auth: widget.auth,
+            onNotifyToggled: widget.onNotifyToggled,
+            onPushProjectCommitted: widget.onPushProjectCommitted,
+            onServiceAccountCommitted: widget.onServiceAccountCommitted,
+            onThemeModeChanged: widget.onThemeModeChanged,
+          ),
+        ],
+      ),
     ),
-    body: IndexedStack(
-      index: _tab,
+    bottomNavigationBar: Stack(
+      // The bar sits on top, so the indicator never steals its taps.
+      alignment: Alignment.bottomRight,
+      clipBehavior: Clip.none,
       children: [
-        SessionsTab(
-          apiBase: _apiBase,
-          settings: widget.settings,
-          onThemeModeChanged: widget.onThemeModeChanged,
-          auth: widget.auth,
-          access: widget.access,
-          deepLinkSession: _sessionTarget,
-          onDeepLinkSessionConsumed: () {
-            _sessionTarget = null;
-          },
-          // The structured view's `/settings` command (issue #46): the view
-          // closes itself, and the shell lands on the Settings tab.
-          onOpenSettings: () {
-            if (mounted) setState(() => _tab = 3);
-          },
-          // The session → orb navigation (spec §9.2): the chip reports the
-          // orb id, the shell switches to the Orbs tab and highlights it.
-          onOrbChipTapped: (orbId) {
-            if (mounted) {
-              setState(() {
-                _orbHighlight = orbId;
-                _tab = 1;
-              });
-            }
-          },
+        NavigationBar(
+          selectedIndex: _tab,
+          onDestinationSelected: (index) => setState(() => _tab = index),
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.chat_bubble_outline),
+              selectedIcon: Icon(Icons.chat_bubble),
+              label: 'Sessions',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.public_outlined),
+              selectedIcon: Icon(Icons.public),
+              label: 'Orbs',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.inventory_2_outlined),
+              selectedIcon: Icon(Icons.inventory_2),
+              label: 'Docker',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings),
+              label: 'Settings',
+            ),
+          ],
         ),
-        OrbsTab(
-          apiBase: _apiBase,
-          auth: widget.auth,
-          access: widget.access,
-          highlight: _orbHighlight,
-          onHighlightConsumed: () {
-            if (mounted) setState(() => _orbHighlight = null);
-          },
-        ),
-        DockerTab(
-          apiBase: _apiBase,
-          auth: widget.auth,
-          access: widget.access,
-          deepLinkContainer: _containerTarget,
-          onDeepLinkContainerConsumed: () {
-            _containerTarget = null;
-          },
-        ),
-        SettingsTab(
-          settings: widget.settings,
-          mode: widget.mode,
-          localBridgeUri: widget.localBridgeUri,
-          onTunnelUrlCommitted: widget.onTunnelUrlCommitted,
-          access: widget.access,
-          auth: widget.auth,
-          onNotifyToggled: widget.onNotifyToggled,
-          onPushProjectCommitted: widget.onPushProjectCommitted,
-          onServiceAccountCommitted: widget.onServiceAccountCommitted,
-          onThemeModeChanged: widget.onThemeModeChanged,
-        ),
-      ],
-    ),
-    bottomNavigationBar: NavigationBar(
-      selectedIndex: _tab,
-      onDestinationSelected: (index) => setState(() => _tab = index),
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.chat_bubble_outline),
-          selectedIcon: Icon(Icons.chat_bubble),
-          label: 'Sessions',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.public_outlined),
-          selectedIcon: Icon(Icons.public),
-          label: 'Orbs',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.inventory_2_outlined),
-          selectedIcon: Icon(Icons.inventory_2),
-          label: 'Docker',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.settings_outlined),
-          selectedIcon: Icon(Icons.settings),
-          label: 'Settings',
+        // The bridge status indicator, out of the app bar: right of the
+        // Settings item, nestled on the bar's top edge. Rebuilds on every
+        // link-state change; the dot itself stays deliberately small.
+        Positioned(
+          top: -4,
+          right: 8,
+          child: AnimatedBuilder(
+            animation: widget.monitor,
+            builder: (context, _) =>
+                ConnectionIndicator(state: widget.monitor.state),
+          ),
         ),
       ],
     ),
