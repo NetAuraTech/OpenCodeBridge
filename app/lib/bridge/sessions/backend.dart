@@ -32,10 +32,7 @@ class SessionsBackend {
   /// agent, not the previous session's, which may be a restricted subagent).
   Future<Session> create(String projectId) async {
     final model = await _defaultModel();
-    final session = await service.createSession(
-      projectId,
-      model: model,
-    );
+    final session = await service.createSession(projectId, model: model);
     await _applyDefaultModel(session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
