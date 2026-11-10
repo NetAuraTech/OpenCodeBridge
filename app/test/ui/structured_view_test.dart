@@ -942,7 +942,9 @@ void main() {
         // Two footers: the closed turn's frozen one, and the in-flight
         // turn's live one (ticking from the prompt, issue #124).
         expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
-        expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
+        // The LIVE footer splits its label (indicator between the parts).
+        expect(find.text('1m 40s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
 
         // The first Stop on the failing service: the failure is reported and
@@ -961,7 +963,9 @@ void main() {
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
         // The Turn is still Active: the live footer banner was kept.
         expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
-        expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
+        // The LIVE footer splits its label (indicator between the parts).
+        expect(find.text('1m 40s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
 
         // Pressing Stop again retries: a second cancel request is sent.
         await tester.tap(find.byKey(const ValueKey('structured-stop')));
@@ -971,7 +975,9 @@ void main() {
         // Still Active, still offered.
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
         expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
-        expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
+        // The LIVE footer splits its label (indicator between the parts).
+        expect(find.text('1m 40s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
         await events.close();
       },
     );
@@ -1021,8 +1027,11 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
-      // now = 1500: 0.5s from the prompt (created 1000), no step yet.
-      expect(find.text('0.5s · 0 compactions'), findsOneWidget);
+      // now = 1500: 0.5s from the prompt (created 1000), no step yet. The
+      // LIVE footer splits its label (the activity indicator rides between
+      // the duration and the compaction count, issue #161).
+      expect(find.text('0.5s'), findsOneWidget);
+      expect(find.text('0 compactions'), findsOneWidget);
 
       // A step begins: it streams but has not finished, so it is not yet
       // counted and the duration keeps ticking.
@@ -1036,8 +1045,10 @@ void main() {
       now = 2500;
       await tester.pump();
       await tester.pump();
-      // now = 2500: 1.5s, the step still in flight -> no tok/s yet.
-      expect(find.text('1.5s · 0 compactions'), findsOneWidget);
+      // now = 2500: 1.5s, the step still in flight -> no tok/s yet. The
+      // LIVE footer still splits its label (indicator between the parts).
+      expect(find.text('1.5s'), findsOneWidget);
+      expect(find.text('0 compactions'), findsOneWidget);
 
       // The step streams its first token and then completes: its 100
       // tokens over 1.0s of streaming settle the live tok/s.
@@ -1064,10 +1075,13 @@ void main() {
       await tester.pump();
       await tester.pump();
       // now = 3000: 2.0s live, 100 tokens over 1.0s -> 100.0 tok/s live.
-      expect(find.text('2.0s · 0 compactions · 100.0 tok/s'), findsOneWidget);
+      // The LIVE footer splits its label (indicator between the parts).
+      expect(find.text('2.0s'), findsOneWidget);
+      expect(find.text('0 compactions'), findsOneWidget);
+      expect(find.text('100.0 tok/s'), findsOneWidget);
 
       // The turn ends: the frozen, history-derived value is identical — the
-      // live footer freezes in place.
+      // live footer freezes in place, back to a single joined label.
       events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
       await tester.pump();
       await tester.pump();
@@ -1113,14 +1127,19 @@ void main() {
         // step's throughput, and the compaction. The in-flight step does not
         // yet drop the tok/s.
         expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
-        expect(find.text('2.5s · 1 compaction · 100.0 tok/s'), findsOneWidget);
+        // The LIVE footer splits its label (indicator between the parts).
+        expect(find.text('2.5s'), findsOneWidget);
+        expect(find.text('1 compaction'), findsOneWidget);
+        expect(find.text('100.0 tok/s'), findsOneWidget);
 
         // Time passes: the live footer's tick clock re-renders the duration,
         // continuing from the turn's first prompt (0), not the open.
         now = 3500;
         await tester.pump(const Duration(milliseconds: 200));
         await tester.pump();
-        expect(find.text('3.5s · 1 compaction · 100.0 tok/s'), findsOneWidget);
+        expect(find.text('3.5s'), findsOneWidget);
+        expect(find.text('1 compaction'), findsOneWidget);
+        expect(find.text('100.0 tok/s'), findsOneWidget);
 
         // The turn ends: the footer freezes and the ticking clock is released
         // (a periodic timer must not outlive the test).
@@ -1181,7 +1200,9 @@ void main() {
         now = 4000;
         await tester.pump();
         await tester.pump();
-        expect(find.text('3.0s · 0 compactions'), findsOneWidget);
+        // The LIVE footer splits its label (indicator between the parts).
+        expect(find.text('3.0s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
 
         // The compaction lands: its marker settles into the history, so the
         // live count goes up.
@@ -1195,7 +1216,8 @@ void main() {
         now = 4000;
         await tester.pump();
         await tester.pump();
-        expect(find.text('3.0s · 1 compaction'), findsOneWidget);
+        expect(find.text('3.0s'), findsOneWidget);
+        expect(find.text('1 compaction'), findsOneWidget);
 
         // The step completes and the turn ends: the step settles the
         // throughput and the frozen footer keeps the compaction count.
@@ -1276,7 +1298,10 @@ void main() {
         // Turn's first prompt (1000), not the steer (2500), and folds the
         // finished step (100 tokens over 0.5s). One footer, not two.
         expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
-        expect(find.text('2.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
+        // The LIVE footer splits its label (indicator between the parts).
+        expect(find.text('2.0s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
+        expect(find.text('200.0 tok/s'), findsOneWidget);
 
         // The steered prompt's step runs and completes: its 200 tokens join
         // the Turn's average (300 tokens over 1.0s), the duration keeps
@@ -1311,10 +1336,13 @@ void main() {
         await tester.pump();
         await tester.pump();
         expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
-        expect(find.text('2.6s · 0 compactions · 300.0 tok/s'), findsOneWidget);
+        // Still the LIVE (split) footer; the throughput average has settled.
+        expect(find.text('2.6s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
+        expect(find.text('300.0 tok/s'), findsOneWidget);
 
         // The Turn ends: the frozen footer settles on the same single-turn
-        // window — 1000 -> 3600, 300 tokens over 1.0s.
+        // window — 1000 -> 3600, 300 tokens over 1.0s, back to one label.
         events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
         await tester.pump();
         await tester.pump();
@@ -1396,7 +1424,12 @@ void main() {
         await tester.pump();
         await tester.pump();
         expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
-        expect(find.text('0.5s · 0 compactions'), findsOneWidget);
+        // The fresh LIVE footer (the queued prompt's own Turn) splits its
+        // label (indicator between the parts); the completed Turn's frozen
+        // footer stays a single label on its own marker.
+        expect(find.text('0.5s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
+        expect(find.text('2.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
 
         // The new Turn ends: the footer freezes on ITS window (5000 -> 6000,
         // 100 tokens over 0.5s).
@@ -2757,7 +2790,11 @@ void main() {
         await tester.pump();
         await tester.pump();
         expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
-        expect(find.byKey(const ValueKey('structured-active')), findsNothing);
+        // The footer's activity indicator leaves with the Turn (issue #161).
+        expect(
+          find.byKey(const ValueKey('turn-activity-indicator')),
+          findsNothing,
+        );
         await events.close();
       },
     );
@@ -3000,7 +3037,12 @@ void main() {
           findsOneWidget,
         );
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
-        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
+        // The turn is still Active: the footer's activity indicator is there
+        // (issue #161).
+        expect(
+          find.byKey(const ValueKey('turn-activity-indicator')),
+          findsOneWidget,
+        );
 
         // The Stop control is usable again: tapping retries the cancel.
         await tester.tap(find.byKey(const ValueKey('structured-stop')));
@@ -3013,22 +3055,65 @@ void main() {
   });
 
   group(
-    'StructuredSessionScreen active-turn header indicator (issue #161)',
+    'StructuredSessionScreen active-turn footer indicator (issue #161)',
     () {
-      // The Active turn's header slot: agent · model · … ticking duration,
-      // instead of the idle title. Driven by the same Active detection the
-      // live footer uses (execution events, detail reconciliation, the
-      // normalized history).
-      const idleModel = _detailModel; // active: false
-      final activeModel = idleModel.copyWithActive(true);
+      // The Active turn's activity indicator (issue #161): a track of
+      // small squares with a larger one ping-ponging across, in the footer's
+      // label between the duration and the compaction count. Driven by the
+      // same Active detection the live footer uses (execution events, detail
+      // reconciliation, the normalized history). The header keeps the
+      // session's title throughout.
+      final activeModel = _detailModel.copyWithActive(true);
 
-      testWidgets('opening mid-turn shows the indicator, not the title', (
+      /// A completed turn's history (a prompt, a finished step, an `idle`
+      /// marker): its footer freezes to this label once the turn closes.
+      const closed = <SessionMessage>[
+        SessionMessage(role: 'user', text: 'go', created: 0),
+        SessionMessage(
+          id: 'm1',
+          role: 'assistant',
+          created: 0,
+          streamed: 1000,
+          completed: 1000,
+          outputTokens: 100,
+          reasoningTokens: 0,
+        ),
+        SessionMessage(id: 'i1', role: 'idle'),
+      ];
+
+      /// The in-flight (active) turn's history: a prompt at 1000 and an
+      /// assistant step still streaming (no `idle` marker closes it).
+      const inFlight = <SessionMessage>[
+        ...closed,
+        SessionMessage(role: 'user', text: 'again', created: 1000),
+        SessionMessage(id: 'm2', role: 'assistant', created: 1200),
+      ];
+
+      /// The in-flight turn once it completes (its step finishes, the turn
+      /// closes at an `idle` marker).
+      const inFlightDone = <SessionMessage>[
+        ...closed,
+        SessionMessage(role: 'user', text: 'again', created: 1000),
+        SessionMessage(
+          id: 'm2',
+          role: 'assistant',
+          created: 1200,
+          streamed: 2000,
+          completed: 2000,
+          outputTokens: 100,
+          reasoningTokens: 0,
+        ),
+        SessionMessage(id: 'i2', role: 'idle'),
+      ];
+
+      testWidgets('opening mid-turn shows the title and the footer indicator', (
         tester,
       ) async {
         // The turn was already running when the view opened: the detail's
-        // Active fact (and the in-flight step) show the indicator at once.
+        // Active fact (and the in-flight step) show the footer indicator at
+        // once. The header keeps the session's title.
         final client = _FakeClient(
-          details: [activeModel],
+          details: [activeModel, _detail0],
           messages: const [
             SessionMessage(role: 'user', text: 'go', created: 1000),
             SessionMessage(id: 'm1', role: 'assistant', created: 1200),
@@ -3040,177 +3125,192 @@ void main() {
           clock: () => DateTime.fromMillisecondsSinceEpoch(13300),
         );
 
-        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
+        // The header keeps the session's title (issue #161's header).
+        expect(find.text('external session'), findsOneWidget);
+        // The footer shows the duration and the compaction count, with the
+        // activity indicator riding between them.
+        expect(find.text('12.3s'), findsOneWidget);
+        expect(find.text('0 compactions'), findsOneWidget);
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
         expect(
-          find.text('Plan · opencode/flint-40b-free · … 12.3s'),
+          find.byKey(const ValueKey('turn-activity-indicator')),
           findsOneWidget,
         );
-        // The idle title is replaced while Active.
-        expect(find.text('external session'), findsNothing);
-        // The cost bar's identity chips are unaffected (the indicator is the
-        // header's title slot, not the chips).
+        // The cost bar's identity chips are unaffected.
         expect(find.byKey(const ValueKey('structured-model')), findsOneWidget);
         expect(find.text('opencode/flint-40b-free'), findsOneWidget);
         expect(find.byKey(const ValueKey('structured-mode')), findsOneWidget);
       });
 
-      testWidgets('execution events show and hide the indicator', (
-        tester,
-      ) async {
-        // Open on a settled session, watch a turn start from another client
-        // (an event, not a local prompt) and end.
-        // Detail calls, in order: initial load (idle), then one normalize per
-        // boundary — active on each `started`, idle on each terminal event.
-        final client = _FakeClient(
-          details: [
-            idleModel,
-            activeModel,
-            idleModel,
-            activeModel,
-            idleModel,
-            activeModel,
-            idleModel,
-          ],
-          messageLists: const [
-            [
-              SessionMessage(role: 'user', text: 'go', created: 0),
-              SessionMessage(id: 'm1', role: 'assistant', completed: 500),
-              SessionMessage(id: 'i1', role: 'idle'),
+      testWidgets(
+        'a started turn shows the indicator; a terminal event removes it',
+        (tester) async {
+          // Open on a settled session (a completed turn), watch a turn start
+          // from another client (an event, not a local prompt) and end.
+          // Detail calls, in order: initial load (idle), one normalize per
+          // boundary — active on `started`, idle on the terminal event.
+          final client = _FakeClient(
+            details: [
+              _detail0, // idle (initial)
             ],
-            [
-              SessionMessage(role: 'user', text: 'go', created: 0),
-              SessionMessage(id: 'm1', role: 'assistant', completed: 500),
-              SessionMessage(id: 'i1', role: 'idle'),
-              SessionMessage(role: 'user', text: 'again', created: 100000),
-              SessionMessage(id: 'm2', role: 'assistant', created: 100100),
+            messageLists: [
+              [
+                ...closed,
+                SessionMessage(role: 'user', text: 'again', created: 1000),
+                SessionMessage(id: 'm2', role: 'assistant', created: 1200),
+                SessionMessage(id: 'i2', role: 'idle'),
+              ],
             ],
-            [
-              SessionMessage(role: 'user', text: 'go', created: 0),
-              SessionMessage(id: 'm1', role: 'assistant', completed: 500),
-              SessionMessage(id: 'i1', role: 'idle'),
-              SessionMessage(role: 'user', text: 'again', created: 100000),
-              SessionMessage(id: 'm2', role: 'assistant', completed: 101000),
-              SessionMessage(id: 'i2', role: 'idle'),
-            ],
-          ],
-        );
-        final events = await _pump(
-          tester,
-          client: client,
-          clock: () => DateTime.fromMillisecondsSinceEpoch(101234),
-        );
+          );
+          final events = await _pump(
+            tester,
+            client: client,
+            clock: () => DateTime.fromMillisecondsSinceEpoch(2000),
+          );
 
-        // A completed session: no indicator, the title.
-        expect(find.byKey(const ValueKey('structured-active')), findsNothing);
-        expect(find.text('external session'), findsOneWidget);
+          // A completed session: no indicator, the frozen footer.
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsNothing,
+          );
 
-        // The turn starts: the indicator appears within one event round-trip,
-        // ticking from the new prompt (12.3s after it, at the injected clock).
-        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
-        await tester.pump();
-        await tester.pump();
-        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
-        expect(
-          find.text('Plan · opencode/flint-40b-free · … 1.2s'),
-          findsOneWidget,
-        );
-        expect(find.text('external session'), findsNothing);
-
-        // Each terminal execution event removes it and brings the title back.
-        for (final type in [
-          'session.execution.succeeded',
-          'session.execution.failed',
-          'session.execution.interrupted',
-        ]) {
-          if (type != 'session.execution.succeeded') {
-            // Re-arm: start another turn for the next terminal event.
-            events.add(
-              _event('session.execution.started', aggregateID: 'ses_1'),
-            );
-            await tester.pump();
-            await tester.pump();
-            expect(
-              find.byKey(const ValueKey('structured-active')),
-              findsOneWidget,
-            );
-          }
-          events.add(_event(type, aggregateID: 'ses_1'));
+          // The turn starts: the detail goes Active and the history goes
+          // in-flight, so the indicator appears in the live footer.
+          client.details.add(activeModel);
+          client.messageLists.add(inFlight);
+          events.add(_event('session.execution.started', aggregateID: 'ses_1'));
           await tester.pump();
           await tester.pump();
-          expect(find.byKey(const ValueKey('structured-active')), findsNothing);
           expect(find.text('external session'), findsOneWidget);
-        }
-        await events.close();
-      });
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsOneWidget,
+          );
 
-      testWidgets('the duration ticks while the turn is Active (issue #161)', (
-        tester,
-      ) async {
-        var now = 1500;
-        final client = _FakeClient(
-          details: [activeModel],
-          messages: const [
-            SessionMessage(role: 'user', text: 'go', created: 1000),
-          ],
-        );
-        await _pump(
-          tester,
-          client: client,
-          clock: () => DateTime.fromMillisecondsSinceEpoch(now),
-        );
-        expect(
-          find.text('Plan · opencode/flint-40b-free · … 0.5s'),
-          findsOneWidget,
-        );
+          // The turn succeeds: the detail settles to idle and the history
+          // closes, so the indicator is removed and the footer freezes.
+          client.details.add(_detail0);
+          client.messageLists.add(inFlightDone);
+          events.add(
+            _event('session.execution.succeeded', aggregateID: 'ses_1'),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsNothing,
+          );
+          expect(find.text('external session'), findsOneWidget);
+          await events.close();
+        },
+      );
 
-        // Time passes: the live turn's tick re-renders the header duration.
-        now = 2500;
-        await tester.pump(const Duration(milliseconds: 200));
-        await tester.pump();
-        expect(
-          find.text('Plan · opencode/flint-40b-free · … 1.5s'),
-          findsOneWidget,
-        );
-      });
+      testWidgets(
+        'a failed turn removes the indicator and freezes the footer',
+        (tester) async {
+          // Open on a settled session, watch a turn start, then FAIL: the
+          // indicator is removed (the task is over, with an error) and the
+          // footer freezes.
+          final client = _FakeClient(
+            details: [_detail0],
+            messageLists: [closed],
+          );
+          final events = await _pump(
+            tester,
+            client: client,
+            clock: () => DateTime.fromMillisecondsSinceEpoch(2000),
+          );
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsNothing,
+          );
 
-      testWidgets('a normalize that ends idle removes the indicator', (
-        tester,
-      ) async {
-        // The turn ends while the event stream is dropped: the terminal event
-        // never arrives, the gap's reconcile (detail no longer Active, history
-        // ends on the idle marker) removes the indicator.
-        final client = _FakeClient(
-          details: [activeModel, idleModel],
-          messageLists: const [
-            [
+          // The turn starts: Active, in-flight — the indicator shows.
+          client.details.add(activeModel);
+          client.messageLists.add(inFlight);
+          events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+          await tester.pump();
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsOneWidget,
+          );
+
+          // The turn fails: the indicator is removed and the footer freezes.
+          client.details.add(_detail0);
+          client.messageLists.add(inFlightDone);
+          events.add(_event('session.execution.failed', aggregateID: 'ses_1'));
+          await tester.pump();
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsNothing,
+          );
+          expect(find.text('external session'), findsOneWidget);
+          await events.close();
+        },
+      );
+
+      testWidgets(
+        'a settled session shows no indicator (its footer is frozen)',
+        (tester) async {
+          final client = _FakeClient(
+            details: const [_detail0],
+            messages: const [
+              SessionMessage(role: 'user', text: 'go', created: 0),
+              SessionMessage(
+                id: 'm1',
+                role: 'assistant',
+                created: 0,
+                streamed: 1000,
+                completed: 1500,
+                outputTokens: 100,
+                reasoningTokens: 0,
+              ),
+              SessionMessage(id: 'i1', role: 'idle'),
+            ],
+          );
+          await _pump(tester, client: client);
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsNothing,
+          );
+          // The frozen footer still shows the turn's full stats, as one
+          // label (no indicator riding in it).
+          expect(
+            find.text('1.5s · 0 compactions · 100.0 tok/s'),
+            findsOneWidget,
+          );
+        },
+      );
+
+      testWidgets(
+        'a compaction during the live turn counts in the footer, and the '
+        'indicator rides between the parts',
+        (tester) async {
+          final client = _FakeClient(
+            details: [activeModel],
+            messages: const [
               SessionMessage(role: 'user', text: 'go', created: 1000),
+              SessionMessage(id: 'c1', role: 'compaction', text: 'summary'),
               SessionMessage(id: 'm1', role: 'assistant', created: 1200),
             ],
-            [
-              SessionMessage(role: 'user', text: 'go', created: 1000),
-              SessionMessage(id: 'm1', role: 'assistant', completed: 2000),
-              SessionMessage(id: 'i1', role: 'idle'),
-            ],
-          ],
-        );
-        final gaps = StreamController<SessionGap>.broadcast();
-        await _pump(
-          tester,
-          client: client,
-          gaps: gaps.stream,
-          clock: () => DateTime.fromMillisecondsSinceEpoch(3000),
-        );
-        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
-
-        gaps.add(
-          const SessionGap(aggregateID: 'ses_1', lastSeen: 1, received: 4),
-        );
-        await tester.pump();
-        await tester.pump();
-        expect(find.byKey(const ValueKey('structured-active')), findsNothing);
-        expect(find.text('external session'), findsOneWidget);
-        await gaps.close();
-      });
+          );
+          await _pump(
+            tester,
+            client: client,
+            clock: () => DateTime.fromMillisecondsSinceEpoch(3000),
+          );
+          // The live label: the duration and the compaction count, with the
+          // indicator riding between them.
+          expect(find.text('2.0s'), findsOneWidget);
+          expect(find.text('1 compaction'), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('turn-activity-indicator')),
+            findsOneWidget,
+          );
+        },
+      );
     },
   );
 
@@ -3278,8 +3378,14 @@ void main() {
       // step revealed.
       final seen = <String>{};
       void recordFooters() {
+        // A footer's label is its text under the turn-stats row. The frozen
+        // footers (every turn in this test is settled) each carry one label
+        // Text.
         for (final m in tester.widgetList<Text>(
-          find.byKey(const ValueKey('turn-stats')),
+          find.descendant(
+            of: find.byKey(const ValueKey('turn-stats')),
+            matching: find.byType(Text),
+          ),
         )) {
           seen.add(m.data!);
         }

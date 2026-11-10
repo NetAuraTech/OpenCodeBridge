@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
@@ -2675,28 +2676,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     );
   }
 
-  /// The header's Active-turn indicator (issue #161): `Agent · model · …
-  /// 12.3s` in place of the idle title while the Turn is Active, driven by
-  /// the same [_turnActive] the live footer rides on (execution events,
-  /// detail reconciliation, completion streaming) and the same live
-  /// duration — from the Turn's first prompt to the injected clock, ticking
-  /// with [_startTurnTick]'s re-renders. `null` when the Turn is settled.
-  String? _activeIndicator() {
-    if (!_turnActive) return null;
-    final detail = _detail;
-    final model = detail?.model;
-    return activeTurnIndicator(
-      messages: _messages,
-      now: widget.clock().millisecondsSinceEpoch,
-      agent: detail?.agent,
-      model: model == null
-          ? null
-          : model.providerId.isEmpty
-          ? model.id
-          : '${model.providerId}/${model.id}',
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     // The panel owns its surface and header (issue #130): it renders the
@@ -2710,24 +2689,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // running turn's live label and the loaded Turns' frozen labels, keyed
     // by the row each rides on.
     final footers = _turnFooters();
-    // The header's title slot: the Active turn's indicator (agent · model ·
-    // ticking duration, issue #161) while the Turn runs, the session's
-    // title while it is settled.
-    final activeIndicator = _activeIndicator();
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           AppBar(
-            title: Text(
-              activeIndicator ?? _title,
-              key: activeIndicator == null
-                  ? null
-                  : const ValueKey('structured-active'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+            title: Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis),
             leading: widget.showCloseButton && widget.onClose != null
                 ? IconButton(
                     icon: const Icon(Icons.arrow_back),
@@ -2829,11 +2797,20 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                             // the lazy older Turns): keyed by the row it
                                             // rides on, computed once for the build.
                                             final footer = footers[i];
+                                            // The LIVE footer (issue #161's
+                                            // activity indicator rides on it):
+                                            // only the newest turn's row while
+                                            // the Turn runs; older rows keep
+                                            // their frozen footers.
+                                            final live =
+                                                _turnActive &&
+                                                i == _messages.length - 1;
                                             if (message.role == 'idle') {
                                               // The turn-boundary marker carries no
                                               // content of its own.
                                               return _TurnStatsFooter(
                                                 label: footer,
+                                                active: live,
                                               );
                                             }
                                             if (message.role == 'compaction') {
@@ -2849,6 +2826,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                   ),
                                                   _TurnStatsFooter(
                                                     label: footer,
+                                                    active: live,
                                                   ),
                                                 ],
                                               );
@@ -2867,7 +2845,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                   message: message,
                                                   inFlight: inFlight,
                                                 ),
-                                                _TurnStatsFooter(label: footer),
+                                                _TurnStatsFooter(
+                                                  label: footer,
+                                                  active: live,
+                                                ),
                                               ],
                                             );
                                           },
@@ -3285,31 +3266,213 @@ class _CostBar extends StatelessWidget {
   }
 }
 
-/// The completed turn's stats footer (issue #121): `duration · N
-/// compactions · X.X tok/s`, dimmed under the turn's last row. `null` or
-/// empty renders nothing (an empty row keeps the lazy list's item count
-/// stable).
+/// The turn's stats footer (issue #121's frozen labels, issue #124's live
+/// one): `duration · N compactions · X.X tok/s`, dimmed under the turn's
+/// last row. While the Turn is Active ([active]) the footer carries the
+/// activity indicator (issue #161) between the duration and the compaction
+/// count — a track of small squares with a larger one ping-ponging across —
+/// and the full live label (duration, compactions, and the throughput that
+/// settles in as each step completes) is still shown. A `null` label renders
+/// nothing (an empty row keeps the lazy list's item count stable).
 class _TurnStatsFooter extends StatelessWidget {
-  const _TurnStatsFooter({required this.label});
+  const _TurnStatsFooter({required this.label, this.active = false});
 
   final String? label;
+
+  /// True for the LIVE footer (the newest turn, still running): the activity
+  /// indicator (issue #161) rides between the duration and the compaction
+  /// count. Frozen footers (closed turns) keep the plain, pre-joined label.
+  final bool active;
 
   @override
   Widget build(BuildContext context) {
     final label = this.label;
     if (label == null || label.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    // The live label is rendered as its parts so the indicator can ride
+    // between them (between the duration and the compaction count, issue
+    // #161); the frozen labels stay the plain, pre-joined string.
+    final parts = active ? label.split(' · ') : <String>[label];
+    final sepStyle = TextStyle(fontSize: 11, color: scheme.outline);
+    Widget sep() => Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Text('·', style: sepStyle),
+    );
+    final children = <Widget>[
+      for (var k = 0; k < parts.length; k++) ...[
+        Text(parts[k], style: TextStyle(fontSize: 11, color: scheme.outline)),
+        if (k == 0 && active) ...[
+          // The activity indicator, its own field between the duration and
+          // the compaction count, with a separator on each side.
+          sep(),
+          const Padding(
+            padding: EdgeInsets.only(left: 6),
+            child: _TurnActivityIndicator(),
+          ),
+          sep(),
+        ] else if (k < parts.length - 1)
+          sep(),
+      ],
+    ];
     return Padding(
       // Sits under the turn's last message: the label hugs the message it
       // describes, and the pane's own bottom padding keeps the next turn
       // clear.
       padding: const EdgeInsets.only(top: 2),
-      child: Text(
-        label,
+      child: Row(
         key: const ValueKey('turn-stats'),
-        style: TextStyle(
-          fontSize: 11,
-          color: Theme.of(context).colorScheme.outline,
-        ),
+        mainAxisSize: MainAxisSize.min,
+        children: children,
+      ),
+    );
+  }
+}
+
+/// The Active turn's activity indicator (issue #161): a track of small
+/// squares with one larger square that pings and pongs left to right and
+/// back while the Turn runs (until the turn finishes or fails — then the
+/// widget is simply not built, the label freezing to the turn's stats).
+///
+/// The motion is a per-frame ping-pong on its own [Ticker] (the same
+/// self-driven clock opencode's shimmer uses, independent of the footer's
+/// 200 ms duration tick), so it animates at the display's frame rate. The
+/// large square eases out of the left edge, glides across at full speed,
+/// eases to a full stop at the right edge — and all four turns happen
+/// off-screen, so the bounce reads as a ball rolling between the two ends,
+/// never stopping or teleporting on the track. As it passes, it brightens
+/// the small squares it lights (a soft band of light, like opencode's
+/// shimmer), and its rounded shape makes it read as a pulse of light rather
+/// than a hard block. Its footprint is constant, so the text never reflows.
+class _TurnActivityIndicator extends StatefulWidget {
+  const _TurnActivityIndicator();
+
+  @override
+  State<_TurnActivityIndicator> createState() => _TurnActivityIndicatorState();
+}
+
+class _TurnActivityIndicatorState extends State<_TurnActivityIndicator>
+    with SingleTickerProviderStateMixin {
+  late final Ticker _ticker;
+
+  /// The elapsed time the ticker last reported (it passes it to the callback
+  /// each frame; `Ticker` itself keeps no running clock).
+  Duration _elapsed = Duration.zero;
+
+  /// One full left → right → left ping-pong, in milliseconds.
+  static const int _periodMs = 2800;
+
+  static const double _width = 46;
+
+  static const double _height = 10;
+
+  static const double _small = 4;
+
+  static const double _large = 7;
+
+  /// The small squares of the track, evenly spaced across [_width].
+  static const List<double> _smallXs = <double>[1, 11, 21, 31, 41];
+
+  /// opencode's `smootherstep` (tab-pulse.ts): a C2-smooth 0→1 S-curve.
+  static double _smootherstep(double value) {
+    final t = value.clamp(0.0, 1.0);
+    return t * t * t * (t * (t * 6 - 15) + 10);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker((elapsed) {
+      _elapsed = elapsed;
+      setState(() {});
+    });
+    _ticker.start();
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    super.dispose();
+  }
+
+  /// The cycle phase, 0 → 1 over the whole ping-pong (left → right → left),
+  /// from the ticker clock.
+  double get _phase {
+    final phase = (_elapsed.inMilliseconds % _periodMs) / _periodMs;
+    return phase.clamp(0.0, 1.0);
+  }
+
+  /// A smooth ping-pong: 0 at the left edge, 1 at the right edge, 0 again —
+  /// a triangle wave (0→1 over the first half, 1→0 over the second) run
+  /// through `smootherstep`, so the comet eases to a full, zero-velocity stop
+  /// at each end (off-screen) and glides fastest through the middle. That is
+  /// the organic "ball bouncing between the ends" motion, with no teleport.
+  double get _bounce {
+    final triangle = 1 - (1 - 2 * _phase).abs();
+    return _smootherstep(triangle);
+  }
+
+  /// The comet's center: off the left edge at rest, off the right edge at the
+  /// far turn, and back — so the bounce never lands in view.
+  double get _cometCenter => -8 + _bounce * (_width + 16);
+
+  /// The comet's left edge.
+  double get _cometX => _cometCenter - _large / 2;
+
+  /// The trail's brightness at a point on the track: a soft, symmetric band
+  /// centred on the comet (opencode's shimmer light, direction-independent
+  /// so it reads the same going right as coming back). 1 at the comet's
+  /// centre, 0 once [_trailFalloff] away.
+  double _trailAt(double index) {
+    final distance = (index - _cometCenter).abs();
+    return _smootherstep(1 - distance / _trailFalloff);
+  }
+
+  static const double _trailFalloff = 13;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.primary;
+    final smallY = (_height - _small) / 2;
+    final largeY = (_height - _large) / 2;
+    return SizedBox(
+      key: const ValueKey('turn-activity-indicator'),
+      width: _width,
+      height: _height,
+      child: Stack(
+        clipBehavior: Clip.hardEdge,
+        children: [
+          for (final x in _smallXs)
+            Positioned(
+              left: x,
+              top: smallY,
+              child: Container(
+                width: _small,
+                height: _small,
+                // The dim track brightens as the comet passes over it (a
+                // soft, symmetric band of light), then dims again.
+                color: color.withValues(
+                  alpha: 0.3 + 0.7 * _trailAt(x + _small / 2),
+                ),
+              ),
+            ),
+          // The bright comet, ping-ponging across the track on the Ticker;
+          // clipped to the box so it enters from the left edge and exits the
+          // right edge. Rounded, so it reads as a pulse of light (opencode's
+          // shimmer) rather than a hard block sliding across.
+          Positioned(
+            left: _cometX,
+            top: largeY,
+            child: Container(
+              key: const ValueKey('turn-activity-square'),
+              width: _large,
+              height: _large,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
