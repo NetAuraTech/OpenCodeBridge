@@ -37,6 +37,12 @@ void main() {
       // finder looks past the Offstage.
       expect(find.byType(OrbsTab, skipOffstage: false), findsOneWidget);
 
+      // The shell has no app bar (the "OpenCodeBridge" header was dropped):
+      // the bridge status indicator moved to the footer, right of the
+      // Settings item, so the dot is still present but not in an AppBar.
+      expect(find.byType(AppBar), findsNothing);
+      expect(find.byKey(const Key('connection-indicator-dot')), findsOneWidget);
+
       // The Sessions tab is the default body; without a tunnel URL it
       // points at Settings.
       expect(
