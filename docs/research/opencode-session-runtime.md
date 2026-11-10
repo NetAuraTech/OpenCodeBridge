@@ -148,13 +148,14 @@ Bearer auth is rejected (401); use Basic. Session IDs look like
 
 ## Retry / error lifecycle (provider 429 + terminal failure) — the wire shapes
 
-Probe for issue #154. **Every claim below was verified live** against the
-running service (`opencode serve --service`, v2.2.7,
+Probe for issue #154. Every *observed* claim below was verified live against
+the running service (`opencode serve --service`, v2.2.7,
 `http://127.0.0.1:49374`, Basic auth from `~/.local/state/opencode/service.json`)
-on 2026-11-10. Probes ran on throwaway sessions bound to a real project
-directory; all deleted afterwards. The model was the live session's own
-`amd/Qwen3.8-27B` (the gateway that produces the 429s), plus one
-forced-failure session bound to an unavailable model.
+on 2026-11-10. What could not be observed live is collected and labelled under
+**Assumptions** at the end of the section. Probes ran on throwaway sessions
+bound to a real project directory; all deleted afterwards. The model was the
+live session's own `amd/Qwen3.8-27B` (the gateway that produces the 429s),
+plus one forced-failure session bound to an unavailable model.
 
 Artifacts — raw service JSON, unreshaped (trimmed to the interesting
 message(s) only), so slice 02's HTTP-service tests replay them through the real
@@ -207,6 +208,40 @@ Verified: after a retry lands, the same assistant message is read with **no
 `retry` and no `error`**, `finish:"stop"`, populated `content`, and the turn's
 `idle` carries `outcome:"succeeded"`. (`message_429_succeeded.json`.)
 
+### Q3 — where the final failure lives (the distinction slice 02 must preserve)
+
+- **Non-retryable** failure (unavailable model — the forced setup): the final
+  `error` lands on the **`idle`** message with `outcome:"failed"` and **no
+  assistant row is written** (`message_failed_model_unavailable.json`).
+- **Exhausted-retry** failure (a 429 that never recovers): **not observed
+  live.** **Assumption** (schema-supported): the final `error` lands on the
+  **assistant** message (with `retry` cleared once exhausted, since
+  `retry`/`error` are never both set), the turn's `idle` carries
+  `outcome:"failed"`, and there **is** an assistant row. Slice 02 must not
+  conflate the two: an idle-only error means no assistant content was ever
+  produced; an assistant error means content was attempted.
+
+### Q4 — the TUI's terminal line
+
+- **In-flight** (a retried turn, while `retry` is set): the TUI's own render
+  (confirmed in the opencode v2.2.7 binary) is
+  `⚠ ` + (`Retrying in {d}s` while `retry.at - now > 0`, else
+  `Retry due`) + ` · attempt ` + `{retry.attempt}` + ` · ` +
+  `{retry.error.message}` — e.g. the issue's
+  `Retry due · attempt 3 · Provider request failed with HTTP 429: {…}`. The app
+  can reproduce this straight from `retry`.
+- **Terminal "no automatic retry left" wording: not observed.** No live turn
+  exhausted its retries on this model (Q6), so the exact terminal string was
+  **not observed**. The forced-failure setup used instead — a session bound to
+  an unavailable model (`amd/qwen3.8-flash-next`) that fails before any
+  provider request with `provider.no-route` ("Model unavailable: …",
+  non-retryable) — produces a terminal `idle {outcome:"failed", error}` that
+  the TUI renders from the message's `error`/idle `error` **verbatim**; no
+  extra "no automatic retry left" copy is appended. **Assumption:** the app
+  therefore renders the terminal failure from `error.message` (as the
+  in-flight line does) and does not need to invent a "no automatic retry
+  left" string.
+
 ### Q5 — the service auto-retries; it does not wait for the user
 
 The 429 is absorbed by the **service's own** retry loop: it schedules the next
@@ -226,51 +261,19 @@ The 429s originate upstream at the AMD gateway (a shared API key hit at
 concurrency); opencode's retry layer rides them out, so the app's job is to
 surface the in-flight retry and the (rare) exhausted case.
 
-### Q4 — the TUI's terminal line
-
-- **In-flight** (a retried turn, while `retry` is set): the TUI's own render
-  (confirmed in the opencode v2.2.7 binary) is
-  `⚠ ` + (`Retrying in {d}s` while `retry.at - now > 0`, else
-  `Retry due`) + ` · attempt ` + `{retry.attempt}` + ` · ` +
-  `{retry.error.message}` — e.g. the issue's
-  `Retry due · attempt 3 · Provider request failed with HTTP 429: {…}`. The app
-  can reproduce this straight from `retry`.
-- **Terminal "no automatic retry left" wording: not observed.** No live turn
-  exhausted its retries on this model (Q6), so the exact terminal string was
-  **not observed**. The forced-failure setup used instead — a session bound to
-  an unavailable model (`amd/qwen3.8-flash-next`, 404-class, non-retryable) —
-  produces a terminal `idle {outcome:"failed", error}` that the TUI renders from
-  the message's `error`/idle `error` **verbatim**; no extra "no automatic retry
-  left" copy is appended. **Assumption:** the app therefore renders the
-  terminal failure from `error.message` (as the in-flight line does) and does
-  not need to invent a "no automatic retry left" string.
-
-### Where the final failure lives (the distinction slice 02 must preserve)
-
-- **Non-retryable** failure (unavailable model — the forced setup): the final
-  `error` lands on the **`idle`** message with `outcome:"failed"` and **no
-  assistant row is written** (`message_failed_model_unavailable.json`).
-- **Exhausted-retry** failure (a 429 that never recovers): **not observed
-  live.** **Assumption** (schema-supported): the final `error` lands on the
-  **assistant** message (with `retry` cleared once exhausted, since
-  `retry`/`error` are never both set), the turn's `idle` carries
-  `outcome:"failed"`, and there **is** an assistant row. Slice 02 must not
-  conflate the two: an idle-only error means no assistant content was ever
-  produced; an assistant error means content was attempted.
-
 ### The app must not depend on a retry event
 
 `session.retry.scheduled` **does exist** in the service's full event enum
 (`{sessionID, assistantMessageID, attempt, at, error}` — see
-`event_retry_scheduled.json`), but it is **not** in the bridge's consumed subset
-(`session.inbox.*`, `session.execution.*`, `session.step.*`,
-`session.text/reasoning.*`, `session.usage.updated`, `session.compaction.*`).
-And no `session.idle` event is emitted at all — the idle boundary only appears
-in the `/message`/`/context` reads. **Verdict:** the app drives retry + terminal
-state from the **message reads**, not from a retry event. (Confirms the issue's
-"the app must not depend on one" — and refines it: `session.retry.scheduled` is
-a real, usable event if a later slice wants to *live*-update the attempt
-counter without re-reading the message.)
+`event_retry_scheduled.json`), but it is **not** among the event types the app
+consumes (`session.execution.*`, `session.step.*`, `session.text/reasoning.*`,
+`session.tool.*`, `session.usage.updated`, `session.compaction.*`, and the
+session-lifecycle events). And no `session.idle` event is emitted at all — the
+idle boundary only appears in the `/message`/`/context` reads. **Verdict:** the
+app drives retry + terminal state from the **message reads**, not from a retry
+event. (Confirms the issue's "the app must not depend on one" — and refines it:
+`session.retry.scheduled` is a real, usable event if a later slice wants to
+*live*-update the attempt counter without re-reading the message.)
 
 ### What the bridge discards today (the bug slices 02–04 fix)
 
@@ -281,9 +284,24 @@ counter without re-reading the message.)
   `error`.
 
 So a retried turn looks like a slow agent and an exhausted/failed turn looks
-like a clean stop — exactly the reported symptom. Slice 02 parses `retry` /
-`error` (assistant) and `outcome` / `error` (idle) and replays the fixtures
-above through `_messageFrom`.
+like a clean stop — exactly the reported symptom. This section is the reference
+those slices cite:
+
+- **Slice 02** (#155, bridge carries `retry` / terminal `error` / idle
+  `outcome` in `SessionMessage`): parses `retry` / `error` (assistant) and
+  `outcome` / `error` (idle) and replays the fixtures above through
+  `_messageFrom`. It must preserve the Q3 distinction — an idle-only error (no
+  assistant row) is a different case than an assistant error.
+- **Slice 03** (#156, app shows the live provider retry, attempt N): reads
+  `retry.attempt` + `retry.error.message` off the retried assistant message and
+  renders the in-flight line **verbatim as the TUI does** (Q4) —
+  `⚠ {Retrying in Ns|Retry due} · attempt {n} · {error.message}` — so the app
+  needs no invented copy.
+- **Slice 04** (#157, app reads an exhausted retry as a failed turn, not a
+  quiet stop): keys off the turn's terminal state — `idle.outcome:"failed"`
+  (with the `error` on the `idle` for the non-retryable case, or on the
+  assistant for the exhausted-429 case, assumption A1) — so an exhausted turn
+  renders as a failed turn instead of a clean stop.
 
 ### Assumptions (labelled, per the probe brief)
 
