@@ -232,6 +232,11 @@ abstract class OpencodeService {
   /// `POST /api/session/{id}/compact`).
   Future<void> compact(String id);
 
+  /// Cancel the session's running turn (the service's
+  /// `POST /api/session/{id}/interrupt`): the turn stops and no further
+  /// output streams. An idle session accepts it harmlessly.
+  Future<void> cancelTurn(String id);
+
   /// Undo the previous message: stage a revert at the session's last user
   /// message (the service's `POST /api/session/{id}/revert/stage`). A no-op
   /// when the session has no user message yet.

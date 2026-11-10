@@ -477,7 +477,8 @@ void main() {
       } else if (request.method == 'POST' &&
           (request.uri.path.endsWith('/compact') ||
               request.uri.path.endsWith('/undo') ||
-              request.uri.path.endsWith('/redo'))) {
+              request.uri.path.endsWith('/redo') ||
+              request.uri.path.endsWith('/cancel'))) {
         final id = request.uri.path
             .substring('/api/sessions/'.length)
             .split('/')
@@ -1062,6 +1063,19 @@ void main() {
     test('compact maps the bridge 404 to SessionsClientError(404)', () async {
       try {
         await client.compact('ses_missing');
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    });
+
+    test('cancel accepts 204', () async {
+      await client.cancel('ses_1');
+    });
+
+    test('cancel maps the bridge 404 to SessionsClientError(404)', () async {
+      try {
+        await client.cancel('ses_missing');
         fail('expected SessionsClientError');
       } on SessionsClientError catch (e) {
         expect(e.statusCode, HttpStatus.notFound);

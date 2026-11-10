@@ -690,6 +690,16 @@ class OpencodeHttpService implements OpencodeService {
     );
   }
 
+  /// Cancel the session's running turn (the service's
+  /// `POST /api/session/{id}/interrupt`).
+  @override
+  Future<void> cancelTurn(String id) async {
+    await _post(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/interrupt'),
+      jsonEncode({}),
+    );
+  }
+
   /// Undo the previous message: stage a revert at the session's last user
   /// message (the service's `POST /api/session/{id}/revert/stage`). A no-op
   /// when the session has no user message yet.

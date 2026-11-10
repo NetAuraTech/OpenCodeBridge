@@ -758,6 +758,11 @@ class SessionsClient {
   /// Undo the previous message (the `/` menu's `/undo`).
   Future<void> undo(String id) => _postNoContent(id, 'undo');
 
+  /// Cancel the session's running turn (issue #158): the bridge's
+  /// `POST /api/sessions/{id}/cancel`, which interrupts the turn on the
+  /// owning service. A failure surfaces as a [SessionsClientError].
+  Future<void> cancel(String id) => _postNoContent(id, 'cancel');
+
   /// Redo (the `/` menu's `/redo`).
   Future<void> redo(String id) => _postNoContent(id, 'redo');
 

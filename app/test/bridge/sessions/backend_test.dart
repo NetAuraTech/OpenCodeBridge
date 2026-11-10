@@ -197,6 +197,7 @@ class FakeOpencodeService implements OpencodeService {
   final List<String> compacted = [];
   final List<String> undos = [];
   final List<String> redos = [];
+  final List<String> cancelled = [];
   final List<String> forks = [];
   final List<(String, String)> renames = [];
   final List<(String, String)> moves = [];
@@ -252,6 +253,11 @@ class FakeOpencodeService implements OpencodeService {
   @override
   Future<void> redo(String id) async {
     redos.add(id);
+  }
+
+  @override
+  Future<void> cancelTurn(String id) async {
+    cancelled.add(id);
   }
 
   @override
@@ -720,6 +726,7 @@ void main() {
         await backend.compact('ses_1');
         await backend.undo('ses_1');
         await backend.redo('ses_1');
+        await backend.cancel('ses_1');
         expect(await backend.fork('ses_1'), 'ses_forked');
         await backend.rename('ses_1', 'new title');
         await backend.move('ses_1', '/elsewhere');
@@ -732,6 +739,7 @@ void main() {
         expect(service.compacted, ['ses_1']);
         expect(service.undos, ['ses_1']);
         expect(service.redos, ['ses_1']);
+        expect(service.cancelled, ['ses_1']);
         expect(service.forks, ['ses_1']);
         expect(service.renames, const [('ses_1', 'new title')]);
         expect(service.moves, const [('ses_1', '/elsewhere')]);

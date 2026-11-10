@@ -1078,6 +1078,55 @@ void main() {
       expect(jsonDecode(body), {'error': 'not_found'});
     });
 
+    test('POST .../cancel cancels the turn and is 204', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/cancel',
+        '',
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.cancelled, ['ses_one']);
+    });
+
+    test('POST .../cancel is 502 when the service is down', () async {
+      service.failCancel = true;
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/cancel',
+        '',
+      );
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      expect(service.cancelled, isEmpty);
+    });
+
+    test('POST .../cancel is 404 for an unknown session', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_missing/cancel',
+        '',
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+    });
+
+    test('POST .../cancel is 503 without a sessions backend', () async {
+      if (_hostHasServiceDescriptor()) return;
+      final bare = await BridgeServer.start(port: 0);
+      try {
+        final (status, body) = await _postRaw(
+          bare.baseUri,
+          'api/sessions/ses_one/cancel',
+          '',
+        );
+        expect(status, 503);
+        expect(jsonDecode(body), {'error': 'opencode_unavailable'});
+      } finally {
+        await bare.stop();
+      }
+    });
+
     test(
       'POST /api/sessions/{id}/fork returns the forked session id',
       () async {
@@ -2560,6 +2609,7 @@ class _FakeService implements OpencodeService {
   var failAnswer = false;
   var failDismiss = false;
   var failCompact = false;
+  var failCancel = false;
   var failUsage = false;
 
   /// The session id [createSession] mints, by project id.
@@ -2802,6 +2852,7 @@ class _FakeService implements OpencodeService {
   final List<(String, String)> agentsSet = [];
   final List<(String, String)> skillsActivated = [];
   final List<String> compacted = [];
+  final List<String> cancelled = [];
   final List<String> undos = [];
   final List<String> redos = [];
   final List<String> forks = [];
@@ -2867,6 +2918,13 @@ class _FakeService implements OpencodeService {
   Future<void> redo(String id) async {
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     redos.add(id);
+  }
+
+  @override
+  Future<void> cancelTurn(String id) async {
+    if (failCancel) throw const OpencodeServiceError(0, 'service down');
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    cancelled.add(id);
   }
 
   @override
