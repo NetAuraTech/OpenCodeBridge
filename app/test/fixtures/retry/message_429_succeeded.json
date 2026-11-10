@@ -1,0 +1,68 @@
+{
+  "data": [
+    {
+      "id": "msg_1c68f6ac1001IhNVGv7ax9XhHS",
+      "time": {
+        "created": 1794332650177
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_1c68f42c7001H8MgETik6BH3y4",
+      "time": {
+        "created": 1794332647500,
+        "streamed": 1794332650175,
+        "completed": 1794332650176
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "Qwen3.8-27B",
+        "providerID": "amd",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The user is asking me to reply with exactly \"one\". This is a simple instruction to output exactly that text. There's no need to call any tool.\n",
+          "native": {
+            "reasoningField": "reasoning"
+          },
+          "time": {
+            "created": 1794332650172,
+            "completed": 1794332650174
+          }
+        },
+        {
+          "type": "text",
+          "text": "\n\none"
+        }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 9.7202e-06,
+      "tokens": {
+        "input": 13,
+        "output": 37,
+        "reasoning": 34,
+        "cache": {
+          "read": 9536,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_1c68f428f001S3dFNmh3LTTnuU",
+      "time": {
+        "created": 1794332639928
+      },
+      "text": "Reply with exactly: one",
+      "type": "user"
+    }
+  ],
+  "cursor": {
+    "previous": "eyJpZCI6Im1zZ18xYzY4ZjZhYzEwMDFJaE5WR3Y3YXg5WGhIUyIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6InByZXZpb3VzIn0",
+    "next": "eyJpZCI6Im1zZ18xYzY4ZjQyOGYwMDFTM2RGTm1oM0xUVG51VSIsIm9yZGVyIjoiZGVzYyIsImRpcmVjdGlvbiI6Im5leHQifQ"
+  }
+}

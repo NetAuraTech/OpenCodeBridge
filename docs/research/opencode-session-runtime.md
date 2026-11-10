@@ -145,3 +145,160 @@ curl -s -u "opencode:$P" http://127.0.0.1:49374/api/session
 
 Bearer auth is rejected (401); use Basic. Session IDs look like
 `ses_<base62-ish>`; messages `msg_…`; events `evt_…`.
+
+## Retry / error lifecycle (provider 429 + terminal failure) — the wire shapes
+
+Probe for issue #154. **Every claim below was verified live** against the
+running service (`opencode serve --service`, v2.2.7,
+`http://127.0.0.1:49374`, Basic auth from `~/.local/state/opencode/service.json`)
+on 2026-11-10. Probes ran on throwaway sessions bound to a real project
+directory; all deleted afterwards. The model was the live session's own
+`amd/Qwen3.8-27B` (the gateway that produces the 429s), plus one
+forced-failure session bound to an unavailable model.
+
+Artifacts — raw service JSON, unreshaped (trimmed to the interesting
+message(s) only), so slice 02's HTTP-service tests replay them through the real
+parser:
+
+| fixture | read | shows |
+|---|---|---|
+| `app/test/fixtures/retry/message_429_inflight_attempt_2.json` | `GET /message` mid-retry | assistant carrying `retry.attempt: 2` (429), `content: []` |
+| `app/test/fixtures/retry/message_429_inflight_attempt_3.json` | `GET /message` mid-retry | **same** assistant message id, now `retry.attempt: 3` |
+| `app/test/fixtures/retry/message_429_succeeded.json` | `GET /message` after recovery | same assistant, **no** `retry`/`error`, `finish:"stop"`; `idle` `outcome:"succeeded"` |
+| `app/test/fixtures/retry/message_failed_model_unavailable.json` | `GET /message` after a forced failure | `idle` `outcome:"failed"` + `error`; **no assistant row** |
+| `app/test/fixtures/retry/event_retry_scheduled.json` | one `/api/event` frame | the `session.retry.scheduled` event payload (see "The app must not depend on a retry event") |
+
+### The shape (from the service's `openapi.json`, confirmed against the live reads)
+
+- **`retry` lives on the assistant message, not in an event.**
+  `Session.Message.Assistant.retry = {attempt, at, error}` — all required,
+  `attempt > 0`. `at` is a **millisecond epoch** of the *scheduled* next
+  attempt.
+- **`error` is `Session.StructuredError`**: `{type, message, status?,
+  response?: {body}, retryAfterMs?}`. On a 429 the upstream body rides in
+  `retry.error.response.body` as a JSON string and `status` is the HTTP status:
+  ```json
+  { "type": "provider.rate-limit",
+    "message": "Provider request failed with HTTP 429: {…}",
+    "status": 429,
+    "response": { "body": "{\"detail\":{\"error\":{\"message\":\"Model API rate limit exceeded; please retry later\",\"type\":\"rate_limit_error\",\"code\":\"token_concurrency_rate_limit_exceeded\"}}}" },
+    "retryAfterMs": 1000 }
+  ```
+  Two `code`s were observed live on the AMD gateway:
+  `token_concurrency_rate_limit_exceeded` and `token_rate_limit_exceeded`.
+- **The assistant message also carries an `error` of the same type** for the
+  terminal failure; `retry` and `error` are never both set on one message.
+- **The `idle` message** (the turn boundary) carries
+  `outcome ∈ {succeeded, failed, interrupted}` and an optional `error`.
+
+### Q1 — one message, mutated in place (not one row per attempt)
+
+Verified by polling `GET /message` through a live 429 window. On one session
+the assistant message id `msg_1c68f42c7001H8MgETik6BH3y4` was read
+consecutively carrying `retry.attempt: 2`, then `retry.attempt: 3` (identical
+error payload), then — after recovery — **no** `retry` and `finish:"stop"`. A
+second session drove `attempt` 2→3→4→5 on one message. **Verdict: in-place.**
+`retry.attempt` climbs N→N+1 on a single assistant row; the app tracks
+"attempt N of …" off that one message id, not by counting rows.
+
+### Q2 — retried-then-succeeded
+
+Verified: after a retry lands, the same assistant message is read with **no
+`retry` and no `error`**, `finish:"stop"`, populated `content`, and the turn's
+`idle` carries `outcome:"succeeded"`. (`message_429_succeeded.json`.)
+
+### Q5 — the service auto-retries; it does not wait for the user
+
+The 429 is absorbed by the **service's own** retry loop: it schedules the next
+attempt itself from `retry.error.retryAfterMs` (observed `1000`; the real gap
+to the next attempt was 4–11s including the provider's response time) and no
+new user prompt is required. `attempt` climbed 2→3→4→5 with nobody re-prompting.
+**Verdict: the service re-attempts on its own** — the TUI's "please retry
+later" refers to the *provider's* backoff window, not a manual re-prompt of the
+session.
+
+### Q6 — the model does retry (it does not die at once)
+
+The `retry` field is set on the assistant message across many attempts, and
+every 429 window observed this session recovered to `succeeded` even under
+heavy concurrency (up to 64 simultaneous AMD prompts). **Verdict: it retries.**
+The 429s originate upstream at the AMD gateway (a shared API key hit at
+concurrency); opencode's retry layer rides them out, so the app's job is to
+surface the in-flight retry and the (rare) exhausted case.
+
+### Q4 — the TUI's terminal line
+
+- **In-flight** (a retried turn, while `retry` is set): the TUI's own render
+  (confirmed in the opencode v2.2.7 binary) is
+  `⚠ ` + (`Retrying in {d}s` while `retry.at - now > 0`, else
+  `Retry due`) + ` · attempt ` + `{retry.attempt}` + ` · ` +
+  `{retry.error.message}` — e.g. the issue's
+  `Retry due · attempt 3 · Provider request failed with HTTP 429: {…}`. The app
+  can reproduce this straight from `retry`.
+- **Terminal "no automatic retry left" wording: not observed.** No live turn
+  exhausted its retries on this model (Q6), so the exact terminal string was
+  **not observed**. The forced-failure setup used instead — a session bound to
+  an unavailable model (`amd/qwen3.8-flash-next`, 404-class, non-retryable) —
+  produces a terminal `idle {outcome:"failed", error}` that the TUI renders from
+  the message's `error`/idle `error` **verbatim**; no extra "no automatic retry
+  left" copy is appended. **Assumption:** the app therefore renders the
+  terminal failure from `error.message` (as the in-flight line does) and does
+  not need to invent a "no automatic retry left" string.
+
+### Where the final failure lives (the distinction slice 02 must preserve)
+
+- **Non-retryable** failure (unavailable model — the forced setup): the final
+  `error` lands on the **`idle`** message with `outcome:"failed"` and **no
+  assistant row is written** (`message_failed_model_unavailable.json`).
+- **Exhausted-retry** failure (a 429 that never recovers): **not observed
+  live.** **Assumption** (schema-supported): the final `error` lands on the
+  **assistant** message (with `retry` cleared once exhausted, since
+  `retry`/`error` are never both set), the turn's `idle` carries
+  `outcome:"failed"`, and there **is** an assistant row. Slice 02 must not
+  conflate the two: an idle-only error means no assistant content was ever
+  produced; an assistant error means content was attempted.
+
+### The app must not depend on a retry event
+
+`session.retry.scheduled` **does exist** in the service's full event enum
+(`{sessionID, assistantMessageID, attempt, at, error}` — see
+`event_retry_scheduled.json`), but it is **not** in the bridge's consumed subset
+(`session.inbox.*`, `session.execution.*`, `session.step.*`,
+`session.text/reasoning.*`, `session.usage.updated`, `session.compaction.*`).
+And no `session.idle` event is emitted at all — the idle boundary only appears
+in the `/message`/`/context` reads. **Verdict:** the app drives retry + terminal
+state from the **message reads**, not from a retry event. (Confirms the issue's
+"the app must not depend on one" — and refines it: `session.retry.scheduled` is
+a real, usable event if a later slice wants to *live*-update the attempt
+counter without re-reading the message.)
+
+### What the bridge discards today (the bug slices 02–04 fix)
+
+`opencode_http_service.dart` → `_messageFrom`:
+- for an `assistant` item it keeps only the `content` parts (text / reasoning /
+  tool) + `tokens` + `time` — it drops `retry` and `error`;
+- for an `idle` item it returns only `{id, role}` — it drops `outcome` and
+  `error`.
+
+So a retried turn looks like a slow agent and an exhausted/failed turn looks
+like a clean stop — exactly the reported symptom. Slice 02 parses `retry` /
+`error` (assistant) and `outcome` / `error` (idle) and replays the fixtures
+above through `_messageFrom`.
+
+### Assumptions (labelled, per the probe brief)
+
+- **A1.** A *true* exhausted 429 terminal: `retry` cleared + terminal `error`
+  on the assistant, `idle.outcome:"failed"`. (Only the non-retryable terminal
+  was forced; the exhausted one was never observed on this model.)
+- **A2.** The 429 retry budget is finite (the retry loop eventually gives up).
+  A generous budget was observed (≥5 attempts; every window recovered) and the
+  opencode v2.2.7 binary shows the provider retry is a bounded Effect
+  *suspended retry schedule* with an explicit `…RetrySchedule exhausted`
+  terminal path — so an exhausted turn is a real state, it just needs a 429 that
+  holds past the budget (which this gateway never produced live). The exact
+  attempt cap was not measured.
+- **A3.** `session.execution.failed` fires for an exhausted turn. It was
+  present in the service's OpenAPI event enum and in prior probes' spec, but
+  this probe's event stream showed only `started`/`succeeded` for the 429 turns
+  (all recovered), so it was not re-confirmed live here.
+
