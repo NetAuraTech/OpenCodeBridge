@@ -224,45 +224,50 @@ class _HomeShellState extends State<HomeShell> {
         ],
       ),
     ),
-    bottomNavigationBar: Row(
+    bottomNavigationBar: Stack(
+      // The bar keeps its full width; the indicator is centred on its right
+      // edge, inside the bar — never floating off it.
       children: [
-        Expanded(
-          child: NavigationBar(
-            selectedIndex: _tab,
-            onDestinationSelected: (index) => setState(() => _tab = index),
-            destinations: const [
-              NavigationDestination(
-                icon: Icon(Icons.chat_bubble_outline),
-                selectedIcon: Icon(Icons.chat_bubble),
-                label: 'Sessions',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.public_outlined),
-                selectedIcon: Icon(Icons.public),
-                label: 'Orbs',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.inventory_2_outlined),
-                selectedIcon: Icon(Icons.inventory_2),
-                label: 'Docker',
-              ),
-              NavigationDestination(
-                icon: Icon(Icons.settings_outlined),
-                selectedIcon: Icon(Icons.settings),
-                label: 'Settings',
-              ),
-            ],
-          ),
+        NavigationBar(
+          selectedIndex: _tab,
+          onDestinationSelected: (index) => setState(() => _tab = index),
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.chat_bubble_outline),
+              selectedIcon: Icon(Icons.chat_bubble),
+              label: 'Sessions',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.public_outlined),
+              selectedIcon: Icon(Icons.public),
+              label: 'Orbs',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.inventory_2_outlined),
+              selectedIcon: Icon(Icons.inventory_2),
+              label: 'Docker',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings),
+              label: 'Settings',
+            ),
+          ],
         ),
         // The bridge status indicator, out of the app bar: right of the
-        // Settings item, vertically centred on the bar (the Row centres its
-        // children). Rebuilds on every link-state change; the dot itself
-        // stays deliberately small.
-        AnimatedBuilder(
-          animation: widget.monitor,
-          builder: (context, _) => Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: ConnectionIndicator(state: widget.monitor.state),
+        // Settings item, vertically centred on the bar (top/bottom + Center).
+        // Rebuilds on every link-state change; the dot itself stays
+        // deliberately small.
+        Positioned(
+          top: 0,
+          bottom: 0,
+          right: 8,
+          child: Center(
+            child: AnimatedBuilder(
+              animation: widget.monitor,
+              builder: (context, _) =>
+                  ConnectionIndicator(state: widget.monitor.state),
+            ),
           ),
         ),
       ],
