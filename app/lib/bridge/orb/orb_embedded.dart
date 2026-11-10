@@ -39,7 +39,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Pinned toolchain versions (spec §5.1). Every toolchain the orb mechanism
 # depends on is an ARG with a default; no rolling latest. opencode is pinned
-# to v2.1.4, the version every orb mechanism was verified against (#83).
+# to v2.2.7, kept in step with the host CLI: a client/service mix no longer
+# works (the v2.1.4 host CLI lost data in its own stdout write on oversized
+# session exports — issue #173 — and v2.2.x answers a version-mismatch
+# warning instead of the import).
 ARG NODE_VERSION=22.14.0
 ARG NPM_VERSION=10.9.2
 ARG PHP_VERSION=8.3
@@ -49,7 +52,7 @@ ARG POSTGRES_VERSION=16
 ARG TYPESENSE_VERSION=28.0
 ARG MAILHOG_VERSION=1.0.1
 ARG GIT_VERSION=2.43
-ARG OPENCODE_VERSION=2.1.4
+ARG OPENCODE_VERSION=2.2.7
 ARG GH_VERSION=2.103.3
 
 # --- System packages: build tools + php + git + ssh ------------------------
