@@ -330,6 +330,9 @@ void main() {
   final connectBodies = <Map<String, Object?>>[];
   final renameBodies = <Map<String, Object?>>[];
   final deletedPaths = <String>[];
+  // Cancel-a-turn (issue #158): the recorded `/api/session/{id}/interrupt`
+  // paths, in request order.
+  final interruptedPaths = <String>[];
   final statsQueries = <String?>[];
   final worktreeQueries = <String?>[];
   // The `@` menu's file search (issue #58): the recorded `/api/fs/find`
@@ -496,6 +499,10 @@ void main() {
         skillActivations.add(jsonDecode(body) as Map<String, Object?>);
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1/compact' && req.method == 'POST') {
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_1/interrupt' &&
+          req.method == 'POST') {
+        interruptedPaths.add(path);
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1/revert/stage' &&
           req.method == 'POST') {
@@ -1293,6 +1300,24 @@ void main() {
 
     test('compact posts the compact request and accepts 204', () async {
       await service.compact('ses_1'); // no throw on 204
+    });
+
+    test('cancelTurn posts the interrupt and accepts 204', () async {
+      await service.cancelTurn('ses_1'); // no throw on 204
+      expect(interruptedPaths, ['/api/session/ses_1/interrupt']);
+    });
+
+    test('cancelTurn of an unknown session is a 404', () async {
+      await expectLater(
+        service.cancelTurn('ses_missing'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            404,
+          ),
+        ),
+      );
     });
 
     test('undo without a user message stages nothing', () async {

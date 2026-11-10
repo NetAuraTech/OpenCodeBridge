@@ -211,6 +211,10 @@ class SessionsBackend {
 
   Future<void> compact(String id) => service.compact(id);
 
+  /// Cancel the session's running turn (issue #158): a pass-through to the
+  /// service's interrupt.
+  Future<void> cancel(String id) => service.cancelTurn(id);
+
   Future<void> undo(String id) => service.undo(id);
 
   Future<void> redo(String id) => service.redo(id);

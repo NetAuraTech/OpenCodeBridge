@@ -2206,6 +2206,12 @@ class BridgeServer {
           await sessions.undo(id);
           await BridgeServer._noContent(response);
           return;
+        case ('POST', ['cancel']):
+          // Cancel the running turn (issue #158): the service interrupt,
+          // same mapping as the other command endpoints.
+          await sessions.cancel(id);
+          await BridgeServer._noContent(response);
+          return;
         case ('POST', ['redo']):
           await sessions.redo(id);
           await BridgeServer._noContent(response);

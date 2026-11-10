@@ -204,6 +204,9 @@ class CompositeOpencodeService implements OpencodeService {
   Future<void> redo(String id) async => (await _route(id)).redo(id);
 
   @override
+  Future<void> cancelTurn(String id) async => (await _route(id)).cancelTurn(id);
+
+  @override
   Future<String> fork(String id) async {
     final service = await _route(id);
     final newId = await service.fork(id);

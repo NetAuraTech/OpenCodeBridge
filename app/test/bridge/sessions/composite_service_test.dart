@@ -29,6 +29,7 @@ class FakeService implements OpencodeService {
   Object? listError;
 
   final List<String> detailCalls = [];
+  final List<String> cancelled = [];
   final List<String> deleted = [];
   final List<String> forked = [];
   var projectsCalls = 0;
@@ -190,6 +191,11 @@ class FakeService implements OpencodeService {
 
   @override
   Future<void> redo(String id) async {}
+
+  @override
+  Future<void> cancelTurn(String id) async {
+    cancelled.add(id);
+  }
 
   @override
   Future<void> rename(String id, String title) async {}
@@ -537,6 +543,40 @@ void main() {
       await composite.deleteSession('ses_host');
 
       expect(host.deleted, ['ses_host']);
+    });
+
+    test('cancelTurn routes to the owning orb', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final orb1 = FakeService(sessions: [orbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+      await composite.listSessions();
+
+      await composite.cancelTurn('ses_orb');
+
+      expect(orb1.cancelled, ['ses_orb']);
+      expect(host.cancelled, isEmpty);
+    });
+
+    test('a host cancelTurn routes to the host', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final orb1 = FakeService(sessions: [orbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+      await composite.listSessions();
+
+      await composite.cancelTurn('ses_host');
+
+      expect(host.cancelled, ['ses_host']);
+      expect(orb1.cancelled, isEmpty);
     });
 
     test('fork registers the new id under the parent orb', () async {
