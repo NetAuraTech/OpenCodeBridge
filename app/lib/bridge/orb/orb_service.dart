@@ -1387,6 +1387,7 @@ class OrbService {
               cli,
               file,
               session.id,
+              source: service,
               server: url,
               password: password,
             ),
@@ -1454,14 +1455,21 @@ class OrbService {
   /// import` (issue #137): the CLI's stdout reduced to the bare JSON
   /// documents the import schema parses (banner noise stripped, a wrapped
   /// payload unwrapped, a JSON array split per element of which the first
-  /// is [file] — issues #137, #144). The further documents are returned. An
-  /// export that exits 0 without one fails here,
-  /// with the payload excerpt in the error — an empty or noisy staged file
+  /// is [file] — issues #137, #144). The further documents are returned.
+  ///
+  /// When the CLI's stdout carries no document at all, the export is
+  /// recovered through [source]'s HTTP `exportSession` (issue #173): an
+  /// old host CLI (v2.1.4) loses data in its own stdout write once the
+  /// document exceeds a pipe buffer — it exits 0 with a stream cut
+  /// mid-document — while the service's HTTP answer of the same document
+  /// is never capped. An export neither path can read fails here, with
+  /// the payload excerpt in the error — an empty or noisy staged file
   /// would only reach the import as a bare `SchemaError`.
   Future<List<String>> _exportStaged(
     OpencodeCliRunner cli,
     File file,
     String session, {
+    required OpencodeService source,
     String? server,
     String? password,
   }) async {
@@ -1474,17 +1482,44 @@ class OrbService {
     if (export.exitCode != 0) {
       throw OrbSessionMoveError(session, _cliDetail(export));
     }
-    final documents = _exportDocuments(export.stdout);
+    var documents = _exportDocuments(export.stdout);
+    Object? httpFailure;
+    if (documents == null) {
+      try {
+        documents = _exportDocuments(await source.exportSession(session));
+        if (documents == null) {
+          httpFailure = 'answered without a readable document';
+        }
+      } catch (error) {
+        httpFailure = '$error';
+      }
+    }
     if (documents == null) {
       throw OrbSessionMoveError(
         session,
         'the session export exited 0 without a bare JSON document the '
-        'import can read — ${_payloadExcerpt(export.stdout)}\n'
+        'import can read${_truncationNote(export.stdout)}; the service '
+        'HTTP export could not recover it ($httpFailure) — '
+        '${_payloadExcerpt(export.stdout)}\n'
         '${_cliOutput(export)}',
       );
     }
     await file.writeAsString(documents.first);
     return documents.sublist(1);
+  }
+
+  /// The error note naming the issue #173 shape: a payload that starts a
+  /// JSON document (`{` or `[`) and closes it nowhere — the CLI's stdout
+  /// cut mid-document, not noise around a document the slicer would have
+  /// found.
+  String _truncationNote(String payload) {
+    final trimmed = payload.trim();
+    if (trimmed.isEmpty) return '';
+    return trimmed.startsWith('{') || trimmed.startsWith('[')
+        ? ' — the export stream looks truncated: it starts a JSON '
+            'document that never closes (a CLI stdout write cut '
+            'mid-document, issue #173)'
+        : '';
   }
 
   /// The staged [file] imported on the target CLI (issue #97: a 409 is the
@@ -1791,6 +1826,7 @@ class OrbService {
         cli,
         file,
         session,
+        source: source.service,
         server: source.server,
         password: source.password,
       );
