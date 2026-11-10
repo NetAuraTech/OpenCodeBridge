@@ -386,6 +386,12 @@ class _FakeOpencode implements OpencodeService {
   OpencodeSession? nextCreated;
   Object? deleteError;
 
+  /// The payload [exportSession] answers (the issue #173 HTTP fallback of a
+  /// truncated CLI export); `null` and [exportError] `null` answer the
+  /// real service's 404.
+  String? export;
+  Object? exportError;
+
   @override
   Future<List<OpencodeSession>> listSessions() async => List.of(sessions);
 
@@ -405,6 +411,17 @@ class _FakeOpencode implements OpencodeService {
     if (error != null) throw error;
     deleted.add(id);
     sessions.removeWhere((s) => s.id == id);
+  }
+
+  @override
+  Future<String> exportSession(String id) async {
+    final error = exportError;
+    if (error != null) throw error;
+    final payload = export;
+    if (payload == null) {
+      throw OpencodeServiceError(404, 'no export for $id');
+    }
+    return payload;
   }
 
   @override
@@ -1155,6 +1172,91 @@ void main() {
         );
         // The export ran, no import was attempted.
         expect(cli.argvs.map((a) => a[1]), ['export']);
+        expect(orb.deleted, isEmpty);
+        expect(docker.runArgs.where((a) => a.first == 'stop'), isEmpty);
+        expect(markerPresent(), isFalse);
+      });
+
+      // The issue #173 family: an oversized export (>64 KiB) whose CLI
+      // stdout arrives cut mid-document — the old host CLI exits 0 with a
+      // stream that starts a JSON document that never closes. The stop
+      // recovers the full document through the service's HTTP export.
+      test('an oversized CLI export truncated mid-document is recovered '
+          'through the service HTTP export and completes the stop', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        // The full document as the service's HTTP answer (unwrapped
+        // `{info, messages}`, the same shape the CLI prints): ~110 KiB.
+        final full =
+            '{"info":{"id":"s-1"},"messages":['
+            '${List.filled(5000, '"pad-pad-pad-pad-pad-pad-pad"').join(',')}'
+            ']}';
+        // The CLI's stdout: the same document cut mid-string, past 64 KiB,
+        // with no closing brace — the shape the v2.1.4 host CLI emits.
+        final truncated = full.substring(0, 70000);
+        orb.export = full;
+        final staged = <String>{};
+        final cli = _Cli((argv, env) async {
+          if (argv[1] == 'export') {
+            return OpencodeCliResult(
+              exitCode: 0,
+              stdout: truncated,
+              stderr: '',
+            );
+          }
+          staged.add(File(argv[2]).readAsStringSync());
+          return _importOk;
+        });
+
+        await service(
+          cli: cli.run,
+          checkoutFor: (projectId) async => checkout.path,
+          hostSessions: _FakeOpencode(),
+          orbServiceFor: (url, password) => orb,
+        ).stop(orbId);
+
+        // What the import was handed is the full HTTP document, not the
+        // cut CLI stream.
+        expect(staged, {full});
+        expect(orb.deleted, ['s-1']);
+        expect(docker.runArgs, contains(equals(['stop', container])));
+        expect(markerPresent(), isTrue);
+      });
+
+      test('a truncated CLI export the service HTTP export cannot recover '
+          'fails with the truncation named in the error', () async {
+        addOrb(port: 49153);
+        stateDir();
+        final orb = _FakeOpencode();
+        orb.sessions.add(_session('s-1'));
+        orb.exportError = OpencodeServiceError(500, 'export boom');
+        // Starts the JSON document, ends mid-string, no closing brace:
+        // the v2.1.4 host CLI's cut-pipe shape.
+        final truncated =
+            '{"info":{"id":"s-1"},"messages":[{"id":"m-1","parts":"${'x' * 70000}';
+        final cli = _Cli((argv, env) async {
+          return OpencodeCliResult(exitCode: 0, stdout: truncated, stderr: '');
+        });
+
+        await expectLater(
+          service(
+            cli: cli.run,
+            checkoutFor: (projectId) async => checkout.path,
+            hostSessions: _FakeOpencode(),
+            orbServiceFor: (url, password) => orb,
+          ).stop(orbId),
+          throwsA(
+            isA<OrbSessionMoveError>()
+                .having((e) => e.session, 'session', 's-1')
+                .having(
+                  (e) => e.detail,
+                  'detail',
+                  allOf(contains('truncated'), contains('export boom')),
+                ),
+          ),
+        );
         expect(orb.deleted, isEmpty);
         expect(docker.runArgs.where((a) => a.first == 'stop'), isEmpty);
         expect(markerPresent(), isFalse);

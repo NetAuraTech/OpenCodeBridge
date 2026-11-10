@@ -153,7 +153,7 @@ void main() {
         'TYPESENSE_VERSION=28.0',
         'MAILHOG_VERSION=1.0.1',
         'GIT_VERSION=2.43',
-        'OPENCODE_VERSION=2.1.4',
+        'OPENCODE_VERSION=2.2.7',
       ]) {
         expect(dockerfile, contains('ARG $arg'), reason: 'missing pin: $arg');
       }
