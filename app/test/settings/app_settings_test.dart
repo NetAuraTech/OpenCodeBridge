@@ -77,4 +77,22 @@ void main() {
     reloaded.themeMode = ThemeMode.system;
     expect((await AppSettings.load()).themeMode, ThemeMode.system);
   });
+
+  test('sessions sidebar starts expanded (issue #132)', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = await AppSettings.load();
+    expect(settings.sessionsSidebarCollapsed, isFalse);
+  });
+
+  test('persists the collapsed sessions sidebar for the next launch', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = await AppSettings.load();
+    settings.sessionsSidebarCollapsed = true;
+
+    final reloaded = await AppSettings.load();
+    expect(reloaded.sessionsSidebarCollapsed, isTrue);
+
+    reloaded.sessionsSidebarCollapsed = false;
+    expect((await AppSettings.load()).sessionsSidebarCollapsed, isFalse);
+  });
 }

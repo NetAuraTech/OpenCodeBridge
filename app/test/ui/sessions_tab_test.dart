@@ -14,6 +14,7 @@ import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
+import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
 import 'package:opencodebridge/ui/structured_view.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -313,6 +314,7 @@ Future<_FakeSessionsClient> _pumpTab(
   String? deepLinkSession,
   VoidCallback? onDeepLinkSessionConsumed,
   FutureOr<void> Function()? onOpenSettings,
+  AppSettings? settings,
 }) async {
   final client = _FakeSessionsClient(rows: List<Session>.of(rows));
   await tester.pumpWidget(
@@ -329,6 +331,7 @@ Future<_FakeSessionsClient> _pumpTab(
           deepLinkSession: deepLinkSession,
           onDeepLinkSessionConsumed: onDeepLinkSessionConsumed,
           onOpenSettings: onOpenSettings,
+          settings: settings,
         ),
       ),
     ),
@@ -1010,6 +1013,151 @@ void main() {
           find.byKey(const ValueKey('sessions-detail-empty')),
           findsOneWidget,
         );
+      });
+    });
+
+    group('collapsible sidebar (issue #132)', () {
+      final toggle = find.byKey(const ValueKey('sessions-sidebar-toggle'));
+
+      testWidgets(
+        'the toggle collapses the sidebar; the detail takes the full width',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one, _three]);
+          await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+          await tester.pumpAndSettle();
+
+          // Expanded: the sidebar occupies its column, the detail the rest.
+          expect(
+            find.byKey(const ValueKey('sessions-list-pane')),
+            findsOneWidget,
+          );
+          final detailWidth = tester
+              .getSize(find.byKey(const ValueKey('sessions-detail-pane')))
+              .width;
+          expect(detailWidth, lessThan(800));
+
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+
+          // Collapsed: the sidebar is gone entirely, the detail is full width
+          // (everything right of the toggle rail, to the window's edge).
+          expect(
+            find.byKey(const ValueKey('sessions-list-pane')),
+            findsNothing,
+          );
+          expect(find.byKey(const ValueKey('sessions-list')), findsNothing);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          final detailRect = tester.getRect(
+            find.byKey(const ValueKey('sessions-detail-pane')),
+          );
+          expect(detailRect.right, 800);
+          expect(detailRect.left, tester.getRect(toggle).right);
+          expect(toggle, findsOneWidget);
+        },
+      );
+
+      testWidgets('when collapsed, only the toggle remains visible', (
+        tester,
+      ) async {
+        const orb = OrbRecord(
+          id: 'orb_1',
+          name: 'api-orb',
+          project: 'p1',
+          branch: 'orb/orb_1',
+          state: 'running',
+          created: '2025-01-01T00:00:00Z',
+        );
+        await _pumpTab(
+          tester,
+          rows: [_two, _one, _orbOne],
+          orbs: _FakeOrbsClient(orbs: [orb]),
+        );
+
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+
+        // No list, no rows, no project groups, no New project button, no
+        // icons rail, no status dots (active or orb chips) — only the toggle.
+        expect(toggle, findsOneWidget);
+        expect(find.byKey(const ValueKey('sessions-new')), findsNothing);
+        expect(find.byKey(const ValueKey('project-p1')), findsNothing);
+        expect(find.byKey(const ValueKey('session-ses_1')), findsNothing);
+        expect(find.byKey(const ValueKey('session-ses_2')), findsNothing);
+        expect(find.byKey(const ValueKey('active-ses_2')), findsNothing);
+        expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsNothing);
+        expect(find.byKey(const ValueKey('host-ses_1')), findsNothing);
+      });
+
+      testWidgets('the toggle stays at the same spot in both states', (
+        tester,
+      ) async {
+        await _pumpTab(tester, rows: [_one]);
+
+        final expanded = tester.getTopLeft(toggle);
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(toggle), expanded);
+
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(toggle), expanded);
+      });
+
+      testWidgets(
+        're-expanding restores the sidebar with the selection intact',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one, _three]);
+          await tester.tap(find.byKey(const ValueKey('session-ses_3')));
+          await tester.pumpAndSettle();
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          // The detail is unaffected by the collapse.
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+
+          // The sidebar is back; the selection never changed.
+          expect(
+            find.byKey(const ValueKey('sessions-list-pane')),
+            findsOneWidget,
+          );
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+          expect(find.byKey(const ValueKey('session-ses_3')), findsOneWidget);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.text('docker logs'), findsWidgets);
+        },
+      );
+
+      testWidgets('the collapsed state survives a restart', (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        final settings = await AppSettings.load();
+        await _pumpTab(tester, rows: [_one], settings: settings);
+        expect(
+          find.byKey(const ValueKey('sessions-list-pane')),
+          findsOneWidget,
+        );
+
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(settings.sessionsSidebarCollapsed, isTrue);
+
+        // The next launch: a fresh tab over the same settings starts collapsed.
+        await tester.pumpWidget(const SizedBox());
+        await _pumpTab(tester, rows: [_one], settings: settings);
+        expect(find.byKey(const ValueKey('sessions-list-pane')), findsNothing);
+        expect(toggle, findsOneWidget);
+
+        // Toggling open again persists the expanded state.
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('sessions-list-pane')),
+          findsOneWidget,
+        );
+        expect(settings.sessionsSidebarCollapsed, isFalse);
       });
     });
 

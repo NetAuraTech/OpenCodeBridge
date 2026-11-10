@@ -7,8 +7,8 @@ import '../app_mode.dart';
 ///
 /// The scaffold persists: the last launch mode (so it is preselected at the
 /// next desktop launch), the client-mode tunnel URL, the theme choice
-/// (issue #49), and the three push-event toggles (which become live with the
-/// push ticket).
+/// (issue #49), the sessions sidebar's collapsed choice (issue #132), and
+/// the three push-event toggles (which become live with the push ticket).
 class AppSettings {
   AppSettings._(this._prefs);
 
@@ -16,6 +16,7 @@ class AppSettings {
   static const String keyLastMode = 'app.lastMode';
   static const String keyThemeMode = 'app.themeMode';
   static const String _keyTunnelUrl = 'host.tunnelUrl';
+  static const String _keySidebarCollapsed = 'sessions.sidebarCollapsed';
   static const String _keyNotifyPermission = 'notify.permissionAsked';
   static const String _keyNotifyTurnEnded = 'notify.turnEnded';
   static const String _keyNotifyDocker = 'notify.dockerContainer';
@@ -53,6 +54,15 @@ class AppSettings {
   }
 
   set themeMode(ThemeMode mode) => _prefs.setString(keyThemeMode, mode.name);
+
+  /// The sessions sidebar's collapsed choice (issue #132): persisted like the
+  /// other settings and restored at the next launch; until the user toggles
+  /// it, the sidebar starts expanded as it always has.
+  bool get sessionsSidebarCollapsed =>
+      _prefs.getBool(_keySidebarCollapsed) ?? false;
+
+  set sessionsSidebarCollapsed(bool collapsed) =>
+      _prefs.setBool(_keySidebarCollapsed, collapsed);
 
   /// The tunnel URL the client mode connects to (spec: Settings).
   String get tunnelUrl => _prefs.getString(_keyTunnelUrl) ?? '';
