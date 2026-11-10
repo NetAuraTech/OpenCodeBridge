@@ -243,6 +243,12 @@ class SlashCommands {
       family: CommandFamily.service,
       scope: CommandScope.session,
     ),
+    SlashCommand(
+      name: 'stop',
+      title: 'Stop the running turn',
+      family: CommandFamily.service,
+      scope: CommandScope.session,
+    ),
     // Service — global scope.
     SlashCommand(
       name: 'sessions',

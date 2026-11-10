@@ -239,8 +239,15 @@ class _FakeClient extends SessionsClient {
   /// service's cancel to).
   Object? cancelError;
 
+  /// When set, `cancel` awaits it before returning (the cancel POST held in
+  /// flight, to sequence it against the Stop control's busy state — issue
+  /// #163's one-request-per-turn).
+  Completer<void>? cancelGate;
+
   @override
   Future<void> cancel(String id) async {
+    final gate = cancelGate;
+    if (gate != null) await gate.future;
     cancelCalls.add(id);
     final error = cancelError;
     if (error is Object) throw error;
@@ -878,8 +885,8 @@ void main() {
     });
 
     testWidgets(
-      'a failed Stop reports, keeps the Turn Active, hides itself; a later '
-      'normalize re-offers it (issue #160)',
+      'a failed Stop reports, keeps the Turn Active, and stays offered to '
+      'retry (issue #163)',
       (tester) async {
         // A completed turn, then the next turn mid-flight (an in-flight
         // assistant, no closing idle): a service whose cancel the view will
@@ -913,7 +920,6 @@ void main() {
           'opencode_unreachable',
         );
         final events = await _pump(tester, client: client);
-        final gaps = StreamController<SessionGap>.broadcast();
         // A fixed clock: the live footer's duration stays put across pumps.
         await tester.pumpWidget(
           MaterialApp(
@@ -922,7 +928,6 @@ void main() {
               title: 'external session',
               client: client,
               events: events.stream,
-              gaps: gaps.stream,
               clock: () => DateTime.fromMillisecondsSinceEpoch(200000),
             ),
           ),
@@ -940,10 +945,11 @@ void main() {
         expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
 
-        // The first Stop on the unsupported service: the failure is
-        // reported, the Turn stays Active (the live footer — the banner —
-        // is kept), and the control hides itself (no obvious repeat-failure
-        // until the memory is cleared).
+        // The first Stop on the failing service: the failure is reported and
+        // the Turn stays Active (the live footer — the banner — is kept).
+        // Unlike an earlier revision, the control does NOT hide itself: a
+        // failed cancel is transient (a restart may fix the route), so the
+        // control stays offered and the user can retry.
         await tester.tap(find.byKey(const ValueKey('structured-stop')));
         await tester.pump();
         await tester.pump();
@@ -952,22 +958,20 @@ void main() {
           find.text('Could not stop the turn (status 502).'),
           findsOneWidget,
         );
-        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
         // The Turn is still Active: the live footer banner was kept.
         expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
         expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
 
-        // A later normalize (a durable-seq gap) clears the memory: the
-        // control reappears while the Turn is still running.
-        gaps.add(
-          const SessionGap(aggregateID: 'ses_1', lastSeen: 1, received: 4),
-        );
+        // Pressing Stop again retries: a second cancel request is sent.
+        await tester.tap(find.byKey(const ValueKey('structured-stop')));
         await tester.pump();
         await tester.pump();
+        expect(client.cancelCalls, ['ses_1', 'ses_1']);
+        // Still Active, still offered.
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
         expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
         expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
-        await gaps.close();
         await events.close();
       },
     );
@@ -2696,6 +2700,316 @@ void main() {
 
       expect(find.textContaining('message 0'), findsOneWidget);
     });
+  });
+
+  group('StructuredSessionScreen Stop the running turn (issue #163)', () {
+    // A session whose current Turn is running (an in-flight assistant, no
+    // closing idle) and that stays Active across the normalize the start
+    // triggers; the terminal event is what settles it.
+    const running = [
+      SessionMessage(role: 'user', text: 'go', created: 0),
+      SessionMessage(id: 'm2', role: 'assistant'),
+    ];
+    const settled = [
+      SessionMessage(role: 'user', text: 'go', created: 0),
+      SessionMessage(id: 'm2', role: 'assistant', completed: 500),
+      SessionMessage(id: 'i2', role: 'idle'),
+    ];
+
+    testWidgets(
+      'the banner Stop control cancels the turn; the banner clears on the '
+      'terminal event, no confirmation (issue #163)',
+      (tester) async {
+        // The session opens idle (settled history), then a turn starts from
+        // the event stream and is interrupted. The initial load reads the
+        // settled history; the normalize each boundary triggers reads it too.
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [settled, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        // Idle: no Stop control.
+        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+
+        // The Turn runs: the Stop control is offered next to the banner.
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+
+        // One tap cancels that session's turn (no confirmation step).
+        await tester.tap(find.byKey(const ValueKey('structured-stop')));
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1']);
+
+        // The cancel is accepted but the banner keeps the running turn until
+        // the execution's terminal event arrives (it leaves on `interrupted`
+        // like any other termination).
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        events.add(
+          _event('session.execution.interrupted', aggregateID: 'ses_1'),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        expect(find.byKey(const ValueKey('structured-active')), findsNothing);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'while the cancel is in flight the Stop control is busy and ignores '
+      'further presses (one request per turn) (issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [running, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+
+        // Hold the cancel POST in flight.
+        final gate = Completer<void>();
+        client.cancelGate = gate;
+        await tester.tap(find.byKey(const ValueKey('structured-stop')));
+        await tester.pump();
+        // Busy: the control is disabled (no onPressed) — a second tap sends
+        // nothing.
+        await tester.tap(find.byKey(const ValueKey('structured-stop')));
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, isEmpty); // still in flight, not landed
+
+        // The request lands: one and only one cancel for the turn.
+        gate.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1']);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'Escape with the menu closed and nothing typed cancels an Active turn; '
+      'the next keystrokes type, not clear (issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [running, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        // Focus the (empty) prompt field and start the Turn.
+        await tester.tap(find.byKey(_promptInput));
+        await tester.pump();
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(_promptText(tester), isEmpty);
+
+        // Escape with the menu closed and an Active turn cancels it — it does
+        // not clear the (already empty) field.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1']);
+        expect(_promptText(tester), isEmpty);
+
+        // The next keystrokes type normally (the turn is settled after the
+        // terminal event, so Escape would now clear the field again — but a
+        // character lands in the field, it is not consumed).
+        events.add(
+          _event('session.execution.interrupted', aggregateID: 'ses_1'),
+        );
+        await tester.pump();
+        await tester.pump();
+        await _typePrompt(tester, 'h');
+        await tester.pump();
+        expect(_promptText(tester), 'h');
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'Escape while the menu is open still closes the menu (and a turn '
+      'running, nothing typed in the empty field, does not cancel) '
+      '(issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [running, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+
+        // Open the menu: Escape closes it (clears the field), it does not
+        // cancel the turn.
+        await _typePrompt(tester, '/stop');
+        await tester.pump();
+        await tester.pump();
+        expect(_commandRowFinder('stop'), findsOneWidget);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        expect(_promptText(tester), isEmpty);
+        expect(_menuFinder(), findsNothing);
+        expect(client.cancelCalls, isEmpty);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'Escape with the menu closed and a settled turn clears the field '
+      '(issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [settled],
+        );
+        await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        await tester.tap(find.byKey(_promptInput));
+        await tester.pump();
+        await _typePrompt(tester, 'draft');
+        await tester.pump();
+        expect(_promptText(tester), 'draft');
+
+        // No turn is Active: Escape clears the field (the pre-#163 action),
+        // and no cancel is sent.
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
+        await tester.pump();
+        expect(_promptText(tester), isEmpty);
+        expect(client.cancelCalls, isEmpty);
+      },
+    );
+
+    testWidgets(
+      '/stop is listed in the `/` menu and, run on Enter, cancels the Active '
+      'turn and reports it (issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [running, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+
+        // It is in the catalogue (the session family), found by its name.
+        await _typePrompt(tester, '/stop');
+        await tester.pump();
+        await tester.pump();
+        expect(_commandRowFinder('stop'), findsOneWidget);
+
+        // Enter runs it: the cancel is sent and its result is reported.
+        await _pressEnter(tester);
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1']);
+        expect(find.text('Stop requested.'), findsOneWidget);
+        expect(_promptText(tester), isEmpty);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      '/stop on an idle session says nothing was running, without an error '
+      '(issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [settled],
+        );
+        await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        await _typePrompt(tester, '/stop');
+        await tester.pump();
+        await tester.pump();
+        expect(_commandRowFinder('stop'), findsOneWidget);
+
+        // Run it on the idle session: a harmless note, no request, no error.
+        await _pressEnter(tester);
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Nothing is running.'), findsOneWidget);
+        expect(client.cancelCalls, isEmpty);
+        expect(_promptText(tester), isEmpty);
+      },
+    );
+
+    testWidgets(
+      'a failing /stop reports the reason, keeps the banner on the running '
+      'turn, and leaves the Stop control usable to retry (issue #163)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [running, running, settled],
+        );
+        client.cancelError = const SessionsClientError(404, 'not_found');
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+
+        // /stop fails (unknown session): the reason is reported, the banner
+        // keeps the running turn, and the Stop control is still offered.
+        await _typePrompt(tester, '/stop');
+        await tester.pump();
+        await tester.pump();
+        await _pressEnter(tester);
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1']);
+        expect(
+          find.text('Could not stop the turn (status 404).'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
+
+        // The Stop control is usable again: tapping retries the cancel.
+        await tester.tap(find.byKey(const ValueKey('structured-stop')));
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1', 'ses_1']);
+        await events.close();
+      },
+    );
   });
 
   group(
