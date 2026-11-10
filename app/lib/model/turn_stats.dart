@@ -34,7 +34,7 @@ class TurnStats {
   String? get label {
     if (duration == null && tokensPerSecond == null) return null;
     final parts = <String>[
-      if (duration != null) _durationText(duration!),
+      if (duration != null) durationText(duration!),
       '$compactions compaction${compactions == 1 ? '' : 's'}',
       if (tokensPerSecond != null)
         '${tokensPerSecond!.toStringAsFixed(1)} tok/s',
@@ -456,9 +456,36 @@ Future<MessagePage> loadCurrentTurn({
   return loaded;
 }
 
+/// The header's Active-turn indicator (issue #161): `Agent · model · … 12.3s`
+/// in place of the idle title, close to the TUI's thinking line. The duration
+/// is the live Turn's (issue #122): from the Turn's first prompt to [now]
+/// (epoch millis), the same fold the live footer ticks — while the Turn has
+/// persisted no first prompt yet there is no duration and only the ellipsis
+/// ticks. The agent (capitalized like the TUI's) and the model drop their
+/// segments when unknown; the ellipsis always marks the Turn as running.
+String activeTurnIndicator({
+  required List<SessionMessage> messages,
+  required int now,
+  String? agent,
+  String? model,
+}) {
+  final duration = liveTurnStats(messages, now: now)?.duration;
+  final parts = <String>[
+    if (agent != null && agent.isNotEmpty) _capitalized(agent),
+    if (model != null && model.isNotEmpty) model,
+    if (duration != null) '… ${durationText(duration)}' else '…',
+  ];
+  return parts.join(' · ');
+}
+
+/// The id with its first letter capitalized (`build` → `Build`), the way the
+/// TUI shows the agent name.
+String _capitalized(String value) =>
+    value[0].toUpperCase() + value.substring(1);
+
 /// The duration as the footer shows it: `3.4s` under a minute, `1m 23s` at
 /// or above.
-String _durationText(Duration duration) {
+String durationText(Duration duration) {
   final millis = duration.inMilliseconds;
   if (millis < 60000) return '${(millis / 1000).toStringAsFixed(1)}s';
   final minutes = duration.inMinutes;

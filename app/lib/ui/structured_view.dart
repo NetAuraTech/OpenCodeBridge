@@ -2614,6 +2614,28 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     );
   }
 
+  /// The header's Active-turn indicator (issue #161): `Agent · model · …
+  /// 12.3s` in place of the idle title while the Turn is Active, driven by
+  /// the same [_turnActive] the live footer rides on (execution events,
+  /// detail reconciliation, completion streaming) and the same live
+  /// duration — from the Turn's first prompt to the injected clock, ticking
+  /// with [_startTurnTick]'s re-renders. `null` when the Turn is settled.
+  String? _activeIndicator() {
+    if (!_turnActive) return null;
+    final detail = _detail;
+    final model = detail?.model;
+    return activeTurnIndicator(
+      messages: _messages,
+      now: widget.clock().millisecondsSinceEpoch,
+      agent: detail?.agent,
+      model: model == null
+          ? null
+          : model.providerId.isEmpty
+          ? model.id
+          : '${model.providerId}/${model.id}',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // The panel owns its surface and header (issue #130): it renders the
@@ -2627,13 +2649,24 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // running turn's live label and the loaded Turns' frozen labels, keyed
     // by the row each rides on.
     final footers = _turnFooters();
+    // The header's title slot: the Active turn's indicator (agent · model ·
+    // ticking duration, issue #161) while the Turn runs, the session's
+    // title while it is settled.
+    final activeIndicator = _activeIndicator();
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           AppBar(
-            title: Text(_title),
+            title: Text(
+              activeIndicator ?? _title,
+              key: activeIndicator == null
+                  ? null
+                  : const ValueKey('structured-active'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
             leading: widget.showCloseButton && widget.onClose != null
                 ? IconButton(
                     icon: const Icon(Icons.arrow_back),
