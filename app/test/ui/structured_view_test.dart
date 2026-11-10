@@ -432,6 +432,9 @@ class _SessionSwitchClient extends SessionsClient {
       role: 'assistant',
       text: id == 'ses_a' ? 'alpha says hi' : 'beta says hi',
     ),
+    // The Turn is closed: the panel shows the title, not the Active-turn
+    // indicator (issue #161).
+    const SessionMessage(id: 'i1', role: 'idle'),
   ];
 
   @override
@@ -2586,6 +2589,208 @@ void main() {
     });
   });
 
+  group(
+    'StructuredSessionScreen active-turn header indicator (issue #161)',
+    () {
+      // The Active turn's header slot: agent · model · … ticking duration,
+      // instead of the idle title. Driven by the same Active detection the
+      // live footer uses (execution events, detail reconciliation, the
+      // normalized history).
+      const idleModel = _detailModel; // active: false
+      final activeModel = idleModel.copyWithActive(true);
+
+      testWidgets('opening mid-turn shows the indicator, not the title', (
+        tester,
+      ) async {
+        // The turn was already running when the view opened: the detail's
+        // Active fact (and the in-flight step) show the indicator at once.
+        final client = _FakeClient(
+          details: [activeModel],
+          messages: const [
+            SessionMessage(role: 'user', text: 'go', created: 1000),
+            SessionMessage(id: 'm1', role: 'assistant', created: 1200),
+          ],
+        );
+        await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(13300),
+        );
+
+        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
+        expect(
+          find.text('Plan · opencode/flint-40b-free · … 12.3s'),
+          findsOneWidget,
+        );
+        // The idle title is replaced while Active.
+        expect(find.text('external session'), findsNothing);
+        // The cost bar's identity chips are unaffected (the indicator is the
+        // header's title slot, not the chips).
+        expect(find.byKey(const ValueKey('structured-model')), findsOneWidget);
+        expect(find.text('opencode/flint-40b-free'), findsOneWidget);
+        expect(find.byKey(const ValueKey('structured-mode')), findsOneWidget);
+      });
+
+      testWidgets('execution events show and hide the indicator', (
+        tester,
+      ) async {
+        // Open on a settled session, watch a turn start from another client
+        // (an event, not a local prompt) and end.
+        // Detail calls, in order: initial load (idle), then one normalize per
+        // boundary — active on each `started`, idle on each terminal event.
+        final client = _FakeClient(
+          details: [
+            idleModel,
+            activeModel,
+            idleModel,
+            activeModel,
+            idleModel,
+            activeModel,
+            idleModel,
+          ],
+          messageLists: const [
+            [
+              SessionMessage(role: 'user', text: 'go', created: 0),
+              SessionMessage(id: 'm1', role: 'assistant', completed: 500),
+              SessionMessage(id: 'i1', role: 'idle'),
+            ],
+            [
+              SessionMessage(role: 'user', text: 'go', created: 0),
+              SessionMessage(id: 'm1', role: 'assistant', completed: 500),
+              SessionMessage(id: 'i1', role: 'idle'),
+              SessionMessage(role: 'user', text: 'again', created: 100000),
+              SessionMessage(id: 'm2', role: 'assistant', created: 100100),
+            ],
+            [
+              SessionMessage(role: 'user', text: 'go', created: 0),
+              SessionMessage(id: 'm1', role: 'assistant', completed: 500),
+              SessionMessage(id: 'i1', role: 'idle'),
+              SessionMessage(role: 'user', text: 'again', created: 100000),
+              SessionMessage(id: 'm2', role: 'assistant', completed: 101000),
+              SessionMessage(id: 'i2', role: 'idle'),
+            ],
+          ],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(101234),
+        );
+
+        // A completed session: no indicator, the title.
+        expect(find.byKey(const ValueKey('structured-active')), findsNothing);
+        expect(find.text('external session'), findsOneWidget);
+
+        // The turn starts: the indicator appears within one event round-trip,
+        // ticking from the new prompt (12.3s after it, at the injected clock).
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
+        expect(
+          find.text('Plan · opencode/flint-40b-free · … 1.2s'),
+          findsOneWidget,
+        );
+        expect(find.text('external session'), findsNothing);
+
+        // Each terminal execution event removes it and brings the title back.
+        for (final type in [
+          'session.execution.succeeded',
+          'session.execution.failed',
+          'session.execution.interrupted',
+        ]) {
+          if (type != 'session.execution.succeeded') {
+            // Re-arm: start another turn for the next terminal event.
+            events.add(
+              _event('session.execution.started', aggregateID: 'ses_1'),
+            );
+            await tester.pump();
+            await tester.pump();
+            expect(
+              find.byKey(const ValueKey('structured-active')),
+              findsOneWidget,
+            );
+          }
+          events.add(_event(type, aggregateID: 'ses_1'));
+          await tester.pump();
+          await tester.pump();
+          expect(find.byKey(const ValueKey('structured-active')), findsNothing);
+          expect(find.text('external session'), findsOneWidget);
+        }
+        await events.close();
+      });
+
+      testWidgets('the duration ticks while the turn is Active (issue #161)', (
+        tester,
+      ) async {
+        var now = 1500;
+        final client = _FakeClient(
+          details: [activeModel],
+          messages: const [
+            SessionMessage(role: 'user', text: 'go', created: 1000),
+          ],
+        );
+        await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(now),
+        );
+        expect(
+          find.text('Plan · opencode/flint-40b-free · … 0.5s'),
+          findsOneWidget,
+        );
+
+        // Time passes: the live turn's tick re-renders the header duration.
+        now = 2500;
+        await tester.pump(const Duration(milliseconds: 200));
+        await tester.pump();
+        expect(
+          find.text('Plan · opencode/flint-40b-free · … 1.5s'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('a normalize that ends idle removes the indicator', (
+        tester,
+      ) async {
+        // The turn ends while the event stream is dropped: the terminal event
+        // never arrives, the gap's reconcile (detail no longer Active, history
+        // ends on the idle marker) removes the indicator.
+        final client = _FakeClient(
+          details: [activeModel, idleModel],
+          messageLists: const [
+            [
+              SessionMessage(role: 'user', text: 'go', created: 1000),
+              SessionMessage(id: 'm1', role: 'assistant', created: 1200),
+            ],
+            [
+              SessionMessage(role: 'user', text: 'go', created: 1000),
+              SessionMessage(id: 'm1', role: 'assistant', completed: 2000),
+              SessionMessage(id: 'i1', role: 'idle'),
+            ],
+          ],
+        );
+        final gaps = StreamController<SessionGap>.broadcast();
+        await _pump(
+          tester,
+          client: client,
+          gaps: gaps.stream,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(3000),
+        );
+        expect(find.byKey(const ValueKey('structured-active')), findsOneWidget);
+
+        gaps.add(
+          const SessionGap(aggregateID: 'ses_1', lastSeen: 1, received: 4),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-active')), findsNothing);
+        expect(find.text('external session'), findsOneWidget);
+        await gaps.close();
+      });
+    },
+  );
+
   group('StructuredSessionScreen lazy turn pages (issue #124)', () {
     /// A settled five-turn history: each turn is a prompt, a completed step
     /// and an `idle` marker; every turn's duration is distinct (turn i runs
@@ -4310,6 +4515,9 @@ void main() {
         messages: const [
           SessionMessage(role: 'user', text: 'hello'),
           SessionMessage(role: 'assistant', text: 'done'),
+          // The Turn is closed: the header shows the title, not the
+          // Active-turn indicator (issue #161).
+          SessionMessage(id: 'i1', role: 'idle'),
         ],
       );
       await _pumpEmbedded(tester, client: client);
