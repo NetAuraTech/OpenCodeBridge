@@ -365,6 +365,18 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// apply to the in-flight message while it is set.
   bool _turnActive = false;
 
+  /// Whether the Stop control is hidden for this session (issue #160). Set
+  /// when a Stop fails on a service without an interrupt route (the 502 the
+  /// bridge maps `CancelUnsupportedError` to) so the control is not an
+  /// obvious repeat-failure; cleared by a later successful normalize (which
+  /// is the #163 failure-handling "allow retry" boundary) and on session
+  /// switch. The Turn stays Active throughout — hiding the control does not
+  /// touch the banner.
+  bool _stopHidden = false;
+
+  /// True while the Stop (cancel) POST is in flight (issue #160).
+  bool _stopBusy = false;
+
   /// The live turn's ticking clock (issue #122): re-renders the footer while
   /// the turn is active so its duration ticks even across a step with no
   /// streamed tokens (a long tool call). Cancelled when the turn ends.
@@ -604,6 +616,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _compacting = false;
     _replyBusyId = null;
     _turnActive = false;
+    _stopHidden = false;
+    _stopBusy = false;
     _contextUsed = null;
     _prefill = null;
     _decode = null;
@@ -1530,6 +1544,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         // still Active (issue #124): a missed end event (a stream gap)
         // cannot leave the live footer ticking on a finished Turn.
         _reconcileTurnActive(results.first as SessionDetail);
+        // A successful re-fetch clears the hidden-Stop memory (issue #160):
+        // the view re-offers Stop even though the last one failed — the
+        // service may have restarted with the route in place.
+        _stopHidden = false;
       });
       // A following reader sits on the anchor (offset 0), which is the new
       // newest message — nothing to re-settle.
@@ -2593,6 +2611,34 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Stop the running turn (issue #160): the bridge's cancel, which interrupts
+  /// the turn on the owning service. The Stop control is offered whenever the
+  /// Turn is Active (the Active fact is independent of cancel capability).
+  /// On a service without an interrupt route the cancel fails (the 502 the
+  /// bridge maps the transport's `CancelUnsupportedError` to): report it, keep
+  /// the Turn Active (the banner stays), and hide the control until a later
+  /// successful normalize clears the memory.
+  Future<void> _stopTurn() async {
+    if (_stopBusy) return;
+    final sessionId = widget.sessionId;
+    _stopBusy = true;
+    if (mounted) setState(() {});
+    try {
+      await widget.client.cancel(sessionId);
+    } on SessionsClientError catch (e) {
+      // The service cannot cancel the turn: the refusal is transient (a
+      // restart may upgrade the route in), so the view hides the control
+      // rather than failing it again — and the Turn stays Active, banner and
+      // all.
+      if (mounted) {
+        setState(() => _stopHidden = true);
+        _snackBar('Could not stop the turn (${_describe(e)}).');
+      }
+    } finally {
+      if (mounted) setState(() => _stopBusy = false);
+    }
+  }
+
   /// The per-Turn footer labels keyed by the history row they ride on
   /// (issue #121's frozen footers, issue #124's running turn and the lazy
   /// older Turns). While a turn is active, its label is the LIVE one
@@ -2675,6 +2721,26 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                   )
                 : null,
             automaticallyImplyLeading: !widget.showCloseButton,
+            // The Stop control (issue #160): offered whenever the Turn is
+            // Active (the Active fact is independent of cancel capability).
+            // Hidden after a failed Stop on a service without an interrupt
+            // route until a later successful normalize clears the memory.
+            actions: _turnActive && !_stopHidden
+                ? [
+                    IconButton(
+                      key: const ValueKey('structured-stop'),
+                      icon: _stopBusy
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.stop),
+                      tooltip: 'Stop the turn',
+                      onPressed: _stopBusy ? null : _stopTurn,
+                    ),
+                  ]
+                : null,
           ),
           Expanded(
             child: _loading

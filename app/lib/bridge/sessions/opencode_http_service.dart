@@ -692,12 +692,62 @@ class OpencodeHttpService implements OpencodeService {
 
   /// Cancel the session's running turn (the service's
   /// `POST /api/session/{id}/interrupt`).
+  ///
+  /// Issue #160: the service may be an older binary with no interrupt route,
+  /// which answers such an unknown route with a plain 404 — the same status
+  /// a real route answers for an unknown session. So the first cancel
+  /// against an unproven client treats its own POST as the probe: a 2xx
+  /// proves the route and is remembered for this client's lifetime (never
+  /// re-probed); a 404 is disambiguated by reading the session — a session
+  /// that exists means the route is the missing piece, and the cancel
+  /// refuses with the typed [CancelUnsupportedError] (the bridge maps it to
+  /// 502, never 500). `unsupported` is remembered only until the next
+  /// cancel, which re-probes by trying again: a service restart may have
+  /// upgraded the route in.
   @override
   Future<void> cancelTurn(String id) async {
-    await _post(
-      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/interrupt'),
-      jsonEncode({}),
+    final uri = _base.replace(
+      path: '/api/session/${Uri.encodeComponent(id)}/interrupt',
     );
+    try {
+      await _post(uri, jsonEncode({}));
+      // The probe answered: supported for this client's lifetime.
+      _interruptRoute = true;
+      return;
+    } on OpencodeServiceError catch (e) {
+      // Only a 404 is ambiguous; every other status (including the
+      // transport's unreachable 0) propagates as the service failure the
+      // bridge maps to 502.
+      if (e.statusCode != HttpStatus.notFound) rethrow;
+      // A route proven supported 404s only for an unknown session: that is
+      // the service's own 404 (the bridge's not_found), no probe cost.
+      if (_interruptRoute == true) rethrow;
+      if (!await _sessionExists(id)) rethrow; // Unknown session: nothing
+      // was learned about the route; its absence is the reportable fact.
+      _interruptRoute = false;
+      throw const CancelUnsupportedError('the service has no interrupt route');
+    }
+  }
+
+  /// The remembered interrupt-route probe (issue #160): `null` until the
+  /// first cancel proves it, `true` for the client's lifetime once served,
+  /// `false` until the next cancel re-probes it by trying the interrupt
+  /// again (a restart may have upgraded the service).
+  bool? _interruptRoute;
+
+  /// Whether the service knows the session (its detail read answers): the
+  /// disambiguation of an interrupt 404 between "no such session" and "no
+  /// such route".
+  Future<bool> _sessionExists(String id) async {
+    try {
+      await _get(
+        _base.replace(path: '/api/session/${Uri.encodeComponent(id)}'),
+      );
+      return true;
+    } on OpencodeServiceError catch (e) {
+      if (e.statusCode == HttpStatus.notFound) return false;
+      rethrow; // The session check itself failed: the bridge maps it.
+    }
   }
 
   /// Undo the previous message: stage a revert at the session's last user

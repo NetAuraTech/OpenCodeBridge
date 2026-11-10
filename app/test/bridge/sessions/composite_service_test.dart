@@ -9,6 +9,8 @@ import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/orb.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
+import 'cancel_contract.dart';
+
 /// A scripted [OpencodeService] for the composite tests: mutable state, call
 /// records, and an optional scripted failure on [listSessions].
 class FakeService implements OpencodeService {
@@ -17,6 +19,7 @@ class FakeService implements OpencodeService {
     Map<String, String>? names,
     Set<String>? active,
     this.listError,
+    this.cancelServesRoute = true,
   }) : sessions = sessions ?? [],
        names = names ?? {},
        active = active ?? {};
@@ -27,6 +30,11 @@ class FakeService implements OpencodeService {
 
   /// When set, [listSessions] throws it (a degraded orb / a dead host).
   Object? listError;
+
+  /// When false, [cancelTurn] refuses with the typed [CancelUnsupportedError]
+  /// (the service has no interrupt route) instead of cancelling (issue #160).
+  /// Mutable so one service can be re-tested after it "restarts upgraded".
+  bool cancelServesRoute;
 
   final List<String> detailCalls = [];
   final List<String> cancelled = [];
@@ -194,6 +202,9 @@ class FakeService implements OpencodeService {
 
   @override
   Future<void> cancelTurn(String id) async {
+    if (!cancelServesRoute) {
+      throw const CancelUnsupportedError('this service has no interrupt route');
+    }
     cancelled.add(id);
   }
 
@@ -701,6 +712,32 @@ void main() {
         expect(orb1.createCalls, 0);
         expect(orb1.modelsCalls, 0);
       },
+    );
+  });
+
+  group('CompositeOpencodeService cancel (issue #160)', () {
+    // The composite delegates `cancelTurn` through its routing table to the
+    // owning service; for an unowned id that is the host. So the shared
+    // contract runs against the composite by toggling the host's interrupt
+    // route, proving the delegation carries the typed refusal unchanged.
+    late FakeService host;
+    late CompositeOpencodeService composite;
+
+    setUp(() {
+      host = FakeService(cancelServesRoute: true);
+      composite = makeComposite(host: host);
+    });
+
+    runCancelContract(
+      'delegation (shared contract)',
+      reset: () {
+        host.cancelled.clear();
+        host.cancelServesRoute = true;
+      },
+      setInterruptRoute: (available) {
+        host.cancelServesRoute = available;
+      },
+      service: () => composite,
     );
   });
 }
