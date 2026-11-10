@@ -22,6 +22,7 @@ void main() {
         'diff',
         'stats',
         'worktrees',
+        'stop',
         // Service — global scope.
         'sessions',
         'new',

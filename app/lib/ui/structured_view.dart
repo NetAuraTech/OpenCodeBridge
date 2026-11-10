@@ -365,16 +365,9 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// apply to the in-flight message while it is set.
   bool _turnActive = false;
 
-  /// Whether the Stop control is hidden for this session (issue #160). Set
-  /// when a Stop fails on a service without an interrupt route (the 502 the
-  /// bridge maps `CancelUnsupportedError` to) so the control is not an
-  /// obvious repeat-failure; cleared by a later successful normalize (which
-  /// is the #163 failure-handling "allow retry" boundary) and on session
-  /// switch. The Turn stays Active throughout — hiding the control does not
-  /// touch the banner.
-  bool _stopHidden = false;
-
-  /// True while the Stop (cancel) POST is in flight (issue #160).
+  /// True while the Stop (cancel) POST is in flight (issue #160). While it is
+  /// set, the Stop control shows a busy state and ignores further presses and
+  /// Escape, so one turn sends at most one cancel request.
   bool _stopBusy = false;
 
   /// The live turn's ticking clock (issue #122): re-renders the footer while
@@ -616,7 +609,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _compacting = false;
     _replyBusyId = null;
     _turnActive = false;
-    _stopHidden = false;
     _stopBusy = false;
     _contextUsed = null;
     _prefill = null;
@@ -1544,10 +1536,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         // still Active (issue #124): a missed end event (a stream gap)
         // cannot leave the live footer ticking on a finished Turn.
         _reconcileTurnActive(results.first as SessionDetail);
-        // A successful re-fetch clears the hidden-Stop memory (issue #160):
-        // the view re-offers Stop even though the last one failed — the
-        // service may have restarted with the route in place.
-        _stopHidden = false;
       });
       // A following reader sits on the anchor (offset 0), which is the new
       // newest message — nothing to re-settle.
@@ -2309,6 +2297,9 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         case 'worktrees':
           await _payloadDialog('Worktrees', () => client.worktrees(id));
           return;
+        case 'stop':
+          await _runStop();
+          return;
         // The menu's navigation commands: the app's existing "new session"
         // flow (the screen closes and the flow runs behind it).
         case 'sessions':
@@ -2611,32 +2602,56 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// Stop the running turn (issue #160): the bridge's cancel, which interrupts
-  /// the turn on the owning service. The Stop control is offered whenever the
-  /// Turn is Active (the Active fact is independent of cancel capability).
-  /// On a service without an interrupt route the cancel fails (the 502 the
-  /// bridge maps the transport's `CancelUnsupportedError` to): report it, keep
-  /// the Turn Active (the banner stays), and hide the control until a later
-  /// successful normalize clears the memory.
-  Future<void> _stopTurn() async {
-    if (_stopBusy) return;
+  /// Stop the running turn (issues #160/#163): the bridge's cancel, which
+  /// interrupts the turn on the owning service. The Stop control is offered
+  /// whenever the Turn is Active (the Active fact is independent of cancel
+  /// capability). While the cancel POST is in flight the control is busy and
+  /// ignores further presses and Escape (one request per turn); on success
+  /// the banner clears on the execution's terminal event (the indicator
+  /// leaves on `interrupted`, like any other termination); on failure (404,
+  /// 502, 503, unreachable) the reason is reported and the Turn stays Active
+  /// — the banner keeps reflecting the running turn and the control is
+  /// usable again to retry. Resolves `true` when the cancel landed (the turn
+  /// settles on its terminal event), `false` when it was a no-op (already in
+  /// flight) or failed.
+  Future<bool> _stopTurn() async {
+    if (_stopBusy) return false;
     final sessionId = widget.sessionId;
     _stopBusy = true;
     if (mounted) setState(() {});
     try {
       await widget.client.cancel(sessionId);
+      return true;
     } on SessionsClientError catch (e) {
-      // The service cannot cancel the turn: the refusal is transient (a
-      // restart may upgrade the route in), so the view hides the control
-      // rather than failing it again — and the Turn stays Active, banner and
-      // all.
-      if (mounted) {
-        setState(() => _stopHidden = true);
-        _snackBar('Could not stop the turn (${_describe(e)}).');
-      }
+      // A failed cancel does not settle the turn: the banner keeps
+      // reflecting it and the Stop control stays offered so the user can
+      // retry (issue #163).
+      if (mounted) _snackBar('Could not stop the turn (${_describe(e)}).');
+      return false;
     } finally {
       if (mounted) setState(() => _stopBusy = false);
     }
+  }
+
+  /// The `/stop` command (issue #163): the same cancel the banner's Stop
+  /// control and Escape run, reported through a snackbar. Unlike the other
+  /// two entry points it is always offered (it is in the menu even while the
+  /// session is idle), so on an idle session it answers harmlessly — "nothing
+  /// is running", without a request and without an error. With a turn Active
+  /// it sends the cancel; the banner then clears on the execution's terminal
+  /// event (the indicator leaves on `interrupted`, like any termination).
+  Future<void> _runStop() async {
+    if (!_turnActive) {
+      if (!mounted) return;
+      _snackBar('Nothing is running.');
+      return;
+    }
+    final stopped = await _stopTurn();
+    if (!mounted) return;
+    if (stopped) _snackBar('Stop requested.');
+    // A failure already reported its reason (and the Turn stays Active, the
+    // Stop control offered to retry); a no-op (a cancel already in flight)
+    // reports nothing — the in-flight request owns the report.
   }
 
   /// The per-Turn footer labels keyed by the history row they ride on
@@ -2721,11 +2736,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                   )
                 : null,
             automaticallyImplyLeading: !widget.showCloseButton,
-            // The Stop control (issue #160): offered whenever the Turn is
-            // Active (the Active fact is independent of cancel capability).
-            // Hidden after a failed Stop on a service without an interrupt
-            // route until a later successful normalize clears the memory.
-            actions: _turnActive && !_stopHidden
+            // The Stop control (issues #160/#163): offered whenever the Turn
+            // is Active (the Active fact is independent of cancel
+            // capability); while the cancel POST is in flight it shows a
+            // busy state and ignores further presses.
+            actions: _turnActive
                 ? [
                     IconButton(
                       key: const ValueKey('structured-stop'),
@@ -2934,6 +2949,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                     onToggleMode: _toggleMode,
                                     onCycleVariant: _cycleVariant,
                                     onPasteFromClipboard: _pasteFromClipboard,
+                                    turnActive: _turnActive,
+                                    onStopTurn: _stopTurn,
                                   ),
                                 ),
                               ],
@@ -3848,6 +3865,8 @@ class _PromptBar extends StatefulWidget {
     required this.onToggleMode,
     required this.onCycleVariant,
     required this.onPasteFromClipboard,
+    required this.turnActive,
+    required this.onStopTurn,
   });
 
   final TextEditingController controller;
@@ -3879,6 +3898,17 @@ class _PromptBar extends StatefulWidget {
   /// `[Image N]` token inserted at the caret (issue #72); with no image the
   /// clipboard's text is pasted. The screen runs the read and the insertion.
   final Future<void> Function() onPasteFromClipboard;
+
+  /// Whether the open session's turn is Active (issue #163): with the menu
+  /// closed, nothing typed, and a turn Active, Escape cancels the turn
+  /// instead of clearing the field.
+  final bool turnActive;
+
+  /// Escape (the menu closed, nothing typed, a turn Active): cancel the
+  /// running turn (issue #163) — the same call the banner's Stop control
+  /// runs; resolves `true` when the cancel landed, `false` when it was a
+  /// no-op (already in flight) or failed.
+  final Future<bool> Function() onStopTurn;
 
   @override
   State<_PromptBar> createState() => _PromptBarState();
@@ -4163,8 +4193,10 @@ class _PromptBarState extends State<_PromptBar> {
   /// The arrow keys move the menu selection (the TUI parity) and nothing
   /// else: they are handled here, before the app's text shortcuts can move
   /// the field's cursor — a cursor move would re-run [_syncMenu] and jump
-  /// the selection back to the top row. Esc closes the menu by clearing the
-  /// field. With the menu closed, Tab toggles the session's mode
+  /// the selection back to the top row. Esc clears the field (the menu open:
+  /// that clears the filter and closes it). With the menu closed, nothing
+  /// typed, and a turn Active, Esc cancels the turn instead (issue #163);
+  /// otherwise it keeps clearing the field. Tab toggles the session's mode
   /// (`build`/`plan`) and Ctrl+T cycles the current model's variant (the
   /// TUI's `agent.cycle` / `variant.cycle`), without inserting anything in
   /// the field.
@@ -4172,7 +4204,21 @@ class _PromptBarState extends State<_PromptBar> {
     if (event is KeyDownEvent) {
       final key = event.logicalKey;
       if (key == LogicalKeyboardKey.escape) {
-        widget.controller.clear();
+        if (_menuOpen) {
+          // The menu open: Esc clears the field (closing the menu); the
+          // framework's default does the rest, as before.
+          widget.controller.clear();
+        } else if (widget.turnActive && widget.controller.text.trim().isEmpty) {
+          // The menu closed, nothing typed, a turn Active: Esc cancels the
+          // turn (issue #163) — the same call the banner's Stop control
+          // runs. The event is consumed (handled): it must not also reach the
+          // field's default clear, and the field is already empty, so the
+          // next keystrokes type normally.
+          widget.onStopTurn();
+          return KeyEventResult.handled;
+        } else {
+          widget.controller.clear();
+        }
       }
       if (_menuOpen) {
         if (key == LogicalKeyboardKey.arrowDown ||
