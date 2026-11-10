@@ -188,9 +188,16 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// session) swaps the pane in place; the list stays visible.
   Session? _selectedSession;
 
+  /// The sidebar's collapsed choice (issue #132): restored from the settings
+  /// at the launch, persisted on every toggle. Collapsed, the list pane is
+  /// gone entirely and the detail takes the full width; only the toggle stays
+  /// visible, at the same screen spot in both states.
+  bool _sidebarCollapsed = false;
+
   @override
   void initState() {
     super.initState();
+    _sidebarCollapsed = widget.settings?.sessionsSidebarCollapsed ?? false;
     WidgetsBinding.instance.addObserver(this);
     final base = widget.apiBase;
     if (base != null) {
@@ -693,12 +700,21 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(
-              key: const ValueKey('sessions-list-pane'),
-              width: 320,
-              child: list,
+            // The toggle's own thin column (issue #132): the only thing that
+            // survives the collapse, always at the same left edge, so the
+            // affordance never moves between the two states.
+            _SidebarToggleRail(
+              collapsed: _sidebarCollapsed,
+              onToggle: _toggleSidebar,
             ),
-            const VerticalDivider(width: 1, thickness: 1),
+            if (!_sidebarCollapsed) ...[
+              SizedBox(
+                key: const ValueKey('sessions-list-pane'),
+                width: 320,
+                child: list,
+              ),
+              const VerticalDivider(width: 1, thickness: 1),
+            ],
             Expanded(
               child: KeyedSubtree(
                 key: const ValueKey('sessions-detail-pane'),
@@ -709,6 +725,15 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         );
       },
     );
+  }
+
+  /// Flips the sidebar's collapsed state and persists the choice (issue
+  /// #132), so the next launch restores it. The selection is untouched: the
+  /// detail pane carries through the collapse untouched.
+  void _toggleSidebar() {
+    setState(() => _sidebarCollapsed = !_sidebarCollapsed);
+    final settings = widget.settings;
+    if (settings != null) settings.sessionsSidebarCollapsed = _sidebarCollapsed;
   }
 
   Widget _buildListPane() {
@@ -868,6 +893,38 @@ List<_ProjectGroup> _groupByProject(List<Session> rows) {
     }
   }
   return byProject.values.toList();
+}
+
+/// The sidebar toggle's rail (issue #132): a thin fixed-width column that is
+/// present in both states, so the toggle sits at the same screen spot whether
+/// the sidebar is open or closed. When the sidebar is collapsed it is the
+/// only thing of the list pane that remains visible — no icons rail, no
+/// status dots.
+class _SidebarToggleRail extends StatelessWidget {
+  const _SidebarToggleRail({required this.collapsed, required this.onToggle});
+
+  /// The rail's width (and the toggle's): the detail pane starts right of it
+  /// in both states, so collapsing never moves the toggle.
+  static const double width = 48;
+
+  /// True when the sidebar is collapsed (the icon points outward).
+  final bool collapsed;
+
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: width,
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: IconButton(
+        key: const ValueKey('sessions-sidebar-toggle'),
+        tooltip: collapsed ? 'Expand sidebar' : 'Collapse sidebar',
+        icon: Icon(collapsed ? Icons.chevron_right : Icons.chevron_left),
+        onPressed: onToggle,
+      ),
+    ),
+  );
 }
 
 /// The global New project action (issue #54): opens the filesystem browser
