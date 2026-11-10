@@ -1101,6 +1101,29 @@ void main() {
       expect(service.cancelled, isEmpty);
     });
 
+    test('POST .../cancel is 502 for an unsupported service, then 204 once it '
+        'restarts serving /interrupt (re-probe)', () async {
+      // The service has no interrupt route: the cancel refuses with the
+      // typed CancelUnsupportedError, which the bridge maps to 502
+      // opencode_unreachable — never a 500 (issue #160).
+      service.cancelUnsupported = true;
+      var (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/cancel',
+        '',
+      );
+      expect(status, 502);
+      expect(jsonDecode(body), {'error': 'opencode_unreachable'});
+      expect(service.cancelled, isEmpty);
+      // The service restarts upgraded, now serving the interrupt route. The
+      // remembered "no" is not final: the same cancel re-probes and lands.
+      service.cancelUnsupported = false;
+      (status, body) = await _postRaw(base, 'api/sessions/ses_one/cancel', '');
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.cancelled, ['ses_one']);
+    });
+
     test('POST .../cancel is 404 for an unknown session', () async {
       final (status, body) = await _postRaw(
         base,
@@ -2612,6 +2635,12 @@ class _FakeService implements OpencodeService {
   var failCancel = false;
   var failUsage = false;
 
+  /// When true, [cancelTurn] refuses with the typed [CancelUnsupportedError]
+  /// (the service has no interrupt route) instead of cancelling (issue #160).
+  /// Mutable so the same fake can be "restarted upgraded" mid-test (the
+  /// re-probe path).
+  var cancelUnsupported = false;
+
   /// The session id [createSession] mints, by project id.
   final Map<String, OpencodeSession> created = {
     'p1': const OpencodeSession(
@@ -2923,6 +2952,9 @@ class _FakeService implements OpencodeService {
   @override
   Future<void> cancelTurn(String id) async {
     if (failCancel) throw const OpencodeServiceError(0, 'service down');
+    if (cancelUnsupported) {
+      throw const CancelUnsupportedError('this service has no interrupt route');
+    }
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     cancelled.add(id);
   }

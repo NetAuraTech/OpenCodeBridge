@@ -10,6 +10,8 @@ import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
+import 'cancel_contract.dart';
+
 /// A stand-in for the shared opencode service: it serves the four endpoints
 /// the bridge needs, checks Basic auth, and paginates `GET /api/session` in
 /// small pages to exercise the client's cursor loop.
@@ -333,6 +335,15 @@ void main() {
   // Cancel-a-turn (issue #158): the recorded `/api/session/{id}/interrupt`
   // paths, in request order.
   final interruptedPaths = <String>[];
+  // Issue #160: when false the fake service withholds the interrupt route
+  // (every `POST /api/session/{id}/interrupt` is a 404, like an old service
+  // binary). Mutable so one client instance can be re-tested after the
+  // service "restarts upgraded" (the re-probe path).
+  bool interruptRouteAvailable = true;
+  // The recorded detail reads: the disambiguation a transport with an
+  // unproven interrupt route makes after an interrupt 404. A remembered
+  // `supported` must never add one (no second probe request).
+  final detailReads = <String>[];
   final statsQueries = <String?>[];
   final worktreeQueries = <String?>[];
   // The `@` menu's file search (issue #58): the recorded `/api/fs/find`
@@ -467,6 +478,7 @@ void main() {
         dismissedFormPaths.add(path);
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1' && req.method == 'GET') {
+        detailReads.add(path);
         resp.write(jsonEncode({'data': detailInfo}));
       } else if (path == '/api/session/ses_2' && req.method == 'GET') {
         resp.write(jsonEncode({'data': detailInfo2}));
@@ -501,7 +513,8 @@ void main() {
       } else if (path == '/api/session/ses_1/compact' && req.method == 'POST') {
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1/interrupt' &&
-          req.method == 'POST') {
+          req.method == 'POST' &&
+          interruptRouteAvailable) {
         interruptedPaths.add(path);
         resp.statusCode = HttpStatus.noContent;
       } else if (path == '/api/session/ses_1/revert/stage' &&
@@ -1477,5 +1490,55 @@ void main() {
         },
       ]);
     });
+  });
+
+  group('OpencodeHttpService cancel (issue #160)', () {
+    setUp(() {
+      interruptedPaths.clear();
+      detailReads.clear();
+      interruptRouteAvailable = true;
+    });
+
+    test('an unsupported service (404 on /interrupt) refuses with '
+        'CancelUnsupportedError, not a 404', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      // The service has no interrupt route: it 404s the POST the way an
+      // old binary answers an unknown route (not the way a real route
+      // answers an unknown session).
+      interruptRouteAvailable = false;
+      await expectLater(
+        service.cancelTurn('ses_1'),
+        throwsA(isA<CancelUnsupportedError>()),
+      );
+      // The 404 was disambiguated by reading the session (which exists), so
+      // the missing route is the reportable fact.
+      expect(detailReads, ['/api/session/ses_1']);
+    });
+
+    test('a supported service (204) cancels and a repeated cancel adds no '
+        'second probe request', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      await service.cancelTurn('ses_1'); // the first cancel proves the route
+      await service.cancelTurn('ses_1'); // the remembered yes: no detail read
+      expect(interruptedPaths, [
+        '/api/session/ses_1/interrupt',
+        '/api/session/ses_1/interrupt',
+      ]);
+      // Neither cancel fell into the disambiguation: no detail reads.
+      expect(detailReads, isEmpty);
+    });
+
+    runCancelContract(
+      'probe & remember (shared contract)',
+      reset: () {
+        interruptedPaths.clear();
+        detailReads.clear();
+        interruptRouteAvailable = true;
+      },
+      setInterruptRoute: (available) {
+        interruptRouteAvailable = available;
+      },
+      service: () => OpencodeHttpService(baseUrl: base, password: password),
+    );
   });
 }

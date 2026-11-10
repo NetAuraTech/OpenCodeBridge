@@ -80,6 +80,23 @@ class OpencodeServiceError implements Exception {
   String toString() => 'OpencodeServiceError($statusCode: $message)';
 }
 
+/// The typed refusal of a cancel the implementation cannot carry out
+/// because its service has no interrupt route (issue #160): the capability
+/// is the observable probe result, and a service without the route answers
+/// this instead of a bare `UnimplementedError` the bridge could not map.
+///
+/// It carries the service-failure status (502), so the bridge's existing
+/// `_serviceError` mapping answers 502 `opencode_unreachable` unchanged —
+/// never 500, and deliberately not a new 501: the condition is transient (a
+/// service restart may upgrade the route in), which is why the transport
+/// re-probes after it rather than caching it.
+class CancelUnsupportedError extends OpencodeServiceError {
+  const CancelUnsupportedError(String message) : super(502, message);
+
+  @override
+  String toString() => 'CancelUnsupportedError($message)';
+}
+
 abstract class OpencodeService {
   /// Every session on the shared service, all pages, newest first.
   Future<List<OpencodeSession>> listSessions();
@@ -235,7 +252,14 @@ abstract class OpencodeService {
   /// Cancel the session's running turn (the service's
   /// `POST /api/session/{id}/interrupt`): the turn stops and no further
   /// output streams. An idle session accepts it harmlessly.
-  Future<void> cancelTurn(String id);
+  ///
+  /// The default refuses with the typed [CancelUnsupportedError] (issue
+  /// #160): an implementation without an interrupt path inherits a refusal
+  /// the bridge maps to 502 `opencode_unreachable`, never a bare
+  /// `UnimplementedError` that would reach the bridge unmapped (a 500).
+  Future<void> cancelTurn(String id) async {
+    throw const CancelUnsupportedError('this service has no interrupt route');
+  }
 
   /// Undo the previous message: stage a revert at the session's last user
   /// message (the service's `POST /api/session/{id}/revert/stage`). A no-op

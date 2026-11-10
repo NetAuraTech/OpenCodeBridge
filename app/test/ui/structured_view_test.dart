@@ -232,6 +232,20 @@ class _FakeClient extends SessionsClient {
     compacts++;
   }
 
+  /// The cancel calls (`cancel`), in order (issue #160's Stop control).
+  final List<String> cancelCalls = [];
+
+  /// When set, `cancel` throws it (the 502 the bridge maps an unsupported
+  /// service's cancel to).
+  Object? cancelError;
+
+  @override
+  Future<void> cancel(String id) async {
+    cancelCalls.add(id);
+    final error = cancelError;
+    if (error is Object) throw error;
+  }
+
   @override
   Future<String> mcps() async {
     mcpsCalls++;
@@ -859,6 +873,101 @@ void main() {
       expect(find.text('1.0s · 0 compactions · 200.0 tok/s'), findsOneWidget);
       await events.close();
     });
+
+    testWidgets(
+      'a failed Stop reports, keeps the Turn Active, hides itself; a later '
+      'normalize re-offers it (issue #160)',
+      (tester) async {
+        // A completed turn, then the next turn mid-flight (an in-flight
+        // assistant, no closing idle): a service whose cancel the view will
+        // not get through.
+        const completed = [
+          SessionMessage(role: 'user', text: 'go', created: 0),
+          SessionMessage(
+            role: 'assistant',
+            text: 'done',
+            created: 0,
+            streamed: 1000,
+            completed: 1500,
+            outputTokens: 100,
+            reasoningTokens: 0,
+          ),
+          SessionMessage(id: 'i1', role: 'idle'),
+        ];
+        const started = [
+          ...completed,
+          SessionMessage(role: 'user', text: 'again', created: 100000),
+          SessionMessage(id: 'm2', role: 'assistant'),
+        ];
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [completed, started],
+        );
+        // The service has no interrupt route: the bridge answers 502
+        // opencode_unreachable for the cancel.
+        client.cancelError = const SessionsClientError(
+          502,
+          'opencode_unreachable',
+        );
+        final events = await _pump(tester, client: client);
+        final gaps = StreamController<SessionGap>.broadcast();
+        // A fixed clock: the live footer's duration stays put across pumps.
+        await tester.pumpWidget(
+          MaterialApp(
+            home: StructuredSessionScreen(
+              sessionId: 'ses_1',
+              title: 'external session',
+              client: client,
+              events: events.stream,
+              gaps: gaps.stream,
+              clock: () => DateTime.fromMillisecondsSinceEpoch(200000),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        // The turn starts: Active — the Stop control is offered (the Active
+        // fact is independent of cancel capability).
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        // Two footers: the closed turn's frozen one, and the in-flight
+        // turn's live one (ticking from the prompt, issue #124).
+        expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
+        expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+
+        // The first Stop on the unsupported service: the failure is
+        // reported, the Turn stays Active (the live footer — the banner —
+        // is kept), and the control hides itself (no obvious repeat-failure
+        // until the memory is cleared).
+        await tester.tap(find.byKey(const ValueKey('structured-stop')));
+        await tester.pump();
+        await tester.pump();
+        expect(client.cancelCalls, ['ses_1']);
+        expect(
+          find.text('Could not stop the turn (status 502).'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        // The Turn is still Active: the live footer banner was kept.
+        expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
+        expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
+
+        // A later normalize (a durable-seq gap) clears the memory: the
+        // control reappears while the Turn is still running.
+        gaps.add(
+          const SessionGap(aggregateID: 'ses_1', lastSeen: 1, received: 4),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(find.byKey(const ValueKey('turn-stats')), findsNWidgets(2));
+        expect(find.text('1m 40s · 0 compactions'), findsOneWidget);
+        await gaps.close();
+        await events.close();
+      },
+    );
 
     testWidgets('a live turn ticks its duration from the prompt (issue #122)', (
       tester,
