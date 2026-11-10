@@ -367,10 +367,10 @@ class BridgeServer {
     void Function(String)? orbEmit;
     // The spawn surface's global agent tools (issue #99, spec §8.1): the
     // opencode v2 plugin registering orb_spawn/orb_wait, materialized into
-    // the global opencode plugins dir at startup (create-if-missing — the
-    // on-disk copy wins), so the host opencode has the tools and every orb
-    // inherits them through the config copy (§6.2). A failure degrades: the
-    // spawn endpoints still serve.
+    // the global opencode plugins dir at startup (a stale untouched copy is
+    // refreshed, a user-tuned copy wins — issue #141), so the host opencode
+    // has the tools and every orb inherits them through the config copy
+    // (§6.2). A failure degrades: the spawn endpoints still serve.
     try {
       await OrbAgentTools.materialize();
     } catch (_) {}

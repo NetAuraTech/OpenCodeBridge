@@ -1,12 +1,16 @@
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import '../sessions/paths.dart';
 
 /// The spawn surface's global opencode agent tools (issue #99, spec §8.1):
 /// the TypeScript file behind `orb_spawn` and `orb_wait`, embedded in the
-/// binary and materialized, **create-if-missing**, into the global plugins
-/// dir `~/.config/opencode/plugins/` at bridge startup — the same "app-owned
-/// files, on-disk copy wins" pattern as the orb build context (§5.2).
+/// binary and materialized into the global plugins dir
+/// `~/.config/opencode/plugins/` at bridge startup — the same "app-owned
+/// files" pattern as the orb build context (§5.2), with the plugin's own
+/// refresh contract (see [materialize], issue #141).
 ///
 /// opencode v2 loads agent tools through **plugins** (a file exporting
 /// `{ id, setup }` whose `setup` registers tools through
@@ -36,19 +40,73 @@ abstract class OrbAgentTools {
     'opencodebridge_orbs.ts': _spawnPlugin,
   };
 
+  /// The SHA-256 hex digests of the bytes of **every previous embedded
+  /// version** of each plugin file, keyed by file name (issue #141). A file
+  /// on disk matching one of these byte-for-byte is a stale copy of a past
+  /// materialization the user never touched — [materialize] refreshes it.
+  ///
+  /// The digests (not the old sources) travel in the binary: enough to
+  /// recognize a stale copy, nothing to ship. Add the digest of the version
+  /// you are replacing in every commit that edits [files]: the digest of a
+  /// committed version is `sha256` over the file's UTF-8 bytes, computable
+  /// from `OrbAgentTools.files` at that commit.
+  static const Map<String, Set<String>> previousDigests = {
+    'opencodebridge_orbs.ts': {
+      // 5c1e71a (#116): the first spawn surface (orb_spawn / orb_wait).
+      'bf90b21445ed3fb7620f4ab0415fb34eb3647652acf9716a601a0496c7a6d3bd',
+      // b5816f9 (#119): targeting, seed, the spawn-tree controls.
+      'c15fe3b8cf7f13c6a732db5eb9fac81598f3b2162b9fb8e403b1e4a076bca4f8',
+      // 32ba4bd (#143): spawn dedup and the bounded blocking wait.
+      '11e7ed02129156d42fe69cd3c4dd4d03bbd81d4ec64e2f73a0c73a51431319dc',
+      // 8fb5c3f (#151): dispatch identity by raw text and caller.
+      '2ae304dec4069537e38e58c9e878514d0cd5596e2699af2e19dd38a7835977e9',
+      // 1d0629e (#149): the no_shell refusal and the refused-task answer.
+      'badb87680f080459dfeffc3839128c3334883859ac059ff12a7c7d0aade2ec26',
+      // acbc8d7 (#169/#170): async-by-default spawn, the bounded orb_wait.
+      // The version every install holds when #141's fix ships.
+      '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
+    },
+  };
+
   /// Materialize the embedded plugin into [into] (the global plugins dir,
-  /// [hostDir], by default), create-if-missing and never overwrite (an agent
-  /// or the user may have tuned a copy; reset = delete the file, the next
-  /// startup re-materializes it). Safe to call at every startup.
+  /// [hostDir], by default). Safe to call at every startup. Three classes of
+  /// on-disk state (issue #141):
+  ///
+  /// - **missing** — write the embedded copy.
+  /// - **byte-identical to a previous materialization** (its digest is in
+  ///   [previousDigests]) — refresh it in place to the embedded copy. The
+  ///   former blanket create-if-missing froze the fix out of every existing
+  ///   install exactly like #145's frozen entrypoint: a machine holding the
+  ///   stale plugin never received the Code Mode opt-out.
+  /// - **anything else** — the user's copy (a tuning, or a file they wrote):
+  ///   left untouched, the on-disk copy wins. Reset = delete the file, the
+  ///   next startup re-materializes it.
+  ///
+  /// A copy already at the embedded bytes is not rewritten (no churn).
   static Future<void> materialize({Directory? into}) async {
     final dir = into ?? hostDir();
     await dir.create(recursive: true);
     for (final entry in files.entries) {
       final file = File('${dir.path}/${entry.key}');
-      if (file.existsSync()) continue; // The on-disk copy wins.
-      await file.writeAsString(entry.value);
+      if (!file.existsSync()) {
+        await file.writeAsString(entry.value);
+        continue;
+      }
+      final onDisk = sha256.convert(file.readAsBytesSync()).toString();
+      if (onDisk == _digestOf(entry.value)) continue; // Already current.
+      if (previousDigests[entry.key]?.contains(onDisk) ?? false) {
+        // A stale, untouched materialization: the app's own old bytes —
+        // not a copy the user chose — follow the app.
+        await file.writeAsString(entry.value);
+      }
+      // Otherwise the on-disk copy wins.
     }
   }
+
+  /// The SHA-256 hex digest of an embedded plugin source as written
+  /// ([writeAsString]'s UTF-8 bytes).
+  static String _digestOf(String content) =>
+      sha256.convert(utf8.encode(content)).toString();
 
   /// One plugin registering the spawn-surface tools (spec §8.2/§8.3/§8.4):
   /// `orb_spawn` wakes-or-creates the targeted orb and dispatches the task
@@ -198,6 +256,10 @@ export default {
           required: ["task"],
         },
         output,
+        // Issue #141: opencode v2's registry defaults every registered tool
+        // into Code Mode; without this opt-out the plain name the model sees
+        // is a decoy whose first direct call always fails ("No tool named").
+        options: { codemode: false },
         async execute(args, context) {
           let model
           if (args.model) {
@@ -293,6 +355,10 @@ export default {
           required: ["task_id"],
         },
         output,
+        // Issue #141: opencode v2's registry defaults every registered tool
+        // into Code Mode; without this opt-out the plain name the model sees
+        // is a decoy whose first direct call always fails ("No tool named").
+        options: { codemode: false },
         async execute(args, context) {
           let result
           try {
@@ -365,6 +431,10 @@ export default {
           "Wake it again with orb_spawn targeting its name.",
         input: orbRefInput,
         output,
+        // Issue #141: opencode v2's registry defaults every registered tool
+        // into Code Mode; without this opt-out the plain name the model sees
+        // is a decoy whose first direct call always fails ("No tool named").
+        options: { codemode: false },
         async execute(args, context) {
           return control("stop", "stopped", "/api/orb/stop", args, context)
         },
@@ -377,6 +447,10 @@ export default {
           "prototype variant — the intended force case).",
         input: orbRefInput,
         output,
+        // Issue #141: opencode v2's registry defaults every registered tool
+        // into Code Mode; without this opt-out the plain name the model sees
+        // is a decoy whose first direct call always fails ("No tool named").
+        options: { codemode: false },
         async execute(args, context) {
           return control("delete", "deleted", "/api/orb/delete", args, context)
         },
@@ -388,6 +462,10 @@ export default {
           "state included) placed next to the project's checkout on the host.",
         input: orbRefInput,
         output,
+        // Issue #141: opencode v2's registry defaults every registered tool
+        // into Code Mode; without this opt-out the plain name the model sees
+        // is a decoy whose first direct call always fails ("No tool named").
+        options: { codemode: false },
         async execute(args, context) {
           return control("export", "exported", "/api/orb/export", args, context)
         },

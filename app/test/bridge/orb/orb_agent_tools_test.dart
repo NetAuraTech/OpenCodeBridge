@@ -1,11 +1,14 @@
 // The spawn surface's global agent tools (issue #99, spec §8.1): the
 // embedded opencode v2 plugin registering orb_spawn/orb_wait, materialized
-// create-if-missing into the global opencode plugins dir.
+// into the global opencode plugins dir (a stale untouched copy refreshed at
+// startup, a user-tuned copy left alone — issue #141).
 
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/orb/orb_agent_tools.dart';
+
+import 'stale_plugin_v1_fixture.dart';
 
 void main() {
   late Directory temp;
@@ -132,6 +135,86 @@ void main() {
       ..writeAsStringSync('// tuned by hand');
     await OrbAgentTools.materialize(into: temp);
     expect(file.readAsStringSync(), '// tuned by hand');
+  });
+
+  // Issue #141: opencode v2's tool registry defaults every registered tool
+  // into Code Mode unless the registration opts out, so the plain names the
+  // model sees were guaranteed to fail their first direct call. The five orb
+  // tools must each carry the opt-out.
+  test('the five orb tools register as direct tools, outside Code Mode '
+      '(issue #141)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // opencode v2's plugin tool API: `options: { codemode: false }` is
+    // what keeps a registered tool a plain callable tool instead of
+    // Code-Mode-only.
+    expect(
+      RegExp(r'options:\s*\{\s*codemode:\s*false\s*\}').allMatches(source),
+      hasLength(5),
+      reason:
+          'one opt-out per orb_spawn / orb_wait / orb_stop / '
+          'orb_delete / orb_export registration',
+    );
+    // Each opt-out belongs to a tool registration: every `editor.add` of
+    // an orb tool carries one (each add block holds both strings).
+    for (final name in const [
+      'orb_spawn',
+      'orb_wait',
+      'orb_stop',
+      'orb_delete',
+      'orb_export',
+    ]) {
+      final block = RegExp(
+        'editor\\.add\\(\\{\\s*name: "$name"[\\s\\S]*?\\n      \\}\\)',
+      ).firstMatch(source);
+      expect(block, isNotNull, reason: 'the $name registration');
+      expect(block!.group(0), contains('codemode: false'));
+    }
+  });
+
+  // Issue #141: the create-if-missing contract froze the fix out of every
+  // existing install — a machine holding the stale plugin file never
+  // received it. Startup refreshes a copy still byte-identical to a
+  // previous materialization.
+  test(
+    'materialize refreshes a stale untouched copy in place (issue #141)',
+    () async {
+      // A previous bridge materialized exactly these bytes; the user never
+      // touched the file.
+      final file = File('${temp.path}/opencodebridge_orbs.ts')
+        ..writeAsStringSync(stalePluginV1);
+      await OrbAgentTools.materialize(into: temp);
+      expect(
+        file.readAsStringSync(),
+        OrbAgentTools.files['opencodebridge_orbs.ts'],
+      );
+    },
+  );
+
+  test('materialize keeps the current copy byte-identical, without rewriting '
+      'it (issue #141)', () async {
+    final file = File('${temp.path}/opencodebridge_orbs.ts')
+      ..writeAsStringSync(OrbAgentTools.files['opencodebridge_orbs.ts']!)
+      ..setLastModifiedSync(DateTime(2026, 1, 1));
+    await OrbAgentTools.materialize(into: temp);
+    expect(file.readAsStringSync(), isNot(stalePluginV1));
+    expect(
+      file.statSync().modified,
+      DateTime(2026, 1, 1), // No touch: the write is a no-op when the
+      // on-disk bytes already are the embedded ones.
+    );
+  });
+
+  test('materialize leaves a copy edited from an old materialization alone '
+      '(issue #141)', () async {
+    // User-tuned: a previous materialization plus the user's own line.
+    // Refreshing it would overwrite the tuning — the on-disk copy wins.
+    final tuned = '$stalePluginV1// my tweak\n';
+    final file = File('${temp.path}/opencodebridge_orbs.ts')
+      ..writeAsStringSync(tuned);
+    await OrbAgentTools.materialize(into: temp);
+    expect(file.readAsStringSync(), tuned);
   });
 
   test(

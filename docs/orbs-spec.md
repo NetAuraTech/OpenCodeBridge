@@ -346,6 +346,8 @@ A global opencode **plugin** (a dependency-free TypeScript file in `~/.config/op
 
 Global placement on purpose: no scripts committed to any repo (spirit of the global preparation), and **every orb's opencode inherits the tool** through the host config copied at every start (§6.2) — which is also what makes nested spawning work ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)).
 
+Every tool registration carries **`options: { codemode: false }`** ([#141](https://github.com/NetAuraTech/OpenCodeBridge/issues/141)): opencode v2's registry defaults *every* registered tool into Code Mode, so without the opt-out the plain names the model sees are decoys whose first direct call always fails. Startup materialization likewise **refreshes** an installed copy still byte-identical to a previous materialization (existing installs self-heal; the former blanket create-if-missing froze the fix out of them, the #145 lesson) and leaves a user-tuned copy untouched.
+
 ### 8.2 `orb_spawn`
 
 Idempotent **wake-or-create** on the project's workspace orb. The project is **not** an argument: the session knows it. The spawn itself is async — the tool returns an orb handle immediately.
