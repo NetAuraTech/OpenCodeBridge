@@ -225,9 +225,8 @@ class _HomeShellState extends State<HomeShell> {
       ),
     ),
     bottomNavigationBar: Stack(
-      // The bar sits on top, so the indicator never steals its taps.
-      alignment: Alignment.bottomRight,
-      clipBehavior: Clip.none,
+      // The bar keeps its full width; the indicator is centred on its right
+      // edge, inside the bar — never floating off it.
       children: [
         NavigationBar(
           selectedIndex: _tab,
@@ -256,15 +255,19 @@ class _HomeShellState extends State<HomeShell> {
           ],
         ),
         // The bridge status indicator, out of the app bar: right of the
-        // Settings item, nestled on the bar's top edge. Rebuilds on every
-        // link-state change; the dot itself stays deliberately small.
+        // Settings item, vertically centred on the bar (top/bottom + Center).
+        // Rebuilds on every link-state change; the dot itself stays
+        // deliberately small.
         Positioned(
-          top: -4,
+          top: 0,
+          bottom: 0,
           right: 8,
-          child: AnimatedBuilder(
-            animation: widget.monitor,
-            builder: (context, _) =>
-                ConnectionIndicator(state: widget.monitor.state),
+          child: Center(
+            child: AnimatedBuilder(
+              animation: widget.monitor,
+              builder: (context, _) =>
+                  ConnectionIndicator(state: widget.monitor.state),
+            ),
           ),
         ),
       ],

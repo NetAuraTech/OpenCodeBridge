@@ -39,9 +39,16 @@ void main() {
 
       // The shell has no app bar (the "OpenCodeBridge" header was dropped):
       // the bridge status indicator moved to the footer, right of the
-      // Settings item, so the dot is still present but not in an AppBar.
+      // Settings item — inside the bar, vertically centred on it (the
+      // 80 px bar's centre is y=560 on the 800x600 test surface, the dot's
+      // centre 8 + 10 px from the right edge: the indicator is 12 px wide
+      // with a 4 px side margin, positioned 8 px from the screen edge).
       expect(find.byType(AppBar), findsNothing);
-      expect(find.byKey(const Key('connection-indicator-dot')), findsOneWidget);
+      final dot = tester.getCenter(
+        find.byKey(const Key('connection-indicator-dot')),
+      );
+      expect(dot.dy, closeTo(560, 1));
+      expect(dot.dx, closeTo(782, 1));
 
       // The Sessions tab is the default body; without a tunnel URL it
       // points at Settings.
