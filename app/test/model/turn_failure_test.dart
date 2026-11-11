@@ -134,31 +134,28 @@ void main() {
       expect(failure!.error, isNull);
     });
 
-    test(
-      'only the turn the marker closes is read: earlier failed turns do not leak',
-      () {
-        final history = [
-          // An earlier turn that failed.
-          SessionMessage(id: 'u0', role: 'user', text: 'go', created: 0),
-          SessionMessage(
-            id: 'i0',
-            role: 'idle',
-            outcome: 'failed',
-            error: _noRouteError,
-          ),
-          // The turn `idle` closes: it succeeded.
-          SessionMessage(id: 'u1', role: 'user', text: 'again', created: 100),
-          SessionMessage(id: 'a1', role: 'assistant', text: 'ok'),
-          SessionMessage(id: 'i1', role: 'idle', outcome: 'succeeded'),
-        ];
-        // The marker's own turn is the one walked back from it; the earlier
-        // failure (the previous turn) must not bleed into it. i1 is index 4
-        // (succeeded), i0 index 1 (failed).
-        expect(turnFailureAt(history, 4), isNull);
-        // …and the earlier marker still reads its own failure.
-        expect(turnFailureAt(history, 1)!.error, _noRouteError);
-      },
-    );
+    test('only the turn the marker closes is read: earlier failed turns do not leak', () {
+      final history = [
+        // An earlier turn that failed.
+        SessionMessage(id: 'u0', role: 'user', text: 'go', created: 0),
+        SessionMessage(
+          id: 'i0',
+          role: 'idle',
+          outcome: 'failed',
+          error: _noRouteError,
+        ),
+        // The turn `idle` closes: it succeeded.
+        SessionMessage(id: 'u1', role: 'user', text: 'again', created: 100),
+        SessionMessage(id: 'a1', role: 'assistant', text: 'ok'),
+        SessionMessage(id: 'i1', role: 'idle', outcome: 'succeeded'),
+      ];
+      // The marker's own turn is the one walked back from it; the earlier
+      // failure (the previous turn) must not bleed into it. i1 is index 4
+      // (succeeded), i0 index 1 (failed).
+      expect(turnFailureAt(history, 4), isNull);
+      // …and the earlier marker still reads its own failure.
+      expect(turnFailureAt(history, 1)!.error, _noRouteError);
+    });
 
     test('a marker in the middle of the history resolves its own turn', () {
       final history = [
@@ -212,24 +209,26 @@ void main() {
         SessionMessage(id: 'u0', role: 'user', text: 'go', created: 0),
         SessionMessage(id: 'a0', role: 'assistant', text: 'ok'),
       ];
-      expect(latestTurnOutcome(history, detailOutcome: 'succeeded'),
-        'succeeded');
+      expect(
+        latestTurnOutcome(history, detailOutcome: 'succeeded'),
+        'succeeded',
+      );
       expect(latestTurnOutcome(history, detailOutcome: null), isNull);
     });
 
-    test('an interrupted verdict is surfaced, not conflated with a failure',
-        () {
-      const history = [
-        SessionMessage(id: 'u0', role: 'user', text: 'go', created: 0),
-        SessionMessage(
-          id: 'i0',
-          role: 'idle',
-          outcome: 'interrupted',
-        ),
-      ];
-      expect(latestTurnOutcome(history, detailOutcome: 'succeeded'),
-        'interrupted');
-    });
+    test(
+      'an interrupted verdict is surfaced, not conflated with a failure',
+      () {
+        const history = [
+          SessionMessage(id: 'u0', role: 'user', text: 'go', created: 0),
+          SessionMessage(id: 'i0', role: 'idle', outcome: 'interrupted'),
+        ];
+        expect(
+          latestTurnOutcome(history, detailOutcome: 'succeeded'),
+          'interrupted',
+        );
+      },
+    );
 
     test('a running turn (no closing marker) keeps the detail', () {
       const history = [

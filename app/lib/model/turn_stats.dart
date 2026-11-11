@@ -516,12 +516,9 @@ TurnFailure? turnFailureAt(List<SessionMessage> messages, int idleIndex) {
       hasAttempts = true;
       if (retry.attempt > attempts) attempts = retry.attempt;
     }
-    if (error == null) error = message.error;
+    error ??= message.error;
   }
-  return TurnFailure(
-    error: error,
-    attempts: hasAttempts ? attempts : null,
-  );
+  return TurnFailure(error: error, attempts: hasAttempts ? attempts : null);
 }
 
 /// The header outcome chip's verdict (issue #157): the outcome of the
