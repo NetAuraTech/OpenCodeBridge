@@ -1090,8 +1090,18 @@ class OpencodeHttpService implements OpencodeService {
     }
     if (type == 'idle') {
       // The marker closing a turn (issue #121): the turn-stats window walks
-      // back to it. It carries no content.
-      return SessionMessage(id: id, role: 'idle');
+      // back to it. It carries no content, but it carries the turn verdict
+      // (`outcome`) and, for a failed turn, the failure (issue #155) — the
+      // probe found the terminal error on the idle row (no assistant row) for
+      // the non-retryable failure.
+      return SessionMessage(
+        id: id,
+        role: 'idle',
+        outcome: item['outcome'] is String ? item['outcome'] as String : null,
+        error: item['error'] is Map<String, Object?>
+            ? StructuredError.fromJson(item['error'])
+            : null,
+      );
     }
     if (type == 'compaction') {
       // The item's `summary` is the text the compaction wrote; a running
@@ -1138,6 +1148,15 @@ class OpencodeHttpService implements OpencodeService {
       completed: _messageTime(item, 'completed'),
       outputTokens: _tokenField(item['tokens'], 'output'),
       reasoningTokens: _tokenField(item['tokens'], 'reasoning'),
+      // The service's retry / terminal-failure facts, carried field-for-field
+      // (issue #155): the in-flight provider retry and the terminal error
+      // (never both set on one message).
+      retry: item['retry'] is Map<String, Object?>
+          ? MessageRetry.fromJson(item['retry'])
+          : null,
+      error: item['error'] is Map<String, Object?>
+          ? StructuredError.fromJson(item['error'])
+          : null,
     );
   }
 

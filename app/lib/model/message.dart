@@ -146,6 +146,136 @@ class ToolCall {
       'answers: $answers)';
 }
 
+/// The service's `Session.StructuredError`: the provider failure the service
+/// attaches to a message's [MessageRetry.error], an assistant message's
+/// terminal [SessionMessage.error], or an `idle` message's
+/// [SessionMessage.error]. Carried field-for-field (no interpretation beyond
+/// carrying the numbers through): `type`, `message`, and the optional
+/// `status` (the HTTP status, e.g. 429), `retryAfterMs` (the provider's
+/// backoff), and `body` — the provider's raw `response.body` (the 429 JSON),
+/// surfaced as-is.
+///
+/// The wire nests the raw body as `response.body`; the bridge mirrors the
+/// service shape field-for-field and flattens it to `body`, so the contract's
+/// `error.body` is exactly the service's `response.body` (documented
+/// flattening, issue #155).
+class StructuredError {
+  const StructuredError({
+    required this.type,
+    required this.message,
+    this.status,
+    this.body,
+    this.retryAfterMs,
+  });
+
+  /// The error's type (e.g. `provider.rate-limit`, `provider.no-route`).
+  final String type;
+
+  /// The error's message (the provider's, carried through verbatim).
+  final String message;
+
+  /// The HTTP status (the 429 on a rate-limit), or `null` when the service
+  /// carried none.
+  final int? status;
+
+  /// The provider's raw `response.body` (the 429 JSON string), surfaced as-is.
+  /// `null` when the service carried none.
+  final Object? body;
+
+  /// The provider's retry backoff in milliseconds (`retryAfterMs`), carried
+  /// through as a number. `null` when the service carried none.
+  final int? retryAfterMs;
+
+  Map<String, Object?> toJson() => {
+    'type': type,
+    'message': message,
+    if (status != null) 'status': status,
+    if (body != null) 'body': body,
+    if (retryAfterMs != null) 'retryAfterMs': retryAfterMs,
+  };
+
+  factory StructuredError.fromJson(Object? json) {
+    final map = json is Map<String, Object?> ? json : const <String, Object?>{};
+    return StructuredError(
+      type: map['type'] is String ? map['type'] as String : '',
+      message: map['message'] is String ? map['message'] as String : '',
+      status: _intOrNull(map['status']),
+      // The wire nests the raw body as `response.body`; flatten it to `body`.
+      body: _nestedObject(map, 'response', 'body') ?? map['body'],
+      retryAfterMs: _intOrNull(map['retryAfterMs']),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is StructuredError &&
+      other.type == type &&
+      other.message == message &&
+      other.status == status &&
+      other.body == body &&
+      other.retryAfterMs == retryAfterMs;
+
+  @override
+  int get hashCode => Object.hash(type, message, status, body, retryAfterMs);
+
+  @override
+  String toString() =>
+      'StructuredError(type: $type, message: $message, status: $status, '
+      'body: $body, retryAfterMs: $retryAfterMs)';
+}
+
+/// The in-flight provider retry the service schedules on a retried assistant
+/// message (its `Session.Message.Assistant.retry`): the attempt number, the
+/// millisecond epoch the next attempt is scheduled for, and the error that
+/// triggered the retry. `null` once the retry lands (the message then reads
+/// back with no `retry`).
+class MessageRetry {
+  const MessageRetry({
+    required this.attempt,
+    required this.at,
+    required this.error,
+  });
+
+  /// The retry attempt number (`attempt > 0`); it climbs in place on the one
+  /// assistant row across attempts (the service retries the same message id).
+  final int attempt;
+
+  /// The millisecond epoch of the *scheduled* next attempt.
+  final int at;
+
+  /// The error that triggered the retry (the service's `retry.error`).
+  final StructuredError error;
+
+  Map<String, Object?> toJson() => {
+    'attempt': attempt,
+    'at': at,
+    'error': error.toJson(),
+  };
+
+  factory MessageRetry.fromJson(Object? json) {
+    final map = json is Map<String, Object?> ? json : const {};
+    return MessageRetry(
+      attempt: _intOrNull(map['attempt']) ?? 0,
+      at: _intOrNull(map['at']) ?? 0,
+      error: StructuredError.fromJson(map['error']),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is MessageRetry &&
+      other.attempt == attempt &&
+      other.at == at &&
+      other.error == error;
+
+  @override
+  int get hashCode => Object.hash(attempt, at, error);
+
+  @override
+  String toString() =>
+      'MessageRetry(attempt: $attempt, at: $at, error: $error)';
+}
+
 /// One message of a session's history (spec section 5, endpoint 6).
 class SessionMessage {
   const SessionMessage({
@@ -160,6 +290,9 @@ class SessionMessage {
     this.completed,
     this.outputTokens,
     this.reasoningTokens,
+    this.retry,
+    this.error,
+    this.outcome,
   });
 
   /// The service's message id (its `Session.Message` id). The bridge sets it
@@ -216,6 +349,25 @@ class SessionMessage {
   /// `tokens.reasoning`), or `null` when the service carried no tokens.
   final int? reasoningTokens;
 
+  /// The in-flight provider retry on a retried assistant message (the
+  /// service's `retry`, issue #155): `null` when the message is not mid-retry.
+  /// Never set together with [error] (the service never carries both on one
+  /// message).
+  final MessageRetry? retry;
+
+  /// The terminal failure: the exhausted retry's error on an assistant
+  /// message (the service's assistant `error`), or the turn's failure on an
+  /// `idle` message (the service's idle `error`). `null` when the message
+  /// carries no terminal failure. An idle-only error (no assistant row) is a
+  /// different case than an assistant error — preserved by keeping the two on
+  /// their own rows (the probe's Q3 distinction).
+  final StructuredError? error;
+
+  /// The turn verdict on an `idle` message (the service's `outcome`):
+  /// `succeeded`, `failed`, or `interrupted`. `null` for every other row and
+  /// for an idle the service carried no outcome for.
+  final String? outcome;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'role': role,
@@ -228,6 +380,11 @@ class SessionMessage {
     'completed': completed,
     'outputTokens': outputTokens,
     'reasoningTokens': reasoningTokens,
+    // No null churn (issue #155): a message with none of the retry/terminal
+    // error/verdict serialises with exactly the keys it does today.
+    if (retry != null) 'retry': retry!.toJson(),
+    if (error != null) 'error': error!.toJson(),
+    if (outcome != null) 'outcome': outcome,
   };
 
   factory SessionMessage.fromJson(Object? json) {
@@ -249,6 +406,13 @@ class SessionMessage {
       completed: _intOrNull(map['completed']),
       outputTokens: _intOrNull(map['outputTokens']),
       reasoningTokens: _intOrNull(map['reasoningTokens']),
+      retry: map['retry'] is Map<String, Object?>
+          ? MessageRetry.fromJson(map['retry'])
+          : null,
+      error: map['error'] is Map<String, Object?>
+          ? StructuredError.fromJson(map['error'])
+          : null,
+      outcome: map['outcome'] is String ? map['outcome'] as String : null,
     );
   }
 
@@ -265,7 +429,10 @@ class SessionMessage {
       other.streamed == streamed &&
       other.completed == completed &&
       other.outputTokens == outputTokens &&
-      other.reasoningTokens == reasoningTokens;
+      other.reasoningTokens == reasoningTokens &&
+      other.retry == retry &&
+      other.error == error &&
+      other.outcome == outcome;
 
   @override
   int get hashCode => Object.hash(
@@ -280,6 +447,9 @@ class SessionMessage {
     completed,
     outputTokens,
     reasoningTokens,
+    retry,
+    error,
+    outcome,
   );
 
   @override
@@ -288,7 +458,8 @@ class SessionMessage {
       'text: $text, reasoning: $reasoning, '
       'contextTokens: $contextTokens, tools: $tools, '
       'created: $created, streamed: $streamed, completed: $completed, '
-      'outputTokens: $outputTokens, reasoningTokens: $reasoningTokens)';
+      'outputTokens: $outputTokens, reasoningTokens: $reasoningTokens, '
+      'retry: $retry, error: $error, outcome: $outcome)';
 }
 
 /// One page of a session's history, as the paged read serves it (issue
@@ -334,6 +505,13 @@ bool _sameList(List<SessionMessage> a, List<SessionMessage> b) {
 }
 
 int? _intOrNull(Object? value) => value is num ? value.toInt() : null;
+
+/// The value at `map[outer][inner]`, or `null` when either level is absent or
+/// not a map (the service's nested `response.body`).
+Object? _nestedObject(Map<String, Object?> map, String outer, String inner) {
+  final outerValue = map[outer];
+  return outerValue is Map<String, Object?> ? outerValue[inner] : null;
+}
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {
   if (a.length != b.length) return false;

@@ -310,6 +310,15 @@ void main() {
   final formReplyBodies = <Map<String, Object?>>[];
   final dismissedFormPaths = <String>[];
 
+  // The captured service row(s) (issue #155's probe fixtures) served verbatim
+  // by `GET /api/session/ses_155/message` to replay through the real parser:
+  // `null` when the replay route is not under test.
+  Object? replayMessages;
+
+  // How many times the replay route was read (a second walk would be a
+  // double-page bug in `getMessages`).
+  var replayMessagesReads = 0;
+
   // The command-menu (issue #46) registries and recorded request bodies.
   final projectCommands = [
     {'name': 'deploy', 'description': 'ship it'},
@@ -428,6 +437,22 @@ void main() {
                   : null,
               'previous': null,
             },
+          }),
+        );
+      } else if (path == '/api/session/ses_155/message' &&
+          req.method == 'GET') {
+        // Issue #155's captured service rows, served verbatim (the client's
+        // parser is the unit under test): the fixture body carries its own
+        // data/cursor and the client re-paginates from it.
+        replayMessagesReads++;
+        final decoded = jsonDecode(replayMessages as String);
+        final data = (decoded is Map<String, Object?>)
+            ? (decoded['data'] as List)
+            : <Object?>[];
+        resp.write(
+          jsonEncode({
+            'data': data,
+            'cursor': {'next': null, 'previous': null},
           }),
         );
       } else if (path == '/api/session/ses_1/permission' &&
@@ -658,6 +683,8 @@ void main() {
   });
 
   tearDown(() async {
+    replayMessages = null;
+    replayMessagesReads = 0;
     await server.close(force: true);
   });
 
@@ -894,8 +921,12 @@ void main() {
           created: 3,
         ),
       );
-      // The idle marker maps to the turn-boundary role, no content.
-      expect(messages[3], const SessionMessage(id: 'm5', role: 'idle'));
+      // The idle marker maps to the turn-boundary role, no content; its
+      // `outcome` (the turn verdict) is carried now (issue #155).
+      expect(
+        messages[3],
+        const SessionMessage(id: 'm5', role: 'idle', outcome: 'succeeded'),
+      );
       // The client walked the pages: a full first page, then the rest.
       expect(messageOffsets, [0, 200]);
     });
@@ -1165,6 +1196,207 @@ void main() {
         await dir.delete(recursive: true);
       }
     });
+  });
+
+  group('OpencodeHttpService message retry replay (issue #155)', () {
+    const rateLimitBody =
+        '{"detail":{"error":{"message":"Model API rate limit exceeded; please retry later","type":"rate_limit_error","code":"token_concurrency_rate_limit_exceeded"}}}';
+    const rateLimitMessage =
+        'Provider request failed with HTTP 429: '
+        '{"detail":{"error":{"message":"Model API rate limit exceeded; please retry later","type":"rate_limit_error","code":"token_concurrency_rate_limit_exceeded"}}}';
+    const rateLimitError = StructuredError(
+      type: 'provider.rate-limit',
+      message: rateLimitMessage,
+      status: 429,
+      body: rateLimitBody,
+      retryAfterMs: 1000,
+    );
+
+    SessionMessage messageById(List<SessionMessage> messages, String id) =>
+        messages.firstWhere((m) => m.id == id);
+
+    test('an in-flight 429 retry (attempt 2, captured fixture)', () async {
+      replayMessages = await File(
+        'test/fixtures/retry/message_429_inflight_attempt_2.json',
+      ).readAsString();
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final messages = await service.getMessages('ses_155');
+
+      // The client walked exactly one page (the fixture has no next cursor).
+      expect(replayMessagesReads, 1);
+      // The turn chronology: the user prompt, then the assistant mid-retry.
+      expect(messages.map((m) => m.id), [
+        'msg_1c68f428f001S3dFNmh3LTTnuU',
+        'msg_1c68f42c7001H8MgETik6BH3y4',
+      ]);
+      final assistant = messageById(messages, 'msg_1c68f42c7001H8MgETik6BH3y4');
+      expect(assistant.role, 'assistant');
+      // No content yet: a retried turn has produced nothing.
+      expect(assistant.text, isNull);
+      expect(assistant.tools, isEmpty);
+      expect(assistant.created, 1794332639945);
+      // The in-flight retry, field-for-field (the nested wire response.body
+      // flattened to the contract's error.body).
+      expect(
+        assistant.retry,
+        const MessageRetry(
+          attempt: 2,
+          at: 1794332643505,
+          error: rateLimitError,
+        ),
+      );
+      // Exactly one of retry / error on the message (the service never
+      // carries both); no verdict on an assistant row.
+      expect(assistant.error, isNull);
+      expect(assistant.outcome, isNull);
+    });
+
+    test(
+      'the same message row re-read at attempt 3 (in-place climb)',
+      () async {
+        replayMessages = await File(
+          'test/fixtures/retry/message_429_inflight_attempt_3.json',
+        ).readAsString();
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final messages = await service.getMessages('ses_155');
+
+        // Q1: the retry climbs in place on the one assistant row (not one row
+        // per attempt) — same id, a higher attempt.
+        final assistant = messageById(
+          messages,
+          'msg_1c68f42c7001H8MgETik6BH3y4',
+        );
+        expect(
+          assistant.retry,
+          const MessageRetry(
+            attempt: 3,
+            at: 1794332647492,
+            error: rateLimitError,
+          ),
+        );
+        expect(assistant.error, isNull);
+        expect(assistant.outcome, isNull);
+      },
+    );
+
+    test('a retried-then-succeeded message (no retry, no error)', () async {
+      replayMessages = await File(
+        'test/fixtures/retry/message_429_succeeded.json',
+      ).readAsString();
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      final messages = await service.getMessages('ses_155');
+
+      final assistant = messageById(messages, 'msg_1c68f42c7001H8MgETik6BH3y4');
+      // The retry landed: the same assistant message reads back clean, with
+      // the content it streamed.
+      expect(assistant.retry, isNull);
+      expect(assistant.error, isNull);
+      expect(assistant.text, '\n\none');
+      expect(
+        assistant.reasoning,
+        'The user is asking me to reply with exactly "one". This is a simple instruction to output exactly that text. There\'s no need to call any tool.\n',
+      );
+      expect(assistant.created, 1794332647500);
+      expect(assistant.streamed, 1794332650175);
+      expect(assistant.completed, 1794332650176);
+      expect(assistant.contextTokens, 9549);
+      expect(assistant.outputTokens, 37);
+      expect(assistant.reasoningTokens, 34);
+      // Q2: equal to an untouched message composed with no retry/error state.
+      expect(
+        assistant,
+        const SessionMessage(
+          id: 'msg_1c68f42c7001H8MgETik6BH3y4',
+          role: 'assistant',
+          text: '\n\none',
+          reasoning: 'The user is asking me to reply with exactly "one". This is a simple instruction to output exactly that text. There\'s no need to call any tool.\n',
+          contextTokens: 9549,
+          created: 1794332647500,
+          streamed: 1794332650175,
+          completed: 1794332650176,
+          outputTokens: 37,
+          reasoningTokens: 34,
+        ),
+      );
+      // The turn's verdict carries on the idle boundary row (not the
+      // assistant).
+      final idle = messageById(messages, 'msg_1c68f6ac1001IhNVGv7ax9XhHS');
+      expect(idle.role, 'idle');
+      expect(idle.outcome, 'succeeded');
+      expect(idle.error, isNull);
+    });
+
+    test(
+      'an exhausted / failed turn (terminal error on the idle row)',
+      () async {
+        replayMessages = await File(
+          'test/fixtures/retry/message_failed_model_unavailable.json',
+        ).readAsString();
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final messages = await service.getMessages('ses_155');
+
+        // Q3: the non-retryable failure writes no assistant row — the terminal
+        // error lands on the idle row (outcome failed) instead.
+        expect(messages.map((m) => m.id), [
+          'msg_1c692fb9800116ZYsWHYV7S4AG',
+          'msg_1c692fbae0017m3RHjuXe6ewTR',
+        ]);
+        final idle = messageById(messages, 'msg_1c692fbae0017m3RHjuXe6ewTR');
+        expect(idle.role, 'idle');
+        expect(idle.outcome, 'failed');
+        expect(
+          idle.error,
+          const StructuredError(
+            type: 'provider.no-route',
+            message: 'Model unavailable: amd/qwen3.8-flash-next',
+          ),
+        );
+        expect(idle.retry, isNull);
+      },
+    );
+
+    test(
+      'the paged read surfaces the same retry / terminal / verdict',
+      () async {
+        // `getMessages` and `getMessagesPage` parse through the same
+        // `_messageFrom`, so the paged read cannot disagree with the full walk.
+        replayMessages = await File(
+          'test/fixtures/retry/message_429_inflight_attempt_2.json',
+        ).readAsString();
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final page = await service.getMessagesPage('ses_155');
+
+        final assistant = messageById(
+          page.messages,
+          'msg_1c68f42c7001H8MgETik6BH3y4',
+        );
+        expect(
+          assistant.retry,
+          const MessageRetry(
+            attempt: 2,
+            at: 1794332643505,
+            error: rateLimitError,
+          ),
+        );
+
+        replayMessages = await File(
+          'test/fixtures/retry/message_failed_model_unavailable.json',
+        ).readAsString();
+        final failedPage = await service.getMessagesPage('ses_155');
+        final idle = messageById(
+          failedPage.messages,
+          'msg_1c692fbae0017m3RHjuXe6ewTR',
+        );
+        expect(idle.outcome, 'failed');
+        expect(
+          idle.error,
+          const StructuredError(
+            type: 'provider.no-route',
+            message: 'Model unavailable: amd/qwen3.8-flash-next',
+          ),
+        );
+      },
+    );
   });
 
   group('OpencodeHttpService `/` command menu (issue #46)', () {

@@ -18,11 +18,13 @@ class FakeService implements OpencodeService {
     List<OpencodeSession>? sessions,
     Map<String, String>? names,
     Set<String>? active,
+    List<SessionMessage>? messages,
     this.listError,
     this.cancelServesRoute = true,
   }) : sessions = sessions ?? [],
        names = names ?? {},
-       active = active ?? {};
+       active = active ?? {},
+       messages = messages ?? const [];
 
   List<OpencodeSession> sessions;
   Map<String, String> names;
@@ -37,9 +39,11 @@ class FakeService implements OpencodeService {
   bool cancelServesRoute;
 
   final List<String> detailCalls = [];
+  final List<String> messageCalls = [];
   final List<String> cancelled = [];
   final List<String> deleted = [];
   final List<String> forked = [];
+  final List<SessionMessage> messages;
   var projectsCalls = 0;
   var createCalls = 0;
   var createInCalls = 0;
@@ -111,7 +115,10 @@ class FakeService implements OpencodeService {
   // observe which service was routed to).
 
   @override
-  Future<List<SessionMessage>> getMessages(String id) async => const [];
+  Future<List<SessionMessage>> getMessages(String id) async {
+    messageCalls.add(id);
+    return List.of(messages);
+  }
 
   @override
   Future<MessagePage> getMessagesPage(
@@ -486,6 +493,82 @@ void main() {
       expect(host.detailCalls, ['ses_host']);
       expect(orb1.detailCalls, isEmpty);
     });
+
+    test(
+      'a retry-bearing orb session routes its message read to the same service '
+      'that served the session (no host/orb split for a retried orb turn)',
+      () async {
+        // Issue #155: the orb's turn is mid-retry. The read of that session's
+        // history must go to the same service that owned the session — never
+        // split across host and orb.
+        const retried = SessionMessage(
+          id: 'msg_orb_retry',
+          role: 'assistant',
+          retry: MessageRetry(
+            attempt: 2,
+            at: 1794332643505,
+            error: StructuredError(
+              type: 'provider.rate-limit',
+              message: 'HTTP 429',
+            ),
+          ),
+        );
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession], messages: [retried]);
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        await composite.listSessions(); // learn the table
+
+        // The session read already routed to the orb.
+        await swallow(() => composite.getDetail('ses_orb'));
+        expect(orb1.detailCalls, ['ses_orb']);
+        expect(host.detailCalls, isEmpty);
+
+        // The message read routes to the same orb service (not the host) and
+        // carries the retry back.
+        final messages = await composite.getMessages('ses_orb');
+        expect(orb1.messageCalls, ['ses_orb']);
+        expect(host.messageCalls, isEmpty);
+        expect(messages, [retried]);
+        expect(messages.single.retry, isNotNull);
+      },
+    );
+
+    test(
+      'a retry-bearing host session routes its message read to the host',
+      () async {
+        const retried = SessionMessage(
+          id: 'msg_host_retry',
+          role: 'assistant',
+          retry: MessageRetry(
+            attempt: 3,
+            at: 1794332647492,
+            error: StructuredError(
+              type: 'provider.rate-limit',
+              message: 'HTTP 429',
+            ),
+          ),
+        );
+        final host = FakeService(sessions: [hostSession], messages: [retried]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        await composite.listSessions();
+
+        final messages = await composite.getMessages('ses_host');
+        expect(host.messageCalls, ['ses_host']);
+        expect(orb1.messageCalls, isEmpty);
+        expect(messages, [retried]);
+      },
+    );
 
     test(
       'an unknown session id falls back to the host after a refresh',

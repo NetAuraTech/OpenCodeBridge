@@ -1,6 +1,15 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/model/message.dart';
 
+// The captured 429 wire shape (issue #155), shared by the model and the
+// HTTP-service replay tests. `message` is the provider's one-line error with
+// the raw body inlined; `body` is the provider's raw `response.body`.
+const _rateLimitBody =
+    '{"detail":{"error":{"message":"Model API rate limit exceeded; please retry later","type":"rate_limit_error","code":"token_concurrency_rate_limit_exceeded"}}}';
+const _rateLimitMessage =
+    'Provider request failed with HTTP 429: '
+    '{"detail":{"error":{"message":"Model API rate limit exceeded; please retry later","type":"rate_limit_error","code":"token_concurrency_rate_limit_exceeded"}}}';
+
 void main() {
   group('ToolCall round-trip', () {
     test('serializes all fields and deserializes back', () {
@@ -243,6 +252,213 @@ void main() {
     });
   });
 
+  group('StructuredError round-trip', () {
+    test('a full 429 error round-trips, nested wire shape flattened', () {
+      // The wire nests the provider's raw body as `response.body`; the
+      // contract flattens it to `body` (documented flattening, issue #155).
+      final err = StructuredError.fromJson({
+        'type': 'provider.rate-limit',
+        'message': _rateLimitMessage,
+        'status': 429,
+        'response': {'body': _rateLimitBody},
+        'retryAfterMs': 1000,
+      });
+      expect(
+        err,
+        const StructuredError(
+          type: 'provider.rate-limit',
+          message: _rateLimitMessage,
+          status: 429,
+          body: _rateLimitBody,
+          retryAfterMs: 1000,
+        ),
+      );
+      // Omitted fields drop from the wire (no null churn).
+      expect(err.toJson(), {
+        'type': 'provider.rate-limit',
+        'message': _rateLimitMessage,
+        'status': 429,
+        'body': _rateLimitBody,
+        'retryAfterMs': 1000,
+      });
+      expect(StructuredError.fromJson(err.toJson()), err);
+      // A row decoded twice is equal, and a differing field is not.
+      expect(err, StructuredError.fromJson(err.toJson()));
+      expect(
+        err,
+        isNot(
+          const StructuredError(
+            type: 'provider.no-route',
+            message: 'Model unavailable: amd/qwen3.8-flash-next',
+          ),
+        ),
+      );
+      expect(err.hashCode, StructuredError.fromJson(err.toJson()).hashCode);
+    });
+
+    test(
+      'a minimal error (no status/body/retryAfterMs) keeps only the keys',
+      () {
+        const err = StructuredError(
+          type: 'provider.no-route',
+          message: 'Model unavailable: amd/qwen3.8-flash-next',
+        );
+        expect(err.toJson(), {
+          'type': 'provider.no-route',
+          'message': 'Model unavailable: amd/qwen3.8-flash-next',
+        });
+        expect(StructuredError.fromJson(err.toJson()), err);
+      },
+    );
+  });
+
+  group('MessageRetry round-trip', () {
+    test('attempt, at and the structured error round-trip by content', () {
+      final retry = MessageRetry.fromJson({
+        'attempt': 2,
+        'at': 1794332643505,
+        'error': {
+          'type': 'provider.rate-limit',
+          'message': _rateLimitMessage,
+          'status': 429,
+          'response': {'body': _rateLimitBody},
+          'retryAfterMs': 1000,
+        },
+      });
+      expect(
+        retry,
+        const MessageRetry(
+          attempt: 2,
+          at: 1794332643505,
+          error: StructuredError(
+            type: 'provider.rate-limit',
+            message: _rateLimitMessage,
+            status: 429,
+            body: _rateLimitBody,
+            retryAfterMs: 1000,
+          ),
+        ),
+      );
+      expect(retry.toJson(), {
+        'attempt': 2,
+        'at': 1794332643505,
+        'error': {
+          'type': 'provider.rate-limit',
+          'message': _rateLimitMessage,
+          'status': 429,
+          'body': _rateLimitBody,
+          'retryAfterMs': 1000,
+        },
+      });
+      expect(MessageRetry.fromJson(retry.toJson()), retry);
+    });
+  });
+
+  group('SessionMessage retry / terminal error / outcome (issue #155)', () {
+    test(
+      'a retried assistant message carries retry (no error, no outcome)',
+      () {
+        final msg = SessionMessage(
+          id: 'msg_x',
+          role: 'assistant',
+          created: 1794332639945,
+          retry: const MessageRetry(
+            attempt: 2,
+            at: 1794332643505,
+            error: StructuredError(
+              type: 'provider.rate-limit',
+              message: _rateLimitMessage,
+              status: 429,
+              body: _rateLimitBody,
+              retryAfterMs: 1000,
+            ),
+          ),
+        );
+        final json = msg.toJson();
+        // Exactly one of retry / error; outcome omitted.
+        expect(json.containsKey('retry'), isTrue);
+        expect(json.containsKey('error'), isFalse);
+        expect(json.containsKey('outcome'), isFalse);
+        final back = SessionMessage.fromJson(json);
+        expect(back, msg); // decoded twice is equal
+        expect(back.retry!.attempt, 2);
+        expect(back.retry!.at, 1794332643505);
+        expect(back.retry!.error.type, 'provider.rate-limit');
+        expect(back.retry!.error.body, _rateLimitBody);
+        expect(back.error, isNull);
+        expect(back.outcome, isNull);
+      },
+    );
+
+    test('a terminal assistant error carries error (no retry)', () {
+      final msg = SessionMessage(
+        id: 'msg_x',
+        role: 'assistant',
+        error: const StructuredError(
+          type: 'provider.no-route',
+          message: 'Model unavailable: amd/qwen3.8-flash-next',
+        ),
+      );
+      final json = msg.toJson();
+      expect(json.containsKey('error'), isTrue);
+      expect(json.containsKey('retry'), isFalse);
+      expect(json.containsKey('outcome'), isFalse);
+      expect(SessionMessage.fromJson(json), msg);
+    });
+
+    test('an idle row carries the outcome verdict', () {
+      const msg = SessionMessage(id: 'm5', role: 'idle', outcome: 'succeeded');
+      final json = msg.toJson();
+      expect(json['outcome'], 'succeeded');
+      expect(json.containsKey('retry'), isFalse);
+      expect(json.containsKey('error'), isFalse);
+      expect(SessionMessage.fromJson(json), msg);
+    });
+
+    test('a failed idle row carries outcome failed and its error', () {
+      final msg = SessionMessage(
+        id: 'm6',
+        role: 'idle',
+        outcome: 'failed',
+        error: const StructuredError(
+          type: 'provider.no-route',
+          message: 'Model unavailable: amd/qwen3.8-flash-next',
+        ),
+      );
+      final json = msg.toJson();
+      expect(json['outcome'], 'failed');
+      expect(json['error'], {
+        'type': 'provider.no-route',
+        'message': 'Model unavailable: amd/qwen3.8-flash-next',
+      });
+      expect(json.containsKey('retry'), isFalse);
+      expect(SessionMessage.fromJson(json), msg);
+    });
+
+    test('an ordinary message keeps its exact current JSON shape', () {
+      // No null churn (issue #155): a message with no retry / terminal error
+      // / verdict serialises with exactly the keys it did before — omitted,
+      // not null.
+      const msg = SessionMessage(id: 'm1', role: 'user', text: 'hello');
+      expect(msg.toJson(), {
+        'id': 'm1',
+        'role': 'user',
+        'text': 'hello',
+        'reasoning': null,
+        'contextTokens': null,
+        'tools': <Object?>[],
+        'created': null,
+        'streamed': null,
+        'completed': null,
+        'outputTokens': null,
+        'reasoningTokens': null,
+      });
+      expect(msg.toJson().containsKey('retry'), isFalse);
+      expect(msg.toJson().containsKey('error'), isFalse);
+      expect(msg.toJson().containsKey('outcome'), isFalse);
+    });
+  });
+
   group('Wire tolerance', () {
     test('unknown fields are ignored', () {
       final tc = ToolCall.fromJson({
@@ -268,7 +484,53 @@ void main() {
       'SessionMessage(id: null, role: user, text: null, '
       'reasoning: null, contextTokens: null, tools: [], created: null, '
       'streamed: null, completed: null, outputTokens: null, '
-      'reasoningTokens: null)',
+      'reasoningTokens: null, retry: null, error: null, outcome: null)',
+    );
+  });
+
+  test('toString prints the retry / terminal error / outcome by content', () {
+    const message = SessionMessage(
+      id: 'm1',
+      role: 'assistant',
+      text: 'working',
+      retry: MessageRetry(
+        attempt: 2,
+        at: 1794332643505,
+        error: StructuredError(
+          type: 'provider.rate-limit',
+          message: 'HTTP 429',
+        ),
+      ),
+    );
+    expect(
+      message.toString(),
+      'SessionMessage(id: m1, role: assistant, text: working, '
+      'reasoning: null, contextTokens: null, tools: [], created: null, '
+      'streamed: null, completed: null, outputTokens: null, '
+      'reasoningTokens: null, '
+      'retry: MessageRetry(attempt: 2, at: 1794332643505, '
+      'error: StructuredError(type: provider.rate-limit, message: HTTP 429, '
+      'status: null, body: null, retryAfterMs: null)), '
+      'error: null, outcome: null)',
+    );
+
+    final failed = SessionMessage(
+      id: 'm6',
+      role: 'idle',
+      outcome: 'failed',
+      error: const StructuredError(
+        type: 'provider.no-route',
+        message: 'Model unavailable: amd/qwen3.8-flash-next',
+      ),
+    );
+    expect(
+      failed.toString(),
+      'SessionMessage(id: m6, role: idle, text: null, reasoning: null, '
+      'contextTokens: null, tools: [], created: null, streamed: null, '
+      'completed: null, outputTokens: null, reasoningTokens: null, '
+      'retry: null, error: StructuredError(type: provider.no-route, '
+      'message: Model unavailable: amd/qwen3.8-flash-next, status: null, '
+      'body: null, retryAfterMs: null), outcome: failed)',
     );
   });
 }
