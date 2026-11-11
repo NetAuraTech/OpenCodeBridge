@@ -100,12 +100,25 @@ class _HomeShellState extends State<HomeShell> {
 
   /// Subscribes to the deep links when the push flow comes up (the service
   /// is created after the client entry, once the login is restored).
+  ///
+  /// Tolerates a stream that already carries a listener: the deep-link
+  /// stream is handed to the shell as a plain `Stream`, and a rebuilt
+  /// (remounted) shell with the same service in hand would otherwise
+  /// re-listen a single-subscription stream and crash the whole tree
+  /// (`Bad state: Stream has already been listened to.`). The stream
+  /// refuses the second listener, so the deep links stay quiet until the
+  /// service hands out a fresh one (a saved Firebase project does) —
+  /// never an error screen.
   void _setDeepLinks(Stream<DeepLink>? stream) {
     final sub = _deepLinksSub;
     _deepLinksSub = null;
     if (sub != null) sub.cancel();
     if (stream == null) return;
-    _deepLinksSub = stream.listen(_onDeepLink);
+    try {
+      _deepLinksSub = stream.listen(_onDeepLink);
+    } on StateError {
+      // A listener already owns the stream: the shell keeps running.
+    }
   }
 
   /// A tapped notification: switch to its tab and hand it the target to

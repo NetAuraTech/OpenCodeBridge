@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../client/authenticated_http.dart';
@@ -27,7 +28,27 @@ class NotificationService {
     required this._settings,
     required this._bridgeBase,
     this._auth,
-  });
+  }) {
+    // Built in the body (not as a field initializer): the onListen closure
+    // reads this instance's buffer.
+    _deepLinks = StreamController<DeepLink>.broadcast(
+      onListen: () {
+        // The first listener attaches (or re-attaches after the last one
+        // went): hand it the links buffered while it was away, one
+        // microtask later (a broadcast controller must not deliver inside
+        // onListen).
+        final pending = List<DeepLink>.of(_bufferedLinks);
+        if (pending.isEmpty) return;
+        _bufferedLinks.clear();
+        scheduleMicrotask(() {
+          if (_deepLinks.isClosed || !_deepLinks.hasListener) return;
+          for (final link in pending) {
+            _deepLinks.add(link);
+          }
+        });
+      },
+    );
+  }
 
   final AppSettings _settings;
 
@@ -37,11 +58,18 @@ class NotificationService {
   /// The Access login's header provider (issue #23); `null` in server mode.
   final AuthHeaderProvider? _auth;
 
-  final StreamController<DeepLink> _deepLinks = StreamController<DeepLink>();
+  /// The tapped-notification links, buffered in [_bufferedLinks] until a
+  /// listener attaches (a cold-start tap arrives before the UI subscribes;
+  /// a broadcast stream would drop them).
+  final _bufferedLinks = <DeepLink>[];
+
+  late final StreamController<DeepLink> _deepLinks;
 
   /// Where a tapped notification lands (the [DeepLink] from its data
-  /// payload); a single-subscription stream, buffered until a listener
-  /// attaches (a cold-start tap arrives before the UI subscribes).
+  /// payload): buffered until a listener attaches (a cold-start tap
+  /// arrives before the UI subscribes), and re-listenable — the shell
+  /// mounts and disposes freely across the app's rebuilds (a re-login, a
+  /// reconnect), and each of its listeners gets the buffered links.
   Stream<DeepLink> get deepLinks => _deepLinks.stream;
 
   FirebaseMessaging? _messaging;
@@ -130,8 +158,22 @@ class NotificationService {
     final link = message.data['link'];
     if (link == null) return;
     final parsed = DeepLink.tryParse(Uri.parse(link));
-    if (parsed != null && !_deepLinks.isClosed) _deepLinks.add(parsed);
+    if (parsed == null) return;
+    if (_deepLinks.hasListener) {
+      if (!_deepLinks.isClosed) _deepLinks.add(parsed);
+    } else {
+      // No listener yet (a cold-start tap, the UI not subscribed yet): a
+      // broadcast stream would drop it, so buffer it until one attaches.
+      _bufferedLinks.add(parsed);
+    }
   }
+
+  /// The tapped-notification feed, exposed so the buffering/re-delivery
+  /// behaviour can be tested without a live FCM (the real feed is the
+  /// Firebase messaging streams, which are static and unavailable off a
+  /// real Android device).
+  @visibleForTesting
+  void openForTest(RemoteMessage message) => _open(message);
 
   /// Releases the streams (the app's `dispose`).
   Future<void> stop() async {

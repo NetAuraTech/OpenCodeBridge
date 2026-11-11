@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/client/connection_monitor.dart';
+import 'package:opencodebridge/notify/notification_service.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:opencodebridge/ui/home_shell.dart';
 import 'package:opencodebridge/ui/orbs_tab.dart';
@@ -78,6 +79,54 @@ void main() {
       );
       expect(find.text('Notifications'), findsOneWidget);
 
+      monitor.dispose();
+    });
+
+    testWidgets('remounts with the same notification service deep-link stream '
+        'without crashing', (tester) async {
+      // The bug seen on a real device (the red screen after the Cloudflare
+      // Access login): the shell's deep-link stream came from the
+      // NotificationService, and a remounted shell (a rebuild that
+      // unmounts and re-inflates the HomeShell) re-listens the same stream
+      // object in `initState`. The stream must be re-listenable, or the
+      // second `listen` throws `Bad state: Stream has already been listened
+      // to.` and the whole tree is replaced by the red error screen.
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
+      // A real service (no `start()`, so no FCM / no timers) whose
+      // `deepLinks` is the stream the shell listens to.
+      final notifications = NotificationService(
+        settings: settings,
+        bridgeBase: Uri.parse('http://127.0.0.1:1/'),
+      );
+
+      Widget pumpShell() => MaterialApp(
+        home: HomeShell(
+          monitor: monitor,
+          settings: settings,
+          mode: AppMode.client,
+          deepLinks: notifications.deepLinks,
+        ),
+      );
+
+      // First mount: the shell subscribes.
+      await tester.pumpWidget(pumpShell());
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Sessions'), findsWidgets);
+
+      // Unmount, then remount the shell with the very same stream object
+      // (the service is still in hand). Without the re-listenable stream
+      // this throws and the tree is replaced by the red error screen.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(pumpShell());
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Sessions'), findsWidgets);
+
+      await tester.pumpWidget(const SizedBox());
       monitor.dispose();
     });
   });
