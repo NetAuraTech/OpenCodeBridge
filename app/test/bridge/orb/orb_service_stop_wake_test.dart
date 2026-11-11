@@ -10,6 +10,7 @@ import 'package:opencodebridge/bridge/orb/orb_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_cli.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/model/command.dart';
+import 'package:opencodebridge/model/session_detail.dart';
 
 /// A deep-equal index lookup ([List.indexOf] compares list elements by
 /// identity, which never matches a fresh literal).
@@ -386,6 +387,19 @@ class _FakeOpencode implements OpencodeService {
   OpencodeSession? nextCreated;
   Object? deleteError;
 
+  /// The (model, agent) [createSessionInDirectory] was asked to create a
+  /// session with — what the bridge passes at creation, observable here
+  /// (issue #187).
+  final List<(ModelRef?, String?)> createdInWith = [];
+
+  /// The detail per session id, for [getDetail]; an id with no detail here
+  /// is the service's 404 (or [detailError] when set).
+  final Map<String, SessionDetail> details = {};
+  Object? detailError;
+
+  /// The (id, model) pairs [setModel] was called with.
+  final List<(String, ModelRef)> modelsSet = [];
+
   /// The payload [exportSession] answers (the issue #173 HTTP fallback of a
   /// truncated CLI export); `null` and [exportError] `null` answer the
   /// real service's 404.
@@ -402,7 +416,24 @@ class _FakeOpencode implements OpencodeService {
     String? agent,
   }) async {
     createdDirectories.add(directory);
+    createdInWith.add((model, agent));
     return nextCreated!;
+  }
+
+  @override
+  Future<SessionDetail> getDetail(String id) async {
+    final error = detailError;
+    if (error != null) throw error;
+    final detail = details[id];
+    if (detail == null) {
+      throw OpencodeServiceError(404, 'no detail for $id');
+    }
+    return detail;
+  }
+
+  @override
+  Future<void> setModel(String id, ModelRef model) async {
+    modelsSet.add((id, model));
   }
 
   @override
@@ -2325,6 +2356,58 @@ void main() {
         expect(row.active, isTrue);
         expect(row.orb, orbId);
       });
+
+      test(
+        'does not inherit the previous session\'s subagent (issue #187)',
+        () async {
+          addOrb(port: 49153);
+          const model = ModelRef(id: 'gpt', providerId: 'openai');
+          final orb = _FakeOpencode()
+            ..sessions.add(
+              const OpencodeSession(
+                id: 's-old',
+                title: 'old',
+                projectId: 'proj-orb',
+                created: 1700000000000,
+                location: '/workspace',
+              ),
+            )
+            ..details['s-old'] = const SessionDetail(
+              id: 's-old',
+              title: 'old',
+              location: '/workspace',
+              cost: 0,
+              tokens: TokenUsage(
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+              ),
+              model: ModelRef(id: 'gpt', providerId: 'openai'),
+              agent: 'reviewer-flash', // a restricted subagent, not the default
+            )
+            ..nextCreated = const OpencodeSession(
+              id: 's-new',
+              title: 'New session',
+              projectId: 'proj-orb',
+              created: 1700000000001,
+              location: '/workspace',
+            )
+            ..names['proj-orb'] = 'workspace'
+            ..active.add('s-new');
+
+          final row = await service(orbServiceFor: (url, password) => orb)
+              .createSessionOnOrb(orbId);
+
+          // The model is inherited (the intent of #136); the agent is not —
+          // the orb service picks its default agent, as a session created
+          // directly in opencode would.
+          expect(orb.createdInWith.single, (model, null));
+          expect(orb.modelsSet.single, ('s-new', model));
+          expect(row.orb, orbId);
+        },
+      );
 
       test('refuses a stopped orb with notRunning', () async {
         addOrb(state: 'exited');

@@ -1936,8 +1936,13 @@ class OrbService {
 
   /// Create a session on the running orb [id] (issue #97, spec §9.5): the
   /// orb's workspace (`/workspace`) is the new session's working directory.
-  /// The returned row is the home-list row as the orb service reports it —
-  /// its `orb` is the orb id. A stopped orb refuses with
+  /// The bridge applies the current/default model (including its thinking
+  /// level / variant) so the new session shows its model like one created
+  /// directly in opencode. The agent is not passed — the orb service picks
+  /// its default (a fresh session starts on the default agent, not the
+  /// previous session's, which may be a restricted subagent). The returned
+  /// row is the home-list row as the orb service reports it — its `orb` is
+  /// the orb id. A stopped orb refuses with
   /// [OrbRefusalError.notRunning] (wake it first).
   Future<Session> createSessionOnOrb(String id) async {
     final record = await _record(id);
@@ -1956,13 +1961,12 @@ class OrbService {
     }
     final url = await _orbUrl(id, record);
     final service = _orbService(url, password);
-    final defaults = await _defaultModelAndAgent(service);
+    final model = await _defaultModel(service);
     final session = await service.createSessionInDirectory(
       '/workspace',
-      model: defaults.model,
-      agent: defaults.agent,
+      model: model,
     );
-    await _applyDefaultModel(service, session.id, defaults.model);
+    await _applyDefaultModel(service, session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
     return Session(
@@ -1979,12 +1983,14 @@ class OrbService {
     );
   }
 
-  /// The model (with its thinking level / variant) and agent to apply to a
-  /// new orb session, copied from the orb's most recent session that has a
-  /// model. Best-effort.
-  Future<({ModelRef? model, String? agent})> _defaultModelAndAgent(
-    OpencodeService service,
-  ) async {
+  /// The model (with its thinking level / variant) to apply to a new orb
+  /// session: copied from the orb's most recent session that has a model,
+  /// which mirrors opencode's "current model" behavior. The agent is
+  /// deliberately not carried over — it is a per-session explicit choice,
+  /// and inheriting the previous session's (which may be a restricted
+  /// subagent) is exactly what a fresh session in opencode does not do;
+  /// the orb service picks its default agent. Best-effort.
+  Future<ModelRef?> _defaultModel(OpencodeService service) async {
     try {
       final sessions = await service.listSessions();
       sessions.sort((a, b) => b.created.compareTo(a.created));
@@ -1992,16 +1998,16 @@ class OrbService {
         try {
           final detail = await service.getDetail(candidate.id);
           if (detail.model != null) {
-            return (model: detail.model, agent: detail.agent);
+            return detail.model;
           }
         } catch (_) {
           // Try the next candidate.
         }
       }
     } catch (_) {
-      // No defaults available.
+      // No default available.
     }
-    return (model: null, agent: null);
+    return null;
   }
 
   Future<void> _applyDefaultModel(
