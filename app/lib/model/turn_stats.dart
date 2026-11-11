@@ -465,3 +465,77 @@ String _durationText(Duration duration) {
   final seconds = duration.inSeconds - minutes * 60;
   return '${minutes}m ${seconds}s';
 }
+
+/// The terminal failure of the Turn closed by the `idle` marker at
+/// [idleIndex] (issue #157): `null` when that Turn did not fail. Reads the
+/// durable state alone — the marker's `outcome` and `error`, and the turn's
+/// assistant rows — so the render is identical with or without an event
+/// stream (the probe's Q3: the non-retryable failure carries the error on
+/// the `idle` marker with no assistant row; the exhausted-retry failure
+/// carries it on the assistant).
+class TurnFailure {
+  const TurnFailure({required this.error, this.attempts});
+
+  /// The turn's terminal error (the marker's `error`, else the turn's
+  /// assistant's terminal `error`), or `null` when the durable state carried
+  /// no error for the failure (the block then marks the turn failed with no
+  /// provider copy).
+  final StructuredError? error;
+
+  /// How many attempts the turn's provider call ran, when the durable state
+  /// carries one (the turn's in-flight `retry` count); `null` otherwise. The
+  /// block never invents a maximum.
+  final int? attempts;
+}
+
+/// The [TurnFailure] of the Turn closed by the `idle` marker at
+/// [idleIndex], or `null` when the marker is not a failed Turn (a
+/// succeeded / interrupted verdict, or a marker that carries no `outcome`).
+/// The Turn's window runs from the previous `idle` marker (exclusive) to
+/// [idleIndex] (exclusive), so an earlier failed Turn never bleeds into it.
+TurnFailure? turnFailureAt(List<SessionMessage> messages, int idleIndex) {
+  final marker = messages[idleIndex];
+  if (marker.role != 'idle' || marker.outcome != 'failed') return null;
+  var start = 0;
+  for (var i = idleIndex - 1; i >= 0; i--) {
+    if (messages[i].role == 'idle') {
+      start = i + 1;
+      break;
+    }
+  }
+  // The marker's own error (the non-retryable case) wins; otherwise the
+  // turn's assistant row carries it (the exhausted-retry case, probe Q3).
+  var error = marker.error;
+  var attempts = 0;
+  var hasAttempts = false;
+  for (var i = idleIndex - 1; i >= start; i--) {
+    final message = messages[i];
+    if (message.role != 'assistant') continue;
+    final retry = message.retry;
+    if (retry != null && retry.attempt > 0) {
+      hasAttempts = true;
+      if (retry.attempt > attempts) attempts = retry.attempt;
+    }
+    error ??= message.error;
+  }
+  return TurnFailure(error: error, attempts: hasAttempts ? attempts : null);
+}
+
+/// The header outcome chip's verdict (issue #157): the outcome of the
+/// NEWEST `idle` marker that closes a Turn — the service's per-turn
+/// verdict, authoritative for the chip even when the session-level detail
+/// `outcome` still reports the previous Turn's — falling back to
+/// [detailOutcome] when the loaded history carries no verdict.
+String? latestTurnOutcome(
+  List<SessionMessage> messages, {
+  String? detailOutcome,
+}) {
+  for (var i = messages.length - 1; i >= 0; i--) {
+    final message = messages[i];
+    if (message.role == 'idle') {
+      final outcome = message.outcome;
+      return outcome ?? detailOutcome;
+    }
+  }
+  return detailOutcome;
+}

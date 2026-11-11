@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/sessions/opencode_http_service.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/command.dart';
@@ -29,6 +31,17 @@ const _detail0 = SessionDetail(
   cost: 0,
   tokens: _zero,
   outcome: null,
+);
+
+/// A detail carrying a fixed [outcome] (issue #157's header-chip tests): the
+/// service's session-level outcome, which can lag the newest turn's verdict.
+SessionDetail _detailOutcome(String? outcome) => SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: outcome,
 );
 const _detailCtx = SessionDetail(
   id: 'ses_1',
@@ -504,12 +517,72 @@ class _PagedClient extends _FakeClient {
   }
 }
 
+/// Replays the captured fixture [path] (issue #154's probe) through the REAL
+/// bridge parser (`OpencodeHttpService`), so the view under test reads exactly
+/// what the bridge would serve from the opencode service's raw `/message` read
+/// (issue #157's "durable first" contract). A throwaway [HttpServer] stands in
+/// for the service, serving the fixture body verbatim; the parse runs in
+/// `runAsync` (real I/O), so it finishes before the pump.
+Future<List<SessionMessage>> _parseFixture(
+  WidgetTester tester,
+  String path,
+) async {
+  final raw = (await tester.runAsync(() => File(path).readAsString()))!;
+  final parsed = await tester.runAsync<List<SessionMessage>>(() async {
+    // The test binding stubs every HttpClient in the suite; restore real
+    // networking just for this parse so the fixture replays through the real
+    // bridge parser (the widget test otherwise cannot make an HTTP request).
+    final previousOverrides = HttpOverrides.current;
+    HttpOverrides.global = null;
+    try {
+      final server = await HttpServer.bind('127.0.0.1', 0);
+      final base = Uri.parse('http://127.0.0.1:${server.port}/');
+      final decoded = jsonDecode(raw);
+      final data = decoded is Map<String, Object?>
+          ? (decoded['data'] as List)
+          : <Object?>[];
+      final expected = 'Basic ${base64Encode(utf8.encode('opencode:secret'))}';
+      server.listen((req) async {
+        final resp = req.response;
+        resp.headers.contentType = ContentType.json;
+        if (req.headers.value(HttpHeaders.authorizationHeader) != expected) {
+          resp.statusCode = HttpStatus.unauthorized;
+          await resp.close();
+          return;
+        }
+        if (req.uri.path == '/api/session/ses_1/message') {
+          resp.write(
+            jsonEncode({
+              'data': data,
+              'cursor': {'next': null, 'previous': null},
+            }),
+          );
+          await resp.close();
+        } else {
+          resp.statusCode = HttpStatus.notFound;
+          await resp.close();
+        }
+      });
+      final service = OpencodeHttpService(baseUrl: base, password: 'secret');
+      try {
+        return await service.getMessages('ses_1');
+      } finally {
+        await server.close(force: true);
+      }
+    } finally {
+      HttpOverrides.global = previousOverrides;
+    }
+  });
+  return parsed!;
+}
+
 Future<StreamController<BridgeEvent>> _pump(
   WidgetTester tester, {
   required _FakeClient client,
   Stream<SessionGap>? gaps,
   ClipboardImageReader? imageReader,
   DateTime Function()? clock,
+  bool wireEvents = true,
 }) async {
   final events = StreamController<BridgeEvent>.broadcast();
   await tester.pumpWidget(
@@ -518,7 +591,10 @@ Future<StreamController<BridgeEvent>> _pump(
         sessionId: 'ses_1',
         title: 'external session',
         client: client,
-        events: events.stream,
+        // [wireEvents] false opens the view with NO event stream (the
+        // durable-first render path, issue #157): the state comes from the
+        // initial reads alone.
+        events: wireEvents ? events.stream : null,
         gaps: gaps,
         imageReader: imageReader,
         clock: clock ?? DateTime.now,
@@ -5345,6 +5421,342 @@ void main() {
         await tester.pump();
         await tester.pump();
         expect(find.text('Cost \$0.2000'), findsOneWidget);
+      },
+    );
+  });
+
+  group('StructuredSessionScreen exhausted retry (issue #157)', () {
+    /// The header outcome chip's text (its key is `structured-outcome`).
+    String chipText(WidgetTester tester) => tester
+        .widget<Text>(
+          find.descendant(
+            of: find.byKey(const ValueKey('structured-outcome')),
+            matching: find.byType(Text),
+          ),
+        )
+        .data!;
+
+    /// A previous, successful turn: its closing `idle` marker is
+    /// `succeeded`.
+    const previousTurn = <SessionMessage>[
+      SessionMessage(role: 'user', text: 'go', created: 0),
+      SessionMessage(id: 'a0', role: 'assistant', text: 'ok'),
+      SessionMessage(id: 'i0', role: 'idle', outcome: 'succeeded'),
+    ];
+
+    /// The captured failed turn replayed through the real bridge parser
+    /// (issue #154's probe fixture): a user prompt and an `idle` marker
+    /// carrying `outcome: failed` + the provider error, no assistant row.
+    /// Returns its `[user, idle(failed)]` rows.
+    Future<List<SessionMessage>> parseFailedTurn(WidgetTester tester) async {
+      final parsed = await _parseFixture(
+        tester,
+        'test/fixtures/retry/message_failed_model_unavailable.json',
+      );
+      expect(parsed.length, 2);
+      expect(parsed.first.role, 'user');
+      expect(parsed.last.role, 'idle');
+      return parsed;
+    }
+
+    testWidgets(
+      'a failed turn opened with no event stream shows the terminal error '
+      'block and a `failed` chip (durable first)',
+      (tester) async {
+        final failedTurn = await parseFailedTurn(tester);
+        // The detail still reports the PREVIOUS turn's `succeeded` (the
+        // session-level outcome is stale); the chip must show the newest
+        // turn's `failed`, and the block must render from /messages alone.
+        final client = _FakeClient(
+          details: [_detailOutcome('succeeded')],
+          messages: failedTurn,
+        );
+        // Opened with NO event stream (durable-first, issue #157).
+        await _pump(tester, client: client, wireEvents: false);
+
+        // The turn-failure block renders on the turn's tail.
+        expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
+        // Its main text is the TUI terminal line, verbatim (the error's
+        // message) — no app-invented wording substituted.
+        expect(
+          find.text('Model unavailable: amd/qwen3.8-flash-next'),
+          findsOneWidget,
+        );
+        // The provider error's type, from the bridge's /messages read.
+        expect(find.byKey(const ValueKey('turn-failure-type')), findsOneWidget);
+        expect(find.text('provider.no-route'), findsOneWidget);
+        // The durable state carried no attempt count, so the block does not
+        // invent one (and never invents a maximum).
+        expect(
+          find.byKey(const ValueKey('turn-failure-attempts')),
+          findsNothing,
+        );
+        // The header outcome chip says `failed`, not the stale `succeeded`.
+        expect(chipText(tester), 'failed');
+      },
+    );
+
+    testWidgets(
+      'live (streamed) then normalize: the chip and block settle to `failed` '
+      'at the turn boundary',
+      (tester) async {
+        final failedTurn = await parseFailedTurn(tester);
+        // Journaled state: a previous successful turn, then the turn that
+        // exhausts its retries. The detail lags the turn (the service's
+        // session-level outcome is `succeeded` until the failed boundary), so
+        // the chip follows the newest idle marker's verdict.
+        final running = [
+          ...previousTurn,
+          ...failedTurn.sublist(0, 1), // the failing turn's prompt
+          SessionMessage(
+            id: 'a2',
+            role: 'assistant',
+            created: 5000,
+          ), // in flight
+        ];
+        final failed = [
+          ...running,
+          ...failedTurn.sublist(1), // the idle(failed) boundary
+        ];
+        final client = _FakeClient(
+          details: [
+            _detailOutcome('succeeded'), // initial
+            _detailOutcome('succeeded'), // the started normalize
+            _detailOutcome('failed'), // the failed normalize
+          ],
+          messageLists: [
+            [...previousTurn], // initial open
+            running, // the started normalize
+            failed, // the failed normalize
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // Opened on a settled, successful turn: the chip is `succeeded`, no
+        // failure block.
+        expect(chipText(tester), 'succeeded');
+        expect(find.byKey(const ValueKey('turn-failure')), findsNothing);
+
+        // The turn starts (from another client): the boundary normalize
+        // re-fetches; while running the new turn has no closing marker, so
+        // the chip keeps the last settled verdict.
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(chipText(tester), 'succeeded');
+        expect(find.byKey(const ValueKey('turn-failure')), findsNothing);
+
+        // The turn exhausts its retries: the failed boundary normalize
+        // re-fetches detail + history; the chip flips to `failed` and the
+        // terminal error block appears on the turn's tail.
+        events.add(_event('session.execution.failed', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(chipText(tester), 'failed');
+        expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
+        expect(
+          find.text('Model unavailable: amd/qwen3.8-flash-next'),
+          findsOneWidget,
+        );
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'no state difference remains between "opened fresh and normalized" and '
+      '"opened with no events" after the boundary',
+      (tester) async {
+        final failedTurn = await parseFailedTurn(tester);
+        // (A) Opened fresh with no event stream.
+        final clientA = _FakeClient(
+          details: [_detailOutcome('succeeded')],
+          messages: [...previousTurn, ...failedTurn],
+        );
+        final eventsA = await _pump(tester, client: clientA, wireEvents: false);
+        final aBlock = find.byKey(const ValueKey('turn-failure')).evaluate();
+        final aMain = find
+            .text('Model unavailable: amd/qwen3.8-flash-next')
+            .evaluate();
+        final aType = find.text('provider.no-route').evaluate();
+        final aChip = chipText(tester);
+        expect(aBlock.length, 1);
+        expect(aChip, 'failed');
+        await eventsA.close();
+
+        // (B) Opened with events, then a live turn-boundary normalize (the
+        // `session.execution.*` re-fetch path) brings in the same authoritative
+        // history the no-events open reads up front.
+        final clientB = _FakeClient(
+          details: [_detailOutcome('failed'), _detailOutcome('failed')],
+          messageLists: [
+            [...previousTurn], // initial (the previous turn, settled)
+            [...previousTurn, ...failedTurn], // the normalize re-fetch
+          ],
+        );
+        final eventsB = await _pump(tester, client: clientB);
+        // A turn-boundary event triggers the normalize (the same path
+        // `session.execution.*` uses on success); the re-fetch settles the
+        // failed turn into the history.
+        eventsB.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        // The turn then fails: a second boundary normalize of the identical
+        // history (the live band settles on the failed marker).
+        eventsB.add(_event('session.execution.failed', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        final bBlock = find.byKey(const ValueKey('turn-failure')).evaluate();
+        final bMain = find
+            .text('Model unavailable: amd/qwen3.8-flash-next')
+            .evaluate();
+        final bType = find.text('provider.no-route').evaluate();
+        final bChip = chipText(tester);
+        await eventsB.close();
+
+        // After the boundary normalize the two renders agree: the block, its
+        // main text, its type, and the chip all match.
+        expect(bBlock.length, aBlock.length);
+        expect(bMain.length, aMain.length);
+        expect(bType.length, aType.length);
+        expect(bChip, aChip);
+        expect(bChip, 'failed');
+      },
+    );
+
+    testWidgets(
+      'a long provider body shows truncated and expands to the full string on '
+      'tap (it cannot blow out the bubble)',
+      (tester) async {
+        // The provider's raw response.body, replayed from the captured
+        // in-flight fixture (issue #154): a real 429 body, long enough to
+        // truncate.
+        final inFlight = await _parseFixture(
+          tester,
+          'test/fixtures/retry/message_429_inflight_attempt_3.json',
+        );
+        final assistant = inFlight.firstWhere((m) => m.role == 'assistant');
+        final body = assistant.retry?.error.body;
+        expect(body, isA<String>());
+        expect((body as String).length, greaterThan(60));
+        // An exhausted-429 terminal: the terminal error (carrying the
+        // provider's raw response.body) lands on the assistant row, and the
+        // turn's idle carries `outcome: failed` (the probe's assumption A1).
+        final exhausted = <SessionMessage>[
+          ...previousTurn,
+          SessionMessage(role: 'user', text: 'one', created: 10000),
+          SessionMessage(
+            id: 'a2',
+            role: 'assistant',
+            error: StructuredError(
+              type: 'provider.rate-limit',
+              message: 'Provider request failed with HTTP 429: (see body)',
+              status: 429,
+              body: body,
+            ),
+            created: 10000,
+            completed: 11000,
+          ),
+          SessionMessage(id: 'i2', role: 'idle', outcome: 'failed'),
+        ];
+        final client = _FakeClient(
+          details: [_detailOutcome('failed')],
+          messages: exhausted,
+        );
+        final events = await _pump(tester, client: client);
+
+        // The block renders; its body is present, truncated by default.
+        expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
+        final bodyKey = find.byKey(const ValueKey('turn-failure-body'));
+        expect(bodyKey, findsOneWidget);
+        var widget = tester.widget<Text>(
+          find.descendant(of: bodyKey, matching: find.byType(Text)),
+        );
+        expect(widget.data, body);
+        expect(widget.maxLines, 3); // clamped, ellipsized.
+
+        // Tapping expands it to the full string (no clamp).
+        await tester.tap(bodyKey);
+        await tester.pump();
+        widget = tester.widget<Text>(
+          find.descendant(of: bodyKey, matching: find.byType(Text)),
+        );
+        expect(widget.data, body);
+        expect(widget.maxLines, null);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'an interrupted turn is not styled as a failure (no block, chip '
+      '`interrupted`)',
+      (tester) async {
+        const interrupted = <SessionMessage>[
+          ...previousTurn,
+          SessionMessage(role: 'user', text: 'one', created: 10000),
+          SessionMessage(id: 'a2', role: 'assistant', text: 'partial'),
+          SessionMessage(id: 'i2', role: 'idle', outcome: 'interrupted'),
+        ];
+        final client = _FakeClient(
+          details: [_detailOutcome('interrupted')],
+          messages: interrupted,
+        );
+        final events = await _pump(tester, client: client, wireEvents: false);
+
+        // Not a failure: no terminal error block (a failed-turn style).
+        expect(find.byKey(const ValueKey('turn-failure')), findsNothing);
+        // The chip carries the interrupted verdict, distinct from `failed`.
+        expect(chipText(tester), 'interrupted');
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'a successful turn keeps showing no error block and a `succeeded` chip',
+      (tester) async {
+        final client = _FakeClient(
+          details: [_detailOutcome('succeeded')],
+          messages: [...previousTurn],
+        );
+        final events = await _pump(tester, client: client, wireEvents: false);
+        expect(find.byKey(const ValueKey('turn-failure')), findsNothing);
+        expect(chipText(tester), 'succeeded');
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'the next successful turn does not inherit the failed block (it stays in '
+      'history as the failed turn\'s record body)',
+      (tester) async {
+        final failedTurn = await parseFailedTurn(tester);
+        final nextTurn = <SessionMessage>[
+          SessionMessage(role: 'user', text: 'again', created: 20000),
+          SessionMessage(
+            id: 'a3',
+            role: 'assistant',
+            text: 'ok',
+            created: 20000,
+          ),
+          SessionMessage(id: 'i3', role: 'idle', outcome: 'succeeded'),
+        ];
+        final client = _FakeClient(
+          details: [_detailOutcome('succeeded')],
+          messages: [...previousTurn, ...failedTurn, ...nextTurn],
+        );
+        final events = await _pump(tester, client: client, wireEvents: false);
+
+        // Exactly ONE failure block — on the failed turn's marker, not the
+        // new successful turn's (the live band's error does not persist into
+        // the next turn).
+        expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
+        // The failed turn's block still carries its provider copy (history).
+        expect(
+          find.text('Model unavailable: amd/qwen3.8-flash-next'),
+          findsOneWidget,
+        );
+        // The newest turn succeeded: the chip follows the latest verdict.
+        expect(chipText(tester), 'succeeded');
+        await events.close();
       },
     );
   });

@@ -2686,6 +2686,24 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     );
   }
 
+  /// The turn-failure blocks keyed by the `idle` marker that closes each
+  /// failed Turn (issue #157). A failed Turn's terminal error renders on its
+  /// marker (the turn's tail) as the failure block; a succeeded or
+  /// interrupted Turn carries no block. Read from the durable history alone,
+  /// so an older failed Turn keeps its block in the history as its record
+  /// body (like any past turn), and the live band's block does not persist
+  /// into the next turn (the next turn's marker resolves its own window).
+  Map<int, TurnFailure> _turnFailures() {
+    final result = <int, TurnFailure>{};
+    for (var i = 0; i < _messages.length; i++) {
+      final message = _messages[i];
+      if (message.role != 'idle') continue;
+      final failure = turnFailureAt(_messages, i);
+      if (failure != null) result[i] = failure;
+    }
+    return result;
+  }
+
   @override
   Widget build(BuildContext context) {
     // The panel owns its surface and header (issue #130): it renders the
@@ -2699,6 +2717,20 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // running turn's live label and the loaded Turns' frozen labels, keyed
     // by the row each rides on.
     final footers = _turnFooters();
+    // The turn-failure blocks keyed by the idle marker that closes each
+    // failed Turn (issue #157): a pure function of the loaded history, so
+    // the render is identical with or without an event stream (the no-events
+    // reopen and the live+normalize render agree after the boundary).
+    final failures = _turnFailures();
+    // The header outcome chip's verdict (issue #157): the newest closing
+    // idle marker's outcome — the authoritative per-turn verdict — so a
+    // failed turn shows `failed` instead of the previous turn's stale
+    // `succeeded` from the session-level detail. The panel's normalize
+    // re-fetches the history at every turn boundary, so this tracks live.
+    final chipOutcome = latestTurnOutcome(
+      _messages,
+      detailOutcome: _detail?.outcome,
+    );
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: Column(
@@ -2753,6 +2785,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                         contextUsed: _contextUsed,
                         prefill: _prefill,
                         decode: _decode,
+                        outcome: chipOutcome,
                       ),
                       Expanded(
                         // The chat list and the prompt bar share the height
@@ -2817,10 +2850,26 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                 i == _messages.length - 1;
                                             if (message.role == 'idle') {
                                               // The turn-boundary marker carries no
-                                              // content of its own.
-                                              return _TurnStatsFooter(
-                                                label: footer,
-                                                active: live,
+                                              // content of its own — unless the
+                                              // Turn it closed failed its retries
+                                              // (issue #157): then it carries the
+                                              // turn's terminal error block,
+                                              // distinct from a tool error and a
+                                              // normal completion.
+                                              final failure = failures[i];
+                                              return Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  if (failure != null)
+                                                    _TurnFailureBlock(
+                                                      failure: failure,
+                                                    ),
+                                                  _TurnStatsFooter(
+                                                    label: footer,
+                                                    active: live,
+                                                  ),
+                                                ],
                                               );
                                             }
                                             if (message.role == 'compaction') {
@@ -3083,6 +3132,7 @@ class _CostBar extends StatelessWidget {
     required this.contextUsed,
     this.prefill,
     this.decode,
+    this.outcome,
   });
 
   final SessionDetail? detail;
@@ -3094,6 +3144,13 @@ class _CostBar extends StatelessWidget {
   final double? prefill;
 
   final double? decode;
+
+  /// The header outcome chip's verdict (issue #157): the newest closing
+  /// `idle` marker's outcome (the authoritative per-turn verdict), falling
+  /// back to the detail's — passed in by the panel so the chip never reads a
+  /// stale session-level `detail.outcome` across a turn boundary. `null`
+  /// hides the chip.
+  final String? outcome;
 
   @override
   Widget build(BuildContext context) {
@@ -3109,6 +3166,10 @@ class _CostBar extends StatelessWidget {
     final speed = _speedText(prefill, decode);
     final speedColor = _TuiSpeedColors.resolve(Theme.of(context).brightness)
         .forPhase(prefill, decode);
+    // The outcome chip reads the panel's per-turn verdict (the newest closing
+    // idle marker, issue #157), not the raw detail.outcome, which can lag the
+    // last turn's verdict across a turn boundary.
+    final chipOutcome = outcome ?? detail.outcome;
     return Container(
       key: const ValueKey('structured-cost'),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -3151,11 +3212,11 @@ class _CostBar extends StatelessWidget {
                       ? 'context $used'
                       : 'context $used / $limit · ${_percent(used, limit)}',
                 ),
-              if (detail.outcome != null)
+              if (chipOutcome != null)
                 _chip(
                   context,
                   const ValueKey('structured-outcome'),
-                  detail.outcome!,
+                  chipOutcome,
                 ),
               if (speed != null)
                 Container(
@@ -3794,6 +3855,127 @@ class _CompactionPane extends StatelessWidget {
               child: _Markdown(
                 data: message.text!,
                 base: const TextStyle(fontSize: 12),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The turn-failure block (issue #157): the terminal error of the Turn that
+/// ran out of its provider retries, read as a FAILED turn on the marker that
+/// closed it — not a quiet stop. It is distinct from a tool error (which sits
+/// inside its tool card) and from a normal completion (which carries no such
+/// block): it rides on the turn's tail, the closing `idle` marker.
+///
+/// It shows, straight from the durable state (so it renders identically with
+/// or without an event stream, issue #157):
+/// - the TUI's terminal line — the error's `message`, verbatim (the probe's
+///   Q4: the TUI renders the terminal failure from `error.message` verbatim;
+///   this block does not invent its wording);
+/// - the provider error's `type`, and its raw `response.body` when present —
+///   truncated by default, expanding to the full string on tap (the long,
+///   unbounded provider JSON, like the in-flight retry notice);
+/// - how many attempts ran, only when the durable state carries the count —
+///   it never invents a maximum.
+///
+/// An interrupted Turn is NOT a failure and carries no block (its marker's
+/// verdict is `interrupted`, not `failed`).
+class _TurnFailureBlock extends StatefulWidget {
+  const _TurnFailureBlock({required this.failure});
+
+  /// The turn's resolved terminal failure (its error and, when carried, its
+  /// attempt count).
+  final TurnFailure failure;
+
+  @override
+  State<_TurnFailureBlock> createState() => _TurnFailureBlockState();
+}
+
+class _TurnFailureBlockState extends State<_TurnFailureBlock> {
+  /// Whether the provider's raw `response.body` is expanded (it is truncated
+  /// by default so a long body never blows out the bubble).
+  bool _bodyExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final error = widget.failure.error;
+    // The TUI's terminal line, verbatim (the error's message). When the
+    // durable state carried a `failed` verdict but no error, there is no
+    // provider copy: the block marks the turn failed and shows no invented
+    // wording.
+    final mainText = error?.message;
+    final body = error?.body;
+    final bodyText = body is String ? body : (body == null ? null : '$body');
+    final attempts = widget.failure.attempts;
+    return Container(
+      key: const ValueKey('turn-failure'),
+      margin: const EdgeInsets.only(left: 4, top: 6),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(6),
+        color: scheme.error.withValues(alpha: 0.06),
+        border: Border.all(color: scheme.error.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.error, size: 16, color: scheme.error),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  mainText ?? 'Turn failed',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.error,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (error != null && error.type.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4, left: 24),
+              child: Text(
+                error.type,
+                key: const ValueKey('turn-failure-type'),
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                  color: scheme.outline,
+                ),
+              ),
+            ),
+          if (attempts != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, left: 24),
+              child: Text(
+                '$attempts attempt${attempts == 1 ? '' : 's'}',
+                key: const ValueKey('turn-failure-attempts'),
+                style: TextStyle(fontSize: 12, color: scheme.outline),
+              ),
+            ),
+          if (bodyText != null)
+            GestureDetector(
+              key: const ValueKey('turn-failure-body'),
+              onTap: () => setState(() => _bodyExpanded = !_bodyExpanded),
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4, left: 24),
+                child: Text(
+                  bodyText,
+                  maxLines: _bodyExpanded ? null : 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                    color: scheme.outline,
+                  ),
+                ),
               ),
             ),
         ],
