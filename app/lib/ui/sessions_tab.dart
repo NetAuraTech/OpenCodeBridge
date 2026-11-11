@@ -194,6 +194,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// row shows progress over the blocking `docker cp` export.
   String? _exportingId;
 
+  /// The id whose row Stop (issue #165) is in flight: its Stop control shows
+  /// a busy spinner and ignores further presses. Cleared when the cancel
+  /// lands (success or failure) — a failure leaves the dot on, so the control
+  /// is offered again to retry.
+  String? _stoppingId;
+
   /// The deep-link session awaiting a loaded list (issue #24): set when the
   /// target arrives before the rows; a failed load leaves it for the next
   /// successful one.
@@ -896,6 +902,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     onExportWorkspace: _exportWorkspace,
                     orb: _orbOf(s.orb),
                     onOrbChipTapped: widget.onOrbChipTapped,
+                    onStop: _client == null ? null : () => _stopTurn(s),
+                    stopping: _stoppingId == s.id,
                   ),
               ],
             ),
@@ -979,6 +987,33 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       if (mounted) _snackBar('Could not export the workspace.');
     } finally {
       if (mounted) setState(() => _exportingId = null);
+    }
+  }
+
+  /// The row's Stop (issue #165): interrupts the session's running turn
+  /// through the bridge's cancel, on the owning service (host or orb — the
+  /// route decides). One request per turn (busy while in flight). On success
+  /// the dot goes out on the bridge's `session.turn.cancelled` or the
+  /// service's terminal event — neither needs the tab to act. On failure the
+  /// reason is reported and the row keeps its active dot (the control is
+  /// offered again to retry).
+  Future<void> _stopTurn(Session session) async {
+    final client = _client;
+    if (client == null || _stoppingId != null) return;
+    setState(() => _stoppingId = session.id);
+    try {
+      await client.cancel(session.id);
+    } on SessionsClientError catch (e) {
+      if (mounted) {
+        _snackBar(
+          'Could not stop the turn '
+          '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+        );
+      }
+    } catch (_) {
+      if (mounted) _snackBar('Could not stop the turn.');
+    } finally {
+      if (mounted) setState(() => _stoppingId = null);
     }
   }
 
@@ -1229,6 +1264,8 @@ class _SessionRow extends StatelessWidget {
     this.onMoveToOrb,
     this.onExportWorkspace,
     this.onOrbChipTapped,
+    this.onStop,
+    this.stopping = false,
   });
 
   final Session session;
@@ -1267,6 +1304,16 @@ class _SessionRow extends StatelessWidget {
   /// The session → orb navigation (spec §9.2): called with the orb id when
   /// the chip is tapped.
   final ValueChanged<String>? onOrbChipTapped;
+
+  /// The row's Stop (issue #165): stops the session's running turn through
+  /// the bridge's cancel. Offered (to the right of the active dot) only while
+  /// the session's Turn is Active (`session.active`), so an idle row shows no
+  /// Stop. `null` when the row has no cancel seam (no client).
+  final VoidCallback? onStop;
+
+  /// True while the row's Stop is in flight: the control shows a busy
+  /// spinner and ignores further presses (one request per turn).
+  final bool stopping;
 
   /// The chip (an orb session) or the muted "host" label (a host session).
   Widget _orbIdentity(BuildContext context) {
@@ -1379,6 +1426,27 @@ class _SessionRow extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
+              // The row's Stop (issue #165): offered only while the Turn is
+              // Active (the green dot is on) and there is a cancel seam. One
+              // tap interrupts the turn on the owning service; the dot goes
+              // out on the bridge's `session.turn.cancelled` (in place, no
+              // refetch) or the service's terminal `session.execution.interrupted`.
+              // Busy (spinner, ignores presses) while the cancel is in flight.
+              if (session.active && onStop != null) ...[
+                IconButton(
+                  key: ValueKey('stop-${session.id}'),
+                  tooltip: 'Stop the turn',
+                  icon: stopping
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.stop, size: 18),
+                  onPressed: stopping ? null : onStop,
+                ),
+                const SizedBox(width: 4),
+              ],
               deleting || moving || exporting
                   ? const SizedBox(
                       width: 20,

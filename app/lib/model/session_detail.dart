@@ -85,6 +85,7 @@ class SessionDetail {
     this.model,
     this.agent,
     this.active = false,
+    this.canCancel = true,
   });
 
   final String id;
@@ -122,6 +123,14 @@ class SessionDetail {
   /// live turn footer when the persisted history alone is ambiguous.
   final bool active;
 
+  /// Whether the service this session lives on can cancel a turn (issue
+  /// #164/#165's capability check, ticket #2): the structured view offers
+  /// Stop on an Active turn only when the service answers the interrupt —
+  /// a service without the route would refuse every cancel with a 502, so
+  /// offering Stop would be a trap. The backend folds it into the detail
+  /// read (like [active], from the routed service's interrupt route).
+  final bool canCancel;
+
   /// This detail with [cost] and [tokens] replaced (the live
   /// `session.usage.updated` refresh keeps the other facts).
   SessionDetail withUsage({required double cost, required TokenUsage tokens}) =>
@@ -136,11 +145,13 @@ class SessionDetail {
         model: model,
         agent: agent,
         active: active,
+        canCancel: canCancel,
       );
 
-  /// This detail with [active] replaced (the backend folds the service's
-  /// active list into the detail read, issue #124).
-  SessionDetail copyWithActive(bool active) => SessionDetail(
+  /// This detail with [active] and [canCancel] replaced (the backend folds
+  /// the service's active list and the routed service's interrupt-route
+  /// capability into the detail read, issues #124 / #165).
+  SessionDetail copyWithActive(bool active, {bool? canCancel}) => SessionDetail(
     id: id,
     title: title,
     location: location,
@@ -151,6 +162,7 @@ class SessionDetail {
     model: model,
     agent: agent,
     active: active,
+    canCancel: canCancel ?? this.canCancel,
   );
 
   Map<String, Object?> toJson() => {
@@ -164,6 +176,7 @@ class SessionDetail {
     'model': model?.toJson(),
     'agent': agent,
     'active': active,
+    'canCancel': canCancel,
   };
 
   factory SessionDetail.fromJson(Object? json) {
@@ -180,6 +193,11 @@ class SessionDetail {
       model: model is Map<String, Object?> ? ModelRef.fromJson(model) : null,
       agent: map['agent'] is String ? map['agent'] as String : null,
       active: map['active'] == true,
+      // The capability is true when the key is absent (a detail read that
+      // predates the field, or a service that always serves the interrupt
+      // route), false only when the backend reports the routed service has
+      // no interrupt route (issue #165).
+      canCancel: map['canCancel'] is bool ? map['canCancel'] as bool : true,
     );
   }
 
@@ -195,7 +213,8 @@ class SessionDetail {
       other.contextLimit == contextLimit &&
       other.model == model &&
       other.agent == agent &&
-      other.active == active;
+      other.active == active &&
+      other.canCancel == canCancel;
 
   @override
   int get hashCode => Object.hash(
@@ -209,6 +228,7 @@ class SessionDetail {
     model,
     agent,
     active,
+    canCancel,
   );
 
   @override

@@ -143,7 +143,26 @@ class SessionsBackend {
   Future<SessionDetail> detailWithActive(String id) async {
     final detail = await service.getDetail(id);
     final active = await service.activeSessionIds();
-    return detail.copyWithActive(active.contains(id));
+    // The cancel capability (issue #165): whether the routed service (host
+    // or the owning orb) can interrupt the turn. It rides the same detail
+    // read as [active], so the structured view learns it with the open. A
+    // lookup failure reads as capable: a wrongly-offered Stop still lands a
+    // clean, reportable 502 and stays offered to retry.
+    final canCancel = await _canCancel(id);
+    return detail.copyWithActive(active.contains(id), canCancel: canCancel);
+  }
+
+  /// The routed service's interrupt capability for [id] (issue #165), read
+  /// without cancelling (a probe would interrupt the live turn).
+  Future<bool> _canCancel(String id) async {
+    try {
+      return await service.canCancelTurn(id);
+    } catch (_) {
+      // The capability is a display fact, not a failure of the read: assume
+      // capable so a Stop is offered and, if truly unsupported, answers a
+      // reportable 502 the user can retry from.
+      return true;
+    }
   }
 
   Future<List<SessionMessage>> getMessages(String id) =>

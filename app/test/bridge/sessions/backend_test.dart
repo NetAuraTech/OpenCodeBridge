@@ -261,6 +261,9 @@ class FakeOpencodeService implements OpencodeService {
   }
 
   @override
+  Future<bool> canCancelTurn(String id) async => true;
+
+  @override
   Future<String> fork(String id) async {
     forks.add(id);
     return 'ses_forked';

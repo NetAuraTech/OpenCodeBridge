@@ -334,6 +334,14 @@ class StructuredSessionScreen extends StatelessWidget {
 class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   SessionDetail? _detail;
 
+  /// The cancel capability (issue #165, ticket #2): the loaded detail's
+  /// `canCancel`, true until a detail says the routed service lacks the
+  /// interrupt route. Derived from [_detail] so it never drifts from the
+  /// re-reads. A service without the route would refuse every cancel with a
+  /// 502, so a false here hides the Stop on an Active turn rather than
+  /// offering a control that can only fail.
+  bool get _canCancel => _detail?.canCancel ?? true;
+
   List<SessionMessage> _messages = const [];
 
   List<PermissionRequest> _pending = const [];
@@ -2883,11 +2891,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                   )
                 : null,
             automaticallyImplyLeading: !widget.showCloseButton,
-            // The Stop control (issues #160/#163): offered whenever the Turn
-            // is Active (the Active fact is independent of cancel
-            // capability); while the cancel POST is in flight it shows a
-            // busy state and ignores further presses.
-            actions: _turnActive
+            // The Stop control (issues #160/#163/#165): offered when the Turn
+            // is Active AND the routed service can cancel it (the detail's
+            // `canCancel`, ticket #2's capability check). A service without
+            // the interrupt route hides the Stop rather than offer a control
+            // that would only fail with a 502; while the cancel POST is in
+            // flight it shows a busy state and ignores further presses.
+            actions: _turnActive && _canCancel
                 ? [
                     IconButton(
                       key: const ValueKey('structured-stop'),

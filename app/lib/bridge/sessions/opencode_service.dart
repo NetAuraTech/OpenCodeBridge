@@ -261,6 +261,20 @@ abstract class OpencodeService {
     throw const CancelUnsupportedError('this service has no interrupt route');
   }
 
+  /// Whether the service can cancel [id]'s turn (issue #165's capability
+  /// check, ticket #2): the single check the structured view uses to decide
+  /// whether to offer Stop on an Active turn.
+  ///
+  /// This is a **read** — it must answer without the side effect of actually
+  /// cancelling the live turn (opencode has no non-destructive "does the
+  /// interrupt route exist" query, so probing it would mean cancelling). The
+  /// default assumes capable (`true`): a wrongly-offered Stop still lands a
+  /// clean, reportable 502 and stays offered to retry, whereas assuming
+  /// incapable would hide Stop from every service on a first open. A
+  /// service that has actually proven itself unable (a remembered probe)
+  /// overrides this to `false`.
+  Future<bool> canCancelTurn(String id) async => true;
+
   /// Undo the previous message: stage a revert at the session's last user
   /// message (the service's `POST /api/session/{id}/revert/stage`). A no-op
   /// when the session has no user message yet.

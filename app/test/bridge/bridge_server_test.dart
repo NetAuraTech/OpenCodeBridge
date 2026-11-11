@@ -3127,6 +3127,9 @@ class _FakeService implements OpencodeService {
   }
 
   @override
+  Future<bool> canCancelTurn(String id) async => !cancelUnsupported;
+
+  @override
   Future<String> fork(String id) async {
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     forks.add(id);
