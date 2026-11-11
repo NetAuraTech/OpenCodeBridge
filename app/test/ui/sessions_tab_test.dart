@@ -340,7 +340,42 @@ Future<_FakeSessionsClient> _pumpTab(
   return client;
 }
 
-/// A scripted [OrbsClient] for the tab tests (no real bridge).
+/// Pumps the tab on a narrow (phone-sized) surface (issue #133), below the
+/// responsive breakpoint, and returns the client. The surface is reset by the
+/// caller's `addTearDown(tester.view.reset)` — a bare `reset()` (no argument)
+/// is safe whether or not the surface was actually changed.
+Future<_FakeSessionsClient> _pumpTabNarrow(
+  WidgetTester tester, {
+  Size surfaceSize = const Size(390, 844),
+  List<Session> rows = const [],
+  _FakeEventsSource? events,
+  _FakeFsClient? fs,
+  _FakeOrbsClient? orbs,
+  String? deepLinkSession,
+  AppSettings? settings,
+}) async {
+  final client = _FakeSessionsClient(rows: List<Session>.of(rows));
+  tester.view.physicalSize = surfaceSize;
+  tester.view.devicePixelRatio = 1.0;
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: SessionsTab(
+          apiBase: Uri.parse('http://bridge.test/'),
+          client: client,
+          fs: fs ?? _FakeFsClient(),
+          orbs: orbs ?? _FakeOrbsClient(),
+          events: events ?? _FakeEventsSource(),
+          deepLinkSession: deepLinkSession,
+          settings: settings,
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+  return client;
+}
+
 class _FakeOrbsClient extends OrbsClient {
   _FakeOrbsClient({this.orbs = const []})
     : super(Uri.parse('http://bridge.test/'));
@@ -1159,6 +1194,198 @@ void main() {
         );
         expect(settings.sessionsSidebarCollapsed, isFalse);
       });
+    });
+
+    group('responsive drawer (issue #133)', () {
+      final toggle = find.byKey(const ValueKey('sessions-sidebar-toggle'));
+      final drawer = find.byKey(const ValueKey('sessions-drawer'));
+      final scrim = find.byKey(const ValueKey('sessions-drawer-scrim'));
+      final detailPane = find.byKey(const ValueKey('sessions-detail-pane'));
+      final listPane = find.byKey(const ValueKey('sessions-list-pane'));
+
+      testWidgets(
+        'below the breakpoint the detail fills the screen and no persistent '
+        'sidebar is shown',
+        (tester) async {
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+          await _pumpTabNarrow(tester, rows: [_one, _three]);
+
+          // No persistent sidebar: the wide rail and list column are gone.
+          expect(listPane, findsNothing);
+          // No overlay drawer until opened: the list is not on screen yet.
+          expect(drawer, findsNothing);
+          expect(scrim, findsNothing);
+          expect(find.byKey(const ValueKey('sessions-list')), findsNothing);
+
+          // The detail fills the screen (no selection yet, so the empty hint),
+          // flush to the left edge — nothing to the left of it.
+          final detail = tester.getRect(detailPane);
+          expect(detail.left, 0);
+          expect(detail.right, 390);
+          expect(
+            find.byKey(const ValueKey('sessions-detail-empty')),
+            findsOneWidget,
+          );
+          // The top bar carries the drawer's toggle.
+          expect(toggle, findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'a toggle in the top bar opens the sidebar as an overlay drawer with '
+        'a scrim',
+        (tester) async {
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+          await _pumpTabNarrow(tester, rows: [_one, _three]);
+
+          // The toggle sits in the top bar, at the left edge.
+          expect(tester.getTopLeft(toggle).dx, 0);
+
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+
+          // The drawer is up, from the left edge over the detail, and below
+          // the top bar (which stays on top so the toggle is still reachable).
+          final drawerRect = tester.getRect(drawer);
+          expect(drawerRect.left, 0);
+          expect(drawerRect.right, 320);
+          expect(drawerRect.top, kToolbarHeight);
+          // A scrim behind it (a tap target across the whole width, below the
+          // top bar).
+          expect(scrim, findsOneWidget);
+          final scrimRect = tester.getRect(scrim);
+          expect(scrimRect.left, 0);
+          expect(scrimRect.top, kToolbarHeight);
+          expect(scrimRect.right, 390);
+          // The list (and its rows) is inside the drawer, not a persistent
+          // column.
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
+          expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+          expect(listPane, findsNothing);
+          // The detail still fills the screen underneath (its left edge stays
+          // at 0 — the drawer does not push it).
+          expect(tester.getRect(detailPane).left, 0);
+          expect(tester.getRect(detailPane).right, 390);
+        },
+      );
+
+      testWidgets(
+        'tapping outside the drawer closes it without changing the selected '
+        'session',
+        (tester) async {
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+          await _pumpTabNarrow(tester, rows: [_one, _three]);
+
+          // Select a session first (from the drawer).
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+          await tester.pumpAndSettle();
+          // The selection closed the drawer and shows the detail underneath.
+          expect(drawer, findsNothing);
+          expect(scrim, findsNothing);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.text('fix the flaky test'), findsWidgets);
+
+          // Re-open the drawer and tap the scrim (the visible part, right of
+          // the drawer): it closes, and the selection is untouched (the same
+          // session's detail remains).
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(drawer, findsOneWidget);
+          await tester.tapAt(const Offset(350, 400));
+          await tester.pumpAndSettle();
+          expect(drawer, findsNothing);
+          expect(scrim, findsNothing);
+          // Still on the session that was selected, not reset.
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(find.text('fix the flaky test'), findsWidgets);
+        },
+      );
+
+      testWidgets('selecting a session in the drawer closes it and shows that '
+          "session's detail underneath", (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+        await _pumpTabNarrow(tester, rows: [_one, _three]);
+
+        await tester.tap(toggle);
+        await tester.pumpAndSettle();
+        expect(drawer, findsOneWidget);
+
+        // Pick a session from the drawer (the other project's session).
+        await tester.tap(find.byKey(const ValueKey('session-ses_3')));
+        await tester.pumpAndSettle();
+
+        // The drawer is gone and the detail underneath shows that session.
+        expect(drawer, findsNothing);
+        expect(scrim, findsNothing);
+        expect(find.byType(StructuredSessionPanel), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('sessions-detail-empty')),
+          findsNothing,
+        );
+        expect(find.text('docker logs'), findsWidgets);
+      });
+
+      testWidgets(
+        'the drawer toggle does not persist the wide-screen collapsed '
+        'setting (it is transient)',
+        (tester) async {
+          SharedPreferences.setMockInitialValues({});
+          final settings = await AppSettings.load();
+          tester.view.physicalSize = const Size(390, 844);
+          tester.view.devicePixelRatio = 1.0;
+          addTearDown(tester.view.reset);
+          await _pumpTabNarrow(tester, rows: [_one], settings: settings);
+
+          // Opening the drawer is an overlay action: it must not touch the
+          // wide-screen collapse setting (which stays for wide layouts only).
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(settings.sessionsSidebarCollapsed, isFalse);
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(settings.sessionsSidebarCollapsed, isFalse);
+        },
+      );
+
+      testWidgets(
+        'at a wide size the existing persistent collapsible layout is '
+        'unchanged (no top bar, no drawer)',
+        (tester) async {
+          // The default 800x600 surface is wide. Re-assert the #131/#132
+          // layout passes with the new breakpoint in place.
+          await _pumpTab(tester, rows: [_one, _three]);
+          await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+          await tester.pumpAndSettle();
+
+          expect(listPane, findsOneWidget);
+          expect(drawer, findsNothing);
+          expect(scrim, findsNothing);
+          // The detail sits right of the rail, not full width.
+          final detail = tester.getRect(detailPane);
+          expect(detail.left, greaterThan(0));
+          expect(detail.right, 800);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+
+          // The rail toggle still collapses the persistent sidebar.
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(listPane, findsNothing);
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(listPane, findsOneWidget);
+        },
+      );
     });
 
     group('orb chip and host label (spec §9.2)', () {
