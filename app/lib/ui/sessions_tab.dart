@@ -360,6 +360,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// - `session.deleted` / the bridge-native `session.closed` — drop the row.
   /// - The turn boundaries (`session.execution.*`) move the row's active dot
   ///   in place, no refetch.
+  /// - The bridge-native `session.turn.cancelled` (issue #164) — a cancelled
+  ///   turn: the row's active dot goes out in place, no refetch, so a session
+  ///   stopped from a panel no longer reads as busy.
   ///
   /// Any other event naming an unknown session (a streamed delta, the first
   /// turn of a just-spawned orb session whose create preceded its upstream's
@@ -394,6 +397,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.interrupted':
+        if (sessionId != null) _setActive(sessionId, false, rows);
+        return;
+      // The bridge-native cancel (issue #164): the session's turn was stopped
+      // (from a panel), so its active dot goes out in place — no refetch. The
+      // service's own terminal for the cancelled turn (`interrupted`) would
+      // settle it too, but this clears it the instant the cancel lands.
+      case BridgeEventType.turnCancelled:
         if (sessionId != null) _setActive(sessionId, false, rows);
         return;
       default:

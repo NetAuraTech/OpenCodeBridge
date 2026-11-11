@@ -47,6 +47,13 @@ class PushDispatcher implements EventConnection {
 
   final Completer<void> _done = Completer<void>();
 
+  /// The sessions whose cancel the bridge already announced as "Turn stopped"
+  /// (issue #164). The service settles a cancelled turn with its own terminal
+  /// `session.execution.interrupted`; remembering the cancel lets the
+  /// dispatcher suppress that follow-on instead of re-announcing it as an
+  /// interrupt. Cleared when the session's next turn starts.
+  final Set<String> _cancelled = {};
+
   @override
   Future<void> get done => _done.future;
 
@@ -58,11 +65,22 @@ class PushDispatcher implements EventConnection {
       case BridgeEventType.dockerContainerStopped:
       case BridgeEventType.dockerContainerCrashed:
         await _docker(event);
+        break;
+      case BridgeEventType.turnCancelled:
+        await _reportCancel(event);
+        break;
+      case 'session.execution.started':
+        // A fresh turn: a stale cancel marker (a terminal missed across a
+        // restart) must not suppress this turn's later outcomes.
+        final id = event.sessionId;
+        if (id != null) _cancelled.remove(id);
+        break;
       case 'permission.asked':
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.interrupted':
         await _opencode(event);
+        break;
       default:
       // The stream also carries every other opencode event (text
       // deltas, usage, ...): not a push event.
@@ -74,9 +92,31 @@ class PushDispatcher implements EventConnection {
     if (!_done.isCompleted) _done.complete();
   }
 
+  /// The bridge-native `session.turn.cancelled` (issue #164): the cancel is
+  /// announced as "Turn stopped" — not reusing "Turn failed" or "Turn
+  /// interrupted". The session is remembered so its service-settled terminal
+  /// (`session.execution.interrupted`) is not re-announced as an interrupt.
+  Future<void> _reportCancel(_Event event) async {
+    final sessionId = event.sessionId;
+    if (sessionId == null) return;
+    _cancelled.add(sessionId);
+    await _service.publish(
+      NotifyKind.turnEnded,
+      title: 'Turn stopped',
+      body: await _label(sessionId),
+      link: DeepLink.sessionUri(sessionId).toString(),
+    );
+  }
+
   Future<void> _opencode(_Event event) async {
     final sessionId = event.sessionId;
     if (sessionId == null) return;
+    if (event.type == 'session.execution.interrupted' &&
+        _cancelled.remove(sessionId)) {
+      // The cancel already reported this turn's end as "Turn stopped": its
+      // service terminal is the same stop, not a new outcome.
+      return;
+    }
     final title = switch (event.type) {
       'permission.asked' => 'Permission requested',
       'session.execution.succeeded' => 'Turn finished',

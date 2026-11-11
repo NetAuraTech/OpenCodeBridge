@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../app_info.dart';
+import '../bridge/events/bridge_event.dart';
 import '../client/events_client.dart';
 import '../client/sessions_client.dart';
 import '../model/command.dart';
@@ -933,6 +934,15 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         // The turn ended: freeze the live footer into its final value (the
         // normalize below replaces the streamed steps with the history, so
         // the frozen stats read the identical window).
+        _setTurnActive(false);
+        _normalize();
+        break;
+      // The bridge-native cancel (issue #164): the turn was stopped. Settle
+      // the running marker and the busy indicator in place, like any terminal
+      // outcome — the normalize below makes the service's authoritative state
+      // authoritative. The service's own terminal for the cancelled turn
+      // (`interrupted`) settles it too; this lands the instant the cancel does.
+      case BridgeEventType.turnCancelled:
         _setTurnActive(false);
         _normalize();
         break;

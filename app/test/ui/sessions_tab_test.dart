@@ -1660,6 +1660,33 @@ void main() {
         expect(client.listCalls, 1);
       });
 
+      testWidgets(
+        'a cancelled turn clears the row active dot in place (issue #164)',
+        (tester) async {
+          // The row is active (a running turn, started before the list load —
+          // the common case: the panel has the session open and it is busy).
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_two], events: events);
+          expect(client.listCalls, 1);
+          expect(find.byKey(const ValueKey('active-ses_2')), findsOneWidget);
+
+          // The bridge-native cancel arrives (no durable seq; the session id
+          // in data, like session.closed): the dot goes out in place, no
+          // refetch.
+          events.emit(
+            const BridgeEvent(
+              id: 'evt_cancelled',
+              created: 0,
+              type: 'session.turn.cancelled',
+              data: {'sessionID': 'ses_2', 'messageID': 'msg_1'},
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('active-ses_2')), findsNothing);
+          expect(client.listCalls, 1, reason: 'no refetch: patched in place');
+        },
+      );
+
       testWidgets('a bridge session.closed drops the row', (tester) async {
         final events = _FakeEventsSource();
         final client = await _pumpTab(

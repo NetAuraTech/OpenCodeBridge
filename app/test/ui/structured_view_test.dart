@@ -2800,6 +2800,55 @@ void main() {
     );
 
     testWidgets(
+      'the bridge-native cancel settles the running marker and Stop control '
+      'in place (issue #164)',
+      (tester) async {
+        // The session opens idle, a turn starts, then the bridge-native cancel
+        // lands (the outcome of a Stop from any panel): the running marker and
+        // the Stop control settle on the event, like a terminal outcome — no
+        // waiting on the service's own terminal.
+        final client = _FakeClient(
+          details: const [_detail0],
+          messageLists: const [settled, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        // Idle: no Stop control.
+        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+
+        // The Turn runs: the Stop control is offered.
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('turn-activity-indicator')),
+          findsOneWidget,
+        );
+
+        // The bridge-native cancel (no durable seq; the session id in data):
+        // the running marker and the Stop control settle in place.
+        events.add(
+          _event(
+            'session.turn.cancelled',
+            data: const {'sessionID': 'ses_1', 'messageID': 'm2'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('turn-activity-indicator')),
+          findsNothing,
+        );
+        await events.close();
+      },
+    );
+
+    testWidgets(
       'while the cancel is in flight the Stop control is busy and ignores '
       'further presses (one request per turn) (issue #163)',
       (tester) async {

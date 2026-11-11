@@ -82,6 +82,74 @@ void main() {
     expect(sender.sent, isEmpty);
   });
 
+  test(
+    'a cancelled turn pushes "Turn stopped", not "Turn interrupted"',
+    () async {
+      // The bridge-native cancel event (no durable seq; the session id in
+      // data, like the other bridge-native events).
+      await dispatcher.write(
+        jsonEncode({
+          'id': 'evt_cancel',
+          'type': 'session.turn.cancelled',
+          'data': {'sessionID': 'ses_1', 'messageID': 'msg_1'},
+        }),
+      );
+      expect(sender.sent, hasLength(1));
+      final sent = sender.sent.single;
+      expect(sent.title, 'Turn stopped');
+      expect(sent.body, 'label-ses_1');
+      expect(sent.link, 'opencodebridge://session/ses_1');
+    },
+  );
+
+  test(
+    'the cancel follow-on terminal is not re-announced as interrupted',
+    () async {
+      // The bridge reports the cancel as "Turn stopped". The service settles
+      // the same turn with its own `session.execution.interrupted` — that
+      // terminal must not add a second "Turn interrupted" push.
+      await dispatcher.write(opencode('session.execution.started'));
+      await dispatcher.write(
+        jsonEncode({
+          'id': 'evt_cancel',
+          'type': 'session.turn.cancelled',
+          'data': {'sessionID': 'ses_1', 'messageID': 'msg_1'},
+        }),
+      );
+      await dispatcher.write(opencode('session.execution.interrupted'));
+      expect(sender.sent.map((s) => s.title), ['Turn stopped']);
+    },
+  );
+
+  test(
+    'a user interrupt (no bridge cancel) still pushes "Turn interrupted"',
+    () async {
+      // No `session.turn.cancelled` precedes it: the terminal is a genuine
+      // user interrupt, reported as before.
+      await dispatcher.write(opencode('session.execution.started'));
+      await dispatcher.write(opencode('session.execution.interrupted'));
+      expect(sender.sent.map((s) => s.title), ['Turn interrupted']);
+    },
+  );
+
+  test('a stale cancel marker is cleared by the next turn start', () async {
+    // A cancel whose terminal was missed (a service restart in between) must
+    // not suppress a later, genuine interrupt of the next turn.
+    await dispatcher.write(
+      jsonEncode({
+        'id': 'evt_cancel',
+        'type': 'session.turn.cancelled',
+        'data': {'sessionID': 'ses_1', 'messageID': 'msg_1'},
+      }),
+    );
+    await dispatcher.write(opencode('session.execution.started'));
+    await dispatcher.write(opencode('session.execution.interrupted'));
+    expect(sender.sent.map((s) => s.title), [
+      'Turn stopped',
+      'Turn interrupted',
+    ]);
+  });
+
   test('docker.container.stopped pushes the container link', () async {
     await dispatcher.write(
       jsonEncode({
