@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
@@ -14,6 +15,21 @@ import '../model/session.dart';
 import '../settings/app_settings.dart';
 import 'new_project_dialog.dart';
 import 'structured_view.dart';
+
+/// The responsive breakpoint (issue #133): at or above this many logical
+/// pixels the sessions sidebar is a persistent, collapsible column (issues
+/// #131/#132); below it the sidebar stops occupying layout space — the detail
+/// pane fills the width and the sidebar opens as an overlay drawer from the
+/// top bar (with a scrim behind it). Driven by the layout width, not device
+/// metrics, so it behaves like a responsive website and is testable at any
+/// surface size. 600 covers phone-sized screens (Android first, e.g. ~360
+/// logical wide in portrait) while still fitting the two panes side by side
+/// on a phone held in landscape (~600+).
+const double kSessionsSidebarBreakpoint = 600;
+
+/// The width the overlay drawer occupies on narrow screens (issue #133): the
+/// same 320 the persistent sidebar column takes on wide screens.
+const double kSessionsDrawerWidth = 320;
 
 /// The Sessions tab: the home list (spec section 5 endpoint 1, section 6,
 /// orbs section 9.2).
@@ -193,6 +209,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// gone entirely and the detail takes the full width; only the toggle stays
   /// visible, at the same screen spot in both states.
   bool _sidebarCollapsed = false;
+
+  /// The overlay drawer's open choice (issue #133): transient, on narrow
+  /// screens only. It is an overlay, not a layout choice, so it is never
+  /// persisted (unlike [_sidebarCollapsed], which only applies to wide
+  /// screens); it resets to closed whenever the narrow layout (re)builds.
+  bool _drawerOpen = false;
 
   @override
   void initState() {
@@ -595,10 +617,15 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   /// Selects [session] in the detail pane (issue #131): swaps the pane in
-  /// place, with no navigator push/pop. The list stays visible.
+  /// place, with no navigator push/pop. The list stays visible. On narrow
+  /// screens a selection made from the overlay drawer also closes it, so the
+  /// detail shows underneath (issue #133).
   void _selectSession(Session session) {
     if (!mounted) return;
-    setState(() => _selectedSession = session);
+    setState(() {
+      _selectedSession = session;
+      _drawerOpen = false;
+    });
   }
 
   void _clearSelection() {
@@ -686,45 +713,129 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
     return LayoutBuilder(
       builder: (context, constraints) {
-        final wide = constraints.maxWidth >= 720;
-        final list = _buildListPane();
-        final detail = _buildDetailPane(showClose: !wide);
-        if (!wide) {
-          return _selectedSession == null
-              ? list
-              : KeyedSubtree(
-                  key: const ValueKey('sessions-detail-pane'),
-                  child: detail,
-                );
+        // Below the breakpoint the sidebar is an overlay drawer (issue #133);
+        // at and above it the persistent, collapsible two-pane layout
+        // (issues #131/#132) is unchanged.
+        if (constraints.maxWidth < kSessionsSidebarBreakpoint) {
+          return _buildNarrow(constraints.maxWidth);
         }
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        return _buildWide();
+      },
+    );
+  }
+
+  /// The wide (≥ [kSessionsSidebarBreakpoint]) layout: the persistent,
+  /// collapsible two-pane layout of issues #131/#132, unchanged by issue
+  /// #133. The toggle rail, the list column (when expanded), and the detail
+  /// fill the row.
+  Widget _buildWide() {
+    final list = _buildListPane();
+    final detail = _buildDetailPane(showClose: false);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // The toggle's own thin column (issue #132): the only thing that
+        // survives the collapse, always at the same left edge, so the
+        // affordance never moves between the two states.
+        _SidebarToggleRail(
+          collapsed: _sidebarCollapsed,
+          onToggle: _toggleSidebar,
+        ),
+        if (!_sidebarCollapsed) ...[
+          SizedBox(
+            key: const ValueKey('sessions-list-pane'),
+            width: 320,
+            child: list,
+          ),
+          const VerticalDivider(width: 1, thickness: 1),
+        ],
+        Expanded(
+          child: KeyedSubtree(
+            key: const ValueKey('sessions-detail-pane'),
+            child: detail,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// The narrow (< [kSessionsSidebarBreakpoint]) layout (issue #133): the
+  /// detail fills the whole width under a top bar, and the sidebar opens as
+  /// an overlay drawer (a scrim behind it) from the top bar's toggle.
+  Widget _buildNarrow(double width) {
+    // A Stack that fills the space: the detail column underneath, and — when
+    // open — the scrim and the drawer positioned over it (an overlay, so the
+    // drawer never takes layout space from the detail).
+    return Stack(
+      fit: StackFit.expand,
+      clipBehavior: Clip.none,
+      children: [
+        // The detail fills the screen: the top bar (its toggle) over the
+        // full-width detail pane.
+        Column(
+          mainAxisSize: MainAxisSize.max,
           children: [
-            // The toggle's own thin column (issue #132): the only thing that
-            // survives the collapse, always at the same left edge, so the
-            // affordance never moves between the two states.
-            _SidebarToggleRail(
-              collapsed: _sidebarCollapsed,
-              onToggle: _toggleSidebar,
-            ),
-            if (!_sidebarCollapsed) ...[
-              SizedBox(
-                key: const ValueKey('sessions-list-pane'),
-                width: 320,
-                child: list,
-              ),
-              const VerticalDivider(width: 1, thickness: 1),
-            ],
+            _NarrowTopBar(drawerOpen: _drawerOpen, onToggle: _toggleDrawer),
             Expanded(
               child: KeyedSubtree(
                 key: const ValueKey('sessions-detail-pane'),
-                child: detail,
+                child: _buildDetailPane(showClose: true),
               ),
             ),
           ],
-        );
-      },
+        ),
+        if (_drawerOpen) ...[
+          // The scrim and the drawer start below the top bar (like a Material
+          // drawer below its AppBar): the top bar stays on top, so the toggle
+          // is always reachable (it closes the drawer too), and the drawer
+          // never hides the control that dismisses it.
+          // The scrim: a tap anywhere on it closes the drawer without
+          // touching the selection (issue #133).
+          Positioned(
+            top: kToolbarHeight,
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: GestureDetector(
+              key: const ValueKey('sessions-drawer-scrim'),
+              behavior: HitTestBehavior.opaque,
+              onTap: _closeDrawer,
+              child: Container(color: Colors.black.withValues(alpha: 0.32)),
+            ),
+          ),
+          // The drawer: the session list from the left edge over the detail.
+          Positioned(
+            top: kToolbarHeight,
+            bottom: 0,
+            left: 0,
+            child: SizedBox(
+              key: const ValueKey('sessions-drawer'),
+              width: min(kSessionsDrawerWidth, width),
+              child: Material(
+                color: Theme.of(context).colorScheme.surface,
+                child: _buildListPane(),
+              ),
+            ),
+          ),
+        ],
+      ],
     );
+  }
+
+  /// Closes the overlay drawer (issue #133). The selection is untouched — a
+  /// tap on the scrim (or the toggle) dismisses the overlay without changing
+  /// which session the detail shows.
+  void _closeDrawer() {
+    if (!mounted || !_drawerOpen) return;
+    setState(() => _drawerOpen = false);
+  }
+
+  /// The top bar's toggle (issue #133): opens the drawer when it is closed
+  /// and closes it when it is open. Transient: never persisted, unlike the
+  /// wide rail's [_toggleSidebar].
+  void _toggleDrawer() {
+    if (!mounted) return;
+    setState(() => _drawerOpen = !_drawerOpen);
   }
 
   /// Flips the sidebar's collapsed state and persists the choice (issue
@@ -895,6 +1006,29 @@ List<_ProjectGroup> _groupByProject(List<Session> rows) {
   return byProject.values.toList();
 }
 
+/// The sidebar's toggle button (issue #132), shared by the wide rail and the
+/// narrow top bar (issue #133): the same affordance in both modes — the same
+/// key, the same chevron icon, and the same tooltip — so the control reads
+/// the same whether it collapses the persistent column (wide) or opens and
+/// closes the overlay drawer (narrow).
+class _SidebarToggle extends StatelessWidget {
+  const _SidebarToggle({required this.collapsed, required this.onToggle});
+
+  /// True when the sidebar is not shown (the icon points outward): the wide
+  /// rail's collapsed state, or the narrow drawer's closed state.
+  final bool collapsed;
+
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    key: const ValueKey('sessions-sidebar-toggle'),
+    tooltip: collapsed ? 'Expand sidebar' : 'Collapse sidebar',
+    icon: Icon(collapsed ? Icons.chevron_right : Icons.chevron_left),
+    onPressed: onToggle,
+  );
+}
+
 /// The sidebar toggle's rail (issue #132): a thin fixed-width column that is
 /// present in both states, so the toggle sits at the same screen spot whether
 /// the sidebar is open or closed. When the sidebar is collapsed it is the
@@ -917,11 +1051,45 @@ class _SidebarToggleRail extends StatelessWidget {
     width: width,
     child: Align(
       alignment: Alignment.topCenter,
-      child: IconButton(
-        key: const ValueKey('sessions-sidebar-toggle'),
-        tooltip: collapsed ? 'Expand sidebar' : 'Collapse sidebar',
-        icon: Icon(collapsed ? Icons.chevron_right : Icons.chevron_left),
-        onPressed: onToggle,
+      child: _SidebarToggle(collapsed: collapsed, onToggle: onToggle),
+    ),
+  );
+}
+
+/// The narrow (phone-sized) top bar (issue #133): the drawer's toggle over
+/// the full-width detail, so the session list is one tap away without taking
+/// layout space. The toggle reuses the wide rail's affordance
+/// ([_SidebarToggle]). When the drawer is open the bar's toggle shows the
+/// "collapse" state and closes it, so it always stays reachable (the drawer
+/// and its scrim sit below this bar, never over it).
+class _NarrowTopBar extends StatelessWidget {
+  const _NarrowTopBar({required this.drawerOpen, required this.onToggle});
+
+  /// True while the overlay drawer is open (the toggle shows the "collapse"
+  /// state and closes it).
+  final bool drawerOpen;
+
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Theme.of(context).colorScheme.surface,
+    elevation: 4,
+    child: SizedBox(
+      height: kToolbarHeight,
+      child: Row(
+        children: [
+          _SidebarToggle(collapsed: !drawerOpen, onToggle: onToggle),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Sessions', overflow: TextOverflow.ellipsis),
+              ),
+            ),
+          ),
+        ],
       ),
     ),
   );
