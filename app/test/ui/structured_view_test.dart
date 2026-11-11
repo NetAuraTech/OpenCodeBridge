@@ -576,6 +576,38 @@ Future<List<SessionMessage>> _parseFixture(
   return parsed!;
 }
 
+/// A [SessionsClient] double whose current history is mutable (issue #156's
+/// live-retry replay): every read (the initial load, the retry poll, and the
+/// turn-end normalize) returns [current]. Making it mutable — instead of a
+/// per-call list — keeps the tests robust to how many times the 1s retry poll
+/// fires (each poll reads the same [current]), so the replay is driven by
+/// changing [current] and advancing the clock to fire a poll, not by counting
+/// reads. The detail is the plain idle one: the Active state is decided by
+/// the history itself (the in-flight step on open, the closing `idle` on the
+/// end read), so no separate "active" detail is needed.
+class _RetryReplayClient extends _FakeClient {
+  List<SessionMessage> current = const [];
+
+  @override
+  Future<SessionDetail> getDetail(String id) async => _detail0;
+
+  @override
+  Future<List<SessionMessage>> getMessages(String id) async {
+    messageCalls++;
+    return current;
+  }
+
+  @override
+  Future<MessagePage> getMessagesPage(
+    String id, {
+    int limit = 50,
+    String? cursor,
+  }) async {
+    messageCalls++;
+    return MessagePage(messages: current, nextCursor: null);
+  }
+}
+
 Future<StreamController<BridgeEvent>> _pump(
   WidgetTester tester, {
   required _FakeClient client,
@@ -2809,6 +2841,281 @@ void main() {
 
       expect(find.textContaining('message 0'), findsOneWidget);
     });
+  });
+
+  group('StructuredSessionScreen live provider retry (issue #156)', () {
+    // The captured in-flight fixture values (issue #154's probe), as the
+    // contract `SessionMessage`s the bridge's parser produces for them —
+    // `message_429_inflight_attempt_2/3.json` and `message_429_succeeded.json`.
+    // The raw service JSON is pinned through the real parser by the
+    // HTTP-service tests; here the view is driven through the same three
+    // states (in-flight retry → updated attempt → succeeded).
+    const rateLimitBody =
+        '{"detail":{"error":{"message":"Model API rate limit exceeded; please retry later","type":"rate_limit_error","code":"token_concurrency_rate_limit_exceeded"}}}';
+    const rateLimitMessage =
+        'Provider request failed with HTTP 429: $rateLimitBody';
+    const rateLimitError = StructuredError(
+      type: 'provider.rate-limit',
+      message: rateLimitMessage,
+      status: 429,
+      body: rateLimitBody,
+      retryAfterMs: 1000,
+    );
+    const user = SessionMessage(
+      id: 'msg_1c68f428f001S3dFNmh3LTTnuU',
+      role: 'user',
+      text: 'Reply with exactly: one',
+      created: 1794332639928,
+    );
+
+    // `message_429_inflight_attempt_2.json`: the assistant mid-retry, no content.
+    const attempt2 = [
+      user,
+      SessionMessage(
+        id: 'msg_1c68f42c7001H8MgETik6BH3y4',
+        role: 'assistant',
+        created: 1794332639945,
+        retry: MessageRetry(
+          attempt: 2,
+          at: 1794332643505,
+          error: rateLimitError,
+        ),
+      ),
+    ];
+    // `message_429_inflight_attempt_3.json`: the same assistant row, attempt climbed in place.
+    const attempt3 = [
+      user,
+      SessionMessage(
+        id: 'msg_1c68f42c7001H8MgETik6BH3y4',
+        role: 'assistant',
+        created: 1794332643517,
+        retry: MessageRetry(
+          attempt: 3,
+          at: 1794332647492,
+          error: rateLimitError,
+        ),
+      ),
+    ];
+    // `message_429_succeeded.json`: the retry landed (no retry, no error), the
+    // content streamed, and the turn closed `succeeded`.
+    const succeeded = [
+      user,
+      SessionMessage(
+        id: 'msg_1c68f42c7001H8MgETik6BH3y4',
+        role: 'assistant',
+        text: '\n\none',
+        reasoning:
+            'The user is asking me to reply with exactly "one". '
+            'This is a simple instruction to output exactly that text. '
+            'There\'s no need to call any tool.\n',
+        contextTokens: 9549,
+        created: 1794332647500,
+        streamed: 1794332650175,
+        completed: 1794332650176,
+        outputTokens: 37,
+        reasoningTokens: 34,
+      ),
+      SessionMessage(
+        id: 'msg_1c68f6ac1001IhNVGv7ax9XhHS',
+        role: 'idle',
+        outcome: 'succeeded',
+      ),
+    ];
+
+    final noticeKey = const ValueKey('structured-retry-notice');
+
+    /// A mutable epoch-millis clock: the panel's retry poll (1s) and the live
+    /// footer's tick clock (200ms) both advance as [now] moves, so advancing
+    /// [now] past the poll's period fires a poll deterministically.
+    late int now;
+    DateTime Function() clock() =>
+        () => DateTime.fromMillisecondsSinceEpoch(now);
+
+    /// Fires one retry poll: advances the binding's fake clock past the 1s
+    /// poll period so the periodic poll timer runs, then pumps the frames the
+    /// poll's async read resolves into (the HTTP microtasks and its setState).
+    /// It does not advance [now] (the injected clock), so the live footer's
+    /// ticking duration is unaffected by the poll.
+    Future<void> firePoll(WidgetTester tester) async {
+      await tester.pump(const Duration(milliseconds: 1100));
+      await tester.pump();
+      await tester.pump();
+    }
+
+    /// Opens the panel mid-retry: the initial read brings in the Active turn
+    /// (an in-flight assistant with a `retry`), so the notice appears from the
+    /// history alone. Returns the event stream (no retry event is ever added).
+    Future<StreamController<BridgeEvent>> openMidRetry(
+      WidgetTester tester, {
+      required _RetryReplayClient client,
+    }) async {
+      now = 1794332645000;
+      return _pump(tester, client: client, clock: clock());
+    }
+
+    testWidgets(
+      'opens mid-retry (another client) and shows the verbatim notice '
+      'without a retry event',
+      (tester) async {
+        // The session opens already mid-retry: a turn launched by another
+        // client is Active (the mid-turn history decides it), so the notice
+        // must appear from the initial read alone — no `session.retry.*`
+        // event ever arrives (issue #156: no event plumbing dependency).
+        final client = _RetryReplayClient()..current = List.of(attempt2);
+        final events = await openMidRetry(tester, client: client);
+        // The notice is on the active turn, verbatim (TUI's copy), N matching
+        // the message's retry.attempt (2), the provider body truncated by
+        // default (the full body is not rendered collapsed).
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(
+          find.textContaining(
+            'Retry due · attempt 2 · Provider request failed with HTTP 429',
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining(rateLimitBody), findsNothing);
+        // Additive: the existing "working…" indicator is still there.
+        expect(find.text('Assistant · working…'), findsOneWidget);
+
+        // The retry lands (the service re-reads attempt cleared) and the turn
+        // ends: the notice leaves, no trace in the rendered history.
+        client.current = List.of(succeeded);
+        await firePoll(tester);
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(noticeKey), findsNothing);
+        expect(find.textContaining('Retry due'), findsNothing);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'replays in-flight retry → updated attempt → succeeded: appear, update '
+      'in place, disappear cleanly, nothing left after normalize',
+      (tester) async {
+        final client = _RetryReplayClient()..current = List.of(attempt2);
+        final events = await openMidRetry(tester, client: client);
+
+        // 1. In-flight retry: the notice appears (the initial read).
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(find.textContaining('Retry due · attempt 2'), findsOneWidget);
+
+        // 2. A later attempt lands on the same message: N advances in place
+        // (the poll re-reads the turn; no second notice is created).
+        client.current = List.of(attempt3);
+        await firePoll(tester);
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(find.textContaining('Retry due · attempt 3'), findsOneWidget);
+        expect(find.textContaining('Retry due · attempt 2'), findsNothing);
+
+        // 3. The retry succeeds: the poll re-reads the message with no `retry`
+        // and the notice disappears cleanly (no duplicate, no lingering text).
+        client.current = List.of(succeeded);
+        await firePoll(tester);
+        expect(find.byKey(noticeKey), findsNothing);
+        expect(find.textContaining('Retry due'), findsNothing);
+
+        // 4. The turn ends and the normalize replaces the history: nothing is
+        // left in the rendered record — the successful content shows, not a
+        // retry notice.
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(noticeKey), findsNothing);
+        expect(find.textContaining('Retry due'), findsNothing);
+        expect(find.textContaining('one'), findsWidgets);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'the provider body is truncated by default and expands to the full '
+      'string on tap',
+      (tester) async {
+        final client = _RetryReplayClient()..current = List.of(attempt2);
+        final events = await openMidRetry(tester, client: client);
+        expect(find.byKey(noticeKey), findsOneWidget);
+        // Collapsed: the first line never wraps into a wall — the long body is
+        // truncated (the full body is not present), with an expand affordance.
+        expect(find.textContaining(rateLimitBody), findsNothing);
+        expect(find.byIcon(Icons.expand_more), findsOneWidget);
+
+        // Tap: the body expands to its full string.
+        await tester.tap(find.byKey(noticeKey));
+        await tester.pump();
+        expect(find.textContaining(rateLimitBody), findsOneWidget);
+        expect(find.byIcon(Icons.expand_less), findsOneWidget);
+
+        // Collapse again: back to the truncated first line.
+        await tester.tap(find.byKey(noticeKey));
+        await tester.pump();
+        expect(find.textContaining(rateLimitBody), findsNothing);
+        expect(find.byIcon(Icons.expand_more), findsOneWidget);
+
+        client.current = List.of(succeeded);
+        await firePoll(tester);
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'the notice is additive: the working indicator and the live footer keep '
+      'whatever they do while the turn retries',
+      (tester) async {
+        final client = _RetryReplayClient()..current = List.of(attempt2);
+        final events = await openMidRetry(tester, client: client);
+        // All three are present at once: the ambient notice, the working
+        // label, and the live footer (the activity indicator rides on it).
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(find.text('Assistant · working…'), findsOneWidget);
+        expect(find.byKey(const ValueKey('turn-stats')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('turn-activity-indicator')),
+          findsOneWidget,
+        );
+
+        client.current = List.of(succeeded);
+        await firePoll(tester);
+        events.add(_event('session.execution.succeeded', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        // The notice is the only one that leaves; the turn settles.
+        expect(find.byKey(noticeKey), findsNothing);
+        expect(find.text('Assistant · working…'), findsNothing);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'a settled (idle) history shows no retry notice (no false positive)',
+      (tester) async {
+        // A closed turn whose last assistant carried no retry: the notice must
+        // never appear.
+        final client = _RetryReplayClient()
+          ..current = const [
+            user,
+            SessionMessage(
+              id: 'm-done',
+              role: 'assistant',
+              text: 'done',
+              created: 1000,
+              streamed: 2000,
+              completed: 3000,
+              outputTokens: 5,
+              reasoningTokens: 0,
+            ),
+            SessionMessage(id: 'i1', role: 'idle', outcome: 'succeeded'),
+          ];
+        final events = await openMidRetry(tester, client: client);
+        expect(find.byKey(noticeKey), findsNothing);
+        expect(find.textContaining('Retry due'), findsNothing);
+        await events.close();
+      },
+    );
   });
 
   group('StructuredSessionScreen Stop the running turn (issue #163)', () {
