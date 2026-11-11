@@ -382,6 +382,18 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// the rebuilds well below the text-delta flush (48 ms).
   static const Duration _turnTickPeriod = Duration(milliseconds: 200);
 
+  /// The live turn's retry-state poll (issue #156): re-reads the turn's
+  /// messages on a short cadence while the turn is active, so the in-flight
+  /// provider retry (attempt N climbing in place) and its landing are
+  /// surfaced without depending on a retry event (the probe found none in the
+  /// event enum the view consumes). Cancelled when the turn ends.
+  Timer? _retryPoll;
+
+  /// How often the live turn's retry state is re-read: the provider backs off
+  /// on the order of seconds, so a one-second cadence keeps the attempt number
+  /// current without hammering the service.
+  static const Duration _retryPollPeriod = Duration(seconds: 1);
+
   /// The tokens the last model call sent to the model (the context the call
   /// used), from the last `session.step.ended` seen; `null` until a step
   /// ends. Kept after the turn ends (the context stays until the next
@@ -592,6 +604,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _flush = null;
     _turnTick?.cancel();
     _turnTick = null;
+    _retryPoll?.cancel();
+    _retryPoll = null;
     _pendingDeltas.clear();
     _pendingReasoning.clear();
     _liveMessages.clear();
@@ -647,6 +661,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _gapsSub?.cancel();
     _flush?.cancel();
     _turnTick?.cancel();
+    _retryPoll?.cancel();
     _prompt.removeListener(_onPromptCleared);
     _prompt.dispose();
     _scroll.dispose();
@@ -842,11 +857,16 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _oldestLoaded = turn.nextCursor == null;
   }
 
-  /// Sets the Active state, running the live footer's ticking clock while the
-  /// Turn is Active (issues #122/#124).
+  /// Sets the Active state, running the live footer's ticking clock and the
+  /// retry-state poll while the Turn is Active (issues #122/#124, #156).
   void _setTurnActive(bool active) {
-    if (active) _startTurnTick();
-    if (!active) _stopTurnTick();
+    if (active) {
+      _startTurnTick();
+      _startRetryPoll();
+    } else {
+      _stopTurnTick();
+      _stopRetryPoll();
+    }
     if (mounted && _turnActive != active) setState(() => _turnActive = active);
   }
 
@@ -865,6 +885,97 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _turnTick?.cancel();
     _turnTick = null;
   }
+
+  /// Starts the live turn's retry-state poll (issue #156), if not already
+  /// running: re-reads the turn's messages on a short cadence so the in-flight
+  /// provider retry is surfaced and its landing detected without a retry event.
+  void _startRetryPoll() {
+    if (_retryPoll != null) return;
+    _retryPoll = Timer.periodic(_retryPollPeriod, (_) {
+      if (mounted && _turnActive) _pollRetry();
+    });
+  }
+
+  /// Stops the live turn's retry-state poll (the Turn ended or the view
+  /// closed). A stop does not leave a trace: whatever retry state the last
+  /// poll read is simply the turn's final read (the turn-end normalize that
+  /// follows is authoritative).
+  void _stopRetryPoll() {
+    _retryPoll?.cancel();
+    _retryPoll = null;
+  }
+
+  /// One retry-state poll (issue #156): re-reads the turn's messages and
+  /// syncs each in-flight message's `retry` / `error` to the service's
+  /// authoritative value. Only the live-only fields are synced — the streamed
+  /// text / reasoning / tool cards the events grew are preserved (a retried
+  /// step has produced no content yet, so a fresh read would never carry it).
+  /// A change is applied with one rebuild; a no-op read rebuilds nothing.
+  Future<void> _pollRetry() async {
+    final token = _sessionLoadToken;
+    try {
+      final page = await _loadTurn();
+      if (!mounted || token != _sessionLoadToken) return;
+      setState(() => _syncLiveRetryState(page.messages));
+    } on SessionsClientError {
+      // Transient (e.g. the service restarted): the next poll retries.
+    } catch (_) {
+      // Same: a failed poll never breaks the view.
+    }
+  }
+
+  /// Syncs the live-only fields (`retry`, `error`) of the in-flight messages
+  /// to [fresh] (the freshly-read turn). Returns `true` when any in-flight
+  /// message changed, so the caller rebuilds only then. The streamed content
+  /// (text / reasoning / tools) of the in-flight message is kept: the fresh
+  /// read carries no content for a step that has not streamed yet.
+  bool _syncLiveRetryState(List<SessionMessage> fresh) {
+    var changed = false;
+    for (var i = 0; i < fresh.length; i++) {
+      final message = fresh[i];
+      final id = message.id;
+      if (id == null) continue;
+      final index = _liveMessages[id];
+      if (index == null || index >= _messages.length) continue;
+      final current = _messages[index];
+      // Skip only when neither live field changed (a no-op read rebuilds
+      // nothing); a change to either syncs both to the fresh read.
+      if (current.retry == message.retry && current.error == message.error) {
+        continue;
+      }
+      _setMessageAt(
+        index,
+        _rebuildLiveFields(current, retry: message.retry, error: message.error),
+      );
+      changed = true;
+    }
+    return changed;
+  }
+
+  /// A [SessionMessage] copy with only [retry] and [error] replaced: every
+  /// other field (the streamed text / reasoning / tools the events grew) is
+  /// kept. Used to land a retried step's live state without disturbing the
+  /// in-flight content.
+  SessionMessage _rebuildLiveFields(
+    SessionMessage message, {
+    MessageRetry? retry,
+    StructuredError? error,
+  }) => SessionMessage(
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    reasoning: message.reasoning,
+    contextTokens: message.contextTokens,
+    tools: message.tools,
+    created: message.created,
+    streamed: message.streamed,
+    completed: message.completed,
+    outputTokens: message.outputTokens,
+    reasoningTokens: message.reasoningTokens,
+    retry: retry,
+    error: error,
+    outcome: message.outcome,
+  );
 
   /// (Re-)indexes the loaded history so the live maps track every message
   /// and tool call it already carries (a turn may be running when the view
@@ -2704,6 +2815,28 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     return result;
   }
 
+  /// The in-flight provider retry of the Active turn (issue #156): the
+  /// [MessageRetry] carried by the turn's newest assistant row, or `null` when
+  /// the turn is not being retried (no `retry` on any loaded row) or the turn
+  /// is not Active. The notice is driven by re-reading the message state
+  /// (the poll + turn-boundary normalize), never by a retry event — so it
+  /// appears for a turn launched by another client as soon as the history is
+  /// read, and it is the newest attempt's when one climbs in place.
+  MessageRetry? _retryNotice() {
+    if (!_turnActive || _messages.isEmpty) return null;
+    // Walk the loaded history newest-first for a row carrying a live `retry`.
+    // A retried step has produced no content yet, so it sits at the newest
+    // end of the Active turn; the first `retry` found is the current one.
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      final message = _messages[i];
+      final retry = message.retry;
+      if (retry != null) return retry;
+      // A closing `idle` marker means this row is past the Active turn: stop.
+      if (message.role == 'idle') break;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     // The panel owns its surface and header (issue #130): it renders the
@@ -2731,6 +2864,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       _messages,
       detailOutcome: _detail?.outcome,
     );
+    // The Active turn's in-flight provider retry (issue #156): the verbatim
+    // `Retry due · attempt N · …` notice shown at the top of the turn's live
+    // band while it retries, gone (no trace) once the request proceeds.
+    final retry = _retryNotice();
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: Column(
@@ -2787,6 +2924,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                         decode: _decode,
                         outcome: chipOutcome,
                       ),
+                      // The Active turn's in-flight provider retry (issue #156):
+                      // the ambient amber notice at the top of the live band,
+                      // present only while the turn is being retried — it leaves
+                      // no trace once the request proceeds.
+                      if (retry != null) _RetryNotice(retry: retry),
                       Expanded(
                         // The chat list and the prompt bar share the height
                         // left by the cost bar: with the keyboard up on
@@ -3544,6 +3686,128 @@ class _TurnActivityIndicatorState extends State<_TurnActivityIndicator>
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The Active turn's in-flight provider retry (issue #156): an ambient, amber
+/// notice at the top of the turn's live band, carrying the TUI's verbatim copy
+/// — `Retry due · attempt N · {error message}` — while the turn is being
+/// retried. It is not a dialog, snackbar, or header chip: a single row pinned
+/// above the streaming area. The provider's (unbounded) JSON body is shown
+/// truncated with an expand affordance; tapping the row expands it to the full
+/// body. It is not part of the turn's record: the moment the message's `retry`
+/// clears (the request proceeds) the row is gone, leaving no trace in the
+/// rendered history. Rendered only while the turn is Active and retrying.
+class _RetryNotice extends StatefulWidget {
+  const _RetryNotice({required this.retry});
+
+  /// The in-flight provider retry (the message's `retry`), `N` and the body
+  /// read from it.
+  final MessageRetry retry;
+
+  @override
+  State<_RetryNotice> createState() => _RetryNoticeState();
+}
+
+class _RetryNoticeState extends State<_RetryNotice> {
+  /// The body's collapsed length: long enough to read the error's shape (the
+  /// TUI's own `{…}` abbreviates the 429 body the same way), short enough that
+  /// the first line never becomes a wall. A body past it is shown truncated
+  /// (with the expand affordance); one at or under it is shown whole.
+  static const int _collapsedBodyLength = 80;
+
+  /// Whether the body is expanded to its full string (toggled by tapping the
+  /// row). It persists while the row stays mounted — so as the attempt climbs
+  /// in place the user keeps the body open they just opened — and resets only
+  /// when the row unmounts (the retry cleared) and a later retry re-mounts it.
+  bool _expanded = false;
+
+  /// The provider's raw body (the `retry.error.response.body`), or `null` when
+  /// the error carried none (then nothing is truncated or expandable).
+  String? get _body => widget.retry.error.body?.toString();
+
+  /// True when the body is long enough that the collapsed form truncates it
+  /// (and so the row offers the expand affordance).
+  bool get _expandable {
+    final body = _body;
+    return body != null && body.length > _collapsedBodyLength;
+  }
+
+  /// The body as shown: the full string when expanded (or when it fits), the
+  /// truncated form with a `…` when collapsed.
+  String get _bodyShown {
+    final body = _body ?? '';
+    if (_expanded || body.length <= _collapsedBodyLength) return body;
+    return '${body.substring(0, _collapsedBodyLength)}…';
+  }
+
+  /// The verbatim line (the TUI's copy, issue #156): `Retry due · attempt N ·
+  /// {error message}`. The message already ends with the provider body, so the
+  /// body is the part that may be truncated; the head stays verbatim. When the
+  /// error carries no body, the head is the whole message.
+  String get _line {
+    final error = widget.retry.error;
+    final body = _body;
+    final head = body != null && error.message.endsWith(body)
+        ? error.message.substring(0, error.message.length - body.length)
+        : error.message;
+    return 'Retry due · attempt ${widget.retry.attempt} · $head$_bodyShown';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final brightness = Theme.brightnessOf(context);
+    final amber = brightness == Brightness.dark
+        ? const Color(0xFFF5A742)
+        : const Color(0xFF8A5A00);
+    return Container(
+      key: const ValueKey('structured-retry-notice'),
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      decoration: BoxDecoration(
+        color: const Color(0xFFB0851F).withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: amber.withValues(alpha: 0.4)),
+      ),
+      child: InkWell(
+        // Tapping expands/collapses the body; a non-truncating body leaves the
+        // row inert (there is nothing to expand).
+        onTap: _expandable
+            ? () => setState(() => _expanded = !_expanded)
+            : null,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.warning_amber, size: 16, color: amber),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _line,
+                  maxLines: _expanded ? null : 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                    color: amber,
+                  ),
+                ),
+              ),
+              if (_expandable)
+                Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 1),
+                  child: Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16,
+                    color: amber,
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
