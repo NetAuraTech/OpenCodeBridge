@@ -1089,6 +1089,173 @@ void main() {
       expect(service.cancelled, ['ses_one']);
     });
 
+    // The cancel's bridge-native `session.turn.cancelled` (issue #164): these
+    // tests wire a live event hub so the tracker sees the stream and the SSE
+    // tap can read the emitted frame. Each test owns its server (the command
+    // group's setUp has no hub).
+    Future<
+      ({
+        BridgeServer server,
+        _SseTap tap,
+        _FakeEventUpstream upstream,
+        EventHub hub,
+      })
+    >
+    cancelEventServer() async {
+      final upstream = _FakeEventUpstream();
+      final hub = EventHub(service: upstream);
+      final server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(service: service),
+        events: hub,
+      );
+      final tap = await _SseTap.open(server.baseUri);
+      await _until(() => tap.ready);
+      return (server: server, tap: tap, upstream: upstream, hub: hub);
+    }
+
+    Future<void> closeCancelEventServer(
+      ({
+        BridgeServer server,
+        _SseTap tap,
+        _FakeEventUpstream upstream,
+        EventHub hub,
+      })
+      ctx,
+    ) async {
+      await ctx.tap.close();
+      await ctx.server.stop();
+      await ctx.hub.close();
+    }
+
+    test('POST .../cancel on a running turn emits session.turn.cancelled with '
+        'the in-flight message id, no durable seq', () async {
+      final ctx = await cancelEventServer();
+      try {
+        // The session is running a turn: the tracker opens it on the start
+        // event and names the in-flight message off the stream.
+        _emitExecStarted(ctx.upstream, 'ses_one');
+        _emitStepStarted(ctx.upstream, 'ses_one', 'msg_inflight');
+        // Wait until the hub has fanned the turn out to the tap: the tracker
+        // (fanned out first, synchronously) has already processed it, so the
+        // cancel reads a caught-up in-flight state.
+        await _until(
+          () => ctx.tap.dataPayloads.any(
+            (p) => p.contains('"type":"session.step.started"'),
+          ),
+          message: 'expected the step frame on the stream',
+        );
+
+        final (status, body) = await _postRaw(
+          ctx.server.baseUri,
+          'api/sessions/ses_one/cancel',
+          '',
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+        expect(service.cancelled, ['ses_one']);
+        await _until(
+          () => ctx.tap.dataPayloads.any((p) => p.contains('turn.cancelled')),
+          message: 'expected the session.turn.cancelled frame',
+        );
+        final frame = jsonDecode(
+          ctx.tap.dataPayloads.firstWhere((p) => p.contains('turn.cancelled')),
+        ) as Map<String, Object?>;
+        expect(frame['type'], 'session.turn.cancelled');
+        expect(frame['data'], {
+          'sessionID': 'ses_one',
+          'messageID': 'msg_inflight',
+        });
+        expect(
+          frame.containsKey('durable'),
+          isFalse,
+          reason: 'bridge-native events carry no durable seq',
+        );
+      } finally {
+        await closeCancelEventServer(ctx);
+      }
+    });
+
+    test('POST .../cancel on a running turn with no in-flight message names '
+        'the session only', () async {
+      final ctx = await cancelEventServer();
+      try {
+        // The turn is running but no message has been named yet. Wait for the
+        // start frame to reach the tap so the tracker has processed it.
+        _emitExecStarted(ctx.upstream, 'ses_one');
+        await _until(
+          () => ctx.tap.dataPayloads.any(
+            (p) => p.contains('"type":"session.execution.started"'),
+          ),
+          message: 'expected the start frame on the stream',
+        );
+
+        final (status, _) = await _postRaw(
+          ctx.server.baseUri,
+          'api/sessions/ses_one/cancel',
+          '',
+        );
+        expect(status, 204);
+        await _until(
+          () => ctx.tap.dataPayloads.any((p) => p.contains('turn.cancelled')),
+        );
+        final frame = jsonDecode(
+          ctx.tap.dataPayloads.firstWhere((p) => p.contains('turn.cancelled')),
+        ) as Map<String, Object?>;
+        expect(frame['data'], {'sessionID': 'ses_one'});
+      } finally {
+        await closeCancelEventServer(ctx);
+      }
+    });
+
+    test(
+      'POST .../cancel on an idle session emits no turn.cancelled event',
+      () async {
+        final ctx = await cancelEventServer();
+        try {
+          // The session is idle: no turn running, no message in flight.
+          final (status, _) = await _postRaw(
+            ctx.server.baseUri,
+            'api/sessions/ses_one/cancel',
+            '',
+          );
+          expect(status, 204);
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          expect(
+            ctx.tap.dataPayloads.where((p) => p.contains('turn.cancelled')),
+            isEmpty,
+            reason: 'an idle cancel must not emit a turn-cancelled event',
+          );
+        } finally {
+          await closeCancelEventServer(ctx);
+        }
+      },
+    );
+
+    test('POST .../cancel does not emit turn.cancelled when the service is '
+        'down', () async {
+      final ctx = await cancelEventServer();
+      try {
+        _emitExecStarted(ctx.upstream, 'ses_one');
+        service.failCancel = true;
+        final (status, _) = await _postRaw(
+          ctx.server.baseUri,
+          'api/sessions/ses_one/cancel',
+          '',
+        );
+        expect(status, 502);
+        expect(service.cancelled, isEmpty);
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(
+          ctx.tap.dataPayloads.where((p) => p.contains('turn.cancelled')),
+          isEmpty,
+          reason: 'a failed cancel carries nothing out',
+        );
+      } finally {
+        await closeCancelEventServer(ctx);
+      }
+    });
+
     test('POST .../cancel is 502 when the service is down', () async {
       service.failCancel = true;
       final (status, body) = await _postRaw(
@@ -3160,6 +3327,45 @@ class _FakeEventUpstream implements OpencodeEventService {
 
   @override
   Future<void> close() async {}
+}
+
+/// A session-scoped opencode event on the unified stream (a durable seq names
+/// the session): the wire shape the bridge's [TurnTracker] reads the turn from
+/// (issue #164).
+String _execRaw(String sessionID, String type, {Map<String, Object?>? data}) =>
+    jsonEncode({
+      'id': 'evt_$type',
+      'type': type,
+      'data': data ?? const <String, Object?>{},
+      'durable': {'aggregateID': sessionID, 'seq': 1, 'version': 1},
+    });
+
+/// A turn opens for [sessionID] on the stream.
+void _emitExecStarted(_FakeEventUpstream upstream, String sessionID) {
+  upstream.add(
+    OpencodeEvent(
+      raw: _execRaw(sessionID, 'session.execution.started'),
+      type: 'session.execution.started',
+    ),
+  );
+}
+
+/// A step names the in-flight [messageID] for [sessionID]'s running turn.
+void _emitStepStarted(
+  _FakeEventUpstream upstream,
+  String sessionID,
+  String messageID,
+) {
+  upstream.add(
+    OpencodeEvent(
+      raw: _execRaw(
+        sessionID,
+        'session.step.started',
+        data: {'assistantMessageID': messageID},
+      ),
+      type: 'session.step.started',
+    ),
+  );
 }
 
 /// A scripted [FsService] for the fs endpoint tests: the drives and

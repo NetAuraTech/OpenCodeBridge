@@ -24,6 +24,7 @@ import 'notify/notify_service.dart';
 import 'notify/push_dispatcher.dart';
 import 'events/llama_speed_feed.dart';
 import 'events/opencode_http_event_service.dart';
+import 'events/turn_tracker.dart';
 import 'health.dart';
 import 'sessions/backend.dart';
 import 'sessions/composite_service.dart';
@@ -66,6 +67,7 @@ class BridgeServer {
     this._dockerLogKeepAlive,
     this._notify,
     this._pushDispatcher,
+    this._turnTracker,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -279,6 +281,12 @@ class BridgeServer {
   /// live push dispatch or a hub.
   PushDispatcher? _pushDispatcher;
 
+  /// The bridge's per-session turn state (issue #164), a downstream [EventHub]
+  /// connection that tracks which sessions are running a turn and the in-flight
+  /// message id; the cancel route reads it to decide whether to emit
+  /// `session.turn.cancelled`. `null` without a hub.
+  final TurnTracker? _turnTracker;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -416,6 +424,15 @@ class BridgeServer {
     final eventHub =
         events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
     orbEmit = eventHub?.emit;
+    // The cancel route's per-session turn state (issue #164): a downstream
+    // connection on the hub that tracks the running turn and its in-flight
+    // message from the unified stream, so the cancel knows whether to emit
+    // `session.turn.cancelled` and which message was in flight.
+    TurnTracker? turnTracker;
+    if (eventHub != null) {
+      turnTracker = TurnTracker();
+      eventHub.add(turnTracker);
+    }
     final speed =
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
@@ -457,6 +474,7 @@ class BridgeServer {
       dockerLogKeepAlive,
       notifyService,
       pushDispatcher,
+      turnTracker,
     );
     speed?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
@@ -498,6 +516,7 @@ class BridgeServer {
       _sessions,
       _fs,
       _events,
+      _turnTracker,
       _docker,
       _orb,
       _orbs,
@@ -1003,6 +1022,7 @@ class BridgeServer {
     SessionsBackend? sessions,
     FsService fs,
     EventHub? events,
+    TurnTracker? turnTracker,
     DockerBackend? docker,
     OrbImageBuilder? orb,
     OrbService? orbs,
@@ -1407,6 +1427,8 @@ class BridgeServer {
           command.$1,
           command.$2,
           sessions,
+          events,
+          turnTracker,
         );
         return;
       }
@@ -2111,6 +2133,8 @@ class BridgeServer {
     String id,
     String sub,
     SessionsBackend? sessions,
+    EventHub? events,
+    TurnTracker? turnTracker,
   ) async {
     final response = request.response;
     if (sessions == null) {
@@ -2207,9 +2231,28 @@ class BridgeServer {
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['cancel']):
+          // Snapshot the in-flight state before the interrupt: the service
+          // settles a cancelled turn with its own terminal, which flows back
+          // through the event stream and clears the tracker — whether to
+          // report the cancel (and which message was in flight) must be
+          // decided before that.
+          final wasRunning = turnTracker != null && turnTracker.isRunning(id);
+          final inFlight = turnTracker?.inFlightMessageID(id);
           // Cancel the running turn (issue #158): the service interrupt,
           // same mapping as the other command endpoints.
           await sessions.cancel(id);
+          // Bridge-native `session.turn.cancelled` (issue #164): the outcome
+          // of the cancel is reported to every watcher, not only the panel
+          // that asked. Emitted only when the session was running a turn (the
+          // in-flight message id, when there is one, rides along); an idle
+          // session's cancel is a no-op and emits nothing.
+          if (wasRunning && events != null) {
+            final data = <String, Object?>{'sessionID': id};
+            if (inFlight != null) data['messageID'] = inFlight;
+            events.emit(
+              bridgeEvent(type: BridgeEventType.turnCancelled, data: data),
+            );
+          }
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['redo']):

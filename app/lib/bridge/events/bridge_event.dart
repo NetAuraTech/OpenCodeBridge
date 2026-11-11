@@ -10,6 +10,13 @@ abstract class BridgeEventType {
   /// app drops it from its list.
   static const String sessionClosed = 'session.closed';
 
+  /// A session's turn was cancelled (a Stop from a panel, issue #164): the
+  /// bridge carries it out and reports the outcome to every watcher, not only
+  /// the panel that asked. `data` carries `sessionID` and — when a message was
+  /// in flight — `messageID`. No durable seq (a bridge-native side-effect,
+  /// like `session.closed`); an idle session's cancel emits no event at all.
+  static const String turnCancelled = 'session.turn.cancelled';
+
   /// A container transitioned to stopped (clean). (Wired as Docker lands.)
   static const String dockerContainerStopped = 'docker.container.stopped';
 
