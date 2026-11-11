@@ -33,6 +33,19 @@ const _detail0 = SessionDetail(
   outcome: null,
 );
 
+/// A detail whose service cannot cancel the turn (no interrupt route — an old
+/// binary, issue #165 / ticket #2): the structured view hides the Stop on an
+/// Active turn rather than offer a control that would only fail with a 502.
+const _detailNoCancel = SessionDetail(
+  id: 'ses_1',
+  title: 'external',
+  location: '/x',
+  cost: 0,
+  tokens: _zero,
+  outcome: null,
+  canCancel: false,
+);
+
 /// A detail carrying a fixed [outcome] (issue #157's header-chip tests): the
 /// service's session-level outcome, which can lag the newest turn's verdict.
 SessionDetail _detailOutcome(String? outcome) => SessionDetail(
@@ -3481,6 +3494,38 @@ void main() {
         await tester.pump();
         await tester.pump();
         expect(client.cancelCalls, ['ses_1', 'ses_1']);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'a service without the interrupt route offers no Stop (issue #165, '
+      'ticket 2)',
+      (tester) async {
+        // The detail's canCancel is false: the routed service (an old binary)
+        // has no interrupt route, so offering Stop would be a control that
+        // only fails with a 502. The view hides it on an Active turn.
+        final client = _FakeClient(
+          details: const [_detailNoCancel],
+          messageLists: const [running, running, settled],
+        );
+        final events = await _pump(
+          tester,
+          client: client,
+          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+        );
+        // The Turn runs, but the Stop is not offered: the detail says the
+        // service cannot cancel it.
+        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
+        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        // The turn is otherwise Active (the footer's activity indicator is
+        // there — the Active fact is independent of cancel capability).
+        expect(
+          find.byKey(const ValueKey('turn-activity-indicator')),
+          findsOneWidget,
+        );
         await events.close();
       },
     );

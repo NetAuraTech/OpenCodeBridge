@@ -216,6 +216,9 @@ class FakeService implements OpencodeService {
   }
 
   @override
+  Future<bool> canCancelTurn(String id) async => cancelServesRoute;
+
+  @override
   Future<void> rename(String id, String title) async {}
 
   @override

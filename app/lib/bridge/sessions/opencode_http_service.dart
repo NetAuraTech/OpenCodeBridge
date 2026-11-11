@@ -735,6 +735,15 @@ class OpencodeHttpService implements OpencodeService {
   /// again (a restart may have upgraded the service).
   bool? _interruptRoute;
 
+  /// The capability read (issue #165): answers from the remembered probe
+  /// without side effect — `false` only when this client has actually proven
+  /// the service lacks the route (`false`); an unproven (`null`) or proven
+  /// (`true`) route reads as capable. This is the view's single check for
+  /// whether to offer Stop, so it never triggers the destructive probe of
+  /// [cancelTurn].
+  @override
+  Future<bool> canCancelTurn(String id) async => _interruptRoute != false;
+
   /// Whether the service knows the session (its detail read answers): the
   /// disambiguation of an interrupt 404 between "no such session" and "no
   /// such route".

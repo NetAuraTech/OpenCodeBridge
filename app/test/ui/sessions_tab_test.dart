@@ -99,12 +99,31 @@ class _FakeSessionsClient extends SessionsClient {
   final List<(String, String, PermissionReply)> replies = [];
   var listCalls = 0;
 
+  /// The cancel calls (`cancel`), in order (issue #165's row Stop).
+  final List<String> cancelled = [];
+
+  /// When set, `cancel` throws it (the failure the row Stop reports).
+  Object? cancelError;
+
+  /// When set, `cancel` awaits it before returning (the cancel held in flight,
+  /// to sequence it against the row's busy state).
+  Completer<void>? cancelGate;
+
   @override
   Future<List<Session>> list() async {
     listCalls++;
     final error = listError;
     if (error is Object) throw error;
     return rows;
+  }
+
+  @override
+  Future<void> cancel(String id) async {
+    final gate = cancelGate;
+    if (gate != null) await gate.future;
+    cancelled.add(id);
+    final error = cancelError;
+    if (error is Object) throw error;
   }
 
   @override
@@ -1658,6 +1677,83 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.byKey(const ValueKey('active-ses_1')), findsNothing);
         expect(client.listCalls, 1);
+      });
+
+      group('the row Stop (issue #165)', () {
+        testWidgets('is offered only on the active row and cancels that '
+            'session', (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one, _two], // _two is active, _one idle
+            events: events,
+          );
+          // The Stop control is offered on the active row only: present for
+          // ses_2, absent for the idle ses_1.
+          expect(find.byKey(const ValueKey('stop-ses_2')), findsOneWidget);
+          expect(find.byKey(const ValueKey('stop-ses_1')), findsNothing);
+
+          // Tapping it cancels the row's session (the bridge's cancel).
+          await tester.tap(find.byKey(const ValueKey('stop-ses_2')));
+          await tester.pump();
+          await tester.pump();
+          expect(client.cancelled, ['ses_2']);
+        });
+
+        testWidgets('clears the row dot on session.turn.cancelled, in place '
+            '(no refetch)', (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_two], // active
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          expect(find.byKey(const ValueKey('active-ses_2')), findsOneWidget);
+
+          // A stop (from the row, the panel, or Escape) settles: the
+          // bridge's cancelled-turn outcome clears the dot in place.
+          events.emit(
+            const BridgeEvent(
+              id: 'evt_turn_cancelled',
+              created: 0,
+              type: 'session.turn.cancelled',
+              data: {'sessionID': 'ses_2'},
+            ),
+          );
+          await tester.pump();
+          await tester.pump();
+          expect(find.byKey(const ValueKey('active-ses_2')), findsNothing);
+          // The Stop goes with the dot (the row is no longer Active).
+          expect(find.byKey(const ValueKey('stop-ses_2')), findsNothing);
+          // In place: no list refetch happened.
+          expect(client.listCalls, 1);
+        });
+
+        testWidgets('keeps the dot and offers Stop again on a failed '
+            'cancel', (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_two], // active
+            events: events,
+          );
+          expect(find.byKey(const ValueKey('stop-ses_2')), findsOneWidget);
+
+          // The cancel fails (e.g. the service is down, a 502): the reason is
+          // reported, the dot stays, and the Stop is offered again to retry.
+          client.cancelError = const SessionsClientError(
+            502,
+            'opencode_unreachable',
+          );
+          await tester.tap(find.byKey(const ValueKey('stop-ses_2')));
+          await tester.pump();
+          await tester.pump();
+          await tester.pump();
+          expect(client.cancelled, ['ses_2']);
+          expect(find.byKey(const ValueKey('stop-ses_2')), findsOneWidget);
+          expect(find.byKey(const ValueKey('active-ses_2')), findsOneWidget);
+        });
       });
 
       testWidgets(
