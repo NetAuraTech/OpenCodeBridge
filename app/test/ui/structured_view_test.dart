@@ -192,10 +192,31 @@ class _FakeClient extends SessionsClient {
 
   int skillCalls = 0;
 
+  /// Per-call skill lists (issue #201): the n-th call returns the n-th list,
+  /// the last repeats — to script a failure (the earlier slot) followed by a
+  /// success (the later one).
+  List<List<SkillOption>> skillResults = const [];
+
+  /// Thrown from `listSkills` when set (the transient service failure the
+  /// `@` menu's fetch must survive, issue #201).
+  Object? skillError;
+
+  /// When set, `listSkills` awaits it before returning (the fetch held in
+  /// flight, issue #201).
+  Completer<void>? skillGate;
+
   @override
   Future<List<SkillOption>> listSkills(String id) async {
     skillCalls++;
-    return skills;
+    final error = skillError;
+    if (error is Object) throw error;
+    final gate = skillGate;
+    if (gate != null) await gate.future;
+    if (skillResults.isEmpty) return skills;
+    final index = skillCalls - 1 < skillResults.length
+        ? skillCalls - 1
+        : skillResults.length - 1;
+    return skillResults[index];
   }
 
   @override
@@ -4937,6 +4958,106 @@ void main() {
         {'uri': 'file:///x/src/main.dart'},
       ]);
       expect(client.prompts.last.$4, isNull);
+    });
+
+    testWidgets('a first failed skills fetch stays retryable: the @ menu '
+        'shows the skills after the next open succeeds (issue #201)', (
+      tester,
+    ) async {
+      final client = fakeClient();
+      client.skillResults = const [
+        [], // the first open's fetch fails...
+        [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ], // ...the re-open's fetch succeeds.
+      ];
+      client.skillError = SessionsClientError(500, 'skill registry');
+      await _pump(tester, client: client);
+
+      // The first @ open: the fetch fails. The failure stays silent — no
+      // unhandled error, no error state — and the menu shows no skill rows.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(find.text('Could not'), findsNothing);
+      expect(_commandRowFinder('skill:a11y'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+
+      // The @ leaves its token (a space closes the menu), then a fresh @
+      // re-opens it: the failed fetch is retried and the skill rows land.
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+      client.skillError = null;
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 2);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+    });
+
+    testWidgets('a successful skills fetch keeps its result for the rest of '
+        'the visit (issue #201)', (tester) async {
+      final client = fakeClient(
+        skills: const [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      // The first @ open fetches and shows the skill rows.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+
+      // A later @ open (the token closed, then re-typed) shows the kept
+      // result: no second fetch.
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+    });
+
+    testWidgets('while a skills fetch is in flight, further @ opens start no '
+        'duplicate fetch (issue #201)', (tester) async {
+      final client = fakeClient(
+        skills: const [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ],
+      );
+      client.skillGate = Completer<void>();
+      await _pump(tester, client: client);
+
+      // The first @ open starts the fetch, held in flight.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsNothing);
+
+      // The @ leaves its token, then a fresh @ re-opens while the fetch is
+      // still in flight: no duplicate fetch starts.
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+
+      // The held fetch resolves: the single fetch's result lands on the open
+      // menu.
+      client.skillGate!.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
     });
   });
 
