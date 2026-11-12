@@ -437,12 +437,14 @@ void main() {
             rows: [_four, _two, _three, _one], // newest first, as delivered
           );
 
-          // Project sections, newest activity first, with counts.
+          // Project sections, newest activity first, with counts. p1 has an
+          // active session (_two), so its count carries the active suffix
+          // (issue #207); p2 has none, so it stays the bare count.
           expect(find.byKey(const ValueKey('project-p1')), findsOneWidget);
           expect(find.byKey(const ValueKey('project-p2')), findsOneWidget);
           expect(find.text('app'), findsOneWidget);
           expect(find.text('infra'), findsOneWidget);
-          expect(find.text('3 sessions'), findsOneWidget);
+          expect(find.text('3 sessions (1 active)'), findsOneWidget);
           expect(find.text('1 session'), findsOneWidget);
 
           // Within the app group: newest first.
@@ -644,10 +646,10 @@ void main() {
             find.byKey(const ValueKey('structured-prompt-input')),
             findsOneWidget,
           );
-          expect(
-            find.byKey(const ValueKey('structured-prompt-send')),
-            findsOneWidget,
-          );
+          // The prompt bar's action is now the Stop control (issue #199):
+          // always visible in the Send button's old position (the header's
+          // Stop is gone).
+          expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
           expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
         },
       );
@@ -1805,6 +1807,358 @@ void main() {
 
         expect(find.text('fix the flaky test'), findsNothing);
         expect(find.text('docker logs'), findsOneWidget);
+      });
+    });
+
+    group('unread dot (issue #207)', () {
+      BridgeEvent sessionEvent(
+        String type,
+        String sessionId, {
+        Map<String, Object?> data = const {},
+      }) => BridgeEvent(
+        id: 'evt_$type',
+        created: 0,
+        type: type,
+        data: data,
+        durable: Durable(aggregateID: sessionId, seq: 1),
+      );
+
+      testWidgets(
+        'a turn ending while the session is not shown lights a violet unread '
+        'dot in place, for every terminal (no list refetch)',
+        (tester) async {
+          Future<void> runFor(String terminal, {Session? active}) async {
+            // A fresh tab per terminal: a bare `pumpWidget` would reuse the
+            // previous State (same widget type at the same tree spot), so reset
+            // the tree first to get a clean, in-memory instance.
+            await tester.pumpWidget(const SizedBox());
+            final events = _FakeEventsSource();
+            final client = await _pumpTab(
+              tester,
+              rows: [active ?? _one],
+              events: events,
+            );
+            expect(client.listCalls, 1);
+            // Not shown in the detail pane yet: the empty-state hint.
+            expect(
+              find.byKey(const ValueKey('sessions-detail-empty')),
+              findsOneWidget,
+            );
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+
+            events.emit(sessionEvent(terminal, 'ses_1'));
+            await tester.pumpAndSettle();
+
+            // The dot turned violet, in place: the detail pane still shows
+            // the empty hint (nothing was opened), no list refetch happened.
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+            expect(
+              find.byKey(const ValueKey('sessions-detail-empty')),
+              findsOneWidget,
+            );
+            expect(client.listCalls, 1, reason: 'patched in place, no refetch');
+          }
+
+          await runFor('session.execution.succeeded');
+          await runFor('session.execution.failed');
+          await runFor('session.execution.interrupted');
+          await runFor(
+            'session.turn.cancelled',
+            active: _one.copyWith(active: true),
+          );
+        },
+      );
+
+      testWidgets(
+        'a turn ending while the session is shown in the detail pane does not '
+        'light the dot',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one, _three],
+            events: events,
+          );
+
+          // Show ses_1 in the detail pane (watching it live).
+          await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+          await tester.pumpAndSettle();
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+
+          // The turn ends on the session that is shown: no unread dot.
+          events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+          await tester.pumpAndSettle();
+
+          expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+          // Still showing the (now idle) session in the detail pane.
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(client.listCalls, 1);
+        },
+      );
+
+      testWidgets(
+        'opening an unread session clears the dot: wide row tap, narrow drawer '
+        'row tap, and a tapped-notification deep link',
+        (tester) async {
+          // Wide layout: a row tap clears it.
+          {
+            final events = _FakeEventsSource();
+            await _pumpTab(tester, rows: [_one], events: events);
+            events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+            await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+            await tester.pumpAndSettle();
+            expect(find.byType(StructuredSessionPanel), findsOneWidget);
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+          }
+
+          // Narrow drawer: a row tap inside the drawer clears it.
+          {
+            // A fresh tab (the wide block's State would otherwise be reused).
+            await tester.pumpWidget(const SizedBox());
+            final events = _FakeEventsSource();
+            tester.view.physicalSize = const Size(390, 844);
+            tester.view.devicePixelRatio = 1.0;
+            addTearDown(tester.view.reset);
+            await _pumpTabNarrow(tester, rows: [_one], events: events);
+            events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+            await tester.pumpAndSettle();
+
+            await tester.tap(
+              find.byKey(const ValueKey('sessions-sidebar-toggle')),
+            );
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+            await tester.tap(find.byKey(const ValueKey('session-ses_1')));
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('sessions-drawer')), findsNothing);
+            expect(find.byType(StructuredSessionPanel), findsOneWidget);
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+          }
+
+          // Deep link: a tapped "Turn finished"-style notification lands on
+          // the row and clears it. Runs wide (like the deep-link tests):
+          // reset the tree and the surface first.
+          {
+            await tester.pumpWidget(const SizedBox());
+            tester.view.reset();
+            final client = _FakeSessionsClient(rows: [_one, _three]);
+            final events = _FakeEventsSource();
+            Future<void> pump(String? target) => tester.pumpWidget(
+              MaterialApp(
+                home: Scaffold(
+                  body: SessionsTab(
+                    key: const ValueKey('sessions-tab'),
+                    apiBase: Uri.parse('http://bridge.test/'),
+                    client: client,
+                    fs: _FakeFsClient(),
+                    orbs: _FakeOrbsClient(),
+                    events: events,
+                    deepLinkSession: target,
+                  ),
+                ),
+              ),
+            );
+            await pump(null);
+            await tester.pump();
+            expect(client.listCalls, 1);
+
+            events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+            await pump('ses_1');
+            await tester.pumpAndSettle();
+            expect(find.byType(StructuredSessionPanel), findsOneWidget);
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+          }
+        },
+      );
+
+      testWidgets(
+        'a new turn starting on an unread session clears the unread dot and '
+        'shows the green active dot',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one, _three],
+            events: events,
+          );
+
+          // ses_1 is unread; the user is looking at ses_3.
+          events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(const ValueKey('session-ses_3')));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+          // A new turn starts on the unread session: the unread fact is stale.
+          events.emit(sessionEvent('session.execution.started', 'ses_1'));
+          await tester.pumpAndSettle();
+
+          expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+          expect(find.byKey(const ValueKey('active-ses_1')), findsOneWidget);
+          expect(client.listCalls, 1, reason: 'patched in place, no refetch');
+        },
+      );
+
+      testWidgets(
+        'the unread mark survives a list reload (event-driven quiet refresh '
+        'and app-foreground re-fetch) and is dropped for a deleted session',
+        (tester) async {
+          // Event-driven quiet refresh: a created session reloads the list;
+          // the mark on ses_1 survives.
+          {
+            final events = _FakeEventsSource();
+            final client = await _pumpTab(
+              tester,
+              rows: [_one, _three],
+              events: events,
+            );
+            expect(client.listCalls, 1);
+
+            events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+            client.rows.insert(0, _orbSession());
+            events.emit(sessionEvent('session.created', 'ses_orb1'));
+            await tester.pumpAndSettle();
+
+            expect(client.listCalls, 2, reason: 'the created session reloads');
+            expect(
+              find.byKey(const ValueKey('session-ses_orb1')),
+              findsOneWidget,
+            );
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+          }
+
+          // App-foreground re-fetch: resumed re-fetches the list; the mark
+          // survives.
+          {
+            // A fresh tab (the previous block's State would be reused).
+            await tester.pumpWidget(const SizedBox());
+            final events = _FakeEventsSource();
+            final client = await _pumpTab(tester, rows: [_one], events: events);
+            expect(client.listCalls, 1);
+
+            events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+            tester.binding.handleAppLifecycleStateChanged(
+              AppLifecycleState.paused,
+            );
+            tester.binding.handleAppLifecycleStateChanged(
+              AppLifecycleState.resumed,
+            );
+            await tester.pump();
+
+            expect(client.listCalls, 2, reason: 'the foreground re-fetch');
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+          }
+
+          // A session that leaves the list (deleted) has its mark dropped.
+          {
+            // A fresh tab (the previous block's State would be reused).
+            await tester.pumpWidget(const SizedBox());
+            final events = _FakeEventsSource();
+            final client = await _pumpTab(
+              tester,
+              rows: [_one, _three],
+              events: events,
+            );
+
+            events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+            await tester.pumpAndSettle();
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+            client.rows.removeWhere((row) => row.id == 'ses_1');
+            events.emit(
+              const BridgeEvent(
+                id: 'evt_closed',
+                created: 0,
+                type: 'session.closed',
+                data: {'sessionID': 'ses_1'},
+              ),
+            );
+            await tester.pumpAndSettle();
+
+            expect(find.byKey(const ValueKey('session-ses_1')), findsNothing);
+            expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+            expect(find.byKey(const ValueKey('session-ses_3')), findsOneWidget);
+          }
+        },
+      );
+
+      testWidgets(
+        'the mark is in memory only: it is not persisted across a restart and '
+        'is not part of the sessions API contract',
+        (tester) async {
+          // In-memory only: a fresh tab over the same (in-memory) clients has
+          // no mark, and no setting persists it.
+          final events = _FakeEventsSource();
+          final orbs = _FakeOrbsClient();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one],
+            events: events,
+            orbs: orbs,
+          );
+          events.emit(sessionEvent('session.execution.succeeded', 'ses_1'));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('unread-ses_1')), findsOneWidget);
+
+          // "Restart": a brand-new tab (fresh state) over the same clients.
+          await tester.pumpWidget(const SizedBox());
+          await _pumpTab(tester, rows: [_one], events: events, orbs: orbs);
+          expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('unread-ses_1')),
+            findsNothing,
+            reason: 'the mark is per running instance, not persisted',
+          );
+
+          // The home-list wire shape is unchanged: no unread field, and the
+          // row still carries the existing active fact.
+          final row = (await client.list()).single;
+          final wire = row.toJson();
+          expect(wire.containsKey('unread'), isFalse);
+          expect(wire['active'], isA<bool>());
+          expect(
+            {for (final entry in wire.entries) entry.key},
+            {'id', 'title', 'project', 'created', 'location', 'active'},
+          );
+        },
+      );
+
+      group('project group active subtitle', () {
+        testWidgets(
+          'appends "(M active)" after the count only while at least one of the '
+          "project's sessions is active",
+          (tester) async {
+            // p1 has ses_2 active and ses_1 idle -> "2 sessions (1 active)";
+            // p2 has no active session -> "1 session" (unchanged).
+            await _pumpTab(tester, rows: [_two, _one, _three]);
+
+            expect(find.text('2 sessions (1 active)'), findsOneWidget);
+            expect(find.text('1 session'), findsOneWidget);
+            // The bare count is replaced by the annotated one for p1.
+            expect(find.text('2 sessions'), findsNothing);
+          },
+        );
+
+        testWidgets('leaves the subtitle unchanged when nothing is active', (
+          tester,
+        ) async {
+          await _pumpTab(tester, rows: [_one, _three]);
+          expect(find.text('1 session'), findsNWidgets(2));
+          expect(find.textContaining('active'), findsNothing);
+        });
       });
     });
   });

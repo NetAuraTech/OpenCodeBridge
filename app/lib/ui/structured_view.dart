@@ -532,12 +532,18 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   bool _commandsFetched = false;
 
   /// The `@` menu's skill rows (issue #58): the session's skills, fetched
-  /// when a menu first opens (`const []` until then, or when the fetch
-  /// fails).
+  /// when a menu first opens (`const []` until then).
   List<SkillOption> _skills = const [];
 
-  /// The session's skills have been requested already.
-  bool _skillsFetched = false;
+  /// The session's skills are loaded: the last successful fetch's result is
+  /// kept for the rest of the visit (issue #201). Set only when a fetch
+  /// succeeds — a failed fetch stays retryable, so the skills appear the
+  /// next time the `@` menu opens.
+  bool _skillsLoaded = false;
+
+  /// A skills fetch is in flight (issue #201): while it is, a further `@`
+  /// opening does not start a duplicate fetch.
+  bool _skillsLoading = false;
 
   /// The `@` menu's file search results, by the token they were searched
   /// for: the service's search is queried once per token (issue #58).
@@ -657,7 +663,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _menus = _buildMenus();
     _commandsFetched = false;
     _skills = const [];
-    _skillsFetched = false;
+    _skillsLoaded = false;
+    _skillsLoading = false;
     _filesToken = null;
     _files = null;
     _filesQuery = null;
@@ -2244,9 +2251,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
 
   /// A menu is open (issue #56): fetch the project's custom commands (the
   /// service's `GET /api/command`) and, for the `@` menu, the session's
-  /// skills — once each — and merge them into the menus. A failed fetch
-  /// keeps the static catalog (or no skill rows) on screen.
-  void _onMenuOpened() {
+  /// skills, and merge them into the menus. A failed fetch keeps the static
+  /// catalog (or no skill rows) on screen, silently. The skills are loaded
+  /// only on success (issue #201): a failed fetch stays retryable — the
+  /// rows appear the next time the `@` menu *opens* (not while the open one
+  /// re-filters), a successful fetch's result is kept for the rest of the
+  /// visit, and a fetch in flight is never duplicated.
+  void _onMenuOpened(bool fresh) {
     if (!_commandsFetched) {
       _commandsFetched = true;
       widget.client
@@ -2261,19 +2272,25 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
           })
           .catchError((Object _) {});
     }
-    if (!_skillsFetched) {
-      _skillsFetched = true;
+    if (fresh && !_skillsLoaded && !_skillsLoading) {
+      _skillsLoading = true;
+      final token = _sessionLoadToken;
       widget.client
           .listSkills(widget.sessionId)
           .then((skills) {
-            if (mounted) {
-              setState(() {
-                _skills = skills;
-                _menus = _buildMenus();
-              });
-            }
+            if (token == _sessionLoadToken) _skillsLoading = false;
+            if (!mounted || token != _sessionLoadToken) return;
+            setState(() {
+              _skills = skills;
+              _skillsLoaded = true;
+              _menus = _buildMenus();
+            });
           })
-          .catchError((Object _) {});
+          .catchError((Object _) {
+            // The failure stays silent, exactly like a failed file search:
+            // no error UI, and the fetch is retryable (issue #201).
+            if (token == _sessionLoadToken) _skillsLoading = false;
+          });
     }
   }
 
@@ -2916,28 +2933,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                   )
                 : null,
             automaticallyImplyLeading: !widget.showCloseButton,
-            // The Stop control (issues #160/#163/#165): offered when the Turn
-            // is Active AND the routed service can cancel it (the detail's
-            // `canCancel`, ticket #2's capability check). A service without
-            // the interrupt route hides the Stop rather than offer a control
-            // that would only fail with a 502; while the cancel POST is in
-            // flight it shows a busy state and ignores further presses.
-            actions: _turnActive && _canCancel
-                ? [
-                    IconButton(
-                      key: const ValueKey('structured-stop'),
-                      icon: _stopBusy
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.stop),
-                      tooltip: 'Stop the turn',
-                      onPressed: _stopBusy ? null : _stopTurn,
-                    ),
-                  ]
-                : null,
           ),
           Expanded(
             child: _loading
@@ -3153,7 +3148,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                   ),
                                   child: _PromptBar(
                                     controller: _prompt,
-                                    busy: _promptBusy || _commandBusy,
                                     onSend: _sendPrompt,
                                     menus: _menus,
                                     mentions: [
@@ -3168,6 +3162,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                     onPasteFromClipboard: _pasteFromClipboard,
                                     turnActive: _turnActive,
                                     onStopTurn: _stopTurn,
+                                    stopBusy: _stopBusy,
+                                    canCancel: _canCancel,
                                   ),
                                 ),
                               ],
@@ -4508,10 +4504,44 @@ class _ToolCard extends StatelessWidget {
 /// toggles the session's mode (`build`/`plan`, the TUI's `agent.cycle`)
 /// and Ctrl+T cycles the current model's variant (the TUI's
 /// `variant.cycle`); both are reported through the screen's handlers.
+/// The turn's Stop control (issue #160/#163/#165, relocated to the prompt
+/// bar in #199): the single Stop affordance. [enabled] keeps it actionable —
+/// a turn Active on a service that can cancel; it stays visible but disabled
+/// otherwise (a service without the interrupt route would refuse every cancel
+/// with a 502, so offering it there would only be a trap). [busy] is set while
+/// the cancel POST is in flight: the spinner shows and further presses are
+/// ignored, so one turn sends at most one cancel request.
+class _StopControl extends StatelessWidget {
+  const _StopControl({
+    required this.enabled,
+    required this.busy,
+    required this.onStop,
+  });
+
+  final bool enabled;
+
+  final bool busy;
+
+  final Future<bool> Function() onStop;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    key: const ValueKey('structured-stop'),
+    icon: busy
+        ? const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : const Icon(Icons.stop),
+    tooltip: 'Stop the turn',
+    onPressed: enabled && !busy ? onStop : null,
+  );
+}
+
 class _PromptBar extends StatefulWidget {
   const _PromptBar({
     required this.controller,
-    required this.busy,
     required this.onSend,
     required this.menus,
     required this.mentions,
@@ -4521,11 +4551,11 @@ class _PromptBar extends StatefulWidget {
     required this.onPasteFromClipboard,
     required this.turnActive,
     required this.onStopTurn,
+    required this.stopBusy,
+    required this.canCancel,
   });
 
   final TextEditingController controller;
-
-  final bool busy;
 
   final Future<void> Function() onSend;
 
@@ -4538,8 +4568,12 @@ class _PromptBar extends StatefulWidget {
   final List<String> mentions;
 
   /// A menu is open; the screen may need to fetch the project's custom
-  /// commands and the session's skills.
-  final VoidCallback onMenuOpened;
+  /// commands and the session's skills. [fresh] is true when this open
+  /// started a menu that was not already open (a new trigger typed, or the
+  /// menu re-opened after closing) — the fetches the screen makes for it;
+  /// false when the already-open menu merely re-fired (the token changed, or
+  /// the menu's own data landed), which must not start a new fetch.
+  final void Function(bool fresh) onMenuOpened;
 
   /// Tab (the menu closed): toggles the session's mode, `build` or `plan`.
   final VoidCallback onToggleMode;
@@ -4559,10 +4593,22 @@ class _PromptBar extends StatefulWidget {
   final bool turnActive;
 
   /// Escape (the menu closed, nothing typed, a turn Active): cancel the
-  /// running turn (issue #163) — the same call the banner's Stop control
-  /// runs; resolves `true` when the cancel landed, `false` when it was a
-  /// no-op (already in flight) or failed.
+  /// running turn (issue #163) — the same call the Stop control runs;
+  /// resolves `true` when the cancel landed, `false` when it was a no-op
+  /// (already in flight) or failed.
   final Future<bool> Function() onStopTurn;
+
+  /// The cancel POST is in flight (issue #160/#163): the Stop control shows
+  /// its busy state and ignores further presses, so one turn sends at most
+  /// one cancel request.
+  final bool stopBusy;
+
+  /// The routed service can cancel the turn (the detail's `canCancel`,
+  /// issue #165 / ticket #2's capability check): the Stop control is enabled
+  /// on an Active turn only when the service answers the interrupt — a
+  /// service without the route would refuse every cancel with a 502, so the
+  /// control stays visible but disabled rather than offered as a trap.
+  final bool canCancel;
 
   @override
   State<_PromptBar> createState() => _PromptBarState();
@@ -4723,6 +4769,7 @@ class _PromptBarState extends State<_PromptBar> {
       _closeMenu();
       return;
     }
+    final fresh = _active == null || _active?.trigger != active.trigger;
     final definitionChanged = _active != active;
     if (definitionChanged) {
       setState(() => _active = active);
@@ -4739,7 +4786,12 @@ class _PromptBarState extends State<_PromptBar> {
         if (rows.isNotEmpty) _showMenuRow(0);
       });
     }
-    widget.onMenuOpened();
+    // Fresh (a new open: the menu was closed, or a different trigger took
+    // it) vs. a re-fire of the open menu (the token changed, or the menu's
+    // own data landed and the definitions were rebuilt): only a fresh open
+    // may start the screen's fetches — a re-fire must not re-fetch (issue
+    // #201's no-duplicate contract).
+    widget.onMenuOpened(fresh);
   }
 
   /// The menu closes: its in-flight fetches are stale, its rows and
@@ -5126,16 +5178,20 @@ class _PromptBarState extends State<_PromptBar> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                FilledButton(
-                  key: const ValueKey('structured-prompt-send'),
-                  onPressed: widget.busy ? null : widget.onSend,
-                  child: widget.busy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Send'),
+                // The Stop control (issue #199): the prompt bar's action, in
+                // the Send button's old position, and the single Stop
+                // affordance — the header's Stop is gone. Always visible so
+                // the layout is stable across the turn's state: enabled on an
+                // Active turn the service can cancel (its press runs the same
+                // bridge-native cancel Escape and `/stop` run); while the
+                // cancel POST is in flight it shows a busy state and ignores
+                // further presses (one request per turn); otherwise visible
+                // but disabled (the turn is not Active, or the service has no
+                // interrupt route — offering it there would only 502).
+                _StopControl(
+                  enabled: widget.turnActive && widget.canCancel,
+                  busy: widget.stopBusy,
+                  onStop: widget.onStopTurn,
                 ),
               ],
             ),

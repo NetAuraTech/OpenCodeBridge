@@ -187,10 +187,6 @@ class _FakeClient extends SessionsClient {
   /// flight).
   Completer<void>? findFilesGate;
 
-  /// When set, `listSkills` awaits it before returning (the skills fetch held
-  /// in flight, to sequence it against the file search — issue #202).
-  Completer<void>? skillsGate;
-
   /// When set, `listCommands` awaits it before returning (the commands fetch
   /// held in flight, to sequence it against the file search — issue #202).
   Completer<void>? commandsGate;
@@ -200,12 +196,31 @@ class _FakeClient extends SessionsClient {
 
   int skillCalls = 0;
 
+  /// Per-call skill lists (issue #201): the n-th call returns the n-th list,
+  /// the last repeats — to script a failure (the earlier slot) followed by a
+  /// success (the later one).
+  List<List<SkillOption>> skillResults = const [];
+
+  /// Thrown from `listSkills` when set (the transient service failure the
+  /// `@` menu's fetch must survive, issue #201).
+  Object? skillError;
+
+  /// When set, `listSkills` awaits it before returning (the fetch held in
+  /// flight, issue #201).
+  Completer<void>? skillGate;
+
   @override
   Future<List<SkillOption>> listSkills(String id) async {
     skillCalls++;
-    final gate = skillsGate;
+    final error = skillError;
+    if (error is Object) throw error;
+    final gate = skillGate;
     if (gate != null) await gate.future;
-    return skills;
+    if (skillResults.isEmpty) return skills;
+    final index = skillCalls - 1 < skillResults.length
+        ? skillCalls - 1
+        : skillResults.length - 1;
+    return skillResults[index];
   }
 
   @override
@@ -2001,7 +2016,8 @@ void main() {
         find.byKey(const ValueKey('structured-prompt-input')),
         'keep going',
       );
-      await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+      // Enter sends the prompt (the Send button is now the Stop control).
+      await _pressEnter(tester);
       await tester.pump();
 
       expect(client.prompts, const [('ses_1', 'keep going', null, null)]);
@@ -2026,8 +2042,8 @@ void main() {
         find.byKey(const ValueKey('structured-prompt-input')),
         'keep going',
       );
-      await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
-      await tester.pump();
+      // Enter sends the prompt (the Send button is now the Stop control).
+      await _pressEnter(tester);
       await tester.pump();
 
       expect(client.prompts, isEmpty);
@@ -2059,10 +2075,13 @@ void main() {
         find.byKey(const ValueKey('structured-prompt-input')),
       );
       expect(field.enabled, isTrue);
-      final send = tester.widget<FilledButton>(
-        find.byKey(const ValueKey('structured-prompt-send')),
+      // The Send button is now the Stop control (issue #199): present in the
+      // prompt bar's action position (the header's Stop is gone). A tool in
+      // flight means the turn is Active, so the control is enabled.
+      final stop = tester.widget<IconButton>(
+        find.byKey(const ValueKey('structured-stop')),
       );
-      expect(send.onPressed, isNotNull);
+      expect(stop.onPressed, isNotNull);
     });
 
     testWidgets(
@@ -2270,7 +2289,8 @@ void main() {
         final events = await _pump(tester, client: client);
 
         await tester.enterText(find.byKey(_promptInput), 'keep going');
-        await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+        // Enter sends the prompt (the Send button is now the Stop control).
+        await _pressEnter(tester);
         await tester.pump();
         expect(client.prompts, isEmpty); // The POST is still in flight.
 
@@ -3158,8 +3178,8 @@ void main() {
     ];
 
     testWidgets(
-      'the banner Stop control cancels the turn; the banner clears on the '
-      'terminal event, no confirmation (issue #163)',
+      'the prompt bar Stop control is always visible: disabled idle, enabled '
+      'on an Active turn; pressing it cancels the turn (issue #163, #199)',
       (tester) async {
         // The session opens idle (settled history), then a turn starts from
         // the event stream and is interrupted. The initial load reads the
@@ -3173,31 +3193,59 @@ void main() {
           client: client,
           clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
         );
-        // Idle: no Stop control.
-        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        // Idle: the Stop control is visible in the prompt bar (the header's
+        // Stop is gone) but disabled — the turn is not Active.
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNull,
+        );
 
-        // The Turn runs: the Stop control is offered next to the banner.
+        // The Turn runs: the control becomes enabled in the same position
+        // (stable layout, no jump).
         events.add(_event('session.execution.started', aggregateID: 'ses_1'));
         await tester.pump();
         await tester.pump();
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNotNull,
+        );
 
-        // One tap cancels that session's turn (no confirmation step).
+        // One tap cancels that session's turn (no confirmation step) — the
+        // same bridge-native cancel the header control used to send.
         await tester.tap(find.byKey(const ValueKey('structured-stop')));
         await tester.pump();
         await tester.pump();
         expect(client.cancelCalls, ['ses_1']);
 
-        // The cancel is accepted but the banner keeps the running turn until
-        // the execution's terminal event arrives (it leaves on `interrupted`
-        // like any other termination).
+        // The cancel is accepted but the turn stays Active until the
+        // execution's terminal event arrives (it leaves on `interrupted`
+        // like any other termination): the control stays enabled.
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNotNull,
+        );
         events.add(
           _event('session.execution.interrupted', aggregateID: 'ses_1'),
         );
         await tester.pump();
         await tester.pump();
-        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        // Settled: the control stays visible but is disabled again.
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNull,
+        );
         // The footer's activity indicator leaves with the Turn (issue #161).
         expect(
           find.byKey(const ValueKey('turn-activity-indicator')),
@@ -3207,54 +3255,52 @@ void main() {
       },
     );
 
-    testWidgets(
-      'the bridge-native cancel settles the running marker and Stop control '
-      'in place (issue #164)',
-      (tester) async {
-        // The session opens idle, a turn starts, then the bridge-native cancel
-        // lands (the outcome of a Stop from any panel): the running marker and
-        // the Stop control settle on the event, like a terminal outcome — no
-        // waiting on the service's own terminal.
-        final client = _FakeClient(
-          details: const [_detail0],
-          messageLists: const [settled, running, settled],
-        );
-        final events = await _pump(
-          tester,
-          client: client,
-          clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
-        );
-        // Idle: no Stop control.
-        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+    testWidgets('the bridge-native cancel settles the running marker and Stop control '
+        'in place (issue #164)', (tester) async {
+      // The session opens idle, a turn starts, then the bridge-native cancel
+      // lands (the outcome of a Stop from any panel): the running marker and
+      // the Stop control settle on the event, like a terminal outcome — no
+      // waiting on the service's own terminal.
+      final client = _FakeClient(
+        details: const [_detail0],
+        messageLists: const [settled, running, settled],
+      );
+      final events = await _pump(
+        tester,
+        client: client,
+        clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
+      );
+      // Idle: the Stop control is visible but disabled.
+      expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
 
-        // The Turn runs: the Stop control is offered.
-        events.add(_event('session.execution.started', aggregateID: 'ses_1'));
-        await tester.pump();
-        await tester.pump();
-        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
-        expect(
-          find.byKey(const ValueKey('turn-activity-indicator')),
-          findsOneWidget,
-        );
+      // The Turn runs: the Stop control is enabled.
+      events.add(_event('session.execution.started', aggregateID: 'ses_1'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('turn-activity-indicator')),
+        findsOneWidget,
+      );
 
-        // The bridge-native cancel (no durable seq; the session id in data):
-        // the running marker and the Stop control settle in place.
-        events.add(
-          _event(
-            'session.turn.cancelled',
-            data: const {'sessionID': 'ses_1', 'messageID': 'm2'},
-          ),
-        );
-        await tester.pump();
-        await tester.pump();
-        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
-        expect(
-          find.byKey(const ValueKey('turn-activity-indicator')),
-          findsNothing,
-        );
-        await events.close();
-      },
-    );
+      // The bridge-native cancel (no durable seq; the session id in data):
+      // the running marker and the Stop control settle in place (the control
+      // stays visible but disabled — it is the prompt bar's, not the header's).
+      events.add(
+        _event(
+          'session.turn.cancelled',
+          data: const {'sessionID': 'ses_1', 'messageID': 'm2'},
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('turn-activity-indicator')),
+        findsNothing,
+      );
+      await events.close();
+    });
 
     testWidgets(
       'while the cancel is in flight the Stop control is busy and ignores '
@@ -3273,14 +3319,49 @@ void main() {
         await tester.pump();
         await tester.pump();
         expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        // Active turn: the control is enabled and shows the stop icon (not
+        // the busy spinner).
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNotNull,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('structured-stop')),
+            matching: find.byType(Icon),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('structured-stop')),
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsNothing,
+        );
 
         // Hold the cancel POST in flight.
         final gate = Completer<void>();
         client.cancelGate = gate;
         await tester.tap(find.byKey(const ValueKey('structured-stop')));
         await tester.pump();
-        // Busy: the control is disabled (no onPressed) — a second tap sends
-        // nothing.
+        // Busy: the control shows the spinner and is disabled (no onPressed)
+        // — a second tap sends nothing.
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNull,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('structured-stop')),
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsOneWidget,
+        );
         await tester.tap(find.byKey(const ValueKey('structured-stop')));
         await tester.pump();
         await tester.pump();
@@ -3511,12 +3592,13 @@ void main() {
     );
 
     testWidgets(
-      'a service without the interrupt route offers no Stop (issue #165, '
-      'ticket 2)',
+      'a service without the interrupt route keeps the Stop disabled on an '
+      'Active turn (issue #165, ticket 2)',
       (tester) async {
         // The detail's canCancel is false: the routed service (an old binary)
-        // has no interrupt route, so offering Stop would be a control that
-        // only fails with a 502. The view hides it on an Active turn.
+        // has no interrupt route, so a cancel would only fail with a 502. The
+        // prompt bar's Stop (issue #199) stays visible but disabled on an
+        // Active turn rather than offered as a trap.
         final client = _FakeClient(
           details: const [_detailNoCancel],
           messageLists: const [running, running, settled],
@@ -3526,12 +3608,18 @@ void main() {
           client: client,
           clock: () => DateTime.fromMillisecondsSinceEpoch(120000),
         );
-        // The Turn runs, but the Stop is not offered: the detail says the
+        // The Turn runs, but the Stop stays disabled: the detail says the
         // service cannot cancel it.
         events.add(_event('session.execution.started', aggregateID: 'ses_1'));
         await tester.pump();
         await tester.pump();
-        expect(find.byKey(const ValueKey('structured-stop')), findsNothing);
+        expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
+        expect(
+          tester
+              .widget<IconButton>(find.byKey(const ValueKey('structured-stop')))
+              .onPressed,
+          isNull,
+        );
         // The turn is otherwise Active (the footer's activity indicator is
         // there — the Active fact is independent of cancel capability).
         expect(
@@ -4837,7 +4925,7 @@ void main() {
           files: const ['src/main.dart'],
         );
         client.findFilesGate = Completer<void>();
-        client.skillsGate = Completer<void>();
+        client.skillGate = Completer<void>();
         await _pump(tester, client: client);
 
         await _typePrompt(tester, '@ma');
@@ -4852,7 +4940,7 @@ void main() {
 
         // The skills land while the search is still in flight: the menu
         // re-syncs for them.
-        client.skillsGate!.complete();
+        client.skillGate!.complete();
         await tester.pump();
         await tester.pump();
 
@@ -4903,7 +4991,7 @@ void main() {
       );
       client.findFilesGate = Completer<void>();
       client.commandsGate = Completer<void>();
-      client.skillsGate = Completer<void>();
+      client.skillGate = Completer<void>();
       await _pump(tester, client: client);
 
       await _typePrompt(tester, '@ma');
@@ -4927,7 +5015,7 @@ void main() {
       expect(_commandRowFinder('file:src/main.dart'), findsNothing);
 
       // The skills land: the bar re-syncs again — still no re-fire.
-      client.skillsGate!.complete();
+      client.skillGate!.complete();
       await tester.pump();
       await tester.pump();
       expect(client.fileQueries, const [('ses_1', 'ma')]);
@@ -5081,6 +5169,106 @@ void main() {
         {'uri': 'file:///x/src/main.dart'},
       ]);
       expect(client.prompts.last.$4, isNull);
+    });
+
+    testWidgets('a first failed skills fetch stays retryable: the @ menu '
+        'shows the skills after the next open succeeds (issue #201)', (
+      tester,
+    ) async {
+      final client = fakeClient();
+      client.skillResults = const [
+        [], // the first open's fetch fails...
+        [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ], // ...the re-open's fetch succeeds.
+      ];
+      client.skillError = SessionsClientError(500, 'skill registry');
+      await _pump(tester, client: client);
+
+      // The first @ open: the fetch fails. The failure stays silent — no
+      // unhandled error, no error state — and the menu shows no skill rows.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(find.text('Could not'), findsNothing);
+      expect(_commandRowFinder('skill:a11y'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+
+      // The @ leaves its token (a space closes the menu), then a fresh @
+      // re-opens it: the failed fetch is retried and the skill rows land.
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+      client.skillError = null;
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 2);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+    });
+
+    testWidgets('a successful skills fetch keeps its result for the rest of '
+        'the visit (issue #201)', (tester) async {
+      final client = fakeClient(
+        skills: const [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      // The first @ open fetches and shows the skill rows.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+
+      // A later @ open (the token closed, then re-typed) shows the kept
+      // result: no second fetch.
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
+    });
+
+    testWidgets('while a skills fetch is in flight, further @ opens start no '
+        'duplicate fetch (issue #201)', (tester) async {
+      final client = fakeClient(
+        skills: const [
+          SkillOption(id: 'a11y', name: 'A11y', description: 'Accessibility'),
+        ],
+      );
+      client.skillGate = Completer<void>();
+      await _pump(tester, client: client);
+
+      // The first @ open starts the fetch, held in flight.
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsNothing);
+
+      // The @ leaves its token, then a fresh @ re-opens while the fetch is
+      // still in flight: no duplicate fetch starts.
+      await _typePrompt(tester, '@ ');
+      await tester.pump();
+      await _typePrompt(tester, '@');
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+
+      // The held fetch resolves: the single fetch's result lands on the open
+      // menu.
+      client.skillGate!.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(client.skillCalls, 1);
+      expect(_commandRowFinder('skill:a11y'), findsOneWidget);
     });
   });
 
@@ -5694,7 +5882,8 @@ void main() {
       await _pumpEmbedded(tester, client: client);
 
       await _typePrompt(tester, 'keep going');
-      await tester.tap(find.byKey(const ValueKey('structured-prompt-send')));
+      // Enter sends the prompt (the Send button is now the Stop control).
+      await _pressEnter(tester);
       await tester.pump();
       await tester.pump();
 
