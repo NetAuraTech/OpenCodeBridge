@@ -148,6 +148,368 @@ Future<ClipboardImageRead> _readClipboardImage() async {
   }
 }
 
+/// The message's full text as plain text (issue #198): the content the
+/// structured view renders for the row, in display order — the reasoning
+/// text (dimmed, above the body), the body, and each tool card's content
+/// (header, input, patch, question lines, error) — with the markdown markup
+/// stripped from the bodies. One tap of a message row's copy button puts
+/// exactly this on the system clipboard: the whole message without selecting
+/// it by hand, and without any `**` or backtick markup surviving the copy.
+///
+/// `''` when the row carries no content (the idle marker, a user message
+/// without text): its row shows no copy button at all, so this is only
+/// called for rows that do.
+String messagePlainText(SessionMessage message) {
+  final sections = <String>[];
+  if (message.reasoning != null) {
+    sections.add(_stripMarkdown(message.reasoning!));
+  }
+  if (message.text != null) {
+    sections.add(_stripMarkdown(message.text!));
+  }
+  for (final tool in message.tools) {
+    sections.add(_toolCardPlainText(tool));
+  }
+  return sections.join('\n');
+}
+
+/// The tool card's plain text, line for line in the order the card renders
+/// them (issue #198): the header, then the patch's path and the patch itself
+/// (or the question's lines with their answers, or the input's one-line
+/// summary / raw input), then the error.
+String _toolCardPlainText(ToolCall tool) {
+  final lines = <String>['${tool.name} · ${tool.status}'];
+  final patch = tool.patch ?? ToolCall.writePatch(tool.input);
+  if (patch != null) {
+    final path = tool.input is Map<String, Object?>
+        ? (tool.input as Map<String, Object?>)['path']
+        : null;
+    if (path is String && path.isNotEmpty) {
+      lines.add(path);
+    }
+    lines.add(patch);
+  } else {
+    final questions = _toolCardQuestions(tool);
+    if (questions != null) {
+      for (final q in questions) {
+        lines.add(q.question);
+        lines.add(
+          q.answers == null || q.answers!.isEmpty ? '—' : q.answers!.join(', '),
+        );
+      }
+    } else {
+      final input = tool.input;
+      final detail = _toolCardDetail(tool);
+      final inputText = input == null
+          ? ''
+          : input is String
+          ? input
+          : (() {
+              try {
+                return jsonEncode(input);
+              } catch (_) {
+                return '$input';
+              }
+            })();
+      final text = (detail != null && detail.isNotEmpty) ? detail : inputText;
+      if (text.isNotEmpty) lines.add(text);
+    }
+  }
+  if (tool.error != null) {
+    lines.add(tool.error!);
+  }
+  return lines.join('\n');
+}
+
+/// The `question` tool's questions with the answers given (issue #198), in
+/// the form order the card renders them; `null` when the input is not the
+/// map the card renders as questions (a still-streaming input is a partial
+/// JSON string, shown raw like any other input).
+List<({String question, List<String>? answers})>? _toolCardQuestions(
+  ToolCall tool,
+) {
+  final input = tool.input;
+  if (input is! Map<String, Object?>) return null;
+  final list = input['questions'];
+  if (list is! List) return null;
+  final answers = tool.answers;
+  final lines = <({String question, List<String>? answers})>[];
+  for (var i = 0; i < list.length; i++) {
+    final item = list[i];
+    final question = item is Map<String, Object?> && item['question'] is String
+        ? item['question'] as String
+        : null;
+    if (question == null) continue;
+    lines.add((
+      question: question,
+      answers: answers != null && i < answers.length ? answers[i] : null,
+    ));
+  }
+  return lines.isEmpty ? null : lines;
+}
+
+/// A one-line, human-readable summary of the tool's input, the same one the
+/// card shows (issue #198): `shell` its command, `read` its path, `grep` its
+/// pattern, `execute` its code. `null` when the input carries none of the
+/// fields the tool is known for — then the card shows the raw input.
+String? _toolCardDetail(ToolCall tool) {
+  final input = tool.input;
+  if (input is! Map<String, Object?>) return null;
+  String? str(Object? value) =>
+      value is String && value.isNotEmpty ? value : null;
+  switch (tool.name) {
+    case 'shell':
+      return str(input['command']);
+    case 'execute':
+      return str(input['code']);
+    case 'read':
+      final path = str(input['path']);
+      if (path == null) return null;
+      final extra = [
+        if (input['offset'] is int) 'offset ${input['offset']}',
+        if (input['limit'] is int) 'limit ${input['limit']}',
+      ].join(', ');
+      return extra.isEmpty ? path : '$path ($extra)';
+    case 'grep':
+      final pattern = str(input['pattern']);
+      if (pattern == null) return null;
+      final path = str(input['path']);
+      return path == null ? pattern : '$pattern in $path';
+  }
+  return null;
+}
+
+/// The rendered plain text of a markdown body (issue #198): the text the
+/// `MarkdownBody` shows — the code spans and emphasis without their markers,
+/// the links reduced to their labels, everything else as written — so the
+/// copy carries what the user sees, not the source. The walk is line-aware
+/// in the constructs it strips: headings (`# …`), block quotes (`> …`), and
+/// list bullets (`-` / `*` / `+` / `1.`) are block constructs the body
+/// renders without their markers, and are stripped per line; the inline
+/// constructs (code spans, `**` / `*` / `_` emphasis, `~~`, links) are
+/// stripped wherever they sit. A ` ``` ` code block's fence and language
+/// tag are dropped and its body kept as literal text (no inline parsing
+/// inside it).
+String _stripMarkdown(String data) {
+  final lines = data.split('\n');
+  final out = StringBuffer();
+  var i = 0;
+  while (i < lines.length) {
+    final line = lines[i];
+    if (line.trimLeft().startsWith('```')) {
+      // A code block: skip the fence, keep the body literal, skip the close.
+      i++;
+      while (i < lines.length && !lines[i].trimLeft().startsWith('```')) {
+        if (out.isNotEmpty) out.writeln();
+        out.write(lines[i]);
+        i++;
+      }
+      i++; // the closing fence (or the end)
+      continue;
+    }
+    var rest = line;
+    // The block constructs, in the order the body renders them without
+    // their markers: a heading, else a block quote, else a list bullet.
+    if (rest.startsWith('#')) {
+      rest = rest.replaceFirst(RegExp(r'^#{1,6}\s+'), '');
+    } else if (rest.startsWith('>')) {
+      rest = rest.replaceFirst(RegExp(r'^>\s?'), '');
+    } else if (rest.startsWith('- ') ||
+        rest.startsWith('* ') ||
+        rest.startsWith('+ ')) {
+      rest = rest.substring(2);
+    } else {
+      final bullet = _orderedBullet(rest);
+      if (bullet != null) {
+        rest = rest.substring(bullet);
+      }
+    }
+    if (out.isNotEmpty) out.writeln();
+    out.write(_stripMarkdownInline(rest));
+    i++;
+  }
+  return out.toString();
+}
+
+/// The ordered-list bullet (`1.`, `2)`, …) at the start of [line], with its
+/// width, or `null` when the line is not an ordered list item.
+int? _orderedBullet(String line) {
+  final match = RegExp(r'^(\d{1,9})([.)])\s+').firstMatch(line);
+  return match?.end;
+}
+
+/// The inline constructs of [data], stripped: a code span's content kept
+/// literal (its backticks dropped, no inline parsing inside it), the
+/// emphasis markers dropped (the inner text kept), a link's label kept (its
+/// target dropped). A marker with no matching close is literal text (the
+/// body shows it as such too).
+String _stripMarkdownInline(String data) {
+  final out = StringBuffer();
+  _collectMarkdownText(data, out);
+  return out.toString();
+}
+
+/// Writes the rendered text of [data] to [out], walking the source
+/// character by character: a plain run is written as-is, an inline
+/// construct recurses on its inner text and skips its markers.
+void _collectMarkdownText(String data, StringBuffer out) {
+  var i = 0;
+  while (i < data.length) {
+    final ch = data[i];
+    if (ch == '`') {
+      final run = _markdownRun(data, i, '`', 1, 1);
+      if (run == null) {
+        out.write(ch);
+        i++;
+        continue;
+      }
+      // A code span renders its content literally: no inline parsing in.
+      out.write(data.substring(run.start, run.end));
+      i = run.skip;
+      continue;
+    }
+    if (ch == '*' || ch == '_') {
+      final marker = ch;
+      var advanced = false;
+      if (marker == '*' || _boundary(data, i, before: true)) {
+        for (var count = 3; count >= 1; count--) {
+          final run = _markdownRun(data, i, marker, count, count);
+          if (run == null) continue;
+          _collectMarkdownText(data.substring(run.start, run.end), out);
+          i = run.skip;
+          advanced = true;
+          break;
+        }
+      }
+      if (advanced) continue;
+      out.write(ch);
+      i++;
+      continue;
+    }
+    if (ch == '~' && i + 1 < data.length && data[i + 1] == '~') {
+      final run = _markdownRun(data, i, '~', 2, 2);
+      if (run != null) {
+        _collectMarkdownText(data.substring(run.start, run.end), out);
+        i = run.skip;
+        continue;
+      }
+      out.write(ch);
+      i++;
+      continue;
+    }
+    if (ch == '[') {
+      final link = _markdownLink(data, i);
+      if (link != null) {
+        _collectMarkdownText(link.label, out);
+        i = link.skip;
+        continue;
+      }
+      out.write(ch);
+      i++;
+      continue;
+    }
+    var j = i + 1;
+    while (j < data.length) {
+      final c = data[j];
+      if (c == '`' ||
+          c == '*' ||
+          c == '[' ||
+          (c == '~' && j + 1 < data.length && data[j + 1] == '~') ||
+          (c == '_' && _boundary(data, j, before: true))) {
+        break;
+      }
+      j++;
+    }
+    out.write(data.substring(i, j));
+    i = j;
+  }
+}
+
+/// Whether the `_` at [i] sits at a word boundary on [before], the rule the
+/// body applies before treating a run of `_` as emphasis (a `_` inside a
+/// word is a literal, e.g. `snake_case`).
+bool _boundary(String data, int i, {required bool before}) {
+  if (before) {
+    if (i == 0) return true;
+    final left = data[i - 1];
+    return left == ' ' || left == '\n' || _punctuation(left);
+  }
+  if (i >= data.length) return true;
+  final right = data[i];
+  return right == ' ' || right == '\n' || _punctuation(right);
+}
+
+/// Whether [ch] is neither an ASCII letter nor a digit.
+bool _punctuation(String ch) => !ch.codeUnits.every(
+  (u) => (u >= 48 && u <= 57) || (u >= 65 && u <= 90) || (u >= 97 && u <= 122),
+);
+
+/// The run of [marker] of exactly [count] that opens at [i], and its
+/// closing run: the closing run must itself be exactly [count] (not part of
+/// a longer run), and a `_` one must sit at a word boundary on its right.
+/// `null` when there is no matching closing run.
+({int start, int end, int skip})? _markdownRun(
+  String data,
+  int i,
+  String marker,
+  int count,
+  int closeCount,
+) {
+  var j = i;
+  var run = 0;
+  while (j < data.length && data[j] == marker) {
+    run++;
+    j++;
+  }
+  if (run != count) return null;
+  if (marker == '_' && !_boundary(data, i, before: true)) return null;
+  var searchFrom = j;
+  while (true) {
+    final k = data.indexOf(marker * count, searchFrom);
+    if (k < 0) return null;
+    final before = k > 0 ? data[k - 1] : ' ';
+    final after = k + closeCount < data.length ? data[k + closeCount] : ' ';
+    if (before == marker || after == marker) {
+      searchFrom = k + 1;
+      continue;
+    }
+    if (marker == '_' && !_boundary(data, k + count, before: false)) {
+      searchFrom = k + 1;
+      continue;
+    }
+    return (start: j, end: k, skip: k + count);
+  }
+}
+
+/// The link `[label](target)` opening at [i] (the `[`): `null` when the
+/// `[` does not open a link (no matching `]` / `(` … `)` pair, or an image
+/// link, whose label the body does not render as text either).
+({String label, int skip})? _markdownLink(String data, int i) {
+  var j = i + 1;
+  var depth = 1;
+  while (j < data.length && depth > 0) {
+    final c = data[j];
+    if (c == '[') depth++;
+    if (c == ']') depth--;
+    j++;
+  }
+  if (depth != 0) return null;
+  // j is past the matching `]`.
+  if (j >= data.length || data[j] != '(') return null;
+  var k = j + 1;
+  depth = 1;
+  while (k < data.length && depth > 0) {
+    final c = data[k];
+    if (c == '(') depth++;
+    if (c == ')') depth--;
+    k++;
+  }
+  if (depth != 0) return null;
+  // An image link (`![alt](url)`) renders as an image, not as text.
+  if (i > 0 && data[i - 1] == '!') return null;
+  return (label: data.substring(i + 1, j - 1), skip: k);
+}
+
 /// The structured view of one session (spec §6: *External* → structured
 /// view): the message history with the tools in flight, the live cost bar,
 /// and the prompt input enabled at any time (spec §5, endpoint 7: a mid-turn
@@ -2787,6 +3149,21 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// The row's copy button (issue #198): the row's full text — body,
+  /// reasoning, and the tool cards, in display order, markup-free — onto the
+  /// system clipboard, with the confirmation snackbar the app's other
+  /// clipboard paths use (`/copy` sends one too). The row's index is
+  /// chronological (the history never reorders), so it stays stable across
+  /// the rebuilds the streaming and the paged older Turns cause.
+  Future<void> _copyMessage(int index) async {
+    if (index < 0 || index >= _messages.length) return;
+    final text = messagePlainText(_messages[index]);
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    _snackBar('Copied the message.');
+  }
+
   /// Stop the running turn (issues #160/#163): the bridge's cancel, which
   /// interrupts the turn on the owning service. The Stop control is offered
   /// whenever the Turn is Active (the Active fact is independent of cancel
@@ -3067,6 +3444,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                               }
                                               if (message.role ==
                                                   'compaction') {
+                                                // The marker's copy button
+                                                // (issue #198): only when it
+                                                // carries a summary.
+                                                final copyKey =
+                                                    message.text != null
+                                                    ? 'copy-message-$i'
+                                                    : null;
                                                 return Column(
                                                   crossAxisAlignment:
                                                       CrossAxisAlignment.start,
@@ -3076,6 +3460,11 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                       inFlight:
                                                           _compacting &&
                                                           i == _compactionIndex,
+                                                      copyKey: copyKey,
+                                                      onCopy: copyKey == null
+                                                          ? null
+                                                          : () =>
+                                                                _copyMessage(i),
                                                     ),
                                                     _TurnStatsFooter(
                                                       label: footer,
@@ -3092,6 +3481,20 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                   );
                                               final retry = message.retry;
                                               final failure = failures[i];
+                                              // The row's copy button (issue
+                                              // #198): every row carries it
+                                              // when it has content — the
+                                              // body, the reasoning, or a tool
+                                              // card — and never on a row
+                                              // without (a textless user
+                                              // prompt).
+                                              final copyKey =
+                                                  message.text != null ||
+                                                      message.reasoning !=
+                                                          null ||
+                                                      message.tools.isNotEmpty
+                                                  ? 'copy-message-$i'
+                                                  : null;
                                               return Column(
                                                 crossAxisAlignment:
                                                     CrossAxisAlignment.start,
@@ -3099,6 +3502,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                   _MessagePane(
                                                     message: message,
                                                     inFlight: inFlight,
+                                                    copyKey: copyKey,
+                                                    onCopy: copyKey == null
+                                                        ? null
+                                                        : () => _copyMessage(i),
                                                   ),
                                                   // The row's in-flow status lines
                                                   // (issue #206), rendered from the
@@ -3920,7 +4327,12 @@ class _RetryNoticeState extends State<_RetryNotice> {
 /// One message of the history (endpoint 6): the reasoning (thinking) text,
 /// then the text, then the assistant's tool calls (in flight or finished).
 class _MessagePane extends StatelessWidget {
-  const _MessagePane({required this.message, required this.inFlight});
+  const _MessagePane({
+    required this.message,
+    required this.inFlight,
+    this.copyKey,
+    this.onCopy,
+  });
 
   final SessionMessage message;
 
@@ -3928,26 +4340,59 @@ class _MessagePane extends StatelessWidget {
   /// label shows it.
   final bool inFlight;
 
+  /// The row's copy button (issue #198), when the row carries content and
+  /// its index is known: a stable key (from the row's index in the history,
+  /// which never reorders) and the handler that puts the row's plain text
+  /// on the clipboard. Both `null` for a row without content (no button).
+  final String? copyKey;
+
+  final Future<void> Function()? onCopy;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final isUser = message.role == 'user';
+    final label = isUser
+        ? 'You'
+        : inFlight
+        ? 'Assistant · working…'
+        : 'Assistant';
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            isUser
-                ? 'You'
-                : inFlight
-                ? 'Assistant · working…'
-                : 'Assistant',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: isUser ? scheme.primary : scheme.outline,
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: isUser ? scheme.primary : scheme.outline,
+                  ),
+                ),
+              ),
+              if (copyKey != null)
+                IconButton(
+                  // The explicit `<String>` matters: the field is `String?`,
+                  // and an inferred `ValueKey<String?>` would not match the
+                  // `ValueKey<String>` the row's copy key is searched by.
+                  key: ValueKey<String>(copyKey!),
+                  icon: const Icon(
+                    Icons.copy_outlined,
+                    size: 14,
+                    color: Color(0xFF8F8F8F),
+                  ),
+                  tooltip: 'Copy the message',
+                  splashRadius: 12,
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: onCopy,
+                ),
+            ],
           ),
           if (message.reasoning != null)
             Padding(
@@ -4171,12 +4616,23 @@ class _Markdown extends StatelessWidget {
 /// compaction wrote. While the compaction runs, its summary streams in token
 /// by token (`session.compaction.delta`) and the marker shows it.
 class _CompactionPane extends StatelessWidget {
-  const _CompactionPane({required this.message, required this.inFlight});
+  const _CompactionPane({
+    required this.message,
+    required this.inFlight,
+    this.copyKey,
+    this.onCopy,
+  });
 
   final SessionMessage message;
 
   /// True while the session's compaction is streaming into this marker.
   final bool inFlight;
+
+  /// The marker's copy button (issue #198), when the marker carries a
+  /// summary and its index is known (see [_MessagePane.copyKey]).
+  final String? copyKey;
+
+  final Future<void> Function()? onCopy;
 
   @override
   Widget build(BuildContext context) {
@@ -4211,6 +4667,29 @@ class _CompactionPane extends StatelessWidget {
                         color: scheme.outline,
                       ),
                     ),
+                    // The summary's copy button (issue #198), right of the
+                    // label inside the divider's gap.
+                    if (copyKey != null) ...[
+                      const SizedBox(width: 6),
+                      IconButton(
+                        // The explicit `<String>` matters: the field is
+                        // `String?`, and an inferred `ValueKey<String?>`
+                        // would not match the `ValueKey<String>` the
+                        // marker's copy key is searched by.
+                        key: ValueKey<String>(copyKey!),
+                        icon: const Icon(
+                          Icons.copy_outlined,
+                          size: 14,
+                          color: Color(0xFF8F8F8F),
+                        ),
+                        tooltip: 'Copy the summary',
+                        splashRadius: 12,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: onCopy,
+                      ),
+                    ],
                   ],
                 ),
               ),
