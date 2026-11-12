@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_http_service.dart';
@@ -905,6 +907,63 @@ Future<void> _pasteControlV(WidgetTester tester) async {
   await tester.pump();
   await tester.pump();
 }
+
+// --- Text selection and copy (issue #197) ----------------------------------
+
+/// The rendered paragraph of the `Text` with [text] (inside the message
+/// list's `SelectionArea`): the `Text`'s `RichText` is a `RenderParagraph`.
+RenderParagraph _paragraph(WidgetTester tester, String text) =>
+    tester.renderObject<RenderParagraph>(
+      find.descendant(of: find.text(text), matching: find.byType(RichText)),
+    );
+
+/// The global point of character [offset] in [paragraph] (the offset's caret
+/// position, mapped through the paragraph's transform).
+Offset _paragraphPosition(RenderParagraph paragraph, int offset) {
+  const caret = Rect.fromLTWH(0.0, 0.0, 2.0, 20.0);
+  return paragraph.localToGlobal(
+    paragraph.getOffsetForCaret(TextPosition(offset: offset), caret),
+  );
+}
+
+/// Runs the region's copy the way a user would (the selection toolbar's Copy /
+/// Ctrl+C): it invokes the region's `CopySelectionTextIntent` action, which
+/// writes the region's selected plain text to the clipboard — the
+/// `SelectionArea`'s content concatenated across every `Text` the selection
+/// spans. [anchorText] is any message body inside the region: the action lives
+/// on the region's `Actions`, which is reached by walking up from it.
+Future<void> _copySelection(WidgetTester tester, String anchorText) async {
+  Actions.invoke(
+    tester.element(find.text(anchorText)),
+    CopySelectionTextIntent.copy,
+  );
+  // The copy is async (it awaits the clipboard write).
+  await tester.pump();
+  await tester.pump();
+}
+
+/// Records every `Clipboard.setData` the region makes (the standard
+/// flutter_test way to simulate the platform clipboard): each write's text is
+/// added to the returned [Set] so a test can assert the exact plain text copied.
+Set<String> _watchClipboard(WidgetTester tester) {
+  final clipboard = <String>{};
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+    if (call.method == 'Clipboard.setData') {
+      clipboard.add((call.arguments as Map)['text'] as String);
+    }
+    return null;
+  });
+  addTearDown(
+    () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+  );
+  return clipboard;
+}
+
+/// The full selection on [paragraph] as a single `TextSelection` (empty when
+/// the paragraph is not part of the current selection).
+TextSelection? _selectionOf(RenderParagraph paragraph) =>
+    paragraph.selections.isEmpty ? null : paragraph.selections.first;
 
 void main() {
   group('StructuredSessionScreen', () {
@@ -7281,6 +7340,326 @@ void main() {
               .controller!
               .text,
           'quietly',
+        );
+        await events.close();
+      },
+    );
+  });
+  group('StructuredSessionScreen select and copy message text (issue #197)', () {
+    testWidgets(
+      'long-press then drag in a message body copies the rendered plain text '
+      '(no markdown markup) to the clipboard',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'fix the tests'),
+            SessionMessage(
+              role: 'assistant',
+              text: 'I ran `flutter test` and it is **green** now.',
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // The markdown body renders as plain text: no backticks, no `**`, and
+        // no source tags survive into the selectable string.
+        expect(
+          find.text('I ran `flutter test` and it is **green** now.'),
+          findsNothing,
+        );
+        expect(find.textContaining('**'), findsNothing);
+        expect(find.textContaining('`flutter test`'), findsNothing);
+        expect(
+          find.text('I ran flutter test and it is green now.'),
+          findsOneWidget,
+        );
+
+        // Long-press the body, then drag to select the whole rendered line.
+        final p = _paragraph(tester, 'I ran flutter test and it is green now.');
+        const full = 'I ran flutter test and it is green now.';
+        final gesture = await tester.startGesture(_paragraphPosition(p, 0));
+        addTearDown(gesture.removePointer);
+        await tester.pump(kLongPressTimeout);
+        await gesture.moveTo(_paragraphPosition(p, full.length - 1));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        // The visual selection spans the whole line.
+        expect(
+          _selectionOf(p),
+          const TextSelection(baseOffset: 0, extentOffset: full.length),
+        );
+
+        // Copy: the clipboard receives the rendered text, markup-free.
+        final clipboard = _watchClipboard(tester);
+        await _copySelection(tester, full);
+        expect(clipboard, contains(full));
+        expect(clipboard.join(''), isNot(contains('**')));
+        expect(clipboard.join(''), isNot(contains('`')));
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'long-press then drag in a user message selects and copies the rendered '
+      'text (the user bubble is selectable too)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: '**bold** and `code` here'),
+            SessionMessage(role: 'assistant', text: 'ok'),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // The user bubble renders the markdown as plain text.
+        expect(find.text('bold and code here'), findsOneWidget);
+        expect(find.textContaining('**bold**'), findsNothing);
+
+        // Long-press at the start, drag to the end: the whole line is selected.
+        final p = _paragraph(tester, 'bold and code here');
+        const full = 'bold and code here';
+        final gesture = await tester.startGesture(_paragraphPosition(p, 0));
+        addTearDown(gesture.removePointer);
+        await tester.pump(kLongPressTimeout);
+        await gesture.moveTo(_paragraphPosition(p, full.length - 1));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+        expect(
+          _selectionOf(p),
+          const TextSelection(baseOffset: 0, extentOffset: full.length),
+        );
+
+        // The copied text is the rendered plain text, no markup.
+        final clipboard = _watchClipboard(tester);
+        await _copySelection(tester, full);
+        expect(clipboard, contains(full));
+        expect(clipboard.join(''), isNot(contains('**')));
+        expect(clipboard.join(''), isNot(contains('`')));
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'one selection spans several consecutive messages, including a tool '
+      "card's content in the middle, and the copy concatenates across them",
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'list the files'),
+            SessionMessage(
+              role: 'assistant',
+              text: 'Here is what I ran',
+              tools: [
+                ToolCall(
+                  name: 'shell',
+                  status: 'completed',
+                  input: {'command': 'ls -la'},
+                ),
+              ],
+            ),
+            SessionMessage(role: 'assistant', text: 'done listing everything'),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        final a = _paragraph(tester, 'list the files');
+        final b = _paragraph(tester, 'Here is what I ran');
+        final t = _paragraph(tester, 'ls -la');
+        final c = _paragraph(tester, 'done listing everything');
+        const cLen = 'done listing everything'.length;
+
+        // One long-press + drag from the top of the user message to the end of
+        // the last assistant message: a single selection crossing the user
+        // message, the assistant message, and the tool card in the middle.
+        final gesture = await tester.startGesture(_paragraphPosition(a, 0));
+        addTearDown(gesture.removePointer);
+        await tester.pump(kLongPressTimeout);
+        await gesture.moveTo(_paragraphPosition(b, 2));
+        await tester.pump();
+        await gesture.moveTo(_paragraphPosition(t, 2));
+        await tester.pump();
+        await gesture.moveTo(_paragraphPosition(c, cLen - 1));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+
+        // Every message the drag crossed is selected, end to end — the
+        // SelectionArea's multi-Text capability.
+        const aLen = 'list the files'.length;
+        const bLen = 'Here is what I ran'.length;
+        const tLen = 'ls -la'.length;
+        expect(
+          _selectionOf(a),
+          TextSelection(baseOffset: 0, extentOffset: aLen),
+        );
+        expect(
+          _selectionOf(b),
+          TextSelection(baseOffset: 0, extentOffset: bLen),
+        );
+        expect(
+          _selectionOf(t),
+          TextSelection(baseOffset: 0, extentOffset: tLen),
+        );
+        expect(
+          _selectionOf(c),
+          TextSelection(baseOffset: 0, extentOffset: cLen),
+        );
+
+        // The copy concatenates the selected text in document order, includes
+        // the tool card's content in the middle, and carries no markdown
+        // markup (there is none to begin with here — the bodies are plain).
+        final clipboard = _watchClipboard(tester);
+        await _copySelection(tester, 'list the files');
+        final joined = clipboard.join('');
+        expect(clipboard, hasLength(1));
+        expect(joined, contains('list the files'));
+        expect(joined, contains('Here is what I ran'));
+        expect(joined, contains('ls -la'));
+        expect(joined, contains('done listing everything'));
+        // ...and the tool card's content sits between the two messages.
+        expect(
+          joined.indexOf('Here is what I ran'),
+          lessThan(joined.indexOf('ls -la')),
+        );
+        expect(
+          joined.indexOf('ls -la'),
+          lessThan(joined.indexOf('done listing everything')),
+        );
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'the markdown Text spans keep their TUI styles/colors under the '
+      'SelectionArea (no visual regression on headings, code, lists, quotes)',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              role: 'assistant',
+              text: '## Objective\n- a list item\n\n> a quote\n\n`inline code`',
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // The heading keeps the TUI light-palette heading color.
+        final heading = tester.widget<Text>(find.text('Objective'));
+        expect(heading.textSpan?.style?.color, const Color(0xFFD68C27));
+
+        // The list item, the quote, and the inline code all render.
+        expect(find.text('a list item'), findsOneWidget);
+        expect(find.text('a quote'), findsOneWidget);
+        expect(find.text('inline code'), findsOneWidget);
+
+        // The inline code span keeps the TUI light-palette code color.
+        final codeText = tester.widget<Text>(find.text('inline code'));
+        expect(codeText.textSpan?.style?.color, const Color(0xFF3D9A57));
+
+        // The text is still selectable and copies to the rendered plain text
+        // (no markdown markup leaks into the copy).
+        final p = _paragraph(tester, 'a list item');
+        const item = 'a list item';
+        final gesture = await tester.startGesture(_paragraphPosition(p, 0));
+        addTearDown(gesture.removePointer);
+        await tester.pump(kLongPressTimeout);
+        await gesture.moveTo(_paragraphPosition(p, item.length - 1));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+        expect(
+          _selectionOf(p),
+          const TextSelection(baseOffset: 0, extentOffset: item.length),
+        );
+        final clipboard = _watchClipboard(tester);
+        await _copySelection(tester, item);
+        expect(clipboard, contains(item));
+        expect(clipboard.join(''), isNot(contains('**')));
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'existing tap gestures keep working under the SelectionArea: the '
+      'failure body expands on tap, short taps stay inert, the prompt field '
+      'still takes focus',
+      (tester) async {
+        // A failed turn: the closing idle marker carries `outcome: failed` and
+        // the assistant row carries the terminal error, so the turn-failure
+        // block renders on the marker — its raw provider body is the one
+        // tap-to-expand control that sits inside the SelectionArea's list.
+        const longBody =
+            '{"error":{"message":"rate limited, slow down","retry_after":30}}';
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'hi there', created: 0),
+            SessionMessage(
+              id: 'a1',
+              role: 'assistant',
+              error: StructuredError(
+                type: 'provider.rate-limit',
+                message: 'Provider request failed',
+                status: 429,
+                body: longBody,
+              ),
+              created: 0,
+              completed: 1000,
+            ),
+            SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // The failure block and its body render.
+        expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
+        final bodyKey = find.byKey(const ValueKey('turn-failure-body'));
+        expect(bodyKey, findsOneWidget);
+        final bodyText = tester.widget<Text>(
+          find.descendant(of: bodyKey, matching: find.byType(Text)),
+        );
+        // Collapsed by default (clamped to 3 lines).
+        expect(bodyText.maxLines, 3);
+
+        // Tapping the body expands it (the tap-to-expand still works under the
+        // SelectionArea).
+        await tester.tap(bodyKey);
+        await tester.pump();
+        final expanded = tester.widget<Text>(
+          find.descendant(of: bodyKey, matching: find.byType(Text)),
+        );
+        expect(expanded.maxLines, null);
+
+        // Tapping again collapses it.
+        await tester.tap(bodyKey);
+        await tester.pump();
+        final collapsed = tester.widget<Text>(
+          find.descendant(of: bodyKey, matching: find.byType(Text)),
+        );
+        expect(collapsed.maxLines, 3);
+
+        // A short tap on a plain message body starts no selection (a tap is
+        // not a long-press, so the selection stays empty) — the tap does not
+        // hijack the row.
+        final p = _paragraph(tester, 'hi there');
+        expect(_selectionOf(p), isNull);
+        await tester.tapAt(p.localToGlobal(Offset.zero) + const Offset(2, 2));
+        await tester.pump();
+        expect(_selectionOf(p), isNull);
+
+        // The prompt field still receives taps and gains focus under the area.
+        await tester.tap(find.byKey(const ValueKey('structured-prompt-input')));
+        await tester.pump();
+        expect(
+          tester.binding.focusManager.primaryFocus?.hasPrimaryFocus,
+          isTrue,
         );
         await events.close();
       },
