@@ -320,3 +320,297 @@ those slices cite:
   this probe's event stream showed only `started`/`succeeded` for the 429 turns
   (all recovered), so it was not re-confirmed live here.
 
+## Session list ordering (position / pin)
+
+Probe for issue #204 — where a user-controlled display order for the home list
+can live. Every *observed* claim below was verified live against the running
+service (`opencode serve --service`, v2.2.7, `http://127.0.0.1:49374`, Basic
+auth from `~/.local/state/opencode/service.json`) on 2026-11-12, on a throwaway
+session titled `test-order-204` (created, probed, deleted). The service's own
+`openapi.json` confirms the event-type names; no other probe re-derived what
+#204 already established. The deliverable is this section only — no UI, no
+runtime behaviour change.
+
+### The service offers no order field (re-stated from #204)
+
+`Session.Info` has no `position`/`order`/`rank`/`pin`; the only ordering knob on
+`GET /api/session` is its pagination (`limit` defaulting to the newest 50,
+`order: asc|desc`, `search`, `parentID`, `archived`, `directory`, `project`,
+`subpath`, `cursor`). The service's default page order is **`time.updated`
+desc**, not `created`; the bridge requests `order=desc` and re-sorts the merged
+rows by `created` (`SessionsBackend.list()`), which is the sort the app sees
+today. The free hook is `Session.Metadata` — an unconstrained
+`{"type":"object"}` the service does not itself use for ordering (the TUI sorts
+its own list independently and is unaffected).
+
+### Q1 — PATCH `metadata` replaces the whole object (not a merge)
+
+A session's `metadata` is **replaced on every PATCH**, not deep-merged. The
+probe session was stepped through:
+
+```
+PATCH {"metadata":{"position":7}}      -> 204 ; GET metadata -> {"position":7}
+PATCH {"metadata":{"other":1}}         -> 204 ; GET metadata -> {"other":1}
+PATCH {"metadata":{"position":8}}      -> 204 ; GET metadata -> {"position":8}
+```
+
+The second PATCH dropped `position` and the third dropped `other` — each PATCH
+is the **entire** new object. **Verdict: last-write-wins on the whole object.**
+Consequence: a `position` write from the bridge must read-modify-write (read the
+current metadata, set `position`, PATCH the whole object back), and two
+concurrent writers (two app instances in client mode, or the app and any future
+non-app consumer of `metadata`) clobber each other's keys. The bridge owns the
+only real consumer today, so this is a non-issue in practice — but it rules out
+"coexisting keys" assumptions and is the single reason option A's write path
+must be read-modify-write.
+
+### Q2 — no practical metadata size cap
+
+Metadata of every size probed was accepted (204) and read back intact:
+
+| payload size | HTTP | readback |
+|---|---|---|
+| ~0.5 KiB | 204 | `pad_len=512` |
+| ~1 KiB | 204 | `pad_len=1024` |
+| ~4 KiB | 204 | `pad_len=4096` |
+| ~10 KiB | 204 | `pad_len=10240` |
+| ~64 KiB | 204 | `pad_len=65536` |
+| ~1 MiB | 204 | `pad_len=1048576` |
+| ~4 MiB | 204 | `pad_len=4194304` |
+
+**Verdict: no cap in the working range.** A position int (or a whole per-session
+order block) is trivially small; size is a non-factor. (No artificial limit was
+observed, so a future service version adding one is an unverified assumption,
+not a fact.)
+
+### Q3 — metadata is persisted in the durable store (survives a restart)
+
+The service's state is a WAL-backed SQLite database
+(`~/.local/share/opencode/opencode.db`, the file held open by the service
+process), table `session_v2` with a dedicated `metadata` column. Immediately
+after `PATCH {"metadata":{"position":7}}`, a **read-only** read of the store on
+disk shows the exact value, alongside the session's `event_sequence` row (the
+durable seq the event stream advances):
+
+```
+table=session_v2
+  id        = ses_e2f38210cffewmhZbBK6WCbQVq
+  title     = test-order-204
+  metadata  = {"position":7}
+  time_updated = 1794504320780
+  ...
+table=event_sequence
+  aggregate_id = ses_e2f38210cffewmhZbBK6WCbQVq
+  seq          = 16
+```
+
+**Verdict: persisted.** Metadata lives in the same durable store as the rest of
+the session (the row is on disk the moment the PATCH lands, before any WAL
+checkpoint), so it survives a service restart. The live restart itself was not
+run against this host's shared service (it hosts real, in-flight sessions) — the
+on-disk store read is the verification, per the ticket's "verify against the
+state dir".
+
+### Q4 — `search` does not reach into metadata
+
+`GET /api/session?search=` searches the session's **title**, not its metadata.
+With a distinctive token stored *only* in `metadata`:
+
+| query | rows | our session present |
+|---|---|---|
+| `search=<token in metadata>` | 0 | no |
+| `search=<session title>` | 1 | yes |
+| `search=<nonsense>` | 0 | no |
+
+**Verdict: no.** `position` in metadata is invisible to search — expected, and
+it means an ordered list can't be reached through the `search` param (the bridge
+re-sorts the full page it already fetches, so this is irrelevant to the design).
+
+### The live event (Q6 context — how the app learns of an order change)
+
+A metadata PATCH emits `session.metadata.updated`, already in the bridge's
+upstream event subscription (the bridge subscribes to the **full** type enum of
+`GET /api/event`; this type is simply ignored by the hub today). Observed live:
+
+```json
+{
+  "id": "evt_1d0cd88c9001FAgB4kEIYOCFzX",
+  "created": 1794504493257,
+  "type": "session.metadata.updated",
+  "data": {
+    "sessionID": "ses_e2f38210cffewmhZbBK6WCbQVq",
+    "metadata": { "position": 3, "live": true }
+  },
+  "durable": { "aggregateID": "ses_e2f38210cffewmhZbBK6WCbQVq", "seq": 18, "version": 1 }
+}
+```
+
+The payload carries the **full** metadata object (not a diff) and a durable
+per-session `seq`. The app already patches its cached home-list rows in place
+from live events (title, the active dot) without a refetch — this event is the
+same shape of update, so a position change merges into the cached list with no
+refetch: read `data.metadata.position`, update the row, re-sort. For
+option B the bridge emits an equivalent **bridge-native** event (see wire) on
+the same fan-out; the app-side merge is identical either way.
+
+### A/B/C — where the order lives
+
+The decision point is which component owns the order and how it reaches the
+app. ADR-0001 is the governing constraint: the bridge is the app's **single**
+API, the app never talks to the opencode service directly, and the bridge
+re-emits upstream events **verbatim** onto `GET /api/events` while
+bridge-native events (no durable seq) are multiplexed onto the same stream.
+
+One fact reframes the choice and is worth stating plainly, because it is not
+obvious from the service side: **the home list is not one service's list.**
+`CompositeOpencodeService.listSessions()` merges the host's sessions with every
+**running orb's** sessions into a single list, which `SessionsBackend.list()`
+then sorts by `created` desc. A session's order must therefore span host and
+orb rows simultaneously (and a session moved host↔orb keeps its id — ADR-0006 —
+so it stays in the list it was ordered in). This is the decisive argument for
+a bridge-local store.
+
+- **A — order in the opencode `metadata`.** Write
+  `metadata.position` (or `{"pinned":bool}`) on each session, per service; the
+  bridge sorts merged rows by `(position ?? +∞, time.updated desc)`.
+  *Pros:* persisted service-side, a real live SSE event already reaches the
+  bridge, and every bridge that shares a service sees the same order.
+  *Cons (the ones that decide it):* the order **does not span services** — each
+  service (host and each orb) keeps its own `position`, so the bridge must
+  stitch per-service orders into the merged list with no natural global
+  coordinate, and a two-bridge setup (server + client bridge over the same
+  host) gets two independent `position` namespaces. The write is
+  read-modify-write (Q1: whole-object replace), so a drag that reorders N rows
+  is N sequential PATCHes with no atomicity, and a lost PATCH mid-drag leaves a
+  half-ordered list. And any `position` write clobbers `metadata` (Q1) — fine
+  while the bridge is the only consumer, fragile the moment anything else
+  writes there.
+
+- **B — a bridge-local order store.** The bridge owns a `sessionID → position`
+  map, persisted in an app-owned file, exposed through its own route and
+  bridge-native event. *Pros:* **one order across host + orb rows** (it keys on
+  session id, which the composite list and the move primitive both preserve);
+  **atomic** reorder (the bridge rewrites the whole map in one write — a drag is
+  one operation, not N network PATCHes, and a crash can't leave a half-ordered
+  list); full control of semantics and no dependence on service `metadata`
+  behaviour (Q1's replace semantics become irrelevant). *Cons:* the order is
+  **per-bridge** (two bridges = two orders) — the same limitation as A in
+  practice, so not a disqualifier; and the map must be kept tidy (drop a session
+  on its `DELETE`, which the bridge already detects and emits `session.closed`
+  for; it survives host↔orb moves automatically because the id is preserved, so
+  cleanup is deletion-only).
+
+- **C — sort modes + pin only (no drag).** The user picks a sort
+  (`recent activity` / `created` / `pinned first`) plus per-session pinning,
+  via A or B. The smallest step that may satisfy the request. *Cons:*
+  `recent activity` needs `time.updated`, which the `Session` home-list row does
+  **not** carry today (only `created`) — so even C, in its natural form,
+  requires surfacing a per-row freshness field, i.e. a small contract change
+  regardless of the ordering decision.
+
+### Recommendation
+
+**B — a bridge-local order store — with `pinned` as the first-shape UX (C's
+minimal step), the `position`-int store already in place so full drag is a
+non-breaking extension.**
+
+The reasoning, against the repo's conventions:
+
+1. **ADR-0001 — the bridge is the single API and the app never talks to the
+   service.** Order is an app-level display concern, not service data. The
+   bridge already composes the home-list rows (`SessionsBackend.list()` already
+   re-sorts the merged set) and is the only component that sees the *complete,
+   merged* host+orb list. Owning the order there is the one place that can order
+   the list the app actually renders — option A cannot, because the merged
+   list spans services that A's per-service `position` never covers. This is the
+   same "the bridge is the sole orchestrator" position ADR-0001 and ADR-0006
+   already take for orb moves.
+
+2. **Atomicity and no dependence on service semantics.** B rewrites one map in
+   one local write — a drag of N rows is atomic and crash-safe — whereas A's
+   read-modify-write + N PATCHes (Q1) is non-atomic and couples the feature to
+   the service's whole-object-replace behaviour, which is an implementation
+   detail the bridge should not build on. B makes Q1, Q2, and Q4 irrelevant to
+   correctness.
+
+3. **It reuses what the bridge already has.** The `session.closed` hook for
+   cleanup, the `EventHub.emit` fan-out for the live event, the composite
+   service's id-keyed routing, and ADR-0006's id-preserved moves all already
+   exist; B wires into them. A would instead put app display state *inside* the
+   service's `metadata`, where the service does not own it and where a TUI or any
+   future consumer could collide.
+
+What B does **not** get, and why that is acceptable: a shared order across two
+bridges. That is not a requirement the app has today (server mode is one bridge
+per host; client mode is a client of *that* bridge), and A offers no more in the
+one-bridge-per-host reality. The cost (per-bridge order) is symmetric with A's
+worst case.
+
+The store is a **position int, not just a pin flag**: the app starts with a
+pin-only UI (C's "pinned first + created") reading `position != null` as
+*pinned, in `position` order*, and `position == null` as *unpinned, newest
+created first* — the exact shape that makes a later full-drag reorder a
+purely-app-side extension (write fractional/integer positions between rows) with
+**no bridge route, event, or store-shape change**.
+
+### The wire (option B), ready to cut into slices
+
+- **Store:** the bridge persists a `sessionID → position:int` map in an
+  app-owned file (the same app-owned-file pattern as the tunnel's
+  `~/.config/opencodebridge/`, CONTEXT.md). Position `null`/absent = unpinned.
+  On load, drop entries whose id is no longer in the merged list (deletion
+  cleanup); the map follows a session across host↔orb moves for free (id
+  preserved, ADR-0006).
+
+- **Read:** no new read route. `SessionsBackend.list()` already returns the
+  merged, sorted rows; it becomes the sort's owner:
+  `rows.sort` by *(pinned first: `position != null` before `null`, then
+  `position` ascending when both pinned, then `created` descending as the stable
+  fallback)*. The `Session` home-list row gains the field the UI needs to
+  render and re-merge — a `pinned` bool (and, for the "recent activity" sort
+  mode, a `time.updated` int, which it does not carry today). Adding fields to
+  `Session.toJson`/`fromJson` is the only contract change and is additive.
+
+- **Write (the one new route):** `PATCH /api/sessions/{id}/order`, body
+  `{"position": <int|null>}` (`null` unpins). This is a **bridge-native**
+  write (it touches the bridge's own store), *not* a pass-through to the service
+  — consistent with ADR-0001's "the app talks only to the bridge". Response
+  `204`. Unknown session → `404`; malformed body → `400` (the existing
+  `_sessionCommandIn` path already yields the `(id, sub)` pair, so this slots in
+  beside the `/api/sessions/{id}/…` command routes).
+  - First-slice (pin) shape: `{"position": 0}` pins, `{"position": null}`
+    unpins — pin order is "pin time" (first pinned highest).
+  - Extension (drag) shape: `{"position": <float/int>}` sets an explicit order;
+    a reorder posts the new positions for the affected rows (or a batched
+    `PATCH /api/sessions/order` variant if per-row N is too chatty) — same store,
+    same event, no schema change.
+
+- **Event (bridge-native, on the existing fan-out):** `session.order.changed`,
+  `data: {"sessionID": <id>, "position": <int|null>}`, **no durable seq** (a
+  bridge-native side-effect, exactly the class of `session.closed` and
+  `session.turn.cancelled` in `bridge_event.dart`). Emitted from the route after
+  the store write, through the same `EventHub.emit` the app's home-list already
+  consumes — so the app merges `data.position` into its cached row and re-sorts
+  with **no refetch**, identical to how it already merges `session.metadata.updated`
+  and title updates.
+
+- **What the app does not do:** it never reads or writes the service's
+  `metadata` for order (option A's whole-object-replace, Q1, stays out of the
+  app's path entirely). If a future slice wants a *cross-bridge* shared order,
+  that is a separate decision (a service-side or tunnel-synced store), out of
+  scope for this ticket.
+
+### Assumptions (labelled, per the probe brief)
+
+- **O1.** The `session_v2` table (and its `metadata` column) is the durable
+  store that survives a service restart. Verified by read-only on-disk read; the
+  live restart was not run against this host's shared service (real sessions in
+  flight). A service that changed its persistence would be a service incident,
+  not an app concern — and option B does not depend on it at all.
+- **O2.** `metadata` has no practical size cap (no cap observed to 4 MiB).
+  Unverified for future service versions; irrelevant to a position int.
+- **O3.** The bridge is the sole consumer of `Session.Metadata`. True today
+  (the service and the TUI do not use it for ordering); if a future consumer
+  appears, option B is unaffected (it never touches `metadata`), option A
+  would need to coordinate.
+
