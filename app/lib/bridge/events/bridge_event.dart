@@ -40,6 +40,13 @@ abstract class BridgeEventType {
   /// `data` carries `id` (the orb id) and `line` (one line of the
   /// container log).
   static const String orbBoot = 'orb.boot';
+
+  /// One line of the host opencode service's boot log (issue #153): the
+  /// `opencode serve` child's output (the `server listening on …` /
+  /// `server password …` lines, the ready line, and the boot's reason on
+  /// failure). `data` carries `line`. This is the "log surface" a failed
+  /// boot is visible on; the health report carries the outcome.
+  static const String opencodeBoot = 'opencode.boot';
 }
 
 /// Build the wire payload for a bridge-native event: the same `data:` envelope

@@ -84,11 +84,20 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
         // The bridge is the tunnel's supervisor (ADR-0002): it starts the
         // cloudflared child after the port is bound, so a second instance
         // (detected by the port conflict) never spawns a second tunnel.
+        // It is also the host opencode service's booter (issue #153,
+        // ADR-0002/ADR-0008): server mode is the on-switch, so the app turns
+        // opencode on (attach to a running one, or start one) after the port
+        // is bound and before the sessions/events backends are built. A
+        // failed boot degrades to `opencode_unavailable` — the bridge still
+        // serves, with the tunnel and orbs unchanged.
         final bridge = await BridgeServer.start(
           tunnel: BridgeServer.defaultTunnel(),
           // The automated lifecycle pass (issue #101, spec §2.10): server
           // mode is where the bridge owns orb automation.
           autoLifecyclePass: true,
+          // The host opencode service boot (issue #153): the app's own
+          // server-mode on-switch.
+          bootstrapOpencode: BridgeServer.defaultOpencodeBooter(),
         );
         _bridge = bridge;
         _serverError = null;
