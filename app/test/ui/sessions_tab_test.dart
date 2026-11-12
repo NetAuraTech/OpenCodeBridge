@@ -218,8 +218,16 @@ class _FakeSessionsClient extends SessionsClient {
     prompts.add((id, text));
   }
 
+  /// The pending permission requests / question forms [getPermissions] and
+  /// [getQuestions] answer (the waiting dot's source, issue #209); the tab
+  /// re-derives a row's waiting fact from these on the permission/question
+  /// events, the same endpoints the structured view consumes.
+  List<PermissionRequest> permissionsResult = const [];
+  List<QuestionForm> questionsResult = const [];
+
   @override
-  Future<List<PermissionRequest>> getPermissions(String id) async => const [];
+  Future<List<PermissionRequest>> getPermissions(String id) async =>
+      permissionsResult;
 
   @override
   Future<void> replyPermission(
@@ -231,7 +239,7 @@ class _FakeSessionsClient extends SessionsClient {
   }
 
   @override
-  Future<List<QuestionForm>> getQuestions(String id) async => const [];
+  Future<List<QuestionForm>> getQuestions(String id) async => questionsResult;
 
   @override
   Future<void> answerQuestion(
@@ -2169,6 +2177,210 @@ void main() {
           expect(find.textContaining('active'), findsNothing);
         });
       });
+    });
+
+    group('waiting dot (issue #209)', () {
+      /// A pending-permission event, as the bridge fans it out: the session in
+      /// `data.sessionID` (no durable seq — `permission.asked` carries none).
+      /// The same event the structured view already consumes.
+      BridgeEvent permEvent(String type, String sessionId) => BridgeEvent(
+        id: 'evt_$type',
+        created: 0,
+        type: type,
+        data: {'sessionID': sessionId},
+      );
+
+      /// A pending-question event (`form.*`), as the bridge fans it out: the
+      /// session nests under `data.form` (the form object), no durable seq.
+      /// The same events the structured view already consumes.
+      BridgeEvent formEvent(String type, String sessionId) => BridgeEvent(
+        id: 'evt_$type',
+        created: 0,
+        type: type,
+        data: {
+          'form': {'id': 'form_1', 'sessionID': sessionId},
+        },
+      );
+
+      testWidgets(
+        'a waiting session shows an orange dot, derived from the row\'s '
+        'waiting fact',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one.copyWith(waiting: true)]);
+
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsOneWidget);
+          // It is orange — not the green active dot, not the violet unread dot.
+          final dot = tester.widget<Container>(
+            find.byKey(const ValueKey('waiting-ses_1')),
+          );
+          expect((dot.decoration as BoxDecoration).color, Colors.orange);
+          expect(find.byKey(const ValueKey('active-ses_1')), findsNothing);
+          expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+        },
+      );
+
+      testWidgets(
+        'orange takes precedence over green: a waiting session that is also '
+        'active reads orange, while an active non-waiting session stays green',
+        (tester) async {
+          // Waiting and active at once: the service still marks it active
+          // during the block, but the dot reads orange.
+          await _pumpTab(tester, rows: [_two.copyWith(waiting: true)]);
+          expect(find.byKey(const ValueKey('waiting-ses_2')), findsOneWidget);
+          expect(find.byKey(const ValueKey('active-ses_2')), findsNothing);
+
+          // Active but not waiting: the green dot stands.
+          await tester.pumpWidget(const SizedBox());
+          await _pumpTab(tester, rows: [_two]);
+          expect(find.byKey(const ValueKey('active-ses_2')), findsOneWidget);
+          expect(find.byKey(const ValueKey('waiting-ses_2')), findsNothing);
+        },
+      );
+
+      testWidgets(
+        'an inactive, non-waiting session shows no dot, and neither does a '
+        'waiting idle row show the green dot',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one, _three]);
+          // Both idle and non-waiting: no dot at all.
+          expect(find.byKey(const ValueKey('active-ses_1')), findsNothing);
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsNothing);
+          expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+          expect(find.byKey(const ValueKey('active-ses_3')), findsNothing);
+          expect(find.byKey(const ValueKey('waiting-ses_3')), findsNothing);
+        },
+      );
+
+      testWidgets(
+        'the dot reverts on resolution — none when the row is idle, green '
+        'when it is active — in place, without a list reload',
+        (tester) async {
+          Future<void> runFor({required bool active}) async {
+            // A fresh tab per case (a bare pumpWidget would reuse the State).
+            await tester.pumpWidget(const SizedBox());
+            final events = _FakeEventsSource();
+            final client = await _pumpTab(
+              tester,
+              rows: [_one.copyWith(active: active, waiting: true)],
+              events: events,
+            );
+            expect(client.listCalls, 1);
+            // Waiting: the dot is orange regardless of the active fact.
+            expect(find.byKey(const ValueKey('waiting-ses_1')), findsOneWidget);
+
+            // The permission is resolved: the service holds nothing pending
+            // (the fake answers empty), and the resolution event lands (the
+            // same one the structured view consumes). The dot reverts in
+            // place.
+            events.emit(permEvent('permission.replied', 'ses_1'));
+            await tester.pumpAndSettle();
+
+            expect(find.byKey(const ValueKey('waiting-ses_1')), findsNothing);
+            if (active) {
+              // Active, non-waiting: back to green.
+              expect(
+                find.byKey(const ValueKey('active-ses_1')),
+                findsOneWidget,
+              );
+            } else {
+              // Idle, non-waiting: no dot at all.
+              expect(find.byKey(const ValueKey('active-ses_1')), findsNothing);
+              expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+            }
+            expect(
+              client.listCalls,
+              1,
+              reason: 'patched in place, no list reload',
+            );
+          }
+
+          await runFor(active: false);
+          await runFor(active: true);
+        },
+      );
+
+      testWidgets(
+        'the dot flips live on the permission/question events (asked/created '
+        'to orange, resolved to off), without a list reload',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_one], events: events);
+          expect(client.listCalls, 1);
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsNothing);
+
+          // A permission is asked: the service now holds it, the event lands.
+          client.permissionsResult = const [
+            PermissionRequest(id: 'req_1', action: 'shell', resources: ['ls']),
+          ];
+          events.emit(permEvent('permission.asked', 'ses_1'));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsOneWidget);
+          expect(client.listCalls, 1, reason: 'no list reload');
+
+          // The permission is answered: the service holds nothing, it reverts.
+          client.permissionsResult = const [];
+          events.emit(permEvent('permission.replied', 'ses_1'));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsNothing);
+          expect(client.listCalls, 1, reason: 'no list reload');
+
+          // A question form is created: a pending question is waiting too, so
+          // the dot turns orange again.
+          client.questionsResult = const [
+            QuestionForm(id: 'form_1', title: 'Questions', questions: []),
+          ];
+          events.emit(formEvent('form.created', 'ses_1'));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsOneWidget);
+          expect(client.listCalls, 1, reason: 'no list reload');
+
+          // The question form is cancelled: the dot reverts.
+          client.questionsResult = const [];
+          events.emit(formEvent('form.cancelled', 'ses_1'));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('waiting-ses_1')), findsNothing);
+          expect(client.listCalls, 1, reason: 'no list reload');
+        },
+      );
+
+      testWidgets(
+        'a pending-question event nests the session under data.form (no '
+        'durable seq), and the dot still flips',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_three], events: events);
+          expect(find.byKey(const ValueKey('waiting-ses_3')), findsNothing);
+
+          client.questionsResult = const [
+            QuestionForm(id: 'form_1', title: 'Questions', questions: []),
+          ];
+          // `form.created` carries no top-level sessionID: the tab must match
+          // the nested `data.form.sessionID`.
+          events.emit(formEvent('form.created', 'ses_3'));
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('waiting-ses_3')), findsOneWidget);
+          expect(client.listCalls, 1, reason: 'no list reload');
+        },
+      );
+
+      testWidgets(
+        'a permission event naming a session the list does not know reloads '
+        '(a missed create), like any other unknown-session event',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_one], events: events);
+          expect(client.listCalls, 1);
+
+          // ses_orb1 is not in the list (its create was missed, e.g. a spawned
+          // orb session): the permission event for it must not be swallowed —
+          // it reloads, coalesced and quiet, so the fresh row (with its waiting
+          // fact) arrives. The known-row flip does no such reload, so this is
+          // the reload the unknown-session path performs.
+          events.emit(permEvent('permission.asked', 'ses_orb1'));
+          await tester.pumpAndSettle();
+          expect(client.listCalls, 2, reason: 'a create was missed');
+        },
+      );
     });
   });
 }

@@ -72,8 +72,10 @@ class Session {
 
   /// The row with the given fields replaced: the home list patches rows in
   /// place from live events (a title the agent assigns, the active dot moving)
-  /// without a refetch.
-  Session copyWith({String? title, bool? active}) => Session(
+  /// without a refetch. [waiting] is the row's waiting fact (issue #208),
+  /// re-derived by the tab from the service's pending states on the same
+  /// permission/question events the structured view consumes (issue #209).
+  Session copyWith({String? title, bool? active, bool? waiting}) => Session(
     id: id,
     title: title ?? this.title,
     project: project,
@@ -81,7 +83,7 @@ class Session {
     location: location,
     active: active ?? this.active,
     orb: orb,
-    waiting: waiting,
+    waiting: waiting ?? this.waiting,
   );
 
   Map<String, Object?> toJson() => {

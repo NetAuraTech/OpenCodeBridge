@@ -384,6 +384,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   ///   turn: the row's active dot goes out in place, no refetch, so a session
   ///   stopped from a panel no longer reads as busy (and lights the unread dot
   ///   when not shown, like any other terminal).
+  /// - The pending permission and question events (`permission.asked` /
+  ///   `permission.replied`, `form.created` / `form.replied` /
+  ///   `form.cancelled` — issue #209, the same events the structured view
+  ///   consumes) — a known row re-derives its waiting fact in place from the
+  ///   service's pending states (no list reload), so its dot turns orange when
+  ///   a permission or question appears and reverts (green while active, none
+  ///   otherwise) when it resolves.
   ///
   /// Any other event naming an unknown session (a streamed delta, the first
   /// turn of a just-spawned orb session whose create preceded its upstream's
@@ -438,6 +445,27 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           _endUnread(sessionId);
         }
         return;
+      // The pending permission and question facts (issue #209): the same
+      // events the structured view already consumes (`permission.asked` /
+      // `permission.replied`, `form.created` / `form.replied` /
+      // `form.cancelled`). A known row re-derives its waiting fact in place,
+      // no list reload — the dot flips orange (or off) the instant the
+      // permission or question appears or resolves.
+      case 'permission.asked':
+      case 'permission.replied':
+      case 'form.created':
+      case 'form.replied':
+      case 'form.cancelled':
+        if (sessionId == null) return;
+        if (_hasRow(rows, sessionId)) {
+          unawaited(_setWaiting(sessionId, rows));
+        } else {
+          // The row is not known: a create was missed (a spawned orb session),
+          // so the list reloads, like any other event naming an unknown
+          // session — the waiting fact arrives with the fresh row.
+          unawaited(_refreshFromEvents());
+        }
+        return;
       default:
         if (sessionId != null && !_hasRow(rows, sessionId)) {
           unawaited(_refreshFromEvents());
@@ -471,11 +499,18 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     return title is String && title.isNotEmpty ? title : null;
   }
 
-  /// Replaces the row [id] in place: a new [title], an [active] dot, or
-  /// ([drop]) nothing — the row is gone. A drop also clears the detail pane
-  /// when it shows that row and drops its unread mark (issue #207); a patch
-  /// otherwise carries the pane's row along.
-  void _patchRow(String id, {String? title, bool? active, bool drop = false}) {
+  /// Replaces the row [id] in place: a new [title], an [active] dot, a
+  /// re-derived [waiting] fact (issue #209), or ([drop]) nothing — the row is
+  /// gone. A drop also clears the detail pane when it shows that row and drops
+  /// its unread mark (issue #207); a patch otherwise carries the pane's row
+  /// along.
+  void _patchRow(
+    String id, {
+    String? title,
+    bool? active,
+    bool? waiting,
+    bool drop = false,
+  }) {
     final rows = _rows;
     if (rows == null) return;
     if (drop) {
@@ -493,13 +528,17 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _rows = [
         for (final session in rows)
           if (session.id == id)
-            session.copyWith(title: title, active: active)
+            session.copyWith(title: title, active: active, waiting: waiting)
           else
             session,
       ];
       final selected = _selectedSession;
       if (selected != null && selected.id == id) {
-        _selectedSession = selected.copyWith(title: title, active: active);
+        _selectedSession = selected.copyWith(
+          title: title,
+          active: active,
+          waiting: waiting,
+        );
       }
     });
   }
@@ -510,6 +549,36 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     final row = rows.where((session) => session.id == id).firstOrNull;
     if (row == null || row.active == active) return;
     _patchRow(id, active: active);
+  }
+
+  /// Re-derives the row [id]'s waiting fact in place (issue #209) from the
+  /// service's pending states — the same pending-permission and
+  /// pending-question endpoints the structured view consumes — and patches the
+  /// row when it disagrees. The question lookup runs only when the permission
+  /// lookup answered empty (a waiting session already has its answer), like
+  /// the backend's own derivation (issue #208). A known row whose lookup fails
+  /// keeps its dot (the last word) rather than flapping off; the row is
+  /// removed on its own delete event, so a stale dot never outlives the
+  /// session.
+  Future<void> _setWaiting(String id, List<Session> rows) async {
+    final client = _client;
+    // The row must be known now (a missed create reloads instead, the caller's
+    // branch): issuing the lookups for a row the list does not hold is waste.
+    if (client == null || !_hasRow(rows, id)) return;
+    try {
+      final permissions = await client.getPermissions(id);
+      final waiting =
+          permissions.isNotEmpty || (await client.getQuestions(id)).isNotEmpty;
+      if (!mounted) return;
+      // Re-read the current row: it may have changed while the lookups were in
+      // flight (another event patched it, or the row was dropped). Guard
+      // against the live value so a burst of events settles on the latest.
+      final current = _rows?.where((session) => session.id == id).firstOrNull;
+      if (current == null || current.waiting == waiting) return;
+      _patchRow(id, waiting: waiting);
+    } on SessionsClientError {
+      // Keep the last word on screen (the structured view does too).
+    }
   }
 
   /// A turn ended on [id] (any terminal, issue #207): light the violet unread
@@ -1350,8 +1419,9 @@ class _SessionRow extends StatelessWidget {
 
   /// The row's unread mark (issue #207): true when the session's turn ended
   /// while it was not shown in the detail pane. The status dot (before the
-  /// title) wears it as a violet dot, mutually exclusive with the green
-  /// active dot — the two are states of the same spot.
+  /// title) wears it as a violet dot — one spot with mutually exclusive
+  /// states, orange (waiting, issue #209) > green (active) > violet
+  /// (unread).
   final bool unread;
 
   /// The orb the session lives on (spec §9.2): the chip's name and state
@@ -1398,6 +1468,23 @@ class _SessionRow extends StatelessWidget {
   /// True while the row's Stop is in flight: the control shows a busy
   /// spinner and ignores further presses (one request per turn).
   final bool stopping;
+
+  /// The status dot's state (issue #209), in precedence order: `waiting`
+  /// (the row's `waiting` fact) beats `active` (the `active` fact) beats
+  /// `unread` (the tab-local mark); none otherwise (no dot).
+  String get _dotKind => session.waiting
+      ? 'waiting'
+      : session.active
+      ? 'active'
+      : 'unread';
+
+  /// The status dot's color for its current state (issue #209): orange while
+  /// waiting, green while active, violet while unread.
+  Color get _dotColor => session.waiting
+      ? Colors.orange
+      : session.active
+      ? Colors.green
+      : Colors.deepPurple;
 
   /// The chip (an orb session) or the muted "host" label (a host session).
   Widget _orbIdentity(BuildContext context) {
@@ -1463,21 +1550,22 @@ class _SessionRow extends StatelessWidget {
                     Row(
                       children: [
                         // The row's status dot (before the title), one spot
-                        // with two mutually exclusive states (issue #207):
-                        // green while the session's turn is active (the
+                        // with three mutually exclusive states, in precedence
+                        // order: orange while the session is waiting on a
+                        // permission or question (the row's `waiting` fact,
+                        // issue #209 — it beats the green active dot, so a
+                        // session still marked active during the block reads
+                        // orange), green while its turn is active (the
                         // existing `active` fact), or violet while its turn
-                        // ended unviewed (the tab-local unread mark).
-                        if (session.active || unread) ...[
+                        // ended unviewed (the tab-local unread mark, issue
+                        // #207). An inactive, non-waiting row shows none.
+                        if (session.waiting || session.active || unread) ...[
                           Container(
-                            key: ValueKey(
-                              '${session.active ? 'active' : 'unread'}-${session.id}',
-                            ),
+                            key: ValueKey('$_dotKind-${session.id}'),
                             width: 8,
                             height: 8,
                             decoration: BoxDecoration(
-                              color: session.active
-                                  ? Colors.green
-                                  : Colors.deepPurple,
+                              color: _dotColor,
                               shape: BoxShape.circle,
                             ),
                           ),
