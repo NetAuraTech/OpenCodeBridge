@@ -187,6 +187,10 @@ class _FakeClient extends SessionsClient {
   /// flight).
   Completer<void>? findFilesGate;
 
+  /// When set, `listCommands` awaits it before returning (the commands fetch
+  /// held in flight, to sequence it against the file search — issue #202).
+  Completer<void>? commandsGate;
+
   /// The file searches (issue #58): (sessionId, token) pairs.
   final List<(String, String)> fileQueries = [];
 
@@ -259,6 +263,8 @@ class _FakeClient extends SessionsClient {
   @override
   Future<List<OpencodeCommand>> listCommands(String id) async {
     commandCalls++;
+    final gate = commandsGate;
+    if (gate != null) await gate.future;
     return commands;
   }
 
@@ -4834,10 +4840,12 @@ void main() {
     _FakeClient fakeClient({
       List<SkillOption> skills = const [],
       List<String> files = const [],
+      List<OpencodeCommand> commands = const [],
     }) => _FakeClient(
       details: const [_detail0],
       skills: skills,
       filesFound: files,
+      commands: commands,
     );
 
     testWidgets('a bare @ lists the session skills, then the working '
@@ -4898,6 +4906,136 @@ void main() {
         expect(_commandRowFinder('file:zzz.txt'), findsNothing);
       },
     );
+
+    testWidgets(
+      'late-arriving skills keep the in-flight file rows for the same token',
+      (tester) async {
+        // The file search for the token is in flight when the session's
+        // skills land: the menu re-syncs for the new skills, but the
+        // in-flight file rows must still land when their query completes —
+        // no re-query for the unchanged token (issue #202).
+        final client = fakeClient(
+          skills: const [
+            SkillOption(
+              id: 'main',
+              name: 'Main',
+              description: 'Accessibility checks',
+            ),
+          ],
+          files: const ['src/main.dart'],
+        );
+        client.findFilesGate = Completer<void>();
+        client.skillGate = Completer<void>();
+        await _pump(tester, client: client);
+
+        await _typePrompt(tester, '@ma');
+        await tester.pump();
+        await tester.pump();
+
+        // The file search for the token is in flight: the menu keeps its
+        // (empty) rows on screen until the rows land.
+        expect(find.text('No matching mention'), findsOneWidget);
+        expect(client.fileQueries, const [('ses_1', 'ma')]);
+        expect(client.skillCalls, 1);
+
+        // The skills land while the search is still in flight: the menu
+        // re-syncs for them.
+        client.skillGate!.complete();
+        await tester.pump();
+        await tester.pump();
+
+        // No file rows yet (the search is in flight), and the token was not
+        // re-queried by the re-sync.
+        expect(_commandRowFinder('file:src/main.dart'), findsNothing);
+        expect(client.fileQueries, const [('ses_1', 'ma')]);
+
+        // The file search lands: the menu settles on the full rows — the
+        // skills above the files — for the same token.
+        client.findFilesGate!.complete();
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.fileQueries, const [
+          ('ses_1', 'ma'),
+        ], reason: 'the unchanged token must not be re-queried');
+        expect(_commandRowFinder('skill:main'), findsOneWidget);
+        expect(_commandRowFinder('file:src/main.dart'), findsOneWidget);
+        expect(
+          tester.getTopLeft(_commandRowFinder('skill:main')).dy,
+          lessThan(
+            tester.getTopLeft(_commandRowFinder('file:src/main.dart')).dy,
+          ),
+        );
+      },
+    );
+
+    testWidgets('a menu rebuild while the search is in flight keeps the token '
+        'queried once', (tester) async {
+      // The project's custom commands (and then the session's skills)
+      // land — the bar's menus are rebuilt — while the file search for
+      // the token is in flight: each re-sync re-runs the row provider
+      // for the same token — the search is awaited, never re-queried,
+      // and its rows land (issue #202).
+      final client = fakeClient(
+        skills: const [
+          SkillOption(
+            id: 'main',
+            name: 'Main',
+            description: 'Accessibility checks',
+          ),
+        ],
+        files: const ['src/main.dart'],
+        commands: const [
+          OpencodeCommand(name: 'deploy', description: 'Deploy the app'),
+        ],
+      );
+      client.findFilesGate = Completer<void>();
+      client.commandsGate = Completer<void>();
+      client.skillGate = Completer<void>();
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@ma');
+      await tester.pump();
+      await tester.pump();
+
+      // The search for the token is in flight: the menu keeps its (empty)
+      // rows on screen, the token queried once.
+      expect(find.text('No matching mention'), findsOneWidget);
+      expect(client.fileQueries, const [('ses_1', 'ma')]);
+      expect(client.skillCalls, 1);
+      expect(client.commandCalls, 1);
+
+      // The commands land: the bar re-syncs for the rebuilt menus.
+      client.commandsGate!.complete();
+      await tester.pump();
+      await tester.pump();
+
+      // The search for the same token was not re-fired...
+      expect(client.fileQueries, const [('ses_1', 'ma')]);
+      expect(_commandRowFinder('file:src/main.dart'), findsNothing);
+
+      // The skills land: the bar re-syncs again — still no re-fire.
+      client.skillGate!.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(client.fileQueries, const [('ses_1', 'ma')]);
+
+      // The search completes: the menu settles on the full rows, the
+      // skills above the files.
+      client.findFilesGate!.complete();
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.fileQueries, const [
+        ('ses_1', 'ma'),
+      ], reason: 'the unchanged token must not be re-queried');
+      expect(_commandRowFinder('skill:main'), findsOneWidget);
+      expect(_commandRowFinder('file:src/main.dart'), findsOneWidget);
+      expect(
+        tester.getTopLeft(_commandRowFinder('skill:main')).dy,
+        lessThan(tester.getTopLeft(_commandRowFinder('file:src/main.dart')).dy),
+      );
+    });
 
     testWidgets('picking a file row inserts the mention in place of its '
         'token, the cursor after it, the menu closed', (tester) async {

@@ -551,6 +551,14 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
 
   List<String>? _files;
 
+  /// The in-flight file search for [_filesToken] (issue #202): the row
+  /// provider re-runs for a token while its search is still in flight when
+  /// the bar re-syncs for other menu data (the skills or commands landing)
+  /// — the re-run awaits this search instead of re-querying the token or
+  /// reading the stale (not-yet-landed) results, so the late search's rows
+  /// still land for the same token.
+  Future<List<String>>? _filesQuery;
+
   /// The mentions committed to the prompt (issue #58), in pick order: the
   /// field's text carries them as typed (`@<id>` / `@<path>`); each
   /// deletes as one unit and sends as an attachment.
@@ -659,6 +667,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _skillsLoading = false;
     _filesToken = null;
     _files = null;
+    _filesQuery = null;
     _mentions = const [];
     _images = const [];
     _commandBusy = false;
@@ -2156,17 +2165,18 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// typed token), then the working directory's files — the service's file
   /// search, re-queried once per token (the TUI behavior; [_filesToken] /
   /// [_files] keep it from re-querying when the row provider runs again for
-  /// the same token, e.g. when the skills land).
+  /// the same token, e.g. when the skills land). A re-run for a token whose
+  /// search is still in flight awaits that search (issue #202) — it neither
+  /// re-queries the token nor returns the stale (not-yet-landed) results, so
+  /// the late search's rows still land in the menu for the same token.
   Future<List<PromptMenuRow>> _mentionRows(String token) async {
     if (_filesToken != token) {
       _filesToken = token;
-      try {
-        _files = await widget.client.findFiles(widget.sessionId, token);
-      } catch (_) {
-        // A failed search yields no file rows (the skill rows stay).
-        _files = const [];
-      }
+      _files = null;
+      _filesQuery = _searchFiles(token);
     }
+    final files =
+        await (_filesQuery ?? Future.value(_files ?? const <String>[]));
     final rows = <PromptMenuRow>[
       for (final skill in _skills)
         if (_skillMatches(skill, token))
@@ -2178,7 +2188,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
             onActivate: (_) => _mentionPicked(isSkill: true, target: skill.id),
           ),
     ];
-    for (final path in _files ?? const <String>[]) {
+    for (final path in files) {
       rows.add(
         PromptMenuRow(
           name: 'file:$path',
@@ -2189,6 +2199,21 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       );
     }
     return rows;
+  }
+
+  /// The service's file search for [token] (one per token, issue #58): the
+  /// results cache into [_files] for the token, a failed search yields none
+  /// (the skill rows stay).
+  Future<List<String>> _searchFiles(String token) async {
+    try {
+      final found = await widget.client.findFiles(widget.sessionId, token);
+      if (_filesToken == token) _files = found;
+      return found;
+    } catch (_) {
+      // A failed search yields no file rows (the skill rows stay).
+      if (_filesToken == token) _files = const [];
+      return const [];
+    }
   }
 
   /// The skill rows filter client-side on the typed token (the files go
