@@ -532,12 +532,18 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   bool _commandsFetched = false;
 
   /// The `@` menu's skill rows (issue #58): the session's skills, fetched
-  /// when a menu first opens (`const []` until then, or when the fetch
-  /// fails).
+  /// when a menu first opens (`const []` until then).
   List<SkillOption> _skills = const [];
 
-  /// The session's skills have been requested already.
-  bool _skillsFetched = false;
+  /// The session's skills are loaded: the last successful fetch's result is
+  /// kept for the rest of the visit (issue #201). Set only when a fetch
+  /// succeeds — a failed fetch stays retryable, so the skills appear the
+  /// next time the `@` menu opens.
+  bool _skillsLoaded = false;
+
+  /// A skills fetch is in flight (issue #201): while it is, a further `@`
+  /// opening does not start a duplicate fetch.
+  bool _skillsLoading = false;
 
   /// The `@` menu's file search results, by the token they were searched
   /// for: the service's search is queried once per token (issue #58).
@@ -649,7 +655,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _menus = _buildMenus();
     _commandsFetched = false;
     _skills = const [];
-    _skillsFetched = false;
+    _skillsLoaded = false;
+    _skillsLoading = false;
     _filesToken = null;
     _files = null;
     _mentions = const [];
@@ -2219,9 +2226,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
 
   /// A menu is open (issue #56): fetch the project's custom commands (the
   /// service's `GET /api/command`) and, for the `@` menu, the session's
-  /// skills — once each — and merge them into the menus. A failed fetch
-  /// keeps the static catalog (or no skill rows) on screen.
-  void _onMenuOpened() {
+  /// skills, and merge them into the menus. A failed fetch keeps the static
+  /// catalog (or no skill rows) on screen, silently. The skills are loaded
+  /// only on success (issue #201): a failed fetch stays retryable — the
+  /// rows appear the next time the `@` menu *opens* (not while the open one
+  /// re-filters), a successful fetch's result is kept for the rest of the
+  /// visit, and a fetch in flight is never duplicated.
+  void _onMenuOpened(bool fresh) {
     if (!_commandsFetched) {
       _commandsFetched = true;
       widget.client
@@ -2236,19 +2247,25 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
           })
           .catchError((Object _) {});
     }
-    if (!_skillsFetched) {
-      _skillsFetched = true;
+    if (fresh && !_skillsLoaded && !_skillsLoading) {
+      _skillsLoading = true;
+      final token = _sessionLoadToken;
       widget.client
           .listSkills(widget.sessionId)
           .then((skills) {
-            if (mounted) {
-              setState(() {
-                _skills = skills;
-                _menus = _buildMenus();
-              });
-            }
+            if (token == _sessionLoadToken) _skillsLoading = false;
+            if (!mounted || token != _sessionLoadToken) return;
+            setState(() {
+              _skills = skills;
+              _skillsLoaded = true;
+              _menus = _buildMenus();
+            });
           })
-          .catchError((Object _) {});
+          .catchError((Object _) {
+            // The failure stays silent, exactly like a failed file search:
+            // no error UI, and the fetch is retryable (issue #201).
+            if (token == _sessionLoadToken) _skillsLoading = false;
+          });
     }
   }
 
@@ -4526,8 +4543,12 @@ class _PromptBar extends StatefulWidget {
   final List<String> mentions;
 
   /// A menu is open; the screen may need to fetch the project's custom
-  /// commands and the session's skills.
-  final VoidCallback onMenuOpened;
+  /// commands and the session's skills. [fresh] is true when this open
+  /// started a menu that was not already open (a new trigger typed, or the
+  /// menu re-opened after closing) — the fetches the screen makes for it;
+  /// false when the already-open menu merely re-fired (the token changed, or
+  /// the menu's own data landed), which must not start a new fetch.
+  final void Function(bool fresh) onMenuOpened;
 
   /// Tab (the menu closed): toggles the session's mode, `build` or `plan`.
   final VoidCallback onToggleMode;
@@ -4723,6 +4744,7 @@ class _PromptBarState extends State<_PromptBar> {
       _closeMenu();
       return;
     }
+    final fresh = _active == null || _active?.trigger != active.trigger;
     final definitionChanged = _active != active;
     if (definitionChanged) {
       setState(() => _active = active);
@@ -4739,7 +4761,12 @@ class _PromptBarState extends State<_PromptBar> {
         if (rows.isNotEmpty) _showMenuRow(0);
       });
     }
-    widget.onMenuOpened();
+    // Fresh (a new open: the menu was closed, or a different trigger took
+    // it) vs. a re-fire of the open menu (the token changed, or the menu's
+    // own data landed and the definitions were rebuilt): only a fresh open
+    // may start the screen's fetches — a re-fire must not re-fetch (issue
+    // #201's no-duplicate contract).
+    widget.onMenuOpened(fresh);
   }
 
   /// The menu closes: its in-flight fetches are stale, its rows and
