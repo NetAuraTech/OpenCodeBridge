@@ -644,10 +644,10 @@ void main() {
             find.byKey(const ValueKey('structured-prompt-input')),
             findsOneWidget,
           );
-          expect(
-            find.byKey(const ValueKey('structured-prompt-send')),
-            findsOneWidget,
-          );
+          // The prompt bar's action is now the Stop control (issue #199):
+          // always visible in the Send button's old position (the header's
+          // Stop is gone).
+          expect(find.byKey(const ValueKey('structured-stop')), findsOneWidget);
           expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
         },
       );
