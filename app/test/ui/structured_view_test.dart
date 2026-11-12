@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -830,6 +831,18 @@ int _caret(WidgetTester tester) => tester
 
 Future<void> _pressEnter(WidgetTester tester) async {
   await tester.testTextInput.receiveAction(TextInputAction.done);
+  await tester.pump();
+  await tester.pump();
+}
+
+/// The mobile keyboard's IME send action (issue #203): the `TextField`'s
+/// `onSubmitted` fires for the send action exactly as it does for the done
+/// action. The platform the test runs on is irrelevant to the *behavior*
+/// (the trim/empty/busy rules and the clear all live in [_sendPrompt]); it
+/// only decides which action the IME toolbar advertises (see the
+/// `textInputAction` assertions in the send-action group).
+Future<void> _pressSend(WidgetTester tester) async {
+  await tester.testTextInput.receiveAction(TextInputAction.send);
   await tester.pump();
   await tester.pump();
 }
@@ -5562,6 +5575,166 @@ void main() {
         findsNothing,
       );
       expect(client.fileQueries, const [('ses_1', 'auth')]);
+    });
+  });
+
+  group('StructuredSessionScreen mobile keyboard send action (issue #203)', () {
+    /// The action the prompt field advertises to the IME toolbar: `send` on
+    /// mobile (the soft keyboard's send button), `done` on desktop (the
+    /// hardware Enter/Shift+Enter handling is unchanged from issue #200).
+    TextInputAction? promptAction(WidgetTester tester) =>
+        tester.widget<TextField>(find.byKey(_promptInput)).textInputAction;
+
+    testWidgets('the prompt field advertises the send action on mobile', (
+      tester,
+    ) async {
+      // The soft keyboard's toolbar shows Send on both mobile platforms.
+      for (final platform in const [
+        TargetPlatform.android,
+        TargetPlatform.iOS,
+      ]) {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final client = _FakeClient(details: const [_detail0]);
+        final events = await _pump(tester, client: client);
+        expect(
+          promptAction(tester),
+          TextInputAction.send,
+          reason: 'the soft keyboard advertises Send on $platform',
+        );
+        await events.close();
+      }
+      // The binding verifies the foundation debug variables are reset before
+      // the test's teardowns run: the override must be cleared in the body.
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets(
+      'tapping the send action posts the trimmed prompt and clears the '
+      'field',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+
+        // The send action carries the field's current text (whitespace and
+        // newlines and all); the send path trims it, and the field clears on
+        // the successful POST (the same rules as the existing send path).
+        await tester.enterText(find.byKey(_promptInput), '  trim me  \n');
+        await tester.pump();
+        await _pressSend(tester);
+        await tester.pump();
+
+        expect(client.prompts, const [('ses_1', 'trim me', null, null)]);
+        expect(_promptText(tester), isEmpty, reason: 'cleared on success');
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+
+    testWidgets('the send action does not post a whitespace-only prompt', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      await tester.enterText(find.byKey(_promptInput), ' \n  ');
+      await tester.pump();
+      await _pressSend(tester);
+      await tester.pump();
+
+      expect(client.prompts, isEmpty);
+      expect(_promptText(tester), ' \n  ');
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('a second send while one is in flight is ignored', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final promptGate = Completer<void>();
+      final client = _FakeClient(
+        details: const [_detail0],
+        promptGate: promptGate,
+      );
+      await _pump(tester, client: client);
+
+      await tester.enterText(find.byKey(_promptInput), 'keep going');
+      await tester.pump();
+      // The first send posts, held in flight by the gate.
+      await _pressSend(tester);
+      await tester.pump();
+      expect(client.prompts, isEmpty, reason: 'still in flight');
+      expect(_promptText(tester), 'keep going');
+
+      // A second send while the first is in flight is ignored (the busy
+      // guard): the field keeps its text and no second POST is queued.
+      await tester.showKeyboard(find.byKey(_promptInput));
+      await _pressSend(tester);
+      await tester.pump();
+      expect(client.prompts, isEmpty, reason: 'the busy send is ignored');
+      expect(_promptText(tester), 'keep going');
+
+      // The first send resolves: exactly one prompt lands and the field
+      // clears.
+      promptGate.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(client.prompts, const [('ses_1', 'keep going', null, null)]);
+      expect(_promptText(tester), isEmpty);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets(
+      'the mobile keyboard return key inserts a newline, it does not send',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+        await tester.showKeyboard(find.byKey(_promptInput));
+
+        await tester.enterText(find.byKey(_promptInput), 'first line');
+        await tester.pump();
+
+        // The soft keyboard's return key sends the IME a newline: the
+        // framework inserts it into the multiline field (the default
+        // behavior) without finalizing, so nothing is sent.
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: 'first line\n',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.prompts, isEmpty, reason: 'the newline must not send');
+        expect(_promptText(tester), 'first line\n');
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+
+    testWidgets('the prompt field keeps the done action on desktop', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      // Desktop is unchanged from issue #200: the hardware Enter sends and
+      // Shift+Enter inserts a newline (the existing multiline tests cover
+      // both), so the IME action stays `done`.
+      expect(
+        promptAction(tester),
+        TextInputAction.done,
+        reason: 'desktop keeps the hardware key handling',
+      );
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 
