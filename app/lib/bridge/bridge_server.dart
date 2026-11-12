@@ -30,6 +30,7 @@ import 'sessions/backend.dart';
 import 'sessions/composite_service.dart';
 import 'sessions/opencode_cli.dart';
 import 'sessions/opencode_http_service.dart';
+import 'sessions/opencode_service_boot.dart';
 import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
 import 'tunnel/cloudflared_binary.dart';
@@ -68,6 +69,7 @@ class BridgeServer {
     this._notify,
     this._pushDispatcher,
     this._turnTracker,
+    this._opencodeBoot,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -287,6 +289,13 @@ class BridgeServer {
   /// `session.turn.cancelled`. `null` without a hub.
   final TurnTracker? _turnTracker;
 
+  /// The host opencode service boot (issue #153, ADR-0002/ADR-0008): the
+  /// server-mode on-switch that turns opencode on before the sessions/events
+  /// backends are built. `null` in client mode and in the default (library)
+  /// start, where nothing is booted and the opencode component stays
+  /// `not_configured`.
+  final OpencodeServiceBooter? _opencodeBoot;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -363,8 +372,20 @@ class BridgeServer {
     Future<FcmSender> Function(FirebaseServiceAccount)? notifySenderFactory,
     bool autoLifecyclePass = false,
     Duration? lifecyclePassInterval,
+    OpencodeServiceBooter? bootstrapOpencode,
   }) async {
     final server = await HttpServer.bind(host, port);
+    // The host opencode service boot (issue #153, ADR-0002/ADR-0008): it runs
+    // **after** the port is bound and **before** the sessions/events backends
+    // are built, so a second server-mode instance (detected by the port
+    // conflict) fails fast, before any second opencode service is spawned.
+    // It is the server-mode on-switch — the app passes
+    // [BridgeServer.defaultOpencodeBooter] — and a failed boot degrades to
+    // `opencode_unavailable` (the descriptor stays unwritten), never to a
+    // failed bridge. Client mode and the default start pass nothing.
+    if (bootstrapOpencode != null) {
+      await bootstrapOpencode.start();
+    }
     // The orbs are built before the backend and the event hub: the
     // composite sessions/event services (issue #95) reach the orb service
     // through these closures, and the orb defaults need only the image
@@ -424,6 +445,26 @@ class BridgeServer {
     final eventHub =
         events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
     orbEmit = eventHub?.emit;
+    // The opencode service boot log (issue #153): the boot ran before the hub
+    // existed, so its lines are buffered in the booter. Flush them onto the
+    // unified stream as `opencode.boot` events (the "log surface" a failed
+    // boot is visible on) and wire the booter's live emit to the hub for any
+    // later line.
+    final opencodeBoot = bootstrapOpencode;
+    if (opencodeBoot != null && eventHub != null) {
+      // Snapshot the buffered lines first, then wire the live emit: a line
+      // arriving in between is emitted exactly once, not both live and in
+      // the replay.
+      final bootLines = opencodeBoot.bootLog;
+      opencodeBoot.emit = (line) => eventHub.emit(
+        bridgeEvent(type: BridgeEventType.opencodeBoot, data: {'line': line}),
+      );
+      for (final line in bootLines) {
+        eventHub.emit(
+          bridgeEvent(type: BridgeEventType.opencodeBoot, data: {'line': line}),
+        );
+      }
+    }
     // The cancel route's per-session turn state (issue #164): a downstream
     // connection on the hub that tracks the running turn and its in-flight
     // message from the unified stream, so the cancel knows whether to emit
@@ -460,7 +501,7 @@ class BridgeServer {
         );
     final bridge = BridgeServer._(
       server,
-      health ?? BridgeServer._scaffoldHealth,
+      health ?? BridgeServer._defaultHealth(bootstrapOpencode),
       backend,
       fsService,
       eventHub,
@@ -475,6 +516,7 @@ class BridgeServer {
       notifyService,
       pushDispatcher,
       turnTracker,
+      bootstrapOpencode,
     );
     speed?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
@@ -641,6 +683,11 @@ class BridgeServer {
     await _docker?.close();
     await _tunnel?.stop();
     await _notify?.close();
+    // The host opencode service the app owns (issue #153, ADR-0002/ADR-0008):
+    // stopped last (after the surfaces that reach it are closed). A service
+    // attached to that the app does not own (the user's / a TUI's) is never
+    // touched.
+    await _opencodeBoot?.stop();
   }
 
   /// The default sessions backend: the aggregate [CompositeOpencodeService]
@@ -874,11 +921,35 @@ class BridgeServer {
     );
   }
 
-  static HealthReport _scaffoldHealth() => const HealthReport(
-    bridge: ComponentStatus.ok,
-    opencode: ComponentStatus.notConfigured,
-    docker: ComponentStatus.notConfigured,
-  );
+  /// The default health report (no [health] passed to [start]): the bridge is
+  /// up, and the opencode component reflects the host service boot
+  /// (issue #153) — `ok` when the app reached (or attached to) a live service,
+  /// `unreachable` when the boot was attempted and failed (opencode missing,
+  /// no free port, boot timeout), and `not_configured` when nothing was
+  /// booted (the default/library start, and client mode). Docker stays
+  /// `not_configured` by default.
+  static HealthReport Function() _defaultHealth(
+    OpencodeServiceBooter? bootstrapOpencode,
+  ) {
+    final ComponentStatus opencode = switch (bootstrapOpencode) {
+      null => ComponentStatus.notConfigured,
+      _ =>
+        bootstrapOpencode.result?.succeeded == true
+            ? ComponentStatus.ok
+            : ComponentStatus.unreachable,
+    };
+    return () => HealthReport(
+      bridge: ComponentStatus.ok,
+      opencode: opencode,
+      docker: ComponentStatus.notConfigured,
+    );
+  }
+
+  /// The default host opencode service booter (issue #153): the server-mode
+  /// on-switch. The app passes it to [start] in server mode only; client mode
+  /// never starts opencode.
+  static OpencodeServiceBooter defaultOpencodeBooter() =>
+      OpencodeServiceBooter();
 
   /// The tunnel status (issue #22): the child's liveness plus its registered
   /// edge connections. A bridge without a tunnel supervisor (one that does

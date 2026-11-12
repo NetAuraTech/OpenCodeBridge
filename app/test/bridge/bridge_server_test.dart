@@ -15,7 +15,11 @@ import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
 import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/opencode_service_boot.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
+import 'package:opencodebridge/bridge/tunnel/cloudflared_binary.dart';
+import 'package:opencodebridge/bridge/tunnel/cloudflared_config.dart';
+import 'package:opencodebridge/bridge/tunnel/tunnel_supervisor.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
@@ -123,6 +127,192 @@ void main() {
     test('default port is the fixed bridge port', () {
       expect(BridgeServer.defaultPort, 48201);
     });
+  });
+
+  group('BridgeServer host opencode boot (issue #153)', () {
+    late Directory dir;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('opencodebridge-boot-bridge');
+    });
+
+    tearDown(() async {
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    });
+
+    test(
+      'a port conflict fails before the boot runs (no orphaned service)',
+      () async {
+        // A second server-mode instance: the port is already bound (the first
+        // instance). The conflict must surface at the bridge port bind,
+        // before any opencode service is spawned.
+        final taken = await ServerSocket.bind('127.0.0.1', 0);
+        try {
+          final booter = _BootFake(dir).booter();
+          await expectLater(
+            () =>
+                BridgeServer.start(port: taken.port, bootstrapOpencode: booter),
+            throwsA(isA<SocketException>()),
+          );
+          expect(booter.result, isNull, reason: 'the boot never ran');
+        } finally {
+          await taken.close();
+        }
+      },
+    );
+
+    test('a failed boot degrades: health unreachable, sessions 503, '
+        'the tunnel still starts', () async {
+      if (_hostHasServiceDescriptor()) return;
+      final boot = _BootFake(dir);
+      boot.cli = null; // No opencode at all: the boot fails.
+      // The tunnel still starts (it is independent of the opencode boot).
+      // A real-looking supervisor whose child is faked: the binary is
+      // seeded so `ensure()` needs no download, and the config is valid.
+      final tunnelDir = await Directory('${dir.path}/cloudflared').create();
+      await File('${tunnelDir.path}/cloudflared').writeAsString('the binary');
+      await File('${tunnelDir.path}/version')
+          .writeAsString(CloudflaredBinary.pinnedVersion);
+      final configFile = File('${dir.path}/cloudflared.yml');
+      await configFile.writeAsString(
+        'tunnel: my-tunnel\n'
+        'credentials-file: ${dir.path}/creds.json\n'
+        'ingress:\n'
+        '  - hostname: bridge.example.com\n'
+        '    service: http://127.0.0.1:48201\n',
+      );
+      final tunnelSpawned = <List<String>>[];
+      final tunnel = TunnelSupervisor(
+        binary: CloudflaredBinary(dir: tunnelDir),
+        configFile: CloudflaredConfigFile(file: configFile),
+        spawner: (List<String> argv) async {
+          tunnelSpawned.add(argv);
+          return _NoopTunnelProcess();
+        },
+        // Nothing holds the metrics port (no real /proc probing in the test).
+        portHolder: (int port) async => null,
+      );
+      final server = await BridgeServer.start(
+        port: 0,
+        bootstrapOpencode: boot.booter(),
+        tunnel: tunnel,
+      );
+      try {
+        final (status, body) = await _get(server.baseUri, 'api/health');
+        expect(status, 200);
+        expect(jsonDecode(body), {
+          'bridge': 'ok',
+          'opencode': 'unreachable',
+          'docker': 'not_configured',
+        });
+        final (sessionsStatus, sessionsBody) = await _get(
+          server.baseUri,
+          'api/sessions',
+        );
+        expect(sessionsStatus, 503);
+        expect(jsonDecode(sessionsBody), {'error': 'opencode_unavailable'});
+        // The tunnel is unaffected by the failed boot.
+        expect(tunnelSpawned, hasLength(1));
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('a failed boot is visible on the log surface (opencode.boot on the '
+        'unified stream)', () async {
+      final upstream = _FakeEventUpstream();
+      final hub = EventHub(service: upstream);
+      final connection = _RecordingEventConnection();
+      // The connection is live before start: the boot log is flushed onto
+      // the unified stream as opencode.boot events (the app connects its
+      // SSE during/after boot the same way).
+      hub.add(connection);
+      final boot = _BootFake(dir);
+      boot.cli = null; // The boot fails (no opencode CLI).
+      final server = await BridgeServer.start(
+        port: 0,
+        events: hub,
+        bootstrapOpencode: boot.booter(),
+      );
+      try {
+        expect(connection.payloads, isNotEmpty);
+        final frame =
+            jsonDecode(connection.payloads.single) as Map<String, Object?>;
+        expect(frame['type'], BridgeEventType.opencodeBoot);
+        final data = frame['data'] as Map<String, Object?>;
+        expect(
+          data['line'],
+          contains('no opencode CLI'),
+          reason: 'the failure reason is on the log surface',
+        );
+      } finally {
+        await server.stop();
+        await hub.close();
+      }
+    });
+
+    test(
+      'a successful boot reports opencode ok and the stop kills the child',
+      () async {
+        if (_hostHasServiceDescriptor()) return;
+        final boot = _BootFake(dir);
+        boot.cli = '/bin/opencode';
+        boot.serviceAnswers = true;
+        boot.emitReadyOnSpawn = true; // The child reports ready on spawn.
+        final server = await BridgeServer.start(
+          port: 0,
+          bootstrapOpencode: boot.booter(),
+        );
+        try {
+          final (status, body) = await _get(server.baseUri, 'api/health');
+          expect(status, 200);
+          expect(jsonDecode(body), {
+            'bridge': 'ok',
+            'opencode': 'ok',
+            'docker': 'not_configured',
+          });
+        } finally {
+          await server.stop();
+        }
+        expect(boot.childKilled, isTrue, reason: 'the app stops its child');
+        expect(boot.marker.existsSync(), isFalse);
+        expect(boot.descriptor.existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'the bridge stop never touches an attached (case 3) service',
+      () async {
+        final boot = _BootFake(dir);
+        boot.serviceAnswers = true; // The user's service answers.
+        await boot.descriptor.writeAsString(
+          '{"url":"http://127.0.0.1:4200","password":"u"}',
+        );
+        final server = await BridgeServer.start(
+          port: 0,
+          bootstrapOpencode: boot.booter(),
+        );
+        try {
+          final (status, body) = await _get(server.baseUri, 'api/health');
+          expect(status, 200);
+          // Attached to the user's service: opencode is up.
+          expect((jsonDecode(body) as Map<String, Object?>)['opencode'], 'ok');
+        } finally {
+          await server.stop();
+        }
+        expect(
+          boot.signals,
+          isEmpty,
+          reason: 'the user’s service is never stopped',
+        );
+        expect(boot.argvs, isEmpty, reason: 'nothing was spawned');
+        expect(
+          boot.descriptor.existsSync(),
+          isTrue,
+          reason: 'the user’s descriptor is never deleted',
+        );
+      },
+    );
   });
 
   group('BridgeServer sessions', () {
@@ -3662,4 +3852,157 @@ class _NotifyFakeSender extends FcmSender {
     required String body,
     required String link,
   }) async => sent.add(token);
+}
+
+/// A downstream event-connection recorder (the log-surface test): captures
+/// every verbatim `data:` payload the hub writes, in order.
+class _RecordingEventConnection implements EventConnection {
+  final List<String> payloads = [];
+
+  @override
+  Future<void> write(String rawPayload) async => payloads.add(rawPayload);
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  Future<void> get done => Completer<void>().future;
+}
+
+/// A supervised tunnel child (the degraded-boot test only wants to know the
+/// tunnel was spawned, not to run it): `kill()` completes the exit code, so
+/// the bridge's `stop()` does not wait out the grace period.
+class _NoopTunnelProcess implements TunnelProcess {
+  final Completer<int> _exited = Completer<int>();
+
+  @override
+  int get pid => 99999;
+
+  @override
+  Future<int> get exitCode => _exited.future;
+
+  @override
+  bool kill() {
+    if (!_exited.isCompleted) _exited.complete(0);
+    return true;
+  }
+}
+
+/// A fake opencode child (issue #153 bridge tests): controllable stdout
+/// (the `server listening on …` / `server password …` lines), a settable
+/// liveness, and a kill that records the SIGTERM.
+class _FakeBootChild implements OpencodeChild {
+  @override
+  final int pid = 424242;
+
+  final _stdout = StreamController<List<int>>.broadcast();
+  final _stderr = StreamController<List<int>>.broadcast();
+  final _exited = Completer<int>();
+
+  final List<ProcessSignal> kills = [];
+
+  /// Whether the process is still alive.
+  bool alive = true;
+
+  @override
+  Stream<List<int>> get stdout => _stdout.stream;
+
+  @override
+  Stream<List<int>> get stderr => _stderr.stream;
+
+  @override
+  Future<int> get exitCode {
+    if (!alive && !_exited.isCompleted) _exited.complete(0);
+    return _exited.future;
+  }
+
+  @override
+  bool kill() {
+    if (alive) kills.add(ProcessSignal.sigterm);
+    die(0);
+    return true;
+  }
+
+  void die(int code) {
+    alive = false;
+    if (!_exited.isCompleted) _exited.complete(code);
+    unawaited(_stdout.close());
+    unawaited(_stderr.close());
+  }
+
+  void emitLine(String line) => _stdout.add(utf8.encode('$line\n'));
+
+  void emitListening(String url) => emitLine('server listening on $url');
+
+  void emitPassword(String pw) => emitLine('server password $pw');
+}
+
+/// The fake host around [OpencodeServiceBooter] for the bridge tests:
+/// records every spawn and signal and answers the probes. The marker and
+/// descriptor live in [dir] (never the real `~/.local/state/opencode/`).
+class _BootFake {
+  _BootFake(this.dir);
+
+  final Directory dir;
+
+  final List<List<String>> argvs = [];
+  final List<_FakeBootChild> spawned = [];
+
+  /// The pids signalled, with the signal.
+  final List<(int, ProcessSignal)> signals = [];
+
+  /// The opencode CLI path; `null` → no CLI at all (the boot fails).
+  String? cli;
+
+  /// Whether the service at the resolved url answers the Basic-auth probe.
+  bool serviceAnswers = false;
+
+  /// When set, the spawned child reports ready on spawn (the `server
+  /// listening on …` + `server password …` lines) and the service answers.
+  bool emitReadyOnSpawn = false;
+
+  String readyUrl = 'http://127.0.0.1:4096';
+
+  bool get childKilled => spawned.isNotEmpty && spawned.first.kills.isNotEmpty;
+
+  File get marker => File('${dir.path}/opencodebridge-child.json');
+
+  File get descriptor => File('${dir.path}/service.json');
+
+  OpencodeServiceBooter booter() {
+    return OpencodeServiceBooter(
+      cli: () async => cli,
+      spawner: (List<String> argv) async {
+        argvs.add(argv);
+        final child = _FakeBootChild();
+        spawned.add(child);
+        if (emitReadyOnSpawn) {
+          serviceAnswers = true;
+          unawaited(
+            Future<void>.delayed(const Duration(milliseconds: 10)).then((_) {
+              child.emitListening(readyUrl);
+              child.emitPassword('pw');
+            }),
+          );
+        }
+        return child;
+      },
+      kill: (int pid, ProcessSignal signal) async {
+        signals.add((pid, signal));
+        return true;
+      },
+      pidAlive: (int pid) {
+        for (final child in spawned) {
+          if (child.pid == pid && !child.alive) return false;
+        }
+        return true;
+      },
+      isPortFree: (int port) async => true,
+      serviceProbe: (Uri url, String password) async => serviceAnswers,
+      startTimeout: const Duration(seconds: 5),
+      killGrace: const Duration(milliseconds: 50),
+      marker: marker,
+      descriptor: descriptor,
+    );
+  }
 }
