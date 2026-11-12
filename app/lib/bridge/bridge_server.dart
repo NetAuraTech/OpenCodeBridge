@@ -452,10 +452,14 @@ class BridgeServer {
     // later line.
     final opencodeBoot = bootstrapOpencode;
     if (opencodeBoot != null && eventHub != null) {
+      // Snapshot the buffered lines first, then wire the live emit: a line
+      // arriving in between is emitted exactly once, not both live and in
+      // the replay.
+      final bootLines = opencodeBoot.bootLog;
       opencodeBoot.emit = (line) => eventHub.emit(
         bridgeEvent(type: BridgeEventType.opencodeBoot, data: {'line': line}),
       );
-      for (final line in opencodeBoot.bootLog) {
+      for (final line in bootLines) {
         eventHub.emit(
           bridgeEvent(type: BridgeEventType.opencodeBoot, data: {'line': line}),
         );

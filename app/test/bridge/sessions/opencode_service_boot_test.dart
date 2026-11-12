@@ -8,6 +8,7 @@ import 'package:opencodebridge/bridge/sessions/opencode_cli.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_http_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service_boot.dart';
 import 'package:opencodebridge/bridge/tunnel/port_holder.dart';
+import 'package:opencodebridge/bridge/tunnel/tunnel_supervisor.dart';
 
 /// A fake opencode child (the `opencode serve` process): controllable
 /// stdout/stderr (the `server listening on …` / `server password …` lines),
@@ -95,8 +96,17 @@ class FakeHost {
   String? cli;
 
   /// Whether the service at the resolved url answers (the Basic-auth
-  /// `GET /api/session` probe).
+  /// `GET /api/session` probe) — the default answer, consumed after any
+  /// scripted [probeResults].
   bool serviceAnswers = false;
+
+  /// Scripted probe answers (consumed one per call, in order): a `false`
+  /// first entry models a transient failure (the re-check path).
+  final List<bool> probeResults = [];
+
+  /// Whether the port holder is the opencode service (the case-2 stop's
+  /// identity check).
+  bool holderIsOpencode = true;
 
   /// Whether the base port is free (`true` → the base port is used).
   bool basePortFree = true;
@@ -149,7 +159,9 @@ class FakeHost {
       },
       portHolder: (int port) async => portHolder,
       isPortFree: (int port) async => port == portBase ? basePortFree : true,
-      serviceProbe: (Uri url, String password) async => serviceAnswers,
+      serviceProbe: (Uri url, String password) async =>
+          probeResults.isNotEmpty ? probeResults.removeAt(0) : serviceAnswers,
+      processIsOpencode: (int pid) => holderIsOpencode,
       startTimeout: startTimeout,
       killGrace: killGrace,
       portBase: portBase,
@@ -321,6 +333,38 @@ void main() {
         expect(host.argvs, hasLength(1), reason: 'never spawn twice');
       },
     );
+
+    test('a transient case-3 probe failure is re-checked: attach, no spawn, '
+        'the user’s descriptor is kept', () async {
+      final host = FakeHost(dir);
+      host.cli = '/bin/opencode';
+      host.emitReadyOnSpawn = true; // Would be ready if case 4 were reached.
+      // The first probe (the user's live service) times out; the re-check
+      // answers — a transient failure, not a dead service.
+      host.probeResults.add(false);
+      host.serviceAnswers = true;
+      await host.descriptorFile.writeAsString(
+        '{"url":"http://127.0.0.1:4200","password":"user"}',
+      );
+      final booter = host.booter();
+
+      final result = await booter.start();
+
+      expect(result.succeeded, isTrue);
+      expect(result.owned, isFalse, reason: 'attached, never the app’s');
+      expect(result.url, 'http://127.0.0.1:4200');
+      expect(
+        host.argvs,
+        isEmpty,
+        reason: 'a blip never spawns a second service',
+      );
+      // The user's descriptor is intact (not overwritten by an app child).
+      final descriptor = jsonDecode(
+        host.descriptorFile.readAsStringSync(),
+      ) as Map<String, Object?>;
+      expect(descriptor['url'], 'http://127.0.0.1:4200');
+      expect(descriptor['password'], 'user');
+    });
   });
 
   group('spawn', () {
@@ -549,6 +593,29 @@ void main() {
       expect(host.argvs, isEmpty);
       expect(host.descriptorFile.existsSync(), isTrue);
     });
+
+    test('a re-attached (case-2) service whose port is now held by a foreign '
+        'process is left alone', () async {
+      final host = FakeHost(dir);
+      host.cli = '/bin/opencode';
+      host.serviceAnswers = true;
+      host.portHolder = const PortHolder(pid: 777, isCloudflared: false);
+      host.holderIsOpencode = false; // The port was re-assigned.
+      await host.markerFile.writeAsString(
+        '{"url":"http://127.0.0.1:4100","password":"old"}',
+      );
+      final booter = host.booter();
+      await booter.start();
+
+      await booter.stop();
+
+      expect(
+        host.signals,
+        isEmpty,
+        reason: 'the foreign holder of the port is never signalled',
+      );
+      expect(host.markerFile.existsSync(), isFalse);
+    });
   });
 
   group('boot log (the log surface)', () {
@@ -635,8 +702,8 @@ void main() {
           // The real host seams: free-port check, liveness, signals, and the
           // authenticated `GET /api/session` probe.
           isPortFree: hostPortFree,
-          pidAlive: hostOpencodePidAlive,
-          kill: hostKillOpencode,
+          pidAlive: hostPidAlive,
+          kill: hostKillPid,
           serviceProbe: probeOpencodeService,
           startTimeout: const Duration(seconds: 60),
           killGrace: const Duration(seconds: 10),

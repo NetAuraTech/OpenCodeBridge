@@ -19,7 +19,7 @@ class OpencodeBinary {
     Directory? dir,
     Future<String> Function()? resolveArch,
     Future<void> Function(Uri url, File target)? downloader,
-    Future<void> Function(String archive, String dir)? extractor,
+    Future<void> Function(String archive, File target)? extractor,
     Future<void> Function(String path)? makeExecutable,
   }) : dir = dir ?? OpencodeBinary._hostDir(),
        _resolveArch = resolveArch ?? OpencodeBinary._hostArch,
@@ -39,11 +39,15 @@ class OpencodeBinary {
 
   final Future<String> Function() _resolveArch;
   final Future<void> Function(Uri url, File target) _downloader;
-  final Future<void> Function(String archive, String dir) _extractor;
+  final Future<void> Function(String archive, File target) _extractor;
   final Future<void> Function(String path) _makeExecutable;
 
   /// The installed binary, after making sure the pinned version is present
   /// (downloading and extracting it first when missing or outdated).
+  ///
+  /// The download is staged in a temp file and renamed onto the installed
+  /// binary only on success (the `CloudflaredBinary` pattern): a failed
+  /// re-download of an outdated binary keeps the previously installed one.
   Future<File> ensure() async {
     final binary = File('${dir.path}/$_fileName');
     final versionFile = File('${dir.path}/$_versionFileName');
@@ -54,15 +58,17 @@ class OpencodeBinary {
     final url = Uri.parse(_releaseUrl(arch));
     await dir.create(recursive: true);
     final archive = File('${dir.path}/$_fileName.download.tar.gz');
+    final staged = File('${dir.path}/$_fileName.download');
     try {
       await _downloader(url, archive);
       // The release asset is a tarball holding a single top-level `opencode`
-      // member; extract just that into the app's data dir.
-      await _extractor(archive.path, dir.path);
-      await _makeExecutable(binary.path);
+      // member; extract just that to the staging file, then promote it.
+      await _extractor(archive.path, staged);
+      await _makeExecutable(staged.path);
+      await staged.rename(binary.path);
       await versionFile.writeAsString(pinnedVersion);
     } catch (e) {
-      for (final cleanup in [archive, binary]) {
+      for (final cleanup in [archive, staged]) {
         try {
           await cleanup.delete();
         } catch (_) {
@@ -133,21 +139,17 @@ class OpencodeBinary {
   }
 
   /// The default extractor: pull the single `opencode` member of the
-  /// tarball into [dir].
-  static Future<void> _extract(String archive, String dir) async {
-    final result = await Process.run('tar', [
-      '-xzf',
-      archive,
-      '-C',
-      dir,
-      _fileName,
-    ]);
+  /// tarball to [target] (the member is a top-level file, so `-xOf` streams
+  /// its contents).
+  static Future<void> _extract(String archive, File target) async {
+    final result = await Process.run('tar', ['-xOf', archive, _fileName]);
     if (result.exitCode != 0) {
       throw OpencodeBinaryError(
         'the opencode archive could not be extracted: '
         '${result.stderr.toString().trim()}',
       );
     }
+    await target.writeAsBytes(result.stdout as List<int>);
   }
 
   /// The default downloader: stream the release asset to [target].

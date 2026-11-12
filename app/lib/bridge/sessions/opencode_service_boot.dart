@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../tunnel/port_holder.dart';
+import '../tunnel/tunnel_supervisor.dart';
 import 'opencode_binary.dart';
 import 'opencode_cli.dart';
 import 'paths.dart';
@@ -42,6 +43,19 @@ class OpencodeBootResult {
 
 /// Resolves the opencode CLI for the host service boot (issue #153).
 typedef OpencodeCliResolver = Future<String?> Function();
+
+/// Spawns the opencode child with the given argv (stdout/stderr piped, for
+/// draining).
+typedef OpencodeSpawner = Future<OpencodeChild> Function(List<String> argv);
+
+/// An authenticated Basic `GET /api/session` (`opencode:<password>`):
+/// `true` when the service answers.
+typedef OpencodeServiceProbe = Future<bool> Function(Uri url, String password);
+
+/// Whether the process [pid] is the opencode service (the app's child), for
+/// the case-2 stop: the port's current holder must be checked before it is
+/// signalled (the port may have been re-assigned since the attach).
+typedef OpencodeProcessIdentity = bool Function(int pid);
 
 /// The host opencode CLI resolver (issue #153): `OPENCODE_CLI` when set, else
 /// `opencode` on the PATH (the existing [findHostOpencode]), else the
@@ -87,11 +101,12 @@ class OpencodeServiceBooter {
   OpencodeServiceBooter({
     this._cli = resolveHostOpencodeCli,
     this._spawner = hostSpawnOpencode,
-    this._kill = hostKillOpencode,
-    this._pidAlive = hostOpencodePidAlive,
+    this._kill = hostKillPid,
+    this._pidAlive = hostPidAlive,
     this._portHolder = portHolderProbe,
     this._isPortFree = hostPortFree,
     this._serviceProbe = probeOpencodeService,
+    this._processIsOpencode = isOpencodeProcess,
     this.startTimeout = const Duration(seconds: 20),
     this.killGrace = const Duration(seconds: 5),
     this.portBase = 4096,
@@ -117,23 +132,29 @@ class OpencodeServiceBooter {
   final OpencodeCliResolver _cli;
 
   /// Spawns the child with the given argv (stdout/stderr piped for draining).
-  final Future<OpencodeChild> Function(List<String> argv) _spawner;
+  final OpencodeSpawner _spawner;
 
-  /// Sends [signal] to [pid]; `true` when a process was signalled.
+  /// Sends [signal] to [pid]; `true` when a process was signalled (the host
+  /// default is the tunnel supervisor's [hostKillPid]).
   final Future<bool> Function(int pid, ProcessSignal signal) _kill;
 
-  /// Whether the process [pid] is alive.
+  /// Whether the process [pid] is alive (the host default is the tunnel
+  /// supervisor's [hostPidAlive]).
   final bool Function(int pid) _pidAlive;
 
   /// Resolves who listens on [port], or `null` when nothing does.
-  final Future<PortHolder?> Function(int port) _portHolder;
+  final PortHolderProbe _portHolder;
 
   /// Whether [port] is free to bind on loopback.
   final Future<bool> Function(int port) _isPortFree;
 
   /// An authenticated Basic `GET /api/session` (`opencode:<password>`):
   /// `true` when the service answers.
-  final Future<bool> Function(Uri url, String password) _serviceProbe;
+  final OpencodeServiceProbe _serviceProbe;
+
+  /// Whether [pid] is the opencode service (the case-2 stop checks the
+  /// port's current holder is the app's child before signalling it).
+  final OpencodeProcessIdentity _processIsOpencode;
 
   /// How long to wait for the spawned service to write its descriptor and
   /// answer.
@@ -192,8 +213,6 @@ class OpencodeServiceBooter {
     final marker = _read(_markerFile);
     if (marker != null) {
       if (await _serviceProbe(Uri.parse(marker.$1), marker.$2)) {
-        // Re-assert the marker (idempotent): the app owns the service.
-        await _write(_markerFile, marker.$1, marker.$2);
         _log('[opencode] attached to the app-owned service at ${marker.$1}');
         return OpencodeBootResult(
           url: marker.$1,
@@ -207,16 +226,18 @@ class OpencodeServiceBooter {
     }
 
     // Case 3: an existing descriptor whose service answers (the user's or a
-    // TUI's service). Attach, and never stop it on exit.
+    // TUI's service). Attach, and never stop it on exit. One bounded re-check
+    // absorbs a transient probe failure (the probe times out after 3 s on a
+    // busy host): without it, a blip would fall through to case 4 and spawn a
+    // second service over the user's, whose descriptor it would then replace.
     final descriptor = _read(_descriptorFile);
-    if (descriptor != null &&
-        await _serviceProbe(Uri.parse(descriptor.$1), descriptor.$2)) {
-      _log('[opencode] attached to the running service at ${descriptor.$1}');
-      return OpencodeBootResult(
-        url: descriptor.$1,
-        password: descriptor.$2,
-        owned: false,
-      );
+    if (descriptor != null) {
+      final (url, password) = descriptor;
+      if (await _serviceProbe(Uri.parse(url), password) ||
+          await _serviceProbe(Uri.parse(url), password)) {
+        _log('[opencode] attached to the running service at $url');
+        return OpencodeBootResult(url: url, password: password, owned: false);
+      }
     }
 
     // Case 4: nothing reachable — the app starts the service itself.
@@ -430,7 +451,9 @@ class OpencodeServiceBooter {
   }
 
   /// Stops a re-attached (case-2) service by resolving its pid from the port
-  /// it answers on: SIGTERM, then SIGKILL after [killGrace].
+  /// it answers on — and only when that pid is still the opencode service
+  /// (the port may have been re-assigned since the attach; a foreign holder
+  /// is never signalled) — SIGTERM, then SIGKILL after [killGrace].
   Future<void> _stopByPort(String url) async {
     final port = Uri.tryParse(url)?.port;
     if (port == null) return;
@@ -440,7 +463,7 @@ class OpencodeServiceBooter {
     } catch (_) {
       holder = null;
     }
-    if (holder == null) return;
+    if (holder == null || !_processIsOpencode(holder.pid)) return;
     try {
       await _kill(holder.pid, ProcessSignal.sigterm);
     } catch (_) {
@@ -544,20 +567,19 @@ Future<OpencodeChild> hostSpawnOpencode(List<String> argv) async {
 /// wrap a child it spawned itself).
 OpencodeChild ioProcessAdapter(Process process) => _IoProcess(process);
 
-/// Sends [signal] to [pid] on the host (Linux).
-Future<bool> hostKillOpencode(int pid, ProcessSignal signal) async {
+/// Whether [pid] is an opencode process (the case-2 stop's identity check):
+/// argv[0] named `opencode` (a host install or the app-managed binary).
+bool isOpencodeProcess(int pid) {
   if (!Platform.isLinux) return false;
   try {
-    return Process.killPid(pid, signal);
+    final cmdline = File('$procPath$pid/cmdline').readAsStringSync();
+    final first = cmdline.split('\x00').first;
+    if (first.isEmpty) return false;
+    final base = first.split('/').last;
+    return base == 'opencode' || base.startsWith('opencode-');
   } catch (_) {
     return false;
   }
-}
-
-/// Whether the process [pid] is alive on the host (Linux, /proc).
-bool hostOpencodePidAlive(int pid) {
-  if (!Platform.isLinux) return false;
-  return Directory('/proc/$pid').existsSync();
 }
 
 /// Whether [port] can be bound on loopback (nothing holds it).
