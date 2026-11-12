@@ -155,8 +155,36 @@ void main() {
         'created': 300,
         'location': '/two',
         'active': false,
+        'waiting': false,
       });
       expect(rows[1]['active'], true);
+      expect(rows[1]['waiting'], false);
+    });
+
+    test('GET /api/sessions rows carry the waiting fact per pending '
+        'permission/question (issue #208)', () async {
+      service.pendingPermissionsBySession['ses_two'] = [
+        const PermissionRequest(id: 'per_2', action: 'shell', resources: []),
+      ];
+      // ses_one answers its permission lookup empty (so the question
+      // lookup runs) and then its pending form.
+      service.pendingPermissionsBySession['ses_one'] = const [];
+      service.pendingQuestionsBySession['ses_one'] = [
+        const QuestionForm(id: 'q_1', title: 'Questions', questions: []),
+      ];
+
+      final (status, body) = await _get(base, 'api/sessions');
+      expect(status, 200);
+      final rows = (jsonDecode(body) as List).cast<Map<String, Object?>>();
+
+      final byId = {for (final row in rows) row['id'] as String: row};
+      // A pending permission request -> waiting true.
+      expect(byId['ses_two']!['waiting'], true);
+      // A pending question form -> waiting true (and it is not active).
+      expect(byId['ses_one']!['waiting'], true);
+      expect(byId['ses_one']!['active'], false);
+      // Nothing pending -> waiting false.
+      expect(byId['ses_three']!['waiting'], false);
     });
 
     test('DELETE /api/sessions/{id} answers 204', () async {
@@ -1736,6 +1764,7 @@ void main() {
           'created': 400,
           'location': '/created',
           'active': false,
+          'waiting': false,
         });
       },
     );
@@ -1813,6 +1842,7 @@ void main() {
           'created': 400,
           'location': dir.path,
           'active': false,
+          'waiting': false,
         });
       },
     );
@@ -2802,6 +2832,16 @@ class _FakeService implements OpencodeService {
   var failCancel = false;
   var failUsage = false;
 
+  /// Per-session pending permission requests (the waiting fact, issue #208):
+  /// a session scripted here answers its own list; an unscripted session
+  /// answers the shared [permissions].
+  final Map<String, List<PermissionRequest>> pendingPermissionsBySession = {};
+
+  /// Per-session pending question forms (the waiting fact, issue #208):
+  /// a session scripted here answers its own list; an unscripted session
+  /// answers the shared [questions].
+  final Map<String, List<QuestionForm>> pendingQuestionsBySession = {};
+
   /// When true, [cancelTurn] refuses with the typed [CancelUnsupportedError]
   /// (the service has no interrupt route) instead of cancelling (issue #160).
   /// Mutable so the same fake can be "restarted upgraded" mid-test (the
@@ -2971,6 +3011,8 @@ class _FakeService implements OpencodeService {
   @override
   Future<List<PermissionRequest>> pendingPermissions(String id) async {
     if (failPermissions) throw const OpencodeServiceError(0, 'service down');
+    final scripted = pendingPermissionsBySession;
+    if (scripted.containsKey(id)) return scripted[id]!;
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     return permissions;
   }
@@ -2995,6 +3037,8 @@ class _FakeService implements OpencodeService {
   @override
   Future<List<QuestionForm>> pendingQuestions(String id) async {
     if (failQuestions) throw const OpencodeServiceError(0, 'service down');
+    final scripted = pendingQuestionsBySession;
+    if (scripted.containsKey(id)) return scripted[id]!;
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     return questions;
   }

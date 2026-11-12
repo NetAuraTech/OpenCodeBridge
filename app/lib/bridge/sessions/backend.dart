@@ -114,15 +114,43 @@ class SessionsBackend {
     return false;
   }
 
-  /// The home-list rows, newest first (spec §5 endpoint 1, §6).
+  /// The home-list rows, newest first (spec §5 endpoint 1, §6). Each row
+  /// carries its waiting fact, re-evaluated per session from the service's
+  /// pending states (issue #208).
   Future<List<Session>> list() async {
     final sessions = await service.listSessions();
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
+    // Every session is evaluated — including ones the service no longer marks
+    // active (during a block it may have dropped out of the active list while
+    // the pending request still stands).
+    final waiting = await Future.wait([
+      for (final session in sessions) _waiting(session.id),
+    ]);
 
-    final rows = <Session>[for (final s in sessions) _row(s, names, active)];
+    final rows = [
+      for (var i = 0; i < sessions.length; i++)
+        _row(sessions[i], names, active, waiting: waiting[i]),
+    ];
     rows.sort((a, b) => b.created.compareTo(a.created));
     return rows;
+  }
+
+  /// The row's waiting fact (issue #208): whether the service still holds a
+  /// pending permission request for [id], or, when it holds none, a pending
+  /// question form. The question lookup runs only when the permission lookup
+  /// answered empty (a waiting session already has its answer). A failed
+  /// lookup degrades this session only — its fact stays false and the rest of
+  /// the list is intact, the same posture [CompositeOpencodeService] takes
+  /// for a degraded orb's routes.
+  Future<bool> _waiting(String id) async {
+    try {
+      final permissions = await service.pendingPermissions(id);
+      if (permissions.isNotEmpty) return true;
+      return (await service.pendingQuestions(id)).isNotEmpty;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Delete (spec §5 endpoint 4): the service `DELETE`.
@@ -276,13 +304,14 @@ class SessionsBackend {
 
   Future<String> plugins() => service.plugins();
 
-  /// One home-list row, from the service's session plus its project name and
-  /// active fact (spec §6).
+  /// One home-list row, from the service's session plus its project name,
+  /// active fact, and waiting fact (spec §6; the waiting fact, issue #208).
   Session _row(
     OpencodeSession s,
     Map<String, String> names,
-    Set<String> active,
-  ) {
+    Set<String> active, {
+    bool waiting = false,
+  }) {
     return Session(
       id: s.id,
       title: s.title,
@@ -294,6 +323,7 @@ class SessionsBackend {
       location: s.location,
       active: active.contains(s.id),
       orb: s.orb,
+      waiting: waiting,
     );
   }
 }

@@ -19,7 +19,22 @@ void main() {
         'created': 1793233781396,
         'location': '/run/media/x/opencodebridge',
         'active': true,
+        'waiting': false,
       });
+    });
+
+    test('toJson carries the waiting fact and fromJson round-trips it', () {
+      const session = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+        waiting: true,
+      );
+      expect(session.toJson()['waiting'], true);
+      expect(Session.fromJson(session.toJson()), session);
     });
 
     test('fromJson round-trips a row', () {
@@ -85,6 +100,13 @@ void main() {
       );
       // A row carrying the orb id parses it; one without it stays null.
       expect(Session.fromJson({'id': 'ses_3', 'orb': 'orb_9'}).orb, 'orb_9');
+      // The waiting fact defaults to false on a row that carries no pending
+      // fact at all; a row carrying it parses it.
+      expect(Session.fromJson(const {'id': 'ses_4'}).waiting, isFalse);
+      expect(
+        Session.fromJson(const {'id': 'ses_5', 'waiting': true}).waiting,
+        isTrue,
+      );
     });
   });
 }

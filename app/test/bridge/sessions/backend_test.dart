@@ -23,6 +23,8 @@ class FakeOpencodeService implements OpencodeService {
     this.detailById = const {},
     this.messages = const [],
     this.permissions = const [],
+    this.permissionsBySession = const {},
+    this.questionsBySession = const {},
   });
 
   final List<OpencodeSession> sessions;
@@ -40,6 +42,16 @@ class FakeOpencodeService implements OpencodeService {
   final Map<String, SessionDetail> detailById;
   final List<SessionMessage> messages;
   final List<PermissionRequest> permissions;
+
+  /// Per-session pending permission requests (the waiting fact, issue #208):
+  /// the sessions absent here answer the shared [permissions]. A value of
+  /// `null` makes the lookup for that session throw (the degraded-orb route).
+  final Map<String, List<PermissionRequest>?> permissionsBySession;
+
+  /// Per-session pending question forms (the waiting fact, issue #208):
+  /// the sessions absent here answer the shared [questions]. A value of
+  /// `null` makes the lookup for that session throw (the degraded-orb route).
+  final Map<String, List<QuestionForm>?> questionsBySession;
 
   final List<String> deleted = [];
 
@@ -134,8 +146,17 @@ class FakeOpencodeService implements OpencodeService {
   }
 
   @override
-  Future<List<PermissionRequest>> pendingPermissions(String id) async =>
-      permissions;
+  Future<List<PermissionRequest>> pendingPermissions(String id) async {
+    final scripted = permissionsBySession;
+    if (scripted.containsKey(id)) {
+      final pending = scripted[id];
+      if (pending == null) {
+        throw const OpencodeServiceError(0, 'pending lookup down');
+      }
+      return pending;
+    }
+    return permissions;
+  }
 
   @override
   Future<void> replyPermission(
@@ -154,7 +175,17 @@ class FakeOpencodeService implements OpencodeService {
   final List<(String, String)> dismissed = [];
 
   @override
-  Future<List<QuestionForm>> pendingQuestions(String id) async => questions;
+  Future<List<QuestionForm>> pendingQuestions(String id) async {
+    final scripted = questionsBySession;
+    if (scripted.containsKey(id)) {
+      final pending = scripted[id];
+      if (pending == null) {
+        throw const OpencodeServiceError(0, 'pending lookup down');
+      }
+      return pending;
+    }
+    return questions;
+  }
 
   @override
   Future<void> answerQuestion(
@@ -399,6 +430,118 @@ void main() {
 
       final row = (await backend.list()).single;
       expect(row.project, const SessionProject(id: 'p1', name: 'p1'));
+    });
+
+    // The waiting fact (issue #208): re-evaluated per session from the
+    // service's pending states — the same endpoints the structured view
+    // consumes — not from the active list.
+
+    test('waiting true while the session holds a pending permission', () async {
+      const permission = PermissionRequest(
+        id: 'req_1',
+        action: 'shell',
+        resources: ['ls'],
+      );
+      final service = FakeOpencodeService(
+        sessions: [s1, s2],
+        permissionsBySession: {
+          'ses_1': [permission],
+        },
+      );
+      final backend = SessionsBackend(service: service);
+
+      final rows = await backend.list();
+
+      expect(rows.byId('ses_1').waiting, isTrue);
+      expect(rows.byId('ses_2').waiting, isFalse);
+    });
+
+    test('waiting true while the session holds a pending question', () async {
+      const form = QuestionForm(
+        id: 'q_1',
+        title: 'Questions',
+        questions: [
+          Question(
+            header: 'Pick',
+            question: 'which model?',
+            multiple: false,
+            options: [QuestionOption(label: 'a')],
+            custom: false,
+          ),
+        ],
+      );
+      final service = FakeOpencodeService(
+        sessions: [s1, s2],
+        questionsBySession: {
+          'ses_2': [form],
+        },
+      );
+      final backend = SessionsBackend(service: service);
+
+      final rows = await backend.list();
+
+      expect(rows.byId('ses_2').waiting, isTrue);
+      expect(rows.byId('ses_1').waiting, isFalse);
+    });
+
+    test('waiting false when nothing is pending', () async {
+      final service = FakeOpencodeService(sessions: [s1, s2]);
+      final backend = SessionsBackend(service: service);
+
+      final rows = await backend.list();
+
+      expect(rows.every((r) => !r.waiting), isTrue);
+    });
+
+    test('a degraded pending lookup degrades that session only', () async {
+      const permission = PermissionRequest(
+        id: 'req_2',
+        action: 'shell',
+        resources: ['git status'],
+      );
+      final service = FakeOpencodeService(
+        sessions: [s1, s2, s3],
+        // ses_2's owning route throws (a degraded orb); the other lookups
+        // answer.
+        permissionsBySession: {
+          'ses_1': [permission],
+          'ses_2': null,
+          'ses_3': const [],
+        },
+      );
+      final backend = SessionsBackend(service: service);
+
+      final rows = await backend.list();
+
+      // The list itself stays up, in its newest-first order.
+      expect(rows.map((r) => r.id).toList(), ['ses_2', 'ses_3', 'ses_1']);
+      // The degraded session reads waiting false, the others keep theirs.
+      expect(rows.byId('ses_2').waiting, isFalse);
+      expect(rows.byId('ses_1').waiting, isTrue);
+      expect(rows.byId('ses_3').waiting, isFalse);
+    });
+
+    test('evaluates every session, not just the active ones', () async {
+      // s3 is not active: the waiting fact must still surface for it (during
+      // a block the service may no longer mark the session active).
+      const permission = PermissionRequest(
+        id: 'req_3',
+        action: 'shell',
+        resources: ['ls'],
+      );
+      final service = FakeOpencodeService(
+        sessions: [s1, s2, s3],
+        active: const {},
+        permissionsBySession: {
+          'ses_3': [permission],
+        },
+      );
+      final backend = SessionsBackend(service: service);
+
+      final rows = await backend.list();
+
+      expect(rows.byId('ses_3').active, isFalse);
+      expect(rows.byId('ses_3').waiting, isTrue);
     });
   });
 
@@ -879,4 +1022,9 @@ void main() {
       expect(service.worktreesFor, ['ses_1']);
     });
   });
+}
+
+extension on List<Session> {
+  /// The row with [id] (the waiting tests' look-up).
+  Session byId(String id) => firstWhere((row) => row.id == id);
 }
