@@ -4470,6 +4470,13 @@ class _ToolCard extends StatelessWidget {
 /// disabled and the send button is only busy while a send is in flight.
 /// A mid-turn prompt is queued by the service (`delivery: steer`).
 ///
+/// The field is multiline (issue #200): it grows from one line up to a
+/// five-line cap and scrolls internally beyond it. The keys take on the
+/// TUI's convention: Enter sends the prompt (the menu open: it runs the
+/// selected row), and Shift+Enter inserts a newline instead of sending.
+/// A newline is plain text: it stays in the field, ends a menu filter token
+/// (like a space does), and goes out with the prompt; a failed send keeps it.
+///
 /// The prompt menus (issue #56): the bar hosts one menu per [menus]
 /// definition, and the chrome is shared across triggers. The `/` command
 /// menu (issue #46) opens when the input starts with `/`, filtered live as
@@ -4624,11 +4631,15 @@ class _PromptBarState extends State<_PromptBar> {
     final trigger = definition.trigger;
     if (definition.anchoring == MenuAnchoring.anchored) {
       // The anchored trigger is active only at the start of the field; the
-      // token is the text after it up to the first space (the TUI's live
-      // filter).
+      // token is the text after it up to the first space or newline (the
+      // TUI's live filter; a newline ends the token like a space does,
+      // issue #200).
       if (!text.startsWith(trigger)) return null;
-      final space = text.indexOf(' ');
-      final end = space >= 0 ? space : text.length;
+      var end = text.length;
+      for (final terminator in const [' ', '\n']) {
+        final index = text.indexOf(terminator);
+        if (index >= 0 && index < end) end = index;
+      }
       return (
         0,
         end > trigger.length ? text.substring(trigger.length, end) : '',
@@ -4636,17 +4647,21 @@ class _PromptBarState extends State<_PromptBar> {
     }
     // The inline trigger is active while the caret is inside a token that
     // starts with it, wherever the token appears; the token is the text
-    // between the trigger and the caret.
+    // between the trigger and the caret, up to the first newline (a newline
+    // ends the token like a space does, issue #200).
     final caret = selection.isCollapsed
         ? selection.baseOffset
         : selection.extentOffset;
     var start = caret;
-    while (start > 0 && text[start - 1] != ' ') {
+    while (start > 0 && text[start - 1] != ' ' && text[start - 1] != '\n') {
       start--;
     }
     if (caret < start + trigger.length) return null;
     if (!text.startsWith(trigger, start)) return null;
-    return (start, text.substring(start + trigger.length, caret));
+    var tokenEnd = caret;
+    final newline = text.indexOf('\n', start + trigger.length);
+    if (newline >= 0 && newline < tokenEnd) tokenEnd = newline;
+    return (start, text.substring(start + trigger.length, tokenEnd));
   }
 
   /// Re-filters the menu from the field's text. The bar's definitions claim
@@ -4807,8 +4822,10 @@ class _PromptBarState extends State<_PromptBar> {
     row.onActivate(argument);
   }
 
-  /// Enter in the field: the menu open runs the selected row (a prefix that
-  /// matches nothing stays put); otherwise it sends the prompt.
+  /// Enter in the field (issue #200): the menu open runs the selected row
+  /// (a prefix that matches nothing stays put); otherwise it sends the
+  /// prompt. Reached from the field's submit (the keyboard's done action)
+  /// and from the field's own Enter handling in [_onKeyEvent].
   void _onSubmitted() {
     if (_menuOpen) {
       if (_selected >= 0 && _selected < _matches.length) {
@@ -4817,6 +4834,22 @@ class _PromptBarState extends State<_PromptBar> {
       return;
     }
     widget.onSend();
+  }
+
+  /// Shift+Enter (issue #200): inserts a newline at the caret, replacing any
+  /// selection. A newline is plain text — it stays in the field, ends a menu
+  /// filter token, and goes out with the prompt. The caret lands just after
+  /// it.
+  void _insertNewline() {
+    final value = widget.controller.value;
+    final text = value.text;
+    final selection = value.selection;
+    final nextText =
+        '${text.substring(0, selection.start)}\n${text.substring(selection.end)}';
+    widget.controller.value = TextEditingValue(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: selection.start + 1),
+    );
   }
 
   /// The arrow keys move the menu selection (the TUI parity) and nothing
@@ -4832,6 +4865,20 @@ class _PromptBarState extends State<_PromptBar> {
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     if (event is KeyDownEvent) {
       final key = event.logicalKey;
+      if (key == LogicalKeyboardKey.enter) {
+        // The TUI's convention (issue #200): the field is multiline, so the
+        // bare Enter the framework would turn into a newline is claimed here
+        // instead — Enter sends the prompt (the menu open: it runs the
+        // selected row), and Shift+Enter inserts a newline rather than
+        // sending. The newline is plain text: it stays in the field and goes
+        // out with the prompt (a failed send keeps it, like any other text).
+        if (HardwareKeyboard.instance.isShiftPressed) {
+          _insertNewline();
+        } else {
+          _onSubmitted();
+        }
+        return KeyEventResult.handled;
+      }
       if (key == LogicalKeyboardKey.escape) {
         if (_menuOpen) {
           // The menu open: Esc clears the field (closing the menu); the
@@ -5093,6 +5140,15 @@ class _PromptBarState extends State<_PromptBar> {
                     focusNode: _fieldFocus,
                     enabled: true,
                     autocorrect: false,
+                    // Multiline (issue #200): the field grows from one line up
+                    // to five, then scrolls internally for longer text. Enter
+                    // sends and Shift+Enter inserts a newline (handled in
+                    // [_onKeyEvent]); the done action keeps the keyboard's
+                    // submit wired to the same send as before the field went
+                    // multiline.
+                    minLines: 1,
+                    maxLines: 5,
+                    textInputAction: TextInputAction.done,
                     decoration: const InputDecoration(
                       hintText: 'Send a message… ( / for commands )',
                       border: OutlineInputBorder(),
