@@ -488,12 +488,38 @@ class TurnFailure {
   final int? attempts;
 }
 
-/// The [TurnFailure] of the Turn closed by the `idle` marker at
-/// [idleIndex], or `null` when the marker is not a failed Turn (a
-/// succeeded / interrupted verdict, or a marker that carries no `outcome`).
-/// The Turn's window runs from the previous `idle` marker (exclusive) to
-/// [idleIndex] (exclusive), so an earlier failed Turn never bleeds into it.
-TurnFailure? turnFailureAt(List<SessionMessage> messages, int idleIndex) {
+/// The failed turn's terminal failure and the row it renders on (issue
+/// #206): [failure] is the turn's terminal failure, and [rowIndex] is the
+/// index in the message list of the row that carries the terminal `error` —
+/// the assistant row in the exhausted-retry case (probe Q3), or the closing
+/// `idle` marker in the non-retryable case, where no assistant row exists
+/// (an idle-only error means no assistant content was ever produced).
+class TurnFailureRow {
+  const TurnFailureRow({required this.failure, required this.rowIndex});
+
+  /// The turn's terminal failure (its error and, when carried, its attempt
+  /// count).
+  final TurnFailure failure;
+
+  /// The index in the message list of the row the failure block rides on:
+  /// the error-carrying assistant row, or the closing `idle` marker.
+  final int rowIndex;
+}
+
+/// The [TurnFailureRow] of the Turn closed by the `idle` marker at
+/// [idleIndex] — its terminal failure and the row that carries it — or
+/// `null` when the marker is not a failed Turn (a succeeded / interrupted
+/// verdict, or a marker that carries no `outcome`). The Turn's window runs
+/// from the previous `idle` marker (exclusive) to [idleIndex] (exclusive),
+/// so an earlier failed Turn never bleeds into it.
+///
+/// The row rule (issue #206): the block rides the row that carries the
+/// terminal `error`. The marker's own error (the non-retryable case) wins
+/// and keeps the block on the marker; otherwise the newest assistant row
+/// that carries the error is the block's row (the exhausted-retry case,
+/// probe Q3); and a `failed` verdict with no error anywhere keeps the
+/// marker (the block then marks the turn failed with no provider copy).
+TurnFailureRow? turnFailureAt(List<SessionMessage> messages, int idleIndex) {
   final marker = messages[idleIndex];
   if (marker.role != 'idle' || marker.outcome != 'failed') return null;
   var start = 0;
@@ -503,8 +529,6 @@ TurnFailure? turnFailureAt(List<SessionMessage> messages, int idleIndex) {
       break;
     }
   }
-  // The marker's own error (the non-retryable case) wins; otherwise the
-  // turn's assistant row carries it (the exhausted-retry case, probe Q3).
   var error = marker.error;
   var attempts = 0;
   var hasAttempts = false;
@@ -518,7 +542,21 @@ TurnFailure? turnFailureAt(List<SessionMessage> messages, int idleIndex) {
     }
     error ??= message.error;
   }
-  return TurnFailure(error: error, attempts: hasAttempts ? attempts : null);
+  // The block's row: the marker when it carries the error (or the durable
+  // state carries none), else the newest assistant row that does.
+  var rowIndex = idleIndex;
+  if (error != null && marker.error == null) {
+    for (var i = idleIndex - 1; i >= start; i--) {
+      if (messages[i].role == 'assistant' && messages[i].error != null) {
+        rowIndex = i;
+        break;
+      }
+    }
+  }
+  return TurnFailureRow(
+    failure: TurnFailure(error: error, attempts: hasAttempts ? attempts : null),
+    rowIndex: rowIndex,
+  );
 }
 
 /// The header outcome chip's verdict (issue #157): the outcome of the

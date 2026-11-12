@@ -2847,44 +2847,24 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     );
   }
 
-  /// The turn-failure blocks keyed by the `idle` marker that closes each
-  /// failed Turn (issue #157). A failed Turn's terminal error renders on its
-  /// marker (the turn's tail) as the failure block; a succeeded or
-  /// interrupted Turn carries no block. Read from the durable history alone,
-  /// so an older failed Turn keeps its block in the history as its record
-  /// body (like any past turn), and the live band's block does not persist
-  /// into the next turn (the next turn's marker resolves its own window).
+  /// The turn-failure blocks keyed by the row they ride on (issue #206): the
+  /// row that carries the terminal `error` — the error-carrying assistant row
+  /// in the exhausted-retry case, or the closing `idle` marker in the
+  /// non-retryable case, where no assistant row exists. A succeeded or
+  /// interrupted Turn carries no failure block. Read from the durable history
+  /// alone, so an older failed Turn keeps its block in the history as its
+  /// record body (like any past turn), and the live band's block does not
+  /// persist into the next turn (the next turn's marker resolves its own
+  /// window).
   Map<int, TurnFailure> _turnFailures() {
     final result = <int, TurnFailure>{};
     for (var i = 0; i < _messages.length; i++) {
       final message = _messages[i];
       if (message.role != 'idle') continue;
-      final failure = turnFailureAt(_messages, i);
-      if (failure != null) result[i] = failure;
+      final row = turnFailureAt(_messages, i);
+      if (row != null) result[row.rowIndex] = row.failure;
     }
     return result;
-  }
-
-  /// The in-flight provider retry of the Active turn (issue #156): the
-  /// [MessageRetry] carried by the turn's newest assistant row, or `null` when
-  /// the turn is not being retried (no `retry` on any loaded row) or the turn
-  /// is not Active. The notice is driven by re-reading the message state
-  /// (the poll + turn-boundary normalize), never by a retry event — so it
-  /// appears for a turn launched by another client as soon as the history is
-  /// read, and it is the newest attempt's when one climbs in place.
-  MessageRetry? _retryNotice() {
-    if (!_turnActive || _messages.isEmpty) return null;
-    // Walk the loaded history newest-first for a row carrying a live `retry`.
-    // A retried step has produced no content yet, so it sits at the newest
-    // end of the Active turn; the first `retry` found is the current one.
-    for (var i = _messages.length - 1; i >= 0; i--) {
-      final message = _messages[i];
-      final retry = message.retry;
-      if (retry != null) return retry;
-      // A closing `idle` marker means this row is past the Active turn: stop.
-      if (message.role == 'idle') break;
-    }
-    return null;
   }
 
   @override
@@ -2914,10 +2894,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       _messages,
       detailOutcome: _detail?.outcome,
     );
-    // The Active turn's in-flight provider retry (issue #156): the verbatim
-    // `Retry due · attempt N · …` notice shown at the top of the turn's live
-    // band while it retries, gone (no trace) once the request proceeds.
-    final retry = _retryNotice();
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: Column(
@@ -2954,11 +2930,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                         decode: _decode,
                         outcome: chipOutcome,
                       ),
-                      // The Active turn's in-flight provider retry (issue #156):
-                      // the ambient amber notice at the top of the live band,
-                      // present only while the turn is being retried — it leaves
-                      // no trace once the request proceeds.
-                      if (retry != null) _RetryNotice(retry: retry),
                       Expanded(
                         // The chat list and the prompt bar share the height
                         // left by the cost bar: with the keyboard up on
@@ -3037,16 +3008,25 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                             if (message.role == 'idle') {
                                               // The turn-boundary marker carries no
                                               // content of its own — unless the
-                                              // Turn it closed failed its retries
-                                              // (issue #157): then it carries the
-                                              // turn's terminal error block,
-                                              // distinct from a tool error and a
-                                              // normal completion.
+                                              // Turn it closed carries an in-flow
+                                              // line:
+                                              //  - a neutral "Turn stopped" line
+                                              //    when the turn was interrupted
+                                              //    (issue #206, matching #164) — a
+                                              //    stop is not a failure;
+                                              //  - the terminal error block (issue
+                                              //    #157) when the failed Turn's error
+                                              //    rides on the marker itself (the
+                                              //    non-retryable case, probe Q3: no
+                                              //    assistant row exists to carry it).
                                               final failure = failures[i];
                                               return Column(
                                                 crossAxisAlignment:
                                                     CrossAxisAlignment.start,
                                                 children: [
+                                                  if (message.outcome ==
+                                                      'interrupted')
+                                                    const _TurnStoppedLine(),
                                                   if (failure != null)
                                                     _TurnFailureBlock(
                                                       failure: failure,
@@ -3082,6 +3062,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                 _liveMessages.containsKey(
                                                   message.id,
                                                 );
+                                            final retry = message.retry;
+                                            final failure = failures[i];
                                             return Column(
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
@@ -3090,6 +3072,33 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                   message: message,
                                                   inFlight: inFlight,
                                                 ),
+                                                // The row's in-flow status lines
+                                                // (issue #206), rendered from the
+                                                // loaded row itself — the durable
+                                                // state is the source of truth, so a
+                                                // turn launched or settled by
+                                                // another client shows its line as
+                                                // soon as the history is read:
+                                                //  - the in-flight provider retry
+                                                //    (issue #156): the amber
+                                                //    `Retry due · attempt N · …`
+                                                //    line, present only while the
+                                                //    row carries a `retry` — gone
+                                                //    (no trace) the moment it
+                                                //    clears;
+                                                //  - the terminal error block
+                                                //    (issue #157) when the failed
+                                                //    Turn's terminal error rides on
+                                                //    this row (the exhausted-retry
+                                                //    case, probe Q3: the
+                                                //    assistant's terminal error,
+                                                //    content was attempted).
+                                                if (retry != null)
+                                                  _RetryNotice(retry: retry),
+                                                if (failure != null)
+                                                  _TurnFailureBlock(
+                                                    failure: failure,
+                                                  ),
                                                 _TurnStatsFooter(
                                                   label: footer,
                                                   active: live,
@@ -3753,15 +3762,19 @@ class _TurnActivityIndicatorState extends State<_TurnActivityIndicator>
   }
 }
 
-/// The Active turn's in-flight provider retry (issue #156): an ambient, amber
-/// notice at the top of the turn's live band, carrying the TUI's verbatim copy
-/// — `Retry due · attempt N · {error message}` — while the turn is being
-/// retried. It is not a dialog, snackbar, or header chip: a single row pinned
-/// above the streaming area. The provider's (unbounded) JSON body is shown
-/// truncated with an expand affordance; tapping the row expands it to the full
-/// body. It is not part of the turn's record: the moment the message's `retry`
-/// clears (the request proceeds) the row is gone, leaving no trace in the
-/// rendered history. Rendered only while the turn is Active and retrying.
+/// The in-flight provider retry line (issue #156, in-flow since issue #206):
+/// an amber line attached to the assistant row that carries the `retry`,
+/// carrying the TUI's verbatim copy — `Retry due · attempt N · {error
+/// message}` — while that row is being retried. It is not a dialog, snackbar,
+/// or header chip, and no longer a card pinned above the live band: it is a
+/// row in the message flow, so it scrolls with the history. The provider's
+/// (unbounded) JSON body is shown truncated with an expand affordance; tapping
+/// the line expands it to the full body. It is not part of the turn's record:
+/// the moment the row's `retry` clears (the request proceeds) the line is gone,
+/// leaving no trace in the rendered history. Rendered from the durable row
+/// alone (the live poll keeps the in-flight row in sync while the turn runs),
+/// so a turn launched by another client shows it as soon as the history is
+/// read.
 class _RetryNotice extends StatefulWidget {
   const _RetryNotice({required this.retry});
 
@@ -3825,8 +3838,8 @@ class _RetryNoticeState extends State<_RetryNotice> {
         ? const Color(0xFFF5A742)
         : const Color(0xFF8A5A00);
     return Container(
-      key: const ValueKey('structured-retry-notice'),
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      key: const ValueKey('message-retry'),
+      margin: const EdgeInsets.only(left: 4, top: 6),
       decoration: BoxDecoration(
         color: const Color(0xFFB0851F).withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(8),
@@ -4189,11 +4202,14 @@ class _CompactionPane extends StatelessWidget {
   }
 }
 
-/// The turn-failure block (issue #157): the terminal error of the Turn that
-/// ran out of its provider retries, read as a FAILED turn on the marker that
-/// closed it — not a quiet stop. It is distinct from a tool error (which sits
-/// inside its tool card) and from a normal completion (which carries no such
-/// block): it rides on the turn's tail, the closing `idle` marker.
+/// The turn-failure block (issue #157, repositioned in-flow by issue #206):
+/// the terminal error of the Turn that failed — read as a FAILED turn, not a
+/// quiet stop. It is distinct from a tool error (which sits inside its tool
+/// card) and from a normal completion (which carries no such block): it rides
+/// on the row that carries the terminal `error` — the error-carrying assistant
+/// row in the exhausted-retry case (probe Q3), or the closing `idle` marker in
+/// the non-retryable case, where no assistant row exists (an idle-only error
+/// means no assistant content was ever produced).
 ///
 /// It shows, straight from the durable state (so it renders identically with
 /// or without an event stream, issue #157):
@@ -4202,12 +4218,13 @@ class _CompactionPane extends StatelessWidget {
 ///   this block does not invent its wording);
 /// - the provider error's `type`, and its raw `response.body` when present —
 ///   truncated by default, expanding to the full string on tap (the long,
-///   unbounded provider JSON, like the in-flight retry notice);
+///   unbounded provider JSON, like the in-flight retry line);
 /// - how many attempts ran, only when the durable state carries the count —
 ///   it never invents a maximum.
 ///
 /// An interrupted Turn is NOT a failure and carries no block (its marker's
-/// verdict is `interrupted`, not `failed`).
+/// verdict is `interrupted`, not `failed`); it instead carries the neutral
+/// [_TurnStoppedLine].
 class _TurnFailureBlock extends StatefulWidget {
   const _TurnFailureBlock({required this.failure});
 
@@ -4304,6 +4321,41 @@ class _TurnFailureBlockState extends State<_TurnFailureBlock> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The neutral in-chat line of a STOPPED turn (issue #206): on the closing
+/// `idle` marker of a Turn whose `outcome` is `interrupted`, a plain "Turn
+/// stopped" line — the in-chat half of issue #164's cancel outcome (whose push
+/// reads "Turn stopped"). It is deliberately distinct from the red
+/// [_TurnFailureBlock]: an interrupted turn is not a failure (the user stopped
+/// it, or the turn was interrupted), so it carries no error block and no
+/// provider copy. Rendered from the durable marker alone (like the failure
+/// block), so a turn stopped from another client is visible as soon as the
+/// history is read, and it survives a reopen. A succeeded Turn carries no line
+/// of its own: its content and the frozen turn-stats footer already mark its
+/// end.
+class _TurnStoppedLine extends StatelessWidget {
+  const _TurnStoppedLine();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      key: const ValueKey('turn-stopped'),
+      padding: const EdgeInsets.only(left: 4, top: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.stop_circle_outlined, size: 16, color: scheme.outline),
+          const SizedBox(width: 8),
+          Text(
+            'Turn stopped',
+            style: TextStyle(fontSize: 13, color: scheme.outline),
+          ),
         ],
       ),
     );
