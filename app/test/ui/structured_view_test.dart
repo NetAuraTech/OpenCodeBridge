@@ -5285,6 +5285,228 @@ void main() {
     });
   });
 
+  group('StructuredSessionScreen multiline prompt field (issue #200)', () {
+    /// The prompt field's rendered height (logical pixels).
+    double fieldHeight(WidgetTester tester) =>
+        tester.getSize(find.byKey(_promptInput)).height;
+
+    /// The field's inner scroll position (its internal scroll past the cap).
+    ScrollPosition fieldScroll(WidgetTester tester) => tester
+        .state<ScrollableState>(
+          find.descendant(
+            of: find.byKey(_promptInput),
+            matching: find.byType(Scrollable),
+          ),
+        )
+        .position;
+
+    /// Types [lines] lines of [line] into the field (a multiline prompt).
+    Future<void> typeLines(WidgetTester tester, int lines, String line) async {
+      await tester.enterText(
+        find.byKey(_promptInput),
+        List.filled(lines, line).join('\n'),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('grows with the lines up to the cap and scrolls internally '
+        'past it', (tester) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+
+      final h1 = fieldHeight(tester);
+      await typeLines(tester, 2, 'one');
+      final h2 = fieldHeight(tester);
+      await typeLines(tester, 3, 'one');
+      final h3 = fieldHeight(tester);
+      await typeLines(tester, 5, 'one');
+      final h5 = fieldHeight(tester);
+
+      // The field grows as lines are added…
+      expect(h2, greaterThan(h1));
+      expect(h3, greaterThan(h2));
+      expect(h5, greaterThan(h3));
+      // …and the cap: past five lines the height holds and the text scrolls
+      // inside the field instead of growing it.
+      await typeLines(tester, 10, 'one');
+      final h10 = fieldHeight(tester);
+      expect(
+        h10,
+        closeTo(h5, 0.5),
+        reason: 'the height is capped at five lines',
+      );
+      expect(
+        fieldScroll(tester).maxScrollExtent,
+        greaterThan(0),
+        reason: 'ten lines in a five-line field scroll internally',
+      );
+    });
+
+    testWidgets(
+      'Enter submits the multiline prompt; Shift+Enter inserts a newline '
+      'instead',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+        await tester.showKeyboard(find.byKey(_promptInput));
+
+        // Enter sends the prompt with its newlines intact, and the field
+        // clears on the successful send.
+        await tester.enterText(
+          find.byKey(_promptInput),
+          'explain\nthis in detail',
+        );
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        await tester.pump();
+
+        expect(client.prompts, const [
+          ('ses_1', 'explain\nthis in detail', null, null),
+        ]);
+        expect(_promptText(tester), isEmpty);
+
+        // Shift+Enter inserts a newline (no send, the field keeps growing).
+        await tester.enterText(find.byKey(_promptInput), 'first');
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          client.prompts,
+          hasLength(1),
+          reason: 'the newline must not send',
+        );
+        expect(_promptText(tester), 'first\n');
+      },
+    );
+
+    testWidgets('a whitespace-only field (newlines included) does not send', (
+      tester,
+    ) async {
+      final client = _FakeClient(details: const [_detail0]);
+      await _pump(tester, client: client);
+      await tester.showKeyboard(find.byKey(_promptInput));
+
+      await tester.enterText(find.byKey(_promptInput), ' \n  ');
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.prompts, isEmpty);
+      expect(_promptText(tester), ' \n  ');
+    });
+
+    testWidgets('a failed send keeps the multiline text in the field', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        promptError: const SessionsClientError(502, 'opencode_unreachable'),
+      );
+      await _pump(tester, client: client);
+      await tester.showKeyboard(find.byKey(_promptInput));
+
+      await tester.enterText(find.byKey(_promptInput), 'line one\nline two');
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      expect(client.prompts, isEmpty);
+      expect(_promptText(tester), 'line one\nline two');
+      expect(
+        find.text('Could not send the message (status 502).'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'the / menu still opens and filters when the token is followed by a '
+      'newline',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client);
+
+        // A trailing newline does not join the token: `/compact` still
+        // filters to the `compact` row (the newline ends the token like a
+        // space does).
+        await _typePrompt(tester, '/compact\n');
+        await tester.pump();
+
+        expect(_menuFinder(), findsOneWidget);
+        expect(_commandRowFinder('compact'), findsOneWidget);
+        expect(_commandRowFinder('models'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a newline before the @ token does not stop the menu from opening and '
+      'filtering',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          skills: const [
+            SkillOption(id: 'auth', name: 'Auth', description: 'Auth helpers'),
+          ],
+        );
+        await _pump(tester, client: client);
+
+        // The newline sits on the previous line; the @ token on the new line
+        // still opens the menu and filters (the token is `auth`, not the
+        // whole text).
+        await _typePrompt(tester, 'check the docs\n@auth');
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('structured-command-menu-card')),
+          findsOneWidget,
+        );
+        expect(_commandRowFinder('skill:auth'), findsOneWidget);
+        expect(client.fileQueries, const [('ses_1', 'auth')]);
+      },
+    );
+
+    testWidgets('a newline after the @ token closes the menu, like a space', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        skills: const [
+          SkillOption(id: 'auth', name: 'Auth', description: 'Auth helpers'),
+        ],
+      );
+      await _pump(tester, client: client);
+
+      await _typePrompt(tester, '@auth');
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsOneWidget,
+      );
+      // The file search ran for the bare token.
+      expect(client.fileQueries, const [('ses_1', 'auth')]);
+
+      // A newline after the token ends it (like a space does): the menu
+      // closes, and the token never picked up the trailing newline.
+      await _typePrompt(tester, '@auth\n');
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('structured-command-menu-card')),
+        findsNothing,
+      );
+      expect(client.fileQueries, const [('ses_1', 'auth')]);
+    });
+  });
+
   group('StructuredSessionScreen prompt menu taps keep the field focused '
       '(issue #140)', () {
     /// The prompt field's own focus node: the node a keystroke must reach.
