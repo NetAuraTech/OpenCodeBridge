@@ -7665,4 +7665,222 @@ void main() {
       },
     );
   });
+
+  // --- Per-message copy button (issue #198) --------------------------------
+
+  group('StructuredSessionScreen per-message copy button (issue #198)', () {
+    testWidgets(
+      'the user and assistant rows each carry a copy button; the idle marker '
+      'carries none',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'fix the tests', created: 0),
+            SessionMessage(role: 'assistant', text: 'fixed', created: 1000),
+            SessionMessage(
+              id: 'i1',
+              role: 'idle',
+              outcome: 'succeeded',
+              created: 2000,
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        expect(find.byKey(const ValueKey('copy-message-0')), findsOneWidget);
+        expect(find.byKey(const ValueKey('copy-message-1')), findsOneWidget);
+        expect(find.byKey(const ValueKey('copy-message-2')), findsNothing);
+        // The idle row's only control is the turn footer, not a copy button.
+        expect(
+          find.ancestor(
+            of: find.byKey(const ValueKey('turn-stats')),
+            matching: find.byKey(const ValueKey('copy-message-2')),
+          ),
+          findsNothing,
+        );
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'tapping the assistant row\'s copy button copies the full plain text: '
+      'reasoning, then the body (markup stripped), then the tool card content',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'add a test', created: 0),
+            SessionMessage(
+              role: 'assistant',
+              reasoning: 'Let me think about it.',
+              text: 'I ran `flutter test` and it is **green** now.',
+              tools: [
+                ToolCall(
+                  name: 'shell',
+                  status: 'completed',
+                  input: {'command': 'ls -la'},
+                ),
+              ],
+              created: 1000,
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        final clipboard = _watchClipboard(tester);
+        await tester.tap(find.byKey(const ValueKey('copy-message-1')));
+        await tester.pump();
+
+        // One clipboard write: the message's full text in display order
+        // (reasoning, body, tool card) with the markdown markup stripped.
+        expect(clipboard, hasLength(1));
+        expect(
+          clipboard.first,
+          'Let me think about it.\n'
+          'I ran flutter test and it is green now.\n'
+          'shell · completed\n'
+          'ls -la',
+        );
+        expect(clipboard.first, isNot(contains('**')));
+        expect(clipboard.first, isNot(contains('`')));
+        expect(
+          clipboard.first.indexOf('Let me think about it.'),
+          lessThan(clipboard.first.indexOf('I ran flutter test')),
+        );
+        expect(
+          clipboard.first.indexOf('I ran flutter test'),
+          lessThan(clipboard.first.indexOf('shell · completed')),
+        );
+        expect(find.text('Copied the message.'), findsOneWidget);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'tapping the user row\'s copy button copies its full plain text',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              role: 'user',
+              text: '**bold** and `code`',
+              created: 0,
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        final clipboard = _watchClipboard(tester);
+        await tester.tap(find.byKey(const ValueKey('copy-message-0')));
+        await tester.pump();
+        expect(clipboard, hasLength(1));
+        expect(clipboard.first, 'bold and code');
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'tapping the compaction marker\'s copy button copies its summary',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(
+              role: 'compaction',
+              text: 'The session **fixed two bugs**.',
+              created: 1000,
+            ),
+            SessionMessage(role: 'assistant', text: 'moving on', created: 2000),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        final clipboard = _watchClipboard(tester);
+        await tester.tap(find.byKey(const ValueKey('copy-message-0')));
+        await tester.pump();
+        expect(clipboard, hasLength(1));
+        expect(clipboard.first, 'The session fixed two bugs.');
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'the copy button does not start a selection, and the long-press '
+      'selection and the tool card still work under it',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'list the files', created: 0),
+            SessionMessage(
+              role: 'assistant',
+              text: 'Here is what I ran',
+              tools: [
+                ToolCall(
+                  name: 'shell',
+                  status: 'completed',
+                  input: {'command': 'ls -la'},
+                ),
+              ],
+              created: 1000,
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // Tapping the copy button copies — it does not start a text
+        // selection: no paragraph of the row carries a selection afterwards.
+        final clipboard = _watchClipboard(tester);
+        await tester.tap(find.byKey(const ValueKey('copy-message-1')));
+        await tester.pump();
+        expect(clipboard, hasLength(1));
+        expect(_selectionOf(_paragraph(tester, 'Here is what I ran')), isNull);
+        expect(_selectionOf(_paragraph(tester, 'list the files')), isNull);
+
+        // Long-press selection on the body still starts selections
+        // (issue #197): the button sits in its own tap target and does not
+        // swallow the area's long-press.
+        final p = _paragraph(tester, 'Here is what I ran');
+        const full = 'Here is what I ran';
+        final gesture = await tester.startGesture(_paragraphPosition(p, 0));
+        addTearDown(gesture.removePointer);
+        await tester.pump(kLongPressTimeout);
+        await gesture.moveTo(_paragraphPosition(p, full.length - 1));
+        await tester.pump();
+        await gesture.up();
+        await tester.pump();
+        expect(
+          _selectionOf(p),
+          const TextSelection(baseOffset: 0, extentOffset: full.length),
+        );
+        await _copySelection(tester, full);
+        // The selection's copy is the rendered body alone (the button's copy
+        // of the whole message came first — the two paths stay independent).
+        expect(clipboard, hasLength(2));
+        expect(clipboard, contains(full));
+
+        // The tool card keeps its own identity and gestures: it renders as
+        // before and the long-press on its content still selects it.
+        expect(
+          find.byKey(const ValueKey('tool-shell-completed')),
+          findsOneWidget,
+        );
+        final t = _paragraph(tester, 'ls -la');
+        final toolGesture = await tester.startGesture(_paragraphPosition(t, 0));
+        addTearDown(toolGesture.removePointer);
+        await tester.pump(kLongPressTimeout);
+        await toolGesture.moveTo(_paragraphPosition(t, 5));
+        await tester.pump();
+        await toolGesture.up();
+        await tester.pump();
+        expect(
+          _selectionOf(t),
+          const TextSelection(baseOffset: 0, extentOffset: 6),
+        );
+        await events.close();
+      },
+    );
+  });
 }
