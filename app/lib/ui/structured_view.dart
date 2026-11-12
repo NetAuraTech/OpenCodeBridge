@@ -2891,28 +2891,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                   )
                 : null,
             automaticallyImplyLeading: !widget.showCloseButton,
-            // The Stop control (issues #160/#163/#165): offered when the Turn
-            // is Active AND the routed service can cancel it (the detail's
-            // `canCancel`, ticket #2's capability check). A service without
-            // the interrupt route hides the Stop rather than offer a control
-            // that would only fail with a 502; while the cancel POST is in
-            // flight it shows a busy state and ignores further presses.
-            actions: _turnActive && _canCancel
-                ? [
-                    IconButton(
-                      key: const ValueKey('structured-stop'),
-                      icon: _stopBusy
-                          ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.stop),
-                      tooltip: 'Stop the turn',
-                      onPressed: _stopBusy ? null : _stopTurn,
-                    ),
-                  ]
-                : null,
           ),
           Expanded(
             child: _loading
@@ -3128,7 +3106,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                   ),
                                   child: _PromptBar(
                                     controller: _prompt,
-                                    busy: _promptBusy || _commandBusy,
                                     onSend: _sendPrompt,
                                     menus: _menus,
                                     mentions: [
@@ -3143,6 +3120,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                     onPasteFromClipboard: _pasteFromClipboard,
                                     turnActive: _turnActive,
                                     onStopTurn: _stopTurn,
+                                    stopBusy: _stopBusy,
+                                    canCancel: _canCancel,
                                   ),
                                 ),
                               ],
@@ -4483,10 +4462,44 @@ class _ToolCard extends StatelessWidget {
 /// toggles the session's mode (`build`/`plan`, the TUI's `agent.cycle`)
 /// and Ctrl+T cycles the current model's variant (the TUI's
 /// `variant.cycle`); both are reported through the screen's handlers.
+/// The turn's Stop control (issue #160/#163/#165, relocated to the prompt
+/// bar in #199): the single Stop affordance. [enabled] keeps it actionable —
+/// a turn Active on a service that can cancel; it stays visible but disabled
+/// otherwise (a service without the interrupt route would refuse every cancel
+/// with a 502, so offering it there would only be a trap). [busy] is set while
+/// the cancel POST is in flight: the spinner shows and further presses are
+/// ignored, so one turn sends at most one cancel request.
+class _StopControl extends StatelessWidget {
+  const _StopControl({
+    required this.enabled,
+    required this.busy,
+    required this.onStop,
+  });
+
+  final bool enabled;
+
+  final bool busy;
+
+  final Future<bool> Function() onStop;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    key: const ValueKey('structured-stop'),
+    icon: busy
+        ? const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          )
+        : const Icon(Icons.stop),
+    tooltip: 'Stop the turn',
+    onPressed: enabled && !busy ? onStop : null,
+  );
+}
+
 class _PromptBar extends StatefulWidget {
   const _PromptBar({
     required this.controller,
-    required this.busy,
     required this.onSend,
     required this.menus,
     required this.mentions,
@@ -4496,11 +4509,11 @@ class _PromptBar extends StatefulWidget {
     required this.onPasteFromClipboard,
     required this.turnActive,
     required this.onStopTurn,
+    required this.stopBusy,
+    required this.canCancel,
   });
 
   final TextEditingController controller;
-
-  final bool busy;
 
   final Future<void> Function() onSend;
 
@@ -4534,10 +4547,22 @@ class _PromptBar extends StatefulWidget {
   final bool turnActive;
 
   /// Escape (the menu closed, nothing typed, a turn Active): cancel the
-  /// running turn (issue #163) — the same call the banner's Stop control
-  /// runs; resolves `true` when the cancel landed, `false` when it was a
-  /// no-op (already in flight) or failed.
+  /// running turn (issue #163) — the same call the Stop control runs;
+  /// resolves `true` when the cancel landed, `false` when it was a no-op
+  /// (already in flight) or failed.
   final Future<bool> Function() onStopTurn;
+
+  /// The cancel POST is in flight (issue #160/#163): the Stop control shows
+  /// its busy state and ignores further presses, so one turn sends at most
+  /// one cancel request.
+  final bool stopBusy;
+
+  /// The routed service can cancel the turn (the detail's `canCancel`,
+  /// issue #165 / ticket #2's capability check): the Stop control is enabled
+  /// on an Active turn only when the service answers the interrupt — a
+  /// service without the route would refuse every cancel with a 502, so the
+  /// control stays visible but disabled rather than offered as a trap.
+  final bool canCancel;
 
   @override
   State<_PromptBar> createState() => _PromptBarState();
@@ -5101,16 +5126,20 @@ class _PromptBarState extends State<_PromptBar> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                FilledButton(
-                  key: const ValueKey('structured-prompt-send'),
-                  onPressed: widget.busy ? null : widget.onSend,
-                  child: widget.busy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Send'),
+                // The Stop control (issue #199): the prompt bar's action, in
+                // the Send button's old position, and the single Stop
+                // affordance — the header's Stop is gone. Always visible so
+                // the layout is stable across the turn's state: enabled on an
+                // Active turn the service can cancel (its press runs the same
+                // bridge-native cancel Escape and `/stop` run); while the
+                // cancel POST is in flight it shows a busy state and ignores
+                // further presses (one request per turn); otherwise visible
+                // but disabled (the turn is not Active, or the service has no
+                // interrupt route — offering it there would only 502).
+                _StopControl(
+                  enabled: widget.turnActive && widget.canCancel,
+                  busy: widget.stopBusy,
+                  onStop: widget.onStopTurn,
                 ),
               ],
             ),
