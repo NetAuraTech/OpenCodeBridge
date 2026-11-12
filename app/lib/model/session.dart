@@ -43,6 +43,7 @@ class Session {
     required this.location,
     required this.active,
     this.orb,
+    this.waiting = false,
   });
 
   final String id;
@@ -62,6 +63,13 @@ class Session {
   /// sessions, including sessions moved onto the host from an orb).
   final String? orb;
 
+  /// True while the agent is waiting on the session: it holds at least one
+  /// pending permission request or at least one pending question form.
+  /// Re-evaluated per row from the service's pending states (issue #208), not
+  /// carried by the active list; a session whose pending lookup fails stays
+  /// false (the degraded-orb posture).
+  final bool waiting;
+
   /// The row with the given fields replaced: the home list patches rows in
   /// place from live events (a title the agent assigns, the active dot moving)
   /// without a refetch.
@@ -73,6 +81,7 @@ class Session {
     location: location,
     active: active ?? this.active,
     orb: orb,
+    waiting: waiting,
   );
 
   Map<String, Object?> toJson() => {
@@ -83,6 +92,7 @@ class Session {
     'location': location,
     'active': active,
     if (orb != null) 'orb': orb,
+    'waiting': waiting,
   };
 
   factory Session.fromJson(Object? json) {
@@ -95,6 +105,7 @@ class Session {
       location: map['location'] as String? ?? '',
       active: map['active'] as bool? ?? false,
       orb: map['orb'] as String?,
+      waiting: map['waiting'] as bool? ?? false,
     );
   }
 
@@ -107,13 +118,14 @@ class Session {
       other.created == created &&
       other.location == location &&
       other.active == active &&
-      other.orb == orb;
+      other.orb == orb &&
+      other.waiting == waiting;
 
   @override
   int get hashCode =>
-      Object.hash(id, title, project, created, location, active, orb);
+      Object.hash(id, title, project, created, location, active, orb, waiting);
 
   @override
   String toString() =>
-      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb)';
+      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb, waiting: $waiting)';
 }

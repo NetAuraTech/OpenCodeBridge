@@ -2123,15 +2123,24 @@ void main() {
             reason: 'the mark is per running instance, not persisted',
           );
 
-          // The home-list wire shape is unchanged: no unread field, and the
-          // row still carries the existing active fact.
+          // The home-list wire shape carries no unread field; the row still
+          // carries the existing active fact and the waiting fact (issue
+          // #208), and nothing else.
           final row = (await client.list()).single;
           final wire = row.toJson();
           expect(wire.containsKey('unread'), isFalse);
           expect(wire['active'], isA<bool>());
           expect(
             {for (final entry in wire.entries) entry.key},
-            {'id', 'title', 'project', 'created', 'location', 'active'},
+            {
+              'id',
+              'title',
+              'project',
+              'created',
+              'location',
+              'active',
+              'waiting',
+            },
           );
         },
       );

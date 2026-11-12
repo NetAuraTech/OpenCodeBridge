@@ -875,6 +875,7 @@ void main() {
         'location': '/workspace',
         'active': false,
         'orb': 'aaaa',
+        'waiting': false,
       });
       expect(orbs.sessionOrbId, 'aaaa');
     });
