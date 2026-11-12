@@ -455,6 +455,17 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
 
   final ScrollController _scroll = ScrollController();
 
+  /// The message list's `SelectionArea` focus node (issue #197).
+  ///
+  /// The `SelectionArea` is built as a `SelectableRegion`, whose `Focus` node
+  /// would otherwise join the default Tab-traversal cycle. That stole focus
+  /// away from the prompt field on Tab (the mode/variant toggles, the menu
+  /// close) once a turn's messages were on screen. `skipTraversal: true` keeps
+  /// the region focusable for selection (a long-press or programmatic
+  /// `requestFocus` still reaches it) while leaving it out of the Tab cycle,
+  /// so the prompt bar's key handling keeps the keys it always had.
+  final FocusNode _selectionFocus = FocusNode(skipTraversal: true);
+
   StreamSubscription<BridgeEvent>? _events;
 
   StreamSubscription<SessionGap>? _gapsSub;
@@ -690,6 +701,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _prompt.removeListener(_onPromptCleared);
     _prompt.dispose();
     _scroll.dispose();
+    _selectionFocus.dispose();
     super.dispose();
   }
 
@@ -2969,65 +2981,148 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                         // settle, no crawl. Only the visible messages
                                         // build and lay out; the earlier ones are pulled
                                         // in as the user scrolls up through the history.
-                                        child: ListView.builder(
-                                          controller: _scroll,
-                                          reverse: true,
-                                          padding: const EdgeInsets.fromLTRB(
-                                            16,
-                                            8,
-                                            16,
-                                            8,
-                                          ),
-                                          itemCount: _messages.isEmpty
-                                              ? 1
-                                              : _messages.length,
-                                          itemBuilder: (context, index) {
-                                            if (_messages.isEmpty) {
-                                              return const _CenteredMessage(
-                                                text: 'No messages yet.',
-                                              );
-                                            }
-                                            // The list is reversed (newest at the anchor), so
-                                            // map the list index back to the chronological
-                                            // history index.
-                                            final i =
-                                                _messages.length - 1 - index;
-                                            final message = _messages[i];
-                                            // The Turn's stats footer (issue #121's
-                                            // frozen footers, issue #124's live one and
-                                            // the lazy older Turns): keyed by the row it
-                                            // rides on, computed once for the build.
-                                            final footer = footers[i];
-                                            // The LIVE footer (issue #161's
-                                            // activity indicator rides on it):
-                                            // only the newest turn's row while
-                                            // the Turn runs; older rows keep
-                                            // their frozen footers.
-                                            final live =
-                                                _turnActive &&
-                                                i == _messages.length - 1;
-                                            if (message.role == 'idle') {
-                                              // The turn-boundary marker carries no
-                                              // content of its own — unless the
-                                              // Turn it closed carries an in-flow
-                                              // line:
-                                              //  - a neutral "Turn stopped" line
-                                              //    when the turn was interrupted
-                                              //    (issue #206, matching #164) — a
-                                              //    stop is not a failure;
-                                              //  - the terminal error block (issue
-                                              //    #157) when the failed Turn's error
-                                              //    rides on the marker itself (the
-                                              //    non-retryable case, probe Q3: no
-                                              //    assistant row exists to carry it).
+                                        //
+                                        // Wrapped in a SelectionArea (issue #197): every
+                                        // message's text — the markdown bodies, the tool
+                                        // card's input/output, the compaction summary — is
+                                        // rendered as selectable text in one region that
+                                        // spans the whole list, so a single selection can
+                                        // run from a user message through an assistant
+                                        // answer and the tool card in the middle. The copy
+                                        // carries the rendered plain text (no markdown
+                                        // markup). The floating controls below (jump-to-end,
+                                        // the question panel, the permission banner) sit
+                                        // outside the area and keep their own gestures.
+                                        child: SelectionArea(
+                                          focusNode: _selectionFocus,
+                                          child: ListView.builder(
+                                            controller: _scroll,
+                                            reverse: true,
+                                            padding: const EdgeInsets.fromLTRB(
+                                              16,
+                                              8,
+                                              16,
+                                              8,
+                                            ),
+                                            itemCount: _messages.isEmpty
+                                                ? 1
+                                                : _messages.length,
+                                            itemBuilder: (context, index) {
+                                              if (_messages.isEmpty) {
+                                                return const _CenteredMessage(
+                                                  text: 'No messages yet.',
+                                                );
+                                              }
+                                              // The list is reversed (newest at the anchor), so
+                                              // map the list index back to the chronological
+                                              // history index.
+                                              final i =
+                                                  _messages.length - 1 - index;
+                                              final message = _messages[i];
+                                              // The Turn's stats footer (issue #121's
+                                              // frozen footers, issue #124's live one and
+                                              // the lazy older Turns): keyed by the row it
+                                              // rides on, computed once for the build.
+                                              final footer = footers[i];
+                                              // The LIVE footer (issue #161's
+                                              // activity indicator rides on it):
+                                              // only the newest turn's row while
+                                              // the Turn runs; older rows keep
+                                              // their frozen footers.
+                                              final live =
+                                                  _turnActive &&
+                                                  i == _messages.length - 1;
+                                              if (message.role == 'idle') {
+                                                // The turn-boundary marker carries no
+                                                // content of its own — unless the
+                                                // Turn it closed carries an in-flow
+                                                // line:
+                                                //  - a neutral "Turn stopped" line
+                                                //    when the turn was interrupted
+                                                //    (issue #206, matching #164) — a
+                                                //    stop is not a failure;
+                                                //  - the terminal error block (issue
+                                                //    #157) when the failed Turn's error
+                                                //    rides on the marker itself (the
+                                                //    non-retryable case, probe Q3: no
+                                                //    assistant row exists to carry it).
+                                                final failure = failures[i];
+                                                return Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    if (message.outcome ==
+                                                        'interrupted')
+                                                      const _TurnStoppedLine(),
+                                                    if (failure != null)
+                                                      _TurnFailureBlock(
+                                                        failure: failure,
+                                                      ),
+                                                    _TurnStatsFooter(
+                                                      label: footer,
+                                                      active: live,
+                                                    ),
+                                                  ],
+                                                );
+                                              }
+                                              if (message.role ==
+                                                  'compaction') {
+                                                return Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    _CompactionPane(
+                                                      message: message,
+                                                      inFlight:
+                                                          _compacting &&
+                                                          i == _compactionIndex,
+                                                    ),
+                                                    _TurnStatsFooter(
+                                                      label: footer,
+                                                      active: live,
+                                                    ),
+                                                  ],
+                                                );
+                                              }
+                                              final inFlight =
+                                                  _turnActive &&
+                                                  message.id != null &&
+                                                  _liveMessages.containsKey(
+                                                    message.id,
+                                                  );
+                                              final retry = message.retry;
                                               final failure = failures[i];
                                               return Column(
                                                 crossAxisAlignment:
                                                     CrossAxisAlignment.start,
                                                 children: [
-                                                  if (message.outcome ==
-                                                      'interrupted')
-                                                    const _TurnStoppedLine(),
+                                                  _MessagePane(
+                                                    message: message,
+                                                    inFlight: inFlight,
+                                                  ),
+                                                  // The row's in-flow status lines
+                                                  // (issue #206), rendered from the
+                                                  // loaded row itself — the durable
+                                                  // state is the source of truth, so a
+                                                  // turn launched or settled by
+                                                  // another client shows its line as
+                                                  // soon as the history is read:
+                                                  //  - the in-flight provider retry
+                                                  //    (issue #156): the amber
+                                                  //    `Retry due · attempt N · …`
+                                                  //    line, present only while the
+                                                  //    row carries a `retry` — gone
+                                                  //    (no trace) the moment it
+                                                  //    clears;
+                                                  //  - the terminal error block
+                                                  //    (issue #157) when the failed
+                                                  //    Turn's terminal error rides on
+                                                  //    this row (the exhausted-retry
+                                                  //    case, probe Q3: the
+                                                  //    assistant's terminal error,
+                                                  //    content was attempted).
+                                                  if (retry != null)
+                                                    _RetryNotice(retry: retry),
                                                   if (failure != null)
                                                     _TurnFailureBlock(
                                                       failure: failure,
@@ -3038,75 +3133,8 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                   ),
                                                 ],
                                               );
-                                            }
-                                            if (message.role == 'compaction') {
-                                              return Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  _CompactionPane(
-                                                    message: message,
-                                                    inFlight:
-                                                        _compacting &&
-                                                        i == _compactionIndex,
-                                                  ),
-                                                  _TurnStatsFooter(
-                                                    label: footer,
-                                                    active: live,
-                                                  ),
-                                                ],
-                                              );
-                                            }
-                                            final inFlight =
-                                                _turnActive &&
-                                                message.id != null &&
-                                                _liveMessages.containsKey(
-                                                  message.id,
-                                                );
-                                            final retry = message.retry;
-                                            final failure = failures[i];
-                                            return Column(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                _MessagePane(
-                                                  message: message,
-                                                  inFlight: inFlight,
-                                                ),
-                                                // The row's in-flow status lines
-                                                // (issue #206), rendered from the
-                                                // loaded row itself — the durable
-                                                // state is the source of truth, so a
-                                                // turn launched or settled by
-                                                // another client shows its line as
-                                                // soon as the history is read:
-                                                //  - the in-flight provider retry
-                                                //    (issue #156): the amber
-                                                //    `Retry due · attempt N · …`
-                                                //    line, present only while the
-                                                //    row carries a `retry` — gone
-                                                //    (no trace) the moment it
-                                                //    clears;
-                                                //  - the terminal error block
-                                                //    (issue #157) when the failed
-                                                //    Turn's terminal error rides on
-                                                //    this row (the exhausted-retry
-                                                //    case, probe Q3: the
-                                                //    assistant's terminal error,
-                                                //    content was attempted).
-                                                if (retry != null)
-                                                  _RetryNotice(retry: retry),
-                                                if (failure != null)
-                                                  _TurnFailureBlock(
-                                                    failure: failure,
-                                                  ),
-                                                _TurnStatsFooter(
-                                                  label: footer,
-                                                  active: live,
-                                                ),
-                                              ],
-                                            );
-                                          },
+                                            },
+                                          ),
                                         ),
                                       ),
                                       // The user scrolled up (or the initial settle hasn't
