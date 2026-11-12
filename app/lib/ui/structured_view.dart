@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -4930,6 +4931,20 @@ class _PromptBarState extends State<_PromptBar> {
     row.onActivate(argument);
   }
 
+  /// The IME action the prompt field advertises (issue #203): the soft
+  /// keyboard (mobile) has no Shift+Enter, so it presents a **send** action
+  /// that submits the multiline prompt (firing the field's `onSubmitted`);
+  /// the desktop hardware keyboard keeps **done** — its Enter / Shift+Enter
+  /// are handled in [_onKeyEvent] (Enter sends, Shift+Enter inserts a
+  /// newline), and a bare done does not reach that path. The platform is
+  /// read from `defaultTargetPlatform`, which `debugDefaultTargetPlatformOverride`
+  /// steers in the view's tests.
+  TextInputAction get _textInputAction =>
+      defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS
+      ? TextInputAction.send
+      : TextInputAction.done;
+
   /// Enter in the field (issue #200): the menu open runs the selected row
   /// (a prefix that matches nothing stays put); otherwise it sends the
   /// prompt. Reached from the field's submit (the keyboard's done action)
@@ -5251,12 +5266,15 @@ class _PromptBarState extends State<_PromptBar> {
                     // Multiline (issue #200): the field grows from one line up
                     // to five, then scrolls internally for longer text. Enter
                     // sends and Shift+Enter inserts a newline (handled in
-                    // [_onKeyEvent]); the done action keeps the keyboard's
-                    // submit wired to the same send as before the field went
-                    // multiline.
+                    // [_onKeyEvent]). The IME action the soft keyboard
+                    // presents switches by platform (issue #203): `send` on
+                    // mobile, where the toolbar's send button submits the
+                    // prompt (firing `onSubmitted`), and `done` on desktop,
+                    // where the hardware Enter / Shift+Enter handling is
+                    // unchanged.
                     minLines: 1,
                     maxLines: 5,
-                    textInputAction: TextInputAction.done,
+                    textInputAction: _textInputAction,
                     decoration: const InputDecoration(
                       hintText: 'Send a message… ( / for commands )',
                       border: OutlineInputBorder(),
