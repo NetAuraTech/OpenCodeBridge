@@ -788,6 +788,19 @@ const _promptInput = ValueKey('structured-prompt-input');
 
 Finder _menuFinder() => find.byKey(const ValueKey('structured-command-menu'));
 
+/// The chat list: the only [ListView] on screen in the in-flow panel tests
+/// (the command menu is closed, so its rows' list is not built).
+Finder _chatListFinder() => find.byType(ListView);
+
+/// The in-flow pending-panels wrapper (the question panel and the permission
+/// banner, stacked, between the list and the prompt bar) — issue #205.
+Finder _pendingPanelsFinder() =>
+    find.byKey(const ValueKey('structured-pending-panels'));
+
+/// The prompt bar's content (its top edge is the bottom of the region the
+/// list + panels fill).
+Finder _promptBarFinder() => find.byKey(const ValueKey('structured-prompt'));
+
 /// The menu list's scroll offset in pixels.
 double _menuScrollPixels(WidgetTester tester) => tester
     .state<ScrollableState>(
@@ -5893,33 +5906,49 @@ void main() {
       expect(find.text('keep going'), findsOneWidget);
     });
 
-    testWidgets('the permission banner floats over the pane\'s list', (
-      tester,
-    ) async {
-      const request = PermissionRequest(
-        id: 'per_1',
-        action: 'shell',
-        resources: ['rm -rf node_modules'],
-      );
-      final client = _FakeClient(
-        details: const [_detail0],
-        permissionLists: const [
-          <PermissionRequest>[],
-          <PermissionRequest>[request],
-        ],
-      );
-      final events = await _pumpEmbedded(tester, client: client);
+    testWidgets(
+      'the permission banner sits in flow above the pane\'s prompt bar, the '
+      'list constrained above it (issue #205)',
+      (tester) async {
+        const request = PermissionRequest(
+          id: 'per_1',
+          action: 'shell',
+          resources: ['rm -rf node_modules'],
+        );
+        final client = _FakeClient(
+          details: const [_detail0],
+          permissionLists: const [
+            <PermissionRequest>[],
+            <PermissionRequest>[request],
+          ],
+        );
+        final events = await _pumpEmbedded(tester, client: client);
 
-      events.add(_event('permission.asked', aggregateID: 'ses_1'));
-      await tester.pump();
-      await tester.pump();
+        events.add(_event('permission.asked', aggregateID: 'ses_1'));
+        await tester.pump();
+        await tester.pump();
 
-      expect(find.text('Permission requested: shell'), findsOneWidget);
-      await tester.tap(find.byKey(const ValueKey('permission-once-per_1')));
-      await tester.pump();
-      await tester.pump();
-      expect(client.replies, const [('ses_1', 'per_1', PermissionReply.once)]);
-    });
+        expect(find.text('Permission requested: shell'), findsOneWidget);
+        // In flow, not floating: the list meets the panel's top (no overlap)
+        // and the panel meets the prompt bar's top.
+        final listRect = tester.getRect(_chatListFinder());
+        final panelRect = tester.getRect(_pendingPanelsFinder());
+        final promptRect = tester.getRect(_promptBarFinder());
+        expect(listRect.bottom, moreOrLessEquals(panelRect.top, epsilon: 0.5));
+        expect(
+          panelRect.bottom,
+          moreOrLessEquals(promptRect.top, epsilon: 0.5),
+        );
+
+        await tester.tap(find.byKey(const ValueKey('permission-once-per_1')));
+        await tester.pump();
+        await tester.pump();
+        expect(client.replies, const [
+          ('ses_1', 'per_1', PermissionReply.once),
+        ]);
+        await events.close();
+      },
+    );
 
     testWidgets('a slash command opens its menu and runs from the pane', (
       tester,
@@ -6441,6 +6470,289 @@ void main() {
         );
         // The newest turn succeeded: the chip follows the latest verdict.
         expect(chipText(tester), 'succeeded');
+        await events.close();
+      },
+    );
+  });
+
+  group('StructuredSessionPanel in-flow pending panels (issue #205)', () {
+    const smallForm = QuestionForm(
+      id: 'form_small',
+      title: 'Confirm',
+      questions: [
+        Question(
+          header: 'Confirm',
+          question: 'Proceed with the deployment?',
+          multiple: false,
+          custom: false,
+          options: [
+            QuestionOption(label: 'Yes'),
+            QuestionOption(label: 'No'),
+          ],
+        ),
+      ],
+    );
+
+    const stateForm = QuestionForm(
+      id: 'form_state',
+      title: 'State',
+      questions: [
+        Question(
+          header: 'Ship it?',
+          question: 'Should I ship it?',
+          multiple: false,
+          custom: true,
+          options: [
+            QuestionOption(label: 'Yes', description: 'ship'),
+            QuestionOption(label: 'No', description: 'hold'),
+          ],
+        ),
+        Question(
+          header: 'Areas',
+          question: 'Which areas?',
+          multiple: true,
+          custom: true,
+          options: [
+            QuestionOption(label: 'A', description: 'a'),
+            QuestionOption(label: 'B', description: 'b'),
+          ],
+        ),
+      ],
+    );
+
+    testWidgets(
+      'the pending panels sit in the chat region flow between the list and '
+      'the prompt bar — the list is constrained above them, not overlapped',
+      (tester) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          questionLists: const [
+            <QuestionForm>[smallForm],
+          ],
+        );
+        await _pump(tester, client: client);
+
+        expect(_chatListFinder(), findsOneWidget);
+        // The panel is in flow (not a floating Positioned over the list).
+        expect(_pendingPanelsFinder(), findsOneWidget);
+        expect(find.byKey(const ValueKey('question-banner')), findsOneWidget);
+
+        final listRect = tester.getRect(_chatListFinder());
+        final panelRect = tester.getRect(_pendingPanelsFinder());
+        final promptRect = tester.getRect(_promptBarFinder());
+
+        // The list is above the panel: its bottom meets the panel's top
+        // (contiguous in the Column — the panel does not float over the
+        // list, so no message text is covered).
+        expect(listRect.bottom, moreOrLessEquals(panelRect.top, epsilon: 0.5));
+        // The panel is above the prompt bar.
+        expect(
+          panelRect.bottom,
+          moreOrLessEquals(promptRect.top, epsilon: 0.5),
+        );
+        // The panel is below the list's head (it does not cover the list's
+        // top), so the list keeps its own space above it.
+        expect(panelRect.top, greaterThan(listRect.top));
+      },
+    );
+
+    testWidgets(
+      'a tall form is capped at ~half the chat region and scrolls internally',
+      (tester) async {
+        final tallForm = QuestionForm(
+          id: 'form_tall',
+          title: 'Tall',
+          questions: [
+            Question(
+              header: 'Pick',
+              question: 'Pick one',
+              multiple: false,
+              custom: false,
+              options: [
+                for (var i = 0; i < 25; i++)
+                  QuestionOption(
+                    label: 'Option $i',
+                    description: 'Description for option $i',
+                  ),
+              ],
+            ),
+          ],
+        );
+        final client = _FakeClient(
+          details: const [_detail0],
+          questionLists: [
+            <QuestionForm>[tallForm],
+          ],
+        );
+        await _pump(tester, client: client);
+
+        expect(_chatListFinder(), findsOneWidget);
+        expect(_pendingPanelsFinder(), findsOneWidget);
+
+        final listRect = tester.getRect(_chatListFinder());
+        final panelRect = tester.getRect(_pendingPanelsFinder());
+        final promptRect = tester.getRect(_promptBarFinder());
+
+        // The region the Column fills (list + panel + prompt bar).
+        final regionHeight =
+            listRect.height + panelRect.height + promptRect.height;
+        // The panel is capped at ~half the region: the tall form does not grow
+        // it past half, so the prompt bar and a slice of the list stay visible.
+        expect(
+          panelRect.height,
+          moreOrLessEquals(regionHeight / 2, epsilon: 1.0),
+        );
+        // The list and the prompt bar keep at least the other half.
+        expect(
+          listRect.height + promptRect.height,
+          greaterThanOrEqualTo(regionHeight / 2 - 1.0),
+        );
+        // The form is taller than the cap: the panel content scrolls
+        // internally beyond it.
+        final scroll = tester.state<ScrollableState>(
+          find.descendant(
+            of: _pendingPanelsFinder(),
+            matching: find.byType(Scrollable),
+          ),
+        );
+        expect(scroll.position.maxScrollExtent, greaterThan(0));
+      },
+    );
+
+    testWidgets('no residual gap where the panel was once nothing is pending', (
+      tester,
+    ) async {
+      final client = _FakeClient(
+        details: const [_detail0],
+        questionLists: const [
+          <QuestionForm>[smallForm],
+          <QuestionForm>[],
+        ],
+      );
+      final events = await _pump(tester, client: client);
+
+      // With the form pending, the list meets the panel's top.
+      expect(_pendingPanelsFinder(), findsOneWidget);
+      var listRect = tester.getRect(_chatListFinder());
+      var panelRect = tester.getRect(_pendingPanelsFinder());
+      expect(listRect.bottom, moreOrLessEquals(panelRect.top, epsilon: 0.5));
+
+      // Answer the form: the panel clears.
+      await tester.tap(
+        find.byKey(const ValueKey('question-option-form_small-0-0')),
+      );
+      await tester.pump();
+      await tester.tap(
+        find.byKey(const ValueKey('question-submit-form_small')),
+      );
+      await tester.pump();
+      await tester.pump();
+      await events.close();
+
+      // No panel in flow any more…
+      expect(_pendingPanelsFinder(), findsNothing);
+      expect(find.byKey(const ValueKey('question-banner')), findsNothing);
+      // …and the list meets the prompt bar's top directly: no empty gap
+      // where the panel used to be (the list occupies the full region).
+      listRect = tester.getRect(_chatListFinder());
+      final promptRect = tester.getRect(_promptBarFinder());
+      expect(listRect.bottom, moreOrLessEquals(promptRect.top, epsilon: 0.5));
+    });
+
+    testWidgets(
+      'form state (selections, free text, active tab) survives new messages '
+      'arriving while the form is pending',
+      (tester) async {
+        // A tall surface so the two-question form fits under the panel cap and
+        // its buttons stay tappable (at the default 800×600 the cap is shorter
+        // than this form, so the button row would sit below the fold).
+        tester.view.physicalSize = const Size(800, 1000);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.reset);
+        final client = _FakeClient(
+          details: const [_detail0],
+          questionLists: const [
+            <QuestionForm>[stateForm],
+          ],
+        );
+        final events = await _pump(tester, client: client);
+        expect(_pendingPanelsFinder(), findsOneWidget);
+
+        // On tab 0: select an option and type a free-text answer (set on the
+        // controller directly — no keyboard focus, so the region does not
+        // reshape mid-test).
+        await tester.tap(
+          find.byKey(const ValueKey('question-option-form_state-0-0')),
+        );
+        await tester.pump();
+        tester
+                .widget<TextField>(
+                  find.byKey(const ValueKey('question-text-form_state-0')),
+                )
+                .controller!
+                .text =
+            'quietly';
+        await tester.pump();
+        // Move to tab 1 (the active tab) and select an option there.
+        await tester.tap(
+          find.byKey(const ValueKey('question-next-form_state')),
+        );
+        await tester.pump();
+        await tester.tap(
+          find.byKey(const ValueKey('question-option-form_state-1-0')),
+        );
+        await tester.pump();
+        expect(find.text('Which areas?'), findsOneWidget);
+        expect(find.text('Should I ship it?'), findsNothing);
+
+        // A new message arrives while the form is pending (the agent keeps
+        // working): a streamed delta appends an in-flight assistant message.
+        events.add(
+          _event(
+            'session.text.delta',
+            aggregateID: 'ses_1',
+            data: {'assistantMessageID': 'asst_live', 'delta': 'working…'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 60)); // 48 ms flush
+
+        // The panel is still in flow (it did not drop out on the rebuild)…
+        expect(_pendingPanelsFinder(), findsOneWidget);
+        // …the active tab survived (still on tab 1: Q1 shown, Q0 not)…
+        expect(find.text('Which areas?'), findsOneWidget);
+        expect(find.text('Should I ship it?'), findsNothing);
+        // …and Q1's selection survived.
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('question-option-form_state-1-0')),
+            matching: find.byIcon(Icons.radio_button_checked),
+          ),
+          findsOneWidget,
+        );
+
+        // Back to tab 0: Q0's selection and typed free text survived too.
+        await tester.tap(
+          find.byKey(const ValueKey('question-back-form_state')),
+        );
+        await tester.pump();
+        expect(find.text('Should I ship it?'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('question-option-form_state-0-0')),
+            matching: find.byIcon(Icons.radio_button_checked),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<TextField>(
+                find.byKey(const ValueKey('question-text-form_state-0')),
+              )
+              .controller!
+              .text,
+          'quietly',
+        );
         await events.close();
       },
     );

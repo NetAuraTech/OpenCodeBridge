@@ -14,9 +14,12 @@ import '../model/question.dart';
 /// before the Submit; a single-question form submits it directly.
 ///
 /// Mirrors [PermissionBanner] (spec §6): kept live by the `form.created` /
-/// `form.replied` / `form.cancelled` events. The structured view floats it
-/// over the chat list, just above the prompt bar (the TUI prompts above the
-/// input rather than in the page flow).
+/// `form.replied` / `form.cancelled` events. The structured view places it in
+/// the chat region's layout flow, between the chat list and the prompt bar
+/// (issue #205): it occupies its own space and the list shrinks from the
+/// bottom to make room, rather than floating over the list. The TUI semantics
+/// are kept — the prompts sit above the input bar; the anchor is the prompt
+/// bar, not the page.
 class QuestionPanel extends StatelessWidget {
   const QuestionPanel({
     super.key,
