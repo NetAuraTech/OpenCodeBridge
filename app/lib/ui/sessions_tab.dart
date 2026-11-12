@@ -210,6 +210,17 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// session) swaps the pane in place; the list stays visible.
   Session? _selectedSession;
 
+  /// The ids whose turn ended while they were not shown in the detail pane
+  /// (issue #207): their row wears the violet unread dot. In memory only, per
+  /// running app instance — it is not persisted and is not part of the
+  /// sessions API contract. Driven by the unified event stream's turn
+  /// boundaries (no list refetch for the dot itself) and pruned from the rows
+  /// on every reload, so a session that leaves the list (deleted) drops its
+  /// mark. Opening the session (row tap, narrow drawer, or a deep link) clears
+  /// it, and a new turn starting on it clears it too (the "finished" fact is
+  /// stale once the turn is live again).
+  final Set<String> _unread = <String>{};
+
   /// The sidebar's collapsed choice (issue #132): restored from the settings
   /// at the launch, persisted on every toggle. Collapsed, the list pane is
   /// gone entirely and the detail takes the full width; only the toggle stays
@@ -365,10 +376,14 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   ///   does not know reloads instead (its create was missed).
   /// - `session.deleted` / the bridge-native `session.closed` — drop the row.
   /// - The turn boundaries (`session.execution.*`) move the row's active dot
-  ///   in place, no refetch.
+  ///   in place, no refetch. A turn ending on a session that is not shown in
+  ///   the detail pane also lights its violet unread dot (issue #207); a new
+  ///   turn starting clears it (the "finished" fact is stale once the turn is
+  ///   live again).
   /// - The bridge-native `session.turn.cancelled` (issue #164) — a cancelled
   ///   turn: the row's active dot goes out in place, no refetch, so a session
-  ///   stopped from a panel no longer reads as busy.
+  ///   stopped from a panel no longer reads as busy (and lights the unread dot
+  ///   when not shown, like any other terminal).
   ///
   /// Any other event naming an unknown session (a streamed delta, the first
   /// turn of a just-spawned orb session whose create preceded its upstream's
@@ -398,19 +413,30 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         }
         return;
       case 'session.execution.started':
-        if (sessionId != null) _setActive(sessionId, true, rows);
+        if (sessionId != null) {
+          _setActive(sessionId, true, rows);
+          _clearUnread(sessionId);
+        }
         return;
       case 'session.execution.succeeded':
       case 'session.execution.failed':
       case 'session.execution.interrupted':
-        if (sessionId != null) _setActive(sessionId, false, rows);
+        if (sessionId != null) {
+          _setActive(sessionId, false, rows);
+          _endUnread(sessionId);
+        }
         return;
       // The bridge-native cancel (issue #164): the session's turn was stopped
       // (from a panel), so its active dot goes out in place — no refetch. The
       // service's own terminal for the cancelled turn (`interrupted`) would
-      // settle it too, but this clears it the instant the cancel lands.
+      // settle it too, but this clears it the instant the cancel lands. As
+      // any other terminal, it lights the unread dot when the session is not
+      // shown (issue #207).
       case BridgeEventType.turnCancelled:
-        if (sessionId != null) _setActive(sessionId, false, rows);
+        if (sessionId != null) {
+          _setActive(sessionId, false, rows);
+          _endUnread(sessionId);
+        }
         return;
       default:
         if (sessionId != null && !_hasRow(rows, sessionId)) {
@@ -447,7 +473,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
 
   /// Replaces the row [id] in place: a new [title], an [active] dot, or
   /// ([drop]) nothing — the row is gone. A drop also clears the detail pane
-  /// when it shows that row; a patch otherwise carries the pane's row along.
+  /// when it shows that row and drops its unread mark (issue #207); a patch
+  /// otherwise carries the pane's row along.
   void _patchRow(String id, {String? title, bool? active, bool drop = false}) {
     final rows = _rows;
     if (rows == null) return;
@@ -458,6 +485,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
             if (session.id != id) session,
         ];
         if (_selectedSession?.id == id) _selectedSession = null;
+        _unread.remove(id);
       });
       return;
     }
@@ -482,6 +510,39 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     final row = rows.where((session) => session.id == id).firstOrNull;
     if (row == null || row.active == active) return;
     _patchRow(id, active: active);
+  }
+
+  /// A turn ended on [id] (any terminal, issue #207): light the violet unread
+  /// dot in place when that session is not the one shown in the detail pane
+  /// (it was watched live, so no dot then). Only sets the mark when it is not
+  /// already set, so a burst of terminals does not churn the build.
+  void _endUnread(String id) {
+    if (_selectedSession?.id == id) return;
+    if (_unread.contains(id)) return;
+    setState(() => _unread.add(id));
+  }
+
+  /// A new turn started on [id] (issue #207): the "finished" fact is stale
+  /// once the turn is live again, so the unread dot goes out (the green active
+  /// dot is on instead). Only clears when it is set, so an already-read
+  /// session is a no-op. (Opening [id] in the detail pane clears it too —
+  /// that removal happens inside [_selectSession]'s `setState`, so the
+  /// selection and the mark update atomically.)
+  void _clearUnread(String id) {
+    if (!_unread.contains(id)) return;
+    setState(() => _unread.remove(id));
+  }
+
+  /// Drops the marks for rows that are no longer in the list (a deleted
+  /// session, issue #207); the surviving marks stay. Called from [_load]
+  /// (inside its `setState`, like [_reconcileSelection]) after the rows are in
+  /// place, so event-driven and foreground re-fetches prune deleted sessions
+  /// but never drop a still-valid mark.
+  void _reconcileUnread(List<Session> rows) {
+    final present = rows.map((session) => session.id).toSet();
+    for (final id in _unread.toList()) {
+      if (!present.contains(id)) _unread.remove(id);
+    }
   }
 
   /// Reloads the list after a session event, coalescing bursts: while a load
@@ -521,6 +582,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         _rows = rows;
         _loading = false;
         _reconcileSelection(rows);
+        _reconcileUnread(rows);
       });
       if (pending != null) _openDeepLinkRow(pending, rows);
       unawaited(_loadOrbs());
@@ -641,6 +703,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     setState(() {
       _selectedSession = session;
       _drawerOpen = false;
+      // Opening the session in the detail pane clears its unread dot (issue
+      // #207), from every entry point (row tap, narrow drawer, deep link).
+      _unread.remove(session.id);
     });
   }
 
@@ -711,6 +776,21 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// The rows grouped by project, newest first (the rows arrive pre-sorted,
   /// so grouping preserves the order).
   List<_ProjectGroup> get _groups => _groupByProject(_rows ?? const []);
+
+  /// A project group's subtitle (issue #207): the session count, with the
+  /// active count appended ("N sessions (M active)") only while at least one
+  /// of the project's sessions is active; otherwise the bare count
+  /// ("1 session" / "N sessions").
+  String _groupSubtitle(_ProjectGroup group) {
+    final count = group.sessions.length;
+    final active = group.sessions.where((s) => s.active).length;
+    if (active == 0) {
+      return count == 1 ? '1 session' : '$count sessions';
+    }
+    return count == 1
+        ? '1 session ($active active)'
+        : '$count sessions ($active active)';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -879,11 +959,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
               key: ValueKey('project-${group.project.id}'),
               initiallyExpanded: true,
               title: Text(group.project.name),
-              subtitle: Text(
-                group.sessions.length == 1
-                    ? '1 session'
-                    : '${group.sessions.length} sessions',
-              ),
+              subtitle: Text(_groupSubtitle(group)),
               children: [
                 _GroupNewSessionButton(
                   projectId: group.project.id,
@@ -896,6 +972,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     deleting: _deletingId == s.id,
                     moving: _movingId == s.id,
                     exporting: _exportingId == s.id,
+                    unread: _unread.contains(s.id),
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
                     onMoveToOrb: _moveToOrb,
@@ -1260,6 +1337,7 @@ class _SessionRow extends StatelessWidget {
     required this.exporting,
     required this.onDelete,
     required this.orb,
+    this.unread = false,
     this.onTap,
     this.onMoveToOrb,
     this.onExportWorkspace,
@@ -1269,6 +1347,12 @@ class _SessionRow extends StatelessWidget {
   });
 
   final Session session;
+
+  /// The row's unread mark (issue #207): true when the session's turn ended
+  /// while it was not shown in the detail pane. The status dot (before the
+  /// title) wears it as a violet dot, mutually exclusive with the green
+  /// active dot — the two are states of the same spot.
+  final bool unread;
 
   /// The orb the session lives on (spec §9.2): the chip's name and state
   /// dot. `null` when the orb is absent from the list (deleted in the
@@ -1378,13 +1462,22 @@ class _SessionRow extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        if (session.active) ...[
+                        // The row's status dot (before the title), one spot
+                        // with two mutually exclusive states (issue #207):
+                        // green while the session's turn is active (the
+                        // existing `active` fact), or violet while its turn
+                        // ended unviewed (the tab-local unread mark).
+                        if (session.active || unread) ...[
                           Container(
-                            key: ValueKey('active-${session.id}'),
+                            key: ValueKey(
+                              '${session.active ? 'active' : 'unread'}-${session.id}',
+                            ),
                             width: 8,
                             height: 8,
-                            decoration: const BoxDecoration(
-                              color: Colors.green,
+                            decoration: BoxDecoration(
+                              color: session.active
+                                  ? Colors.green
+                                  : Colors.deepPurple,
                               shape: BoxShape.circle,
                             ),
                           ),
