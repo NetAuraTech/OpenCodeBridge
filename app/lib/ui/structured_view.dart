@@ -2950,6 +2950,20 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                         // inner Flexible would never shrink).
                         child: LayoutBuilder(
                           builder: (context, constraints) {
+                            // The pending panels (the question forms and the
+                            // permission requests) sit in the chat region's
+                            // layout flow, between the list and the prompt bar
+                            // (issue #205): they occupy their own space, the
+                            // list shrinks from the bottom to make room, and no
+                            // space is left behind when none is pending. Their
+                            // combined height is capped at ~half the region
+                            // (the height the LayoutBuilder measures here) so a
+                            // tall form still leaves the prompt bar and a
+                            // healthy slice of the list visible; the panel
+                            // content scrolls internally beyond the cap.
+                            final panelCap = constraints.maxHeight / 2;
+                            final panelsPending =
+                                _questions.isNotEmpty || _pending.isNotEmpty;
                             return Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
@@ -3067,7 +3081,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                       ),
                                       // The user scrolled up (or the initial settle hasn't
                                       // reached the end yet): float the jump-to-end button
-                                      // over the list, just above the prompt bar.
+                                      // over the list, above the pending panels.
                                       if (!_atBottom)
                                         Positioned(
                                           right: 12,
@@ -3083,48 +3097,65 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                             ),
                                           ),
                                         ),
-                                      // The pending question forms (issue #50) float over the
-                                      // list, just above the prompt bar — like the TUI
-                                      // prompts above the input, so the header and the cost
-                                      // bar never shift. The list is lazy, so the panel
-                                      // scrolls when a long form is taller than the room.
-                                      Positioned(
-                                        left: 0,
-                                        right: 0,
-                                        bottom: 0,
-                                        child: SingleChildScrollView(
-                                          child: QuestionPanel(
-                                            pending: _questions,
-                                            onSubmit: _submitAnswers,
-                                            onDismiss: _dismissQuestion,
-                                            busyId: _answerBusyId,
-                                          ),
-                                        ),
-                                      ),
-                                      // The pending permission requests (issue #62)
-                                      // float over the list, just above the prompt
-                                      // bar — like the TUI prompts above the input,
-                                      // so the header and the cost bar never shift.
-                                      // The banner scrolls when a pending request is
-                                      // taller than the room.
-                                      Positioned(
-                                        left: 0,
-                                        right: 0,
-                                        bottom: 0,
-                                        child: SingleChildScrollView(
-                                          child: PermissionBanner(
-                                            pending: _pending,
-                                            onReply: _reply,
-                                            replyBusyId: _replyBusyId,
-                                          ),
-                                        ),
-                                      ),
                                     ],
                                   ),
                                 ),
+                                // The pending question forms (issue #50) and
+                                // permission requests (issue #62), in the chat
+                                // region's layout flow (issue #205): they occupy
+                                // their own space between the list and the
+                                // prompt bar — the list shrinks from the bottom
+                                // to make room, and no space is left behind when
+                                // none is pending. They stack with each other
+                                // (not over one another), and their combined
+                                // height is capped at ~half the region so a tall
+                                // form still leaves the prompt bar and a healthy
+                                // slice of the list visible (the panel content
+                                // scrolls internally beyond the cap).
+                                if (panelsPending)
+                                  ConstrainedBox(
+                                    key: const ValueKey(
+                                      'structured-pending-panels',
+                                    ),
+                                    constraints: BoxConstraints(
+                                      maxHeight: panelCap,
+                                    ),
+                                    child: SingleChildScrollView(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        children: [
+                                          if (_questions.isNotEmpty)
+                                            QuestionPanel(
+                                              pending: _questions,
+                                              onSubmit: _submitAnswers,
+                                              onDismiss: _dismissQuestion,
+                                              busyId: _answerBusyId,
+                                            ),
+                                          if (_pending.isNotEmpty)
+                                            PermissionBanner(
+                                              pending: _pending,
+                                              onReply: _reply,
+                                              replyBusyId: _replyBusyId,
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                // The prompt bar is capped so its command menu can
+                                // flex to fit (a non-flex column child otherwise
+                                // gets unbounded height and its inner Flexible
+                                // would never shrink). With the pending panels in
+                                // flow (issue #205) it is capped at the space left
+                                // after the panels' cap, so the panels + prompt bar
+                                // never exceed the region (the list absorbs the
+                                // rest); with nothing pending it is capped at the
+                                // full region, exactly as before.
                                 ConstrainedBox(
                                   constraints: BoxConstraints(
-                                    maxHeight: constraints.maxHeight,
+                                    maxHeight: panelsPending
+                                        ? constraints.maxHeight - panelCap
+                                        : constraints.maxHeight,
                                   ),
                                   child: _PromptBar(
                                     controller: _prompt,
