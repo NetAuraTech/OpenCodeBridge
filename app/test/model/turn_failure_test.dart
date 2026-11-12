@@ -33,56 +33,77 @@ void main() {
             error: _noRouteError,
           ),
         ];
-        final failure = turnFailureAt(history, history.length - 1);
-        expect(failure, isNotNull);
-        expect(failure!.error, _noRouteError);
+        final row = turnFailureAt(history, history.length - 1);
+        expect(row, isNotNull);
+        expect(row!.failure.error, _noRouteError);
+        // The non-retryable case (probe Q3): the error lands on the `idle`
+        // marker itself (no assistant row), so the block rides the marker.
+        expect(row.rowIndex, 1);
         // No assistant row, no in-flight retry: the durable state carries no
         // attempt count, so the block must not invent one.
-        expect(failure.attempts, isNull);
+        expect(row.failure.attempts, isNull);
       },
     );
 
-    test('an assistant-carried terminal error (the exhausted-retry case)', () {
+    test('an assistant-carried terminal error (the exhausted-retry case) rides '
+        'the assistant row, not the marker', () {
       final history = [
-        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000),
+        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000), // 0
         SessionMessage(
           id: 'a1',
           role: 'assistant',
           error: _rateLimitError,
           created: 1100,
           completed: 1900,
-        ),
-        SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'),
+        ), // 1
+        SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'), // 2
       ];
-      final failure = turnFailureAt(history, history.length - 1);
-      expect(failure, isNotNull);
+      final row = turnFailureAt(history, history.length - 1);
+      expect(row, isNotNull);
       // The idle carries no error of its own: the block reads the turn's
-      // terminal error off the assistant (the probe's Q3 distinction).
-      expect(failure!.error, _rateLimitError);
-      expect(failure.attempts, isNull);
+      // terminal error off the assistant (the probe's Q3 distinction) and
+      // rides that assistant row (index 1), not the marker (index 2).
+      expect(row!.failure.error, _rateLimitError);
+      expect(row.rowIndex, 1);
+      expect(row.failure.attempts, isNull);
     });
 
-    test('the idle error wins over the assistant error when both are set', () {
-      final history = [
-        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000),
-        SessionMessage(id: 'a1', role: 'assistant', error: _rateLimitError),
-        SessionMessage(
-          id: 'i1',
-          role: 'idle',
-          outcome: 'failed',
-          error: _noRouteError,
-        ),
-      ];
-      final failure = turnFailureAt(history, history.length - 1);
-      expect(failure!.error, _noRouteError);
-    });
+    test(
+      'the idle error wins over the assistant error and stays on the marker',
+      () {
+        final history = [
+          SessionMessage(
+            id: 'u1',
+            role: 'user',
+            text: 'go',
+            created: 1000,
+          ), // 0
+          SessionMessage(
+            id: 'a1',
+            role: 'assistant',
+            error: _rateLimitError,
+          ), // 1
+          SessionMessage(
+            id: 'i1',
+            role: 'idle',
+            outcome: 'failed',
+            error: _noRouteError,
+          ), // 2
+        ];
+        final row = turnFailureAt(history, history.length - 1);
+        // The marker's own error wins, so the block stays on the marker (2),
+        // not the assistant (1).
+        expect(row!.failure.error, _noRouteError);
+        expect(row.rowIndex, 2);
+      },
+    );
 
     test('the attempt count is carried only when the durable state has it', () {
       // The probe's rule: `retry` and `error` are never both on one message.
       // The in-flight row carries the count (a multi-step turn keeps them on
       // separate rows), the terminal row carries the failure.
       final history = [
-        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000),
+        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000), // 0
         SessionMessage(
           id: 'a1',
           role: 'assistant',
@@ -91,16 +112,23 @@ void main() {
             at: 1200,
             error: _rateLimitError,
           ),
-        ),
-        SessionMessage(id: 'a2', role: 'assistant', error: _rateLimitError),
-        SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'),
+        ), // 1
+        SessionMessage(
+          id: 'a2',
+          role: 'assistant',
+          error: _rateLimitError,
+        ), // 2
+        SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'), // 3
       ];
-      final failure = turnFailureAt(history, history.length - 1);
-      expect(failure, isNotNull);
-      expect(failure!.error, _rateLimitError);
+      final row = turnFailureAt(history, history.length - 1);
+      expect(row, isNotNull);
+      expect(row!.failure.error, _rateLimitError);
+      // The error row is `a2` (index 2), not the retry-carrying `a1` (index
+      // 1): the block rides the error's own row.
+      expect(row.rowIndex, 2);
       // The block says how many attempts ran (3), and nothing more — it never
       // invents a maximum.
-      expect(failure.attempts, 3);
+      expect(row.failure.attempts, 3);
     });
 
     test('a succeeded turn has no failure block', () {
@@ -112,7 +140,7 @@ void main() {
       expect(turnFailureAt(history, history.length - 1), isNull);
     });
 
-    test('an interrupted turn is not a failure (no block, distinct label)', () {
+    test('an interrupted turn is not a failure (no failure row at all)', () {
       final history = [
         SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000),
         SessionMessage(id: 'a1', role: 'assistant', text: 'partial'),
@@ -121,17 +149,18 @@ void main() {
       expect(turnFailureAt(history, history.length - 1), isNull);
     });
 
-    test('a failed marker with no error anywhere carries an empty block', () {
+    test('a failed marker with no error anywhere keeps the marker row', () {
       // The verdict is `failed` but neither the idle nor the assistant
-      // carried an error: the block still marks the turn as failed, and
-      // carries no provider copy to render.
+      // carried an error: the block still marks the turn as failed (carrying
+      // no provider copy), and with no error row it rides the marker.
       final history = [
-        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000),
-        SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'),
+        SessionMessage(id: 'u1', role: 'user', text: 'go', created: 1000), // 0
+        SessionMessage(id: 'i1', role: 'idle', outcome: 'failed'), // 1
       ];
-      final failure = turnFailureAt(history, history.length - 1);
-      expect(failure, isNotNull);
-      expect(failure!.error, isNull);
+      final row = turnFailureAt(history, history.length - 1);
+      expect(row, isNotNull);
+      expect(row!.failure.error, isNull);
+      expect(row.rowIndex, 1);
     });
 
     test('only the turn the marker closes is read: earlier failed turns do not leak', () {
@@ -153,8 +182,9 @@ void main() {
       // failure (the previous turn) must not bleed into it. i1 is index 4
       // (succeeded), i0 index 1 (failed).
       expect(turnFailureAt(history, 4), isNull);
-      // …and the earlier marker still reads its own failure.
-      expect(turnFailureAt(history, 1)!.error, _noRouteError);
+      // …and the earlier marker still reads its own failure, on its own row.
+      expect(turnFailureAt(history, 1)!.failure.error, _noRouteError);
+      expect(turnFailureAt(history, 1)!.rowIndex, 1);
     });
 
     test('a marker in the middle of the history resolves its own turn', () {
@@ -179,8 +209,11 @@ void main() {
         ),
       ];
       // i2 (index 6) failed, i0 (index 1) failed, i1 (index 4) succeeded.
-      expect(turnFailureAt(history, 6)!.error, _noRouteError);
-      expect(turnFailureAt(history, 1)!.error, _noRouteError);
+      // Each idle-only failure rides its own marker.
+      expect(turnFailureAt(history, 6)!.failure.error, _noRouteError);
+      expect(turnFailureAt(history, 6)!.rowIndex, 6);
+      expect(turnFailureAt(history, 1)!.failure.error, _noRouteError);
+      expect(turnFailureAt(history, 1)!.rowIndex, 1);
       expect(turnFailureAt(history, 4), isNull);
     });
   });

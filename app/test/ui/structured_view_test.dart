@@ -2980,7 +2980,10 @@ void main() {
       ),
     ];
 
-    final noticeKey = const ValueKey('structured-retry-notice');
+    // The in-flow retry line's key: it now rides on the assistant row that
+    // carries the `retry` (issue #206), scrolling with the history — the old
+    // pinned top-of-band card (`structured-retry-notice`) is gone.
+    final noticeKey = const ValueKey('message-retry');
 
     /// A mutable epoch-millis clock: the panel's retry poll (1s) and the live
     /// footer's tick clock (200ms) both advance as [now] moves, so advancing
@@ -3171,6 +3174,61 @@ void main() {
         final events = await openMidRetry(tester, client: client);
         expect(find.byKey(noticeKey), findsNothing);
         expect(find.textContaining('Retry due'), findsNothing);
+        await events.close();
+      },
+    );
+
+    testWidgets(
+      'the line renders from the loaded history alone: a settled read whose '
+      'assistant row still carries a `retry` shows it in-flow (issue #206)',
+      (tester) async {
+        // Durable state is the source of truth (issue #206): a read of the
+        // history that still carries a `retry` on an assistant row renders the
+        // line on that row — no Active turn, no event stream, no retry event.
+        // (The live poll keeps the in-flight row in sync while the turn runs;
+        // this is the same rule for a history read that has not yet seen the
+        // retry clear.)
+        final client = _FakeClient(
+          details: [_detailOutcome('succeeded')],
+          messages: List.of(attempt2),
+        );
+        await _pump(tester, client: client, wireEvents: false);
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(
+          find.textContaining(
+            'Retry due · attempt 2 · Provider request failed with HTTP 429',
+          ),
+          findsOneWidget,
+        );
+        // The line is part of the message flow: it sits in the chat list, on
+        // the assistant's row (not a card above it).
+        expect(
+          find.ancestor(of: find.byKey(noticeKey), matching: _chatListFinder()),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'the line stays on the assistant row as the attempt climbs in place '
+      '(issue #206)',
+      (tester) async {
+        final client = _RetryReplayClient()..current = List.of(attempt2);
+        final events = await openMidRetry(tester, client: client);
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(find.textContaining('Retry due · attempt 2'), findsOneWidget);
+
+        // The attempt climbs in place on the same assistant row (the poll
+        // re-reads it): the line stays on that row, updating in place — no
+        // second line, no second widget.
+        client.current = List.of(attempt3);
+        await firePoll(tester);
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(find.textContaining('Retry due · attempt 3'), findsOneWidget);
+        expect(
+          find.ancestor(of: find.byKey(noticeKey), matching: _chatListFinder()),
+          findsOneWidget,
+        );
         await events.close();
       },
     );
@@ -6410,7 +6468,9 @@ void main() {
         // Opened with NO event stream (durable-first, issue #157).
         await _pump(tester, client: client, wireEvents: false);
 
-        // The turn-failure block renders on the turn's tail.
+        // The turn-failure block renders on the row that carries the terminal
+        // `error` (issue #206): here the closing `idle` marker itself, since
+        // no assistant row exists (the probe's Q3 non-retryable case).
         expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
         // Its main text is the TUI terminal line, verbatim (the error's
         // message) — no app-invented wording substituted.
@@ -6623,8 +6683,8 @@ void main() {
     );
 
     testWidgets(
-      'an interrupted turn is not styled as a failure (no block, chip '
-      '`interrupted`)',
+      'an interrupted turn is not styled as a failure: no block, a neutral '
+      '"Turn stopped" line on its marker, chip `interrupted` (issue #206)',
       (tester) async {
         const interrupted = <SessionMessage>[
           ...previousTurn,
@@ -6640,6 +6700,11 @@ void main() {
 
         // Not a failure: no terminal error block (a failed-turn style).
         expect(find.byKey(const ValueKey('turn-failure')), findsNothing);
+        // Its neutral in-chat trace (issue #206): "Turn stopped" on the turn's
+        // closing `idle` marker — rendered from the durable history alone
+        // (this open carries no event stream), so a turn stopped from another
+        // client is visible as soon as the history is read.
+        expect(find.text('Turn stopped'), findsOneWidget);
         // The chip carries the interrupted verdict, distinct from `failed`.
         expect(chipText(tester), 'interrupted');
         await events.close();
@@ -6647,7 +6712,8 @@ void main() {
     );
 
     testWidgets(
-      'a successful turn keeps showing no error block and a `succeeded` chip',
+      'a successful turn keeps showing no error block and no "Turn stopped" '
+      'line, and a `succeeded` chip (issue #206)',
       (tester) async {
         final client = _FakeClient(
           details: [_detailOutcome('succeeded')],
@@ -6655,10 +6721,78 @@ void main() {
         );
         final events = await _pump(tester, client: client, wireEvents: false);
         expect(find.byKey(const ValueKey('turn-failure')), findsNothing);
+        // A succeeded turn needs no line of its own: its content and the
+        // frozen turn-stats footer already mark its end.
+        expect(find.text('Turn stopped'), findsNothing);
         expect(chipText(tester), 'succeeded');
         await events.close();
       },
     );
+
+    testWidgets('the terminal failure rides the assistant row that carries the '
+        'exhausted-retry error (issue #206, probe Q3)', (tester) async {
+      // The exhausted-retry case (the probe's Q3 assumption A1): the
+      // terminal `error` lands on the assistant row (the `retry` cleared
+      // once exhausted), and the closing marker carries only the verdict.
+      const exhausted = <SessionMessage>[
+        ...previousTurn,
+        SessionMessage(role: 'user', text: 'one', created: 10000),
+        SessionMessage(
+          id: 'a2',
+          role: 'assistant',
+          error: StructuredError(
+            type: 'provider.rate-limit',
+            message: 'Provider request failed with HTTP 429: {…}',
+            status: 429,
+          ),
+          created: 10000,
+          completed: 11000,
+        ),
+        SessionMessage(id: 'i2', role: 'idle', outcome: 'failed'),
+      ];
+      final client = _FakeClient(
+        details: [_detailOutcome('failed')],
+        messages: exhausted,
+      );
+      final events = await _pump(tester, client: client, wireEvents: false);
+
+      // The failure block is on the row that carries the terminal `error`
+      // — the assistant's, not the marker's (issue #206, probe Q3). The
+      // block's nearest Column ancestor is its row's own Column; that row is
+      // the assistant's (it carries the 'Assistant' label the closing
+      // marker's row lacks), so the block rides the assistant row, not the
+      // marker.
+      expect(find.byKey(const ValueKey('turn-failure')), findsOneWidget);
+      final rowColumn = tester
+          .widgetList<Column>(
+            find.ancestor(
+              of: find.byKey(const ValueKey('turn-failure')),
+              matching: find.byType(Column),
+            ),
+          )
+          .first;
+      expect(
+        find
+            .descendant(
+              of: find.byWidget(rowColumn),
+              matching: find.text('Assistant'),
+            )
+            .evaluate()
+            .isNotEmpty,
+        isTrue,
+      );
+      expect(
+        find.text('Provider request failed with HTTP 429: {…}'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('turn-failure-type')), findsOneWidget);
+      expect(find.text('provider.rate-limit'), findsOneWidget);
+      // The durable state carried no attempt count: the block does not
+      // invent one.
+      expect(find.byKey(const ValueKey('turn-failure-attempts')), findsNothing);
+      expect(chipText(tester), 'failed');
+      await events.close();
+    });
 
     testWidgets(
       'the next successful turn does not inherit the failed block (it stays in '
