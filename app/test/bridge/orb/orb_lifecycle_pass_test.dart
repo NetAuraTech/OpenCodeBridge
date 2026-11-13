@@ -1,8 +1,9 @@
 // The automated lifecycle pass (issue #101, spec §2.10): the single actor
 // of orb automation — 60-min idle auto-stop through the shared stop path,
 // the 24-h stopped-TTL auto-delete with the guard re-evaluated on every
-// pass (never forced), the merged-PR bypass of the TTL, and the
-// "cleanup pending" surfacing of guard-blocked candidates.
+// pass (never forced), the merged-PR bypass of the TTL, the "cleanup
+// pending" surfacing of guard-blocked candidates, and the mid-run gh
+// re-stage on `push-failed` (issue #167, spec §4).
 
 import 'dart:async';
 import 'dart:convert';
@@ -396,15 +397,19 @@ class _Cli {
   }
 }
 
-/// The host gh CLI seam (the merged-PR read): `pr view <branch> …` answers
-/// the scripted state per branch; an unscripted branch exits non-zero (no
-/// PR for the head ref).
+/// The host gh CLI seam: `pr view <branch> …` (the merged-PR read) answers
+/// the scripted state per branch, an unscripted branch exits non-zero (no
+/// PR for the head ref); `auth status` / `auth token` (the mid-run re-stage,
+/// issue #167) answer from [auth], keyed by the full argv.
 class _FakeGh {
   final List<List<String>> args = [];
   final Map<String, String> states = {};
+  final Map<String, GitCliResult> auth = {};
 
   GhRunner get run => (List<String> argv) async {
     args.add(List.of(argv));
+    final authed = auth[argv.join(' ')];
+    if (authed != null) return authed;
     final branch = argv[2];
     final state = states[branch];
     if (state == null) {
@@ -544,6 +549,7 @@ void main() {
       expect(OrbService.idleStopAfter, const Duration(minutes: 60));
       expect(OrbService.stoppedAutoDeleteAfter, const Duration(hours: 24));
       expect(OrbService.lifecyclePassInterval, const Duration(minutes: 1));
+      expect(OrbService.ghRestageBackoff, const Duration(minutes: 5));
     });
 
     group('idle auto-stop (spec §2.10.1)', () {
@@ -835,6 +841,267 @@ void main() {
         docker.runRespond = _guardOk;
         await service.runLifecyclePass(now: t);
         expect(docker.rows.map((r) => r.id), contains('c4'));
+      });
+    });
+
+    group('the mid-run gh re-stage on push-failed (issue #167, spec §4)', () {
+      /// The host gh staging side (the re-stage's [OrbService._stageGhConfig]):
+      /// `auth status` reports the active github.com login, `auth token`
+      /// hands back [token] — or the scripted refusal [tokenRefusal].
+      void hostGh({String token = 'gho_NEW', String? tokenRefusal}) {
+        gh.auth['auth status --json hosts'] = const GitCliResult(
+          exitCode: 0,
+          stdout:
+              '{"hosts":{"github.com":[{"state":"success","active":true,'
+              '"host":"github.com","login":"dev","tokenSource":"keyring"}]}}',
+          stderr: '',
+        );
+        gh.auth['auth token --user dev'] = tokenRefusal == null
+            ? GitCliResult(exitCode: 0, stdout: '$token\n', stderr: '')
+            : GitCliResult(exitCode: 1, stdout: '', stderr: tokenRefusal);
+      }
+
+      /// The in-container probe answer ([OrbService.verifyGhAuth]): a
+      /// passing `gh api user` — or the scripted 401 [refusal].
+      void probe({String? refusal}) {
+        docker.execRespond = (argv) => refusal == null
+            ? const DockerCliResult(exitCode: 0, stdout: 'dev\n', stderr: '')
+            : const DockerCliResult(
+                exitCode: 1,
+                stdout: '',
+                stderr:
+                    'HTTP 401: Bad credentials (https://api.github.com/user)\n',
+              );
+      }
+
+      /// The re-probes the pass made in-container (`docker exec … gh`).
+      int probes() => docker.runArgs
+          .where((a) => a.first == 'exec' && a.contains('gh'))
+          .length;
+
+      /// The host-token reads the pass made (status + token per attempt).
+      int stageAttempts() =>
+          gh.args.where((a) => a.first == 'auth').length ~/ 2;
+
+      test('a running orb whose push is failing gets the host token '
+          're-staged into its live gh config and re-probed in-container — '
+          'no wake', () async {
+        build(withGh: true);
+        hostGh();
+        probe();
+        final row = addRow('g1');
+        File(
+          '${stateRoot.path}/g1/push-failed',
+        ).writeAsStringSync('git push origin HEAD:refs/heads/orb/g1 failed\n');
+
+        await service.runLifecyclePass(now: t);
+
+        // The re-stage wrote the host's current token onto the state-dir gh
+        // config — the running container's own GH_CONFIG_DIR (no `docker cp`,
+        // no restart: gh re-reads hosts.yml on every call).
+        expect(
+          File('${stateRoot.path}/g1/gh/hosts.yml').readAsStringSync(),
+          contains('oauth_token: gho_NEW'),
+        );
+        // A passing stage cleared the stale push-failed marker (the next
+        // push re-proves it).
+        expect(File('${stateRoot.path}/g1/push-failed').existsSync(), isFalse);
+        // The authoritative re-probe ran in the container, on the staged
+        // config dir.
+        final execs = docker.runArgs.where((a) => a.first == 'exec').toList();
+        expect(execs, hasLength(1));
+        expect(
+          execs.single.join(' '),
+          contains('-e GH_CONFIG_DIR=${OrbService.inContainerGhConfigDir}'),
+        );
+        expect(execs.single.join(' '), contains('gh api user'));
+        expect(execs.single.join(' '), contains('orb-g1'));
+        // No wake: the container was never started or stopped, and no
+        // session moved.
+        expect(
+          docker.runArgs.where((a) => a.first == 'start' || a.first == 'stop'),
+          isEmpty,
+        );
+        expect(orbService.deleted, isEmpty);
+        expect(row.state, 'running');
+      });
+
+      test('a dead host token ends up on the card with its cause, without a '
+          'wake (the re-stage fails; the marker stays)', () async {
+        build(withGh: true);
+        hostGh(tokenRefusal: 'The token in default is invalid.');
+        probe();
+        final row = addRow('g2');
+        File(
+          '${stateRoot.path}/g2/push-failed',
+        ).writeAsStringSync('git push origin HEAD:refs/heads/orb/g2 failed\n');
+
+        await service.runLifecyclePass(now: t);
+
+        // The stage failed: the stale marker is kept (it fixed nothing), and
+        // the cause is on the state dir, host-side readable.
+        expect(File('${stateRoot.path}/g2/push-failed').existsSync(), isTrue);
+        expect(
+          File('${stateRoot.path}/g2/gh-auth-failed').readAsStringSync(),
+          contains('The token in default is invalid.'),
+        );
+        // The card composes it from the host-side read — and the pass
+        // probed no container (nothing staged to probe).
+        final rows = await service.list();
+        expect(rows.single.pushFailing, isTrue);
+        expect(rows.single.ghAuthFailed, contains('invalid'));
+        expect(probes(), 0);
+        // No wake: the orb keeps running, never started or stopped.
+        expect(row.state, 'running');
+        expect(
+          docker.runArgs.where((a) => a.first == 'start' || a.first == 'stop'),
+          isEmpty,
+        );
+      });
+
+      test('a stage the in-container probe refuses writes the in-container '
+          'cause (the host gh read the token; GitHub rejected it)', () async {
+        build(withGh: true);
+        hostGh(token: 'gho_DEAD');
+        probe(refusal: 'revoked');
+        final row = addRow('g3');
+        // The boot staged the token that then died: the stale config is
+        // what the probe re-reads.
+        Directory('${stateRoot.path}/g3/gh').createSync(recursive: true);
+        File('${stateRoot.path}/g3/gh/hosts.yml')
+            .writeAsStringSync('github.com:\n    stale: true\n');
+        File(
+          '${stateRoot.path}/g3/push-failed',
+        ).writeAsStringSync('git push origin HEAD:refs/heads/orb/g3 failed\n');
+
+        await service.runLifecyclePass(now: t);
+
+        // The host's token was re-staged (the stage itself passed — it
+        // clears the push marker)…
+        expect(
+          File('${stateRoot.path}/g3/gh/hosts.yml').readAsStringSync(),
+          contains('oauth_token: gho_DEAD'),
+        );
+        expect(File('${stateRoot.path}/g3/push-failed').existsSync(), isFalse);
+        // …and the authoritative probe says GitHub rejects it: the cause is
+        // the in-container one, on the marker the card composes.
+        expect(probes(), 1);
+        expect(
+          File('${stateRoot.path}/g3/gh-auth-failed').readAsStringSync(),
+          contains('Bad credentials'),
+        );
+        final rows = await service.list();
+        expect(rows.single.ghAuthFailed, contains('Bad credentials'));
+        expect(row.state, 'running');
+      });
+
+      test('a permanently broken token is re-probed at most once per backoff '
+          'per marker generation (no per-minute hammering)', () async {
+        build(withGh: true);
+        hostGh(tokenRefusal: 'The token in default is invalid.');
+        probe(refusal: 'revoked');
+        final row = addRow('g4');
+        // The boot staged the token that then died: the stale config keeps
+        // the probe live on every attempt.
+        Directory('${stateRoot.path}/g4/gh').createSync(recursive: true);
+        File('${stateRoot.path}/g4/gh/hosts.yml')
+            .writeAsStringSync('github.com:\n    stale: true\n');
+        File('${stateRoot.path}/g4/push-failed').writeAsStringSync('x\n');
+
+        await service.runLifecyclePass(now: t);
+        expect(probes(), 1, reason: 'the first attempt probes');
+        // Within the backoff: the pass still runs, but re-stages nothing.
+        await service.runLifecyclePass(now: t.add(const Duration(minutes: 4)));
+        expect(probes(), 1, reason: 'the backoff has not expired');
+        // Past it: the generation re-attempts.
+        await service.runLifecyclePass(now: t.add(const Duration(minutes: 5)));
+        expect(probes(), 2, reason: 'the backoff expired: one re-attempt');
+        expect(
+          row.state,
+          'running',
+          reason: 'the throttle never stops the orb',
+        );
+      });
+
+      test('a fresh push-failed generation re-attempts promptly — the '
+          'backoff is per marker generation, not a global pace', () async {
+        build(withGh: true);
+        hostGh();
+        probe();
+        final row = addRow('g5');
+        final marker = File('${stateRoot.path}/g5/push-failed');
+        marker.writeAsStringSync('x\n');
+        final firstGeneration = marker.lastModifiedSync();
+
+        // Attempt 1: the stage passes and clears the marker.
+        await service.runLifecyclePass(now: t);
+        expect(marker.existsSync(), isFalse);
+
+        // A push succeeded (the marker cleared), then the next one failed:
+        // a new generation — its mtime moves past the gate's.
+        marker.writeAsStringSync('x\n');
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        expect(marker.lastModifiedSync(), isNot(firstGeneration));
+
+        await service.runLifecyclePass(now: t.add(const Duration(minutes: 1)));
+        expect(
+          stageAttempts(),
+          2,
+          reason:
+              'a fresh generation re-attempts promptly, inside the '
+              'backoff of the old one',
+        );
+        expect(row.state, 'running');
+      });
+
+      test('the list stays probe-free: a push-failed row triggers no re-stage '
+          'and no container probe from it (spec §2.2/§2.9)', () async {
+        build(withGh: true);
+        hostGh();
+        final row = addRow('g6');
+        File('${stateRoot.path}/g6/push-failed').writeAsStringSync('x\n');
+
+        final rows = await service.list();
+
+        expect(
+          rows.single.pushFailing,
+          isTrue,
+          reason: 'the marker is still composed host-side',
+        );
+        expect(
+          docker.runArgs.where((a) => a.first == 'exec'),
+          isEmpty,
+          reason: 'the list adds no container probe',
+        );
+        expect(
+          gh.args.where((a) => a.first == 'auth'),
+          isEmpty,
+          reason: 'the list never re-stages',
+        );
+        expect(File('${stateRoot.path}/g6/gh/hosts.yml').existsSync(), isFalse);
+        expect(row.state, 'running');
+      });
+
+      test('the pass does not re-stage an orb it is auto-stopping (the wake '
+          're-stages on its shared start path)', () async {
+        build(withGh: true);
+        hostGh(tokenRefusal: 'The token in default is invalid.');
+        probe();
+        final row = addRow('g7');
+        File('${stateRoot.path}/g7/push-failed').writeAsStringSync('x\n');
+
+        // The idle clock starts; the re-stage attempts (the stage fails,
+        // nothing is staged to probe).
+        await service.runLifecyclePass(now: t);
+        expect(stageAttempts(), 1);
+        expect(probes(), 0);
+        // At the threshold the pass auto-stops the orb — and skips the
+        // re-stage (a stopping orb is never probed).
+        await service.runLifecyclePass(now: t.add(const Duration(minutes: 60)));
+
+        expect(row.state, 'exited');
+        expect(stageAttempts(), 1, reason: 'no re-stage of a stopping orb');
+        expect(probes(), 0);
       });
     });
 
