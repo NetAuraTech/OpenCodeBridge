@@ -31,6 +31,13 @@ const double kSessionsSidebarBreakpoint = 600;
 /// same 320 the persistent sidebar column takes on wide screens.
 const double kSessionsDrawerWidth = 320;
 
+/// The narrow drawer's slide time (issue #133): the drawer's list is always
+/// in the tree (parked off-screen when closed), so the open is a pure
+/// position animation — this duration is the whole perceived cost of the
+/// open. 200 ms, the repo's micro-motion pace (see the structured view's
+/// in-flow animations).
+const Duration kDrawerSlideDuration = Duration(milliseconds: 200);
+
 /// The Sessions tab: the home list (spec section 5 endpoint 1, section 6,
 /// orbs section 9.2).
 ///
@@ -927,10 +934,19 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// The narrow (< [kSessionsSidebarBreakpoint]) layout (issue #133): the
   /// detail fills the whole width under a top bar, and the sidebar opens as
   /// an overlay drawer (a scrim behind it) from the top bar's toggle.
+  ///
+  /// The drawer's list is **always in the tree**: closed, it is parked
+  /// off-screen to the left; open, it slides in. A drawer that is inserted
+  /// only while open rebuilds the whole list (every group, every row) on the
+  /// open frame — a perceptible lag on a real list (200+ rows). Keeping it
+  /// built means the open is a position animation only, and the list's rows,
+  /// group expansion, and scroll offset are simply preserved across
+  /// open/close.
   Widget _buildNarrow(double width) {
-    // A Stack that fills the space: the detail column underneath, and — when
-    // open — the scrim and the drawer positioned over it (an overlay, so the
-    // drawer never takes layout space from the detail).
+    // A Stack that fills the space: the detail column underneath, the parked
+    // drawer always in it, and — when open — the scrim positioned over the
+    // detail (an overlay, so the drawer never takes layout space from it).
+    final drawerWidth = min(kSessionsDrawerWidth, width);
     return Stack(
       fit: StackFit.expand,
       clipBehavior: Clip.none,
@@ -949,13 +965,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
             ),
           ],
         ),
-        if (_drawerOpen) ...[
-          // The scrim and the drawer start below the top bar (like a Material
-          // drawer below its AppBar): the top bar stays on top, so the toggle
-          // is always reachable (it closes the drawer too), and the drawer
-          // never hides the control that dismisses it.
+        if (_drawerOpen)
           // The scrim: a tap anywhere on it closes the drawer without
-          // touching the selection (issue #133).
+          // touching the selection (issue #133). It starts below the top bar
+          // (like a Material drawer below its AppBar): the top bar stays on
+          // top, so the toggle is always reachable (it closes the drawer
+          // too), and the drawer never hides the control that dismisses it.
           Positioned(
             top: kToolbarHeight,
             bottom: 0,
@@ -968,21 +983,24 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
               child: Container(color: Colors.black.withValues(alpha: 0.32)),
             ),
           ),
-          // The drawer: the session list from the left edge over the detail.
-          Positioned(
-            top: kToolbarHeight,
-            bottom: 0,
-            left: 0,
-            child: SizedBox(
-              key: const ValueKey('sessions-drawer'),
-              width: min(kSessionsDrawerWidth, width),
-              child: Material(
-                color: Theme.of(context).colorScheme.surface,
-                child: _buildListPane(),
-              ),
-            ),
+        // The drawer: the session list over the detail. Always built —
+        // off-screen (left: -drawerWidth, clipped by the stack's edge) when
+        // closed, slid to the left edge when open. The animation is a
+        // position change only: the child subtree is untouched, so opening
+        // costs one relayout of the moved node, never a rebuild of the list.
+        AnimatedPositioned(
+          key: const ValueKey('sessions-drawer'),
+          top: kToolbarHeight,
+          bottom: 0,
+          left: _drawerOpen ? 0 : -drawerWidth,
+          width: drawerWidth,
+          duration: kDrawerSlideDuration,
+          curve: Curves.easeOut,
+          child: Material(
+            color: Theme.of(context).colorScheme.surface,
+            child: _buildListPane(),
           ),
-        ],
+        ),
       ],
     );
   }
