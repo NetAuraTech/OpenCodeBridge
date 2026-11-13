@@ -874,6 +874,17 @@ class OrbTaskService {
   /// dispatch whose agent has not started its first step. Any other read
   /// error is transient (a transport failure, a degraded orb pass) and
   /// counts for nothing — the next pass retries.
+  ///
+  /// The 404 is conclusive only when the task's orb is actually `running`
+  /// (issue #211): the composite routes the read to the orb's upstream, so a
+  /// missing session is a gone one. While the orb is still booting (the
+  /// auto-wake after a restart, not yet `running`), the composite has no
+  /// upstream for it and the read falls back to the host, which does not
+  /// know the orb session — the 404 is "not routable yet," not "session
+  /// gone." Counting it would settle a mid-flight task `failed` while the
+  /// work still runs: the task stays `running` until the orb is back
+  /// `running` and the turn ends for real (or the session is genuinely
+  /// lost, which the running-orb window then settles).
   Future<void> _check(OrbTask target) async {
     if (target.isDone) return;
     final now = DateTime.now();
@@ -883,6 +894,14 @@ class OrbTaskService {
     } on OpencodeServiceError catch (e) {
       _idleSince.remove(target.id);
       if (e.statusCode == HttpStatus.notFound) {
+        if (!await _missingReadConclusive(target)) {
+          // The orb is not up yet (still booting): the 404 is the composite's
+          // fallback to a host that cannot know the orb session, not proof
+          // the session is gone (issue #211). The window restarts once the
+          // orb is running again.
+          _missingSince.remove(target.id);
+          return;
+        }
         final since = _missingSince.putIfAbsent(target.id, () => now);
         if (now.difference(since) >= settleMissingWindow) {
           // The session itself is gone: no turn outcome can ever arrive.
@@ -942,6 +961,39 @@ class OrbTaskService {
       // No summary is a fine degraded completion.
     }
     await _settle(target, outcome, summary);
+  }
+
+  /// Whether [target]'s missing-session 404 is conclusive (issue #211):
+  /// whether the session is actually gone, or merely unreadable for now.
+  /// Conclusive when the orb is `running` (the composite has an upstream for
+  /// it, so a session it 404s is a gone one), when the orb is gone from the
+  /// list altogether (deleted out from under the task — its in-orb sessions
+  /// are lost with it), and when the orb list cannot be read (docker down —
+  /// a degraded read must not mask a genuinely lost session forever).
+  /// Inconclusive only while the orb's record exists but is not `running` —
+  /// the auto-wake's boot (`preparing`), a stop, a broken boot: the
+  /// composite has no upstream for it, the read falls back to the host, and
+  /// the host does not know the orb session — the 404 is "not routable
+  /// yet," not "session gone." Counting it would settle a mid-flight task
+  /// `failed` while the work still runs; the window restarts once the orb is
+  /// `running` again.
+  Future<bool> _missingReadConclusive(OrbTask target) async {
+    try {
+      for (final row in await orbs.list()) {
+        if (row.id != target.orb) continue;
+        // The orb exists: conclusive only when it can host the session.
+        return row.state == 'running';
+      }
+    } catch (_) {
+      // The orb list cannot be read (docker down, a torn label pass): we
+      // cannot tell a booting orb from a lost one, so fall back to the
+      // original behavior — the missing window may settle. A degraded read
+      // must not mask a genuinely lost session forever (a stuck task).
+      return true;
+    }
+    // The orb is not in the list at all (deleted out from under the task):
+    // its in-orb sessions are lost with it — the 404 is the truth.
+    return true;
   }
 
   /// The single settle path (issue #169): the status, the summary (or the

@@ -263,6 +263,10 @@ void main() {
           );
           final backend = SessionsBackend(service: composite);
           final orbs = _FakeOrbs();
+          // The task service consults the orb list for the task's orb state
+          // (a missing-session 404 is conclusive only for a running orb):
+          // keep its view in step with the composite's.
+          orbs.listResult = [orbState];
           orbs.createSessionResult = Session(
             id: 'ses_task',
             title: 'task',
@@ -312,6 +316,19 @@ void main() {
           // the current state the watcher settles the task `failed` here.
           await Future<void>.delayed(const Duration(milliseconds: 700));
 
+          // The orb is **still booting** (not `running`) and its session reads
+          // 404 through the host fallback. Acceptance: the task must stay
+          // `running` — the 404 is "not routable yet," not "session gone," so
+          // the missing window must not settle it `failed` mid-flight.
+          expect(
+            service.task('task_resume')!.isDone,
+            isFalse,
+            reason:
+                'a boot-time 404 settled the task before the orb finished '
+                '(issue #211, defect #2)',
+          );
+          expect(service.task('task_resume')!.status, 'running');
+
           // The orb boots and the turn ends: its **real** outcome, now.
           orbState = OrbRecord(
             id: orbId,
@@ -322,6 +339,7 @@ void main() {
             created: '2026-01-01T00:00:00Z',
             url: orbUrl,
           );
+          orbs.listResult = [orbState];
           orb.sessions = const [
             OpencodeSession(
               id: 'ses_task',
