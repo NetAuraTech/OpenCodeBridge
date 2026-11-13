@@ -614,3 +614,464 @@ purely-app-side extension (write fractional/integer positions between rows) with
   appears, option B is unaffected (it never touches `metadata`), option A
   would need to coordinate.
 
+## Session archiving
+
+Probe for issue #228 — archiving a session from the app (hide it from the home
+list without deleting it, and come back to it later) versus the only exit today,
+the destructive `DELETE`. Every *observed* claim below was verified live against
+the running opencode service the app's bridge wraps (an `opencode serve` on this
+box, **v2.1.4**, `http://127.0.0.1:4097`, Basic auth) on 2026-11-13, on a
+throwaway session titled `test-archive-228` (created, probed, deleted). The
+service's own `openapi.json` confirms the parameter set and the event names.
+The deliverable is this section only — no UI, no runtime behaviour change.
+
+One environment fact up front, because it shapes Q1 and the version notes: the
+tasking assumed the in-orb build pin was **v2.2.7** (matching the host service
+the issue probed on 2026-11-12). It is not — `opencode --version` and
+`GET /api/info` both report **v2.1.4** in this container, and the binary
+(`/usr/local/bin/opencode`, a single Bun-compiled executable) carries the
+archiving feature in full (both durable events, the `time_archived` migration on
+both `session` and `project`, the TUI's `session.archived` local-store reducer,
+and the OpenAPI `archived` param). The Q2–Q5 endpoint behaviour is
+version-independent and identical to the host's v2.2.7 findings in the issue;
+the only version-dependent detail is *how* the TUI hides archived sessions (Q1).
+The raw JSON below is unreshaped, from the v2.1.4 service, so it can be replayed
+against the real parser.
+
+### Q1 — the TUI's session surfaces (hidden by default; the CLI list is not)
+
+This is the visible side effect of the feature: does archiving from the app also
+hide the session from the user's terminal? Two surfaces matter — the **TUI's
+interactive lists** (the ones a person looks at) and the **CLI `opencode
+session list`** (`<leader>l`).
+
+The **TUI hides archived sessions from every interactive list by default**, and
+no "show archived" toggle was found in either version:
+
+- **v2.2.7 (host, the issue's probe — cited from the issue's binary read):**
+  the "Open recent" menu (`ctrl+o`) queries
+  `session.list({…, limit:50, order:"desc", parentID:null, archived:!1})`; the
+  "Switch session" palette filters its local list by
+  `time.archived === void 0`; the new-session "continue latest" heuristic, the
+  "recently used sessions" dialog, and the session-picker for a directory all
+  query `archived:!1`. (`!1` is minified `false`.)
+- **v2.1.4 (this in-orb binary — confirmed here):** the TUI's session list is
+  built the same way behaviourally, but the filter is applied at the list
+  query rather than as a raw `archived:!1` literal: the list builder applies a
+  `where` on `time_archived` —
+  `where(x?.archived ? void 0 : <predicate>(time_archived))` — i.e. *constrain
+  the list to exclude rows whose `time_archived` is set* unless an `archived`
+  argument is passed. (The helper is minified, so the exact predicate identity
+  is not isolated; the behaviour — hide archived by default — matches the
+  v2.2.7 `archived:!1` surfaces above and the OpenAPI `archived` param.) The
+  same binary also carries the `session.archived` / `session.unarchived`
+  local-store reducer (`case "session.archived": …set "time","archived"…`), so
+  a TUI that is open while a session is archived updates its own list from the
+  event.
+
+The **CLI `opencode session list` (`<leader>l`) does NOT filter** — it queries
+`session.list({project, parentID:null, order:"desc", limit})` with **no**
+`archived` param, so archived rows show. (Verified on the host's v2.2.7 binary
+per the issue; the in-orb v2.1.4 binary carries the same `session.list`
+operation and the same `time_archived`/event machinery, though the exact CLI
+list string was not isolated here — see Assumptions.)
+
+**Verdict:** archiving a session from the app **hides it from the user's TUI
+interactive lists** (the visible side effect), but **not from the CLI
+`opencode session list`**. The app and the TUI therefore agree on the default
+(both hide archived), and there is no service-side "show archived" knob the app
+would need to discover — the app implements its own archived surface. This is a
+soft-hide, consistent with Q2: the session is fully usable while archived.
+
+### Q2 — the archived session's own API surface (fully usable while archived)
+
+While the probe session was archived, its own endpoints all worked, and a new
+turn ran to completion **without unarchiving it**:
+
+```
+POST /api/session                -> 200  (create, title "test-archive-228")
+PATCH /api/session/{id} {"archived":true}  -> 204
+GET  /api/session/{id}          -> 200  (time.archived set)
+GET  /api/session/{id}/message  -> 200  (empty, data:[])
+POST /api/session/{id}/prompt   -> 200  (a new turn runs while archived)
+GET  /api/session/{id}          -> 200  (time.archived STILL set)
+PATCH /api/session/{id} {"archived":false} -> 204
+GET  /api/session/{id}          -> 200  (time.archived absent)
+```
+
+Detail read, unarchived (baseline) — note **no** `time.archived` key:
+
+```json
+{"data":{"id":"ses_e2a94e24cffeEAtHtWl5RB1yo2","projectID":"852276104c2ebb2ed449cbaa3cc940e4eec565e9","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1794581929401,"updated":1794581929401},"title":"test-archive-228","location":{"directory":"/workspace"}}}
+```
+
+Detail read, archived — `time.archived` present (unix-ms):
+
+```json
+{"data":{"id":"ses_e2a94e24cffeEAtHtWl5RB1yo2","projectID":"852276104c2ebb2ed449cbaa3cc940e4eec565e9","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1794581929401,"updated":1794581973085,"archived":1794581973085},"title":"test-archive-228","location":{"directory":"/workspace"}}}
+```
+
+Message read while archived (empty — the turn had not run yet):
+
+```json
+{"data":[],"cursor":{"previous":null,"next":null}}
+```
+
+Prompt accepted while archived (a `steer` inbox item, same shape as an
+unarchived prompt):
+
+```json
+{"data":{"id":"msg_1d56c51ba001Zz8As66o8X5XBV","sessionID":"ses_e2a94e24cffeEAtHtWl5RB1yo2","time":{"created":1794582008251},"type":"user","payload":{"text":"Reply with exactly: ok"},"delivery":"steer"}}
+```
+
+Detail read *after* the turn completed — the turn ran to
+`outcome:"succeeded"` and `time.archived` is **still set** (the turn did not
+unarchive it):
+
+```json
+{"data":{"id":"ses_e2a94e24cffeEAtHtWl5RB1yo2","projectID":"852276104c2ebb2ed449cbaa3cc940e4eec565e9","cost":0,"tokens":{"input":3556,"output":3,"reasoning":0,"cache":{"read":1792,"write":0}},"outcome":"succeeded","time":{"created":1794581929401,"updated":1794582011937,"idle":1794582011939,"archived":1794581973085},"title":"test-archive-228","location":{"directory":"/workspace"}}}
+```
+
+Detail read after unarchiving — `time.archived` is **absent** from the JSON
+(in the v2.2.7 host read it is `null`; either way, absent-or-null = not
+archived):
+
+```json
+{"data":{"id":"ses_e2a94e24cffeEAtHtWl5RB1yo2","projectID":"852276104c2ebb2ed449cbaa3cc940e4eec565e9","cost":0,"tokens":{"input":3556,"output":3,"reasoning":0,"cache":{"read":1792,"write":0}},"outcome":"succeeded","time":{"created":1794581929401,"updated":1794582081565,"idle":1794582011939},"title":"test-archive-228","location":{"directory":"/workspace"}}}
+```
+
+**Verdict: fully usable (soft-hide).** An archived session answers its detail,
+message, and prompt endpoints normally, and a turn runs to completion without
+unarchiving it. Two consequences for the app: (a) the app **can open an
+archived session straight into the structured view** — the per-id routes work
+while archived, so no unarchive-first dance is needed; (b) the app **need not
+refuse to archive an active/mid-turn session** — the turn keeps running
+invisibly and is still observable per-id (the active dot and turn footer still
+work). Whether the app *warns* before archiving an active session is a product
+choice (Q7), not a service constraint.
+
+### Q3 — `search` / `directory` / `project` compose independently with `archived`
+
+With the probe session **archived**, each list param composed with `archived`
+independently (the probe's own directory is `/workspace`; its project id is the
+`8522761…` value above):
+
+| query | rows | probe present? |
+|---|---|---|
+| *(no params — default)* | 1 | yes |
+| `archived=false` | 0 | no |
+| `archived=true` | 1 | yes |
+| `search=test-archive-228` | 1 | yes |
+| `search=test-archive-228&archived=false` | 0 | no |
+| `search=test-archive-228&archived=true` | 1 | yes |
+| `directory=/workspace` | 1 | yes |
+| `directory=/workspace&archived=false` | 0 | no |
+| `directory=/workspace&archived=true` | 1 | yes |
+| `project=8522761…` | 1 | yes |
+| `project=8522761…&archived=false` | 0 | no |
+| `project=8522761…&archived=true` | 1 | yes |
+
+**Verdict: independent, not a conflict.** `search`, `directory`, and `project`
+each compose with `archived` (an AND): the probe appears with no filter and with
+`archived=true`, and is excluded by `archived=false` under every combination.
+The default (no `archived` param) **includes archived rows** — the service does
+not hide them on its own; a client that omits the param sees archived sessions.
+This is why the home list must be filtered deliberately (the app, in the
+recommendation), not accidentally.
+
+### Q4 — orb sessions (the in-orb service is the confirmation)
+
+The in-orb service **is** the confirmation: it is the same binary the host runs
+(`/usr/local/lib/node_modules/@opencode/cli/bin/opencode.exe` resolves for both
+the host's service and this container's service), reporting v2.1.4 here, and the
+Q2/Q3 endpoints behave identically — the raw JSON above is the orb-side
+evidence, taken against this box's own service. So the bridge's per-orb upstream
+(the same `OpencodeHttpService` pointed at the orb's URL) will see the same
+`time.archived` field and the same `archived` list param.
+
+One bridge-side fact the flag depends on: `CompositeOpencodeService.listSessions()`
+(app/lib/bridge/sessions/composite_service.dart, ~line 78) **re-builds every orb
+row from `OpencodeSession`**, copying only `id`, `title`, `projectId`, `created`,
+`location` (and stamping `orb`). It drops any field the `OpencodeSession` model
+does not carry. So **the `archived` field must be added to `OpencodeSession`
+*and* carried through this rebuild**, or an archived orb session would be
+inconsistent with an archived host session (the host row hidden, the orb row
+shown). Host rows are passed through as-is (no rebuild), so they need only the
+model field.
+
+### Q5 — persistence (the durable store)
+
+`time.archived` lives in the WAL-backed SQLite store
+(`~/.local/share/opencode/opencode.db` in this container; the isolated probe used
+`/tmp/opencode-probe/data/opencode/opencode.db` so it never touched a shared
+store), table `session_v2`, column **`time_archived`**. A **read-only** read of
+the store on disk immediately after the PATCH shows the exact value, then `NULL`
+after unarchiving (the live restart was not run — the on-disk store read is the
+verification, the same posture #204's Q3 took for `metadata`):
+
+```
+table=session_v2   columns include: … time_updated, time_idle, time_viewed,
+                    idle_outcome, time_compacting, time_archived, time_suspended …
+while archived:    id=ses_e2a94e24cffeEAtHtWl5RB1yo2
+                   time_archived = 1794582423589
+after unarchive:   id=ses_e2a94e24cffeEAtHtWl5RB1yo2
+                   time_archived = NULL
+```
+
+**Verdict: persisted.** The flag is a durable store column, on disk the moment
+the PATCH lands (before any WAL checkpoint), so it survives a service restart.
+The `time_archived` migration also adds the column to the **`project`** table —
+project-level archiving exists too (`project.list` excludes archived projects
+unless `archived=true`), but it is out of scope for this ticket.
+
+### The live events (Q6 context — how the app learns of an archive)
+
+A one-shot SSE capture on the in-orb service recorded **both** events live, each
+with its durable per-session `seq`:
+
+```json
+{"id":"evt_1d56bc85d001gQCWO1vL6uW21A","created":1794581973085,"type":"session.archived","location":{"directory":"/workspace"},"data":{"sessionID":"ses_e2a94e24cffeEAtHtWl5RB1yo2"},"durable":{"aggregateID":"ses_e2a94e24cffeEAtHtWl5RB1yo2","seq":1,"version":1}}
+```
+
+```json
+{"id":"evt_1d56d701d001zseSctCLBsONZF","created":1794582081565,"type":"session.unarchived","location":{"directory":"/workspace"},"data":{"sessionID":"ses_e2a94e24cffeEAtHtWl5RB1yo2"},"durable":{"aggregateID":"ses_e2a94e24cffeEAtHtWl5RB1yo2","seq":12,"version":1}}
+```
+
+Both are **durable** (`{aggregate:"sessionID", version:1}`), payload
+`{"sessionID": "…"}` — a thin, id-only payload (unlike `session.metadata.updated`,
+which carries the full object). The bridge's `EventHub` re-emits every upstream
+event verbatim and the event service subscribes to the **full** type enum, so
+**both events already reach the app's SSE stream today** — the app simply does
+not handle the two types yet. No hub work is needed; the app just merges
+`data.sessionID` into its cached row (set `archived` true/false) with no
+refetch, exactly as it already merges title and the active dot.
+
+### A/B — where the filter lives
+
+The decision point is which component owns "the home list excludes archived,"
+and how the flag reaches the app. ADR-0001 is the governing constraint: the
+bridge is the app's **single** API, the app never talks to the opencode service
+directly, the bridge re-emits upstream events **verbatim** onto
+`GET /api/events`, and the wrapper is the stable contract the app consumes.
+
+One framing fact differs from #204 and is worth stating, because it flips the
+default intuition: **`archived` is a per-session, service-owned fact, not a
+bridge display coordinate.** #204's order had to live bridge-local precisely
+because a `position` is a *global ordering coordinate the service cannot hold*
+across host+orb. `archived` is the opposite: it lives on the service's own row
+(Q5) and each service filters its **own** rows, so service-side filtering
+composes across host+orb for free. That removes the #204 "can't span services"
+objection to service-side state — and it is the reason option A is at all
+viable here.
+
+- **A — the bridge filters.** `listSessions()` requests `archived=false` from
+  the service; archived sessions are invisible to the app until an explicit
+  "archived" list (the bridge also accepts `?archived=` on its own
+  `GET /api/sessions`). *Pros:* one source of truth — the bridge decides what
+  the home list is, so the app does not re-derive hide/show; the home-list route
+  is self-describing. *Cons (the one that decides it):* `listSessions()` is the
+  **seam**, and the same seam feeds two other consumers today —
+  `SessionsBackend.exists()` (the reopen guard) and
+  `SessionsBackend._defaultModel()` (the "copy the current model" heuristic).
+  If the seam filters `archived=false`, an archived session fails `exists()`
+  (the reopen guard says it doesn't exist) and `_defaultModel()` silently skips
+  it. Filtering at the seam couples a *display* decision to every internal
+  reader. To keep A safe the filter must be scoped to the home-list **route**
+  only, with the seam still returning all sessions — at which point A's
+  "one source of truth" mostly becomes "the route filters a faithful list,"
+  i.e. B's wire plus a route param.
+
+- **B — the app filters (the flag rides on every row).** `listSessions()` keeps
+  returning **all** sessions; each row carries `archived: bool`; the app's home
+  list renders `where(!archived)` by default, with an "Archived" surface for the
+  rest. *Pros:* the seam stays a faithful "all sessions" read, so
+  `exists()`/`_defaultModel()`/any future internal consumer keep working with
+  **zero** behaviour change; a "show archived" toggle is nearly free (the data is
+  already on the row); the wire is purely additive (one `bool` on the model and
+  the row). *Cons:* "every client must implement the same hide-or-show logic" —
+  but the bridge is the single API and the app is the only client, and the TUI
+  (the service's other consumer) already filters its own list independently (Q1),
+  so there is no second in-repo client that could diverge; a future
+  raw-service-only consumer would see archived rows, but that is the service's
+  own default (Q3), not a bridge regression.
+
+- **Both.** The two are compatible — carry the flag on rows (B) *and* let the
+  bridge's `GET /api/sessions` accept `?archived=` (A's route). **Not needed now**:
+  B alone produces every UX shape in Q7 (separate view, toggle, or both), and a
+  later slice can add the `?archived=` route param on top of the flag **without
+  any seam or model change** (it is a filter applied to the already-flagged
+  rows). So the recommendation is B; A's route param is a non-breaking
+  extension, not a prerequisite.
+
+### Recommendation
+
+**B — the flag rides on every row and the app hides/shows locally — with the
+single-verb pass-through write route from Q8 to set it.**
+
+Against the repo's conventions:
+
+1. **The bridge relays service facts; it does not impose display policy.**
+   ADR-0001 makes the bridge the *stable wrapper* over a churning 130-endpoint
+   service, and CONTEXT.md makes it the app's single API. *Which rows count as
+   "home"* is a display choice (a policy the user can toggle), not a service
+   fact — that is the app's concern. B keeps the bridge in its wrapper role: it
+   faithfully relays `time.archived` as a row field. A instead makes the bridge
+   re-derive "what is the home list," a decision it would have to keep in sync
+   with the service's own notion of archived — the kind of app policy the
+   bridge should not own.
+
+2. **B keeps the seam faithful; A breaks two live consumers.** The concrete,
+   code-grounded reason (not a vibe): `listSessions()` today feeds
+   `exists()` (the reopen guard) and `_defaultModel()`. B leaves both untouched.
+   A at the seam breaks both; A at the route is workable but collapses into
+   "B's wire plus a route filter," i.e. B plus extra surface for no first-cut
+   benefit.
+
+3. **It composes across host+orb for free, and the state is already durable.**
+   Because `archived` is a per-session, service-owned fact (Q4/Q5), B does not
+   need any bridge-local store (unlike #204's option B) — the flag is simply
+   carried on each row, host and orb alike (Q4's composite-rebuild caveat), and
+   it survives restarts because the service owns it (Q5). B is the *minimal*
+   bridge change that is also the *complete* one: an additive field, a new
+   seam method, one route, and two already-arriving event types.
+
+4. **Lowest churn, additive wire.** `OpencodeSession.archived` (default false),
+   `Session.archived` on the row, the composite carries it through, one new
+   `OpencodeService.archive(id, bool)` seam method, one `POST /api/sessions/{id}/archive`
+   route, and the app handles the two SSE types it already receives. No route
+   signature change, no behaviour change to any existing consumer.
+
+What B does **not** get, and why that is acceptable: a single bridge-side
+source of truth for "the home list." That is not a requirement the app has
+today (one bridge per host in server mode; a client in client mode). If a later
+slice wants the bridge to own the hide (e.g. for a headless client), the
+`?archived=` route param slots on top of the flag with no seam or model change.
+
+### Q7 — UX shape (implications only, not a decision)
+
+Documented so the slices have a shape to build against; none of this is decided
+here, and all of it is enabled by B (the flag is on every row, so the app can
+render any of these without further bridge work):
+
+- **Separate "Archived" view vs a filter toggle vs both.** All three work off
+  the row flag. A separate view is the more discoverable "come back later"
+  surface (it is the thing the user is told they can find the session in); a
+  home-list toggle is the lower-effort option. Both is fine — they are the same
+  flag, two renderings.
+- **Where the archive action sits.** The natural home is the row menu next to
+  Delete (the home-list row menu already offers Delete today). Archiving is
+  non-destructive, so it can be a lighter-weight action than Delete (no
+  destructive-confirm; at most a "this hides the session — you can unarchive
+  later" note). Unarchive is the same menu, on the archived surface.
+- **Archiving an active / mid-turn session.** Not refused (Q2: the turn keeps
+  running invisibly and stays observable per-id). The app *may* warn, but it is
+  a product choice, not a service constraint — the service happily runs a turn
+  on an archived session.
+- **Per-project vs global.** The flag is per-session (service-owned), so the
+  archived set is naturally **global** (it spans projects); the app can present
+  it however it likes (one global archived list, or grouped by project off the
+  row's existing `project` field). Not a service constraint.
+- **Push notifications.** Expected: **none.** Archiving is a local housekeeping
+  act, unlike a permission request or turn end. The two SSE types
+  (`session.archived` / `session.unarchived`) reach the app's stream today
+  (EventHub re-emits verbatim, full enum subscribed) but are for the app to
+  **merge the row in place** (no refetch), not to push-notify.
+
+### Q8 — the bridge route shape
+
+The service offers **one** verb both ways: `PATCH /api/session/{id}` with
+`{"archived": bool}` (one call each way; the `session.update` handler dispatches
+`payload.archived ? archive : unarchive`). The bridge should mirror that 1:1 —
+**a single pass-through route with a `{"archived": bool}` body, not a
+two-verb pair.** A two-verb pair (`/archive`, `/unarchive`) would invent a split
+the service does not have and force the app to pick the verb; the bool body maps
+cleanly to the service's own body.
+
+On the HTTP method: the bridge's command-route family is
+`POST /api/sessions/{id}/<verb>` (compact / undo / cancel / rename / move /
+fork …, dispatched by `_sessionCommandIn` / `_handleCommand` in
+`bridge_server.dart`), and the bridge already re-frames the service's
+`PATCH rename` as `POST /api/sessions/{id}/rename`. The family-consistent shape
+is therefore **`POST /api/sessions/{id}/archive`** with body
+`{"archived": bool}` → service `PATCH /api/session/{id}` `{"archived": bool}` →
+`204` (matching the other command routes). Unknown session → `404`; malformed
+body → `400` (the existing `_invalidBody` / `_notFound` paths apply). (The
+issue's "PATCH …/archive" framing matches the *service* verb; the *bridge*
+command family is POST, so POST is the consistent choice — either is acceptable,
+but the key decision is single-verb-bool, not two verbs.)
+
+### The wire (option B), ready to cut into slices
+
+- **Model (additive, default `false`):**
+  - `OpencodeSession` (app/lib/bridge/sessions/opencode_service.dart) gains
+    `bool archived` — derived in `_sessionFrom` (opencode_http_service.dart,
+    ~line 1321) as `time.archived != null` (a number when archived, **absent or
+    `null`** when not — Q2). This is the host-row and orb-row carrier.
+  - `CompositeOpencodeService.listSessions()` (composite_service.dart, ~line 78)
+    carries `archived: session.archived` in the orb-row rebuild — **required**,
+    or orb rows drop the flag and archived orb sessions leak into the home list
+    (Q4).
+  - `Session` (app/lib/model/session.dart) gains `bool archived` (default
+    `false`) on the home-list row, in `toJson`/`fromJson`, `copyWith` (so the
+    app can merge the two SSE types in place, as it does for title/active), and
+    `==`. `SessionsBackend._row` (backend.dart, ~line 309) sets
+    `archived: s.archived`.
+
+- **Read (no new read route, no seam behaviour change):** `listSessions()`
+  still returns **all** sessions (the service's default includes archived —
+  Q3), now each carrying `archived`. The home-list route (`GET /api/sessions`,
+  endpoint 1) passes the flag through; the app renders
+  `rows.where((r) => !r.archived)` by default. `exists()` and `_defaultModel()`
+  are unchanged (the seam is faithful). *(Later, non-breaking: the route may
+  accept `?archived=` to filter the already-flagged rows — A's surface, added on
+  top.)*
+
+- **Write (the one new route + one new seam method):**
+  `OpencodeService.archive(String id, bool archived)` (the seam interface),
+  implemented in `OpencodeHttpService` as the service's
+  `PATCH /api/session/{id}` `{"archived": bool}`. Exposed as
+  `POST /api/sessions/{id}/archive`, body `{"archived": bool}` → `204`
+  (Q8), dispatched from the existing `_handleCommand` family.
+  `SessionsBackend.archive(id, bool)` pass-through, beside `delete`.
+
+- **Events (the two types already arriving — the app just handles them):**
+  `session.archived` and `session.unarchived`, payload `{"sessionID": "…"}`,
+  durable `{aggregateID, seq, version}`. The bridge re-emits them verbatim onto
+  `GET /api/events` (no hub work — they are already in the subscribed full
+  enum). The app's home-list handler merges each: set `archived` true on
+  `session.archived`, false on `session.unarchived`, on the cached row by
+  `data.sessionID` — no refetch, no push notification (Q7). No new
+  bridge-native event is needed; the upstream events are the source of truth.
+
+- **What the app does not do:** it never opens an archived session by
+  unarchiving it first (per-id routes work while archived — Q2); it does not
+  add a bridge-local archived store (the service owns the flag — Q5); and it
+  does not build the `?archived=` route in the first slice (it is a later,
+  non-breaking extension — "Both" in the A/B evaluation).
+
+### Assumptions (labelled, per the probe brief)
+
+- **A1.** The in-orb build pin is **v2.1.4**, not the v2.2.7 the tasking
+  assumed (both `opencode --version` and `GET /api/info` report 2.1.4 in this
+  container; the binary carries the full archiving feature regardless). Q2–Q5
+  are version-independent and match the issue's host v2.2.7 findings; the only
+  version-dependent detail is the TUI's *mechanism* (Q1).
+- **A2.** The v2.1.4 TUI hides archived sessions by default by constraining its
+  list query on `time_archived` (the in-orb binary shows
+  `where(x?.archived ? void 0 : <predicate>(time_archived))`; the minified
+  helper's identity was not isolated, but the behaviour matches the v2.2.7
+  `archived:!1` list-param surfaces the issue verified on the host). The CLI
+  `opencode session list` does not filter in either version (verified on the
+  host's v2.2.7 binary per the issue; the exact v2.1.4 CLI list string was not
+  isolated here, though the same `session.list` op and `time_archived` machinery
+  are present in the in-orb binary).
+- **A3.** Project-level archiving (`project.list` excluding archived projects
+  unless `archived=true`) exists in the same build (the migration adds
+  `time_archived` to the `project` table and the `Project.Time` schema carries
+  `archived`), but is out of scope for this ticket.
+- **A4.** `time_archived` on `session_v2` is the durable column that survives a
+  service restart (verified by read-only on-disk read; the live restart was not
+  run against a shared store — the probe used an isolated store). Option B does
+  not depend on restart behaviour at all (the service owns the flag), so this
+  is noted, not load-bearing.
+
