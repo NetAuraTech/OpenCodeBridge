@@ -2399,8 +2399,9 @@ class OrbService {
   // The automated lifecycle pass (issue #101, spec §2.10): the single actor
   // of orb automation — 60-min idle auto-stop through the shared stop path,
   // the 24-h stopped-TTL auto-delete with the guard re-evaluated every pass
-  // (never forced), the merged-PR bypass of the TTL, and the
-  // "cleanup pending" surfacing of guard-blocked candidates.
+  // (never forced), the merged-PR bypass of the TTL, the "cleanup pending"
+  // surfacing of guard-blocked candidates, and the mid-run gh re-stage on
+  // `push-failed` (issue #167, spec §4).
 
   /// The idle threshold before the pass auto-stops an orb (spec §2.10.1):
   /// no busy session for this long. A fixed constant, no knob (a future
@@ -2415,11 +2416,28 @@ class OrbService {
   /// The pass's pace (spec §2.10): ~1 minute over all orbs.
   static const Duration lifecyclePassInterval = Duration(minutes: 1);
 
+  /// The mid-run gh re-stage's backoff (issue #167, spec §4): while the
+  /// `push-failed` marker persists for one generation, the re-stage +
+  /// in-container re-probe runs at most once per this window — a
+  /// permanently broken host token must not hammer a `docker exec` probe
+  /// every pass. A fixed constant, no knob. A fresh marker generation
+  /// re-attempts promptly (the gate is per generation, not a global pace).
+  static const Duration ghRestageBackoff = Duration(minutes: 5);
+
   /// The idle clocks (bridge memory only, spec §2.10): orb id → the instant
   /// the pass first saw it idle after its last busy observation. A busy orb
   /// has no entry (the clock resets); a bridge restart resets them all —
   /// harmless, the stop is lossless.
   final Map<String, DateTime> _idleSince = {};
+
+  /// The gh re-stage gates (bridge memory only, issue #167, spec §4): orb
+  /// id → (the `push-failed` marker's mtime at the last attempt, the
+  /// attempt's wall clock). The mtime is the marker's generation: the hook
+  /// rewrites the file on every failed push, so a fresh failure after a
+  /// clearing moves the generation and re-attempts promptly, while a
+  /// persisting marker stays within the backoff. A bridge restart resets
+  /// the gates — at most one redundant probe (like the idle clocks).
+  final Map<String, (DateTime, DateTime)> _ghRestage = {};
 
   Timer? _lifecycleTimer;
   bool _lifecycleRunning = false;
@@ -2464,7 +2482,11 @@ class OrbService {
   /// 3. orphans, broken orbs, and preparing orbs are left alone (no
   ///    auto-reaping, no auto-force — §2.10.4); [delete]'s guard is the
   ///    leak backstop: a leaked orphan's gone-from-the-remote commits read
-  ///    as unpushed and keep it alive behind the badge.
+  ///    as unpushed and keep it alive behind the badge;
+  /// 4. a **running** orb whose `push-failed` marker is set gets a
+  ///    best-effort mid-run gh re-stage + in-container re-probe
+  ///    ([_lifecycleGhRestage], issue #167, spec §4) — the list itself stays
+  ///    probe-free, this pass is where the container probe lives.
   ///
   /// Every per-orb failure is swallowed (the next pass retries): one orb's
   /// docker hiccup never cancels the pass, and the pass never throws.
@@ -2496,8 +2518,9 @@ class OrbService {
           // one orb never blocks the others.
         }
       }
-      // Idle clocks of orbs that are gone (deleted) or no longer running.
+      // Idle clocks and gh re-stage gates of orbs that are gone (deleted).
       _idleSince.removeWhere((id, _) => !live.contains(id));
+      _ghRestage.removeWhere((id, _) => !live.contains(id));
     } finally {
       _lifecycleRunning = false;
     }
@@ -2507,6 +2530,7 @@ class OrbService {
   Future<void> _lifecycleOrb(OrbRecord record, DateTime now) async {
     switch (record.state) {
       case 'running':
+        var autoStopped = false;
         final busy = await _orbIsBusy(record);
         if (busy == null || busy) {
           // Busy — or its busy state could not be read (degraded service,
@@ -2519,7 +2543,14 @@ class OrbService {
             // stop leaves the clock set: the next pass retries.
             await stop(record.id);
             _idleSince.remove(record.id);
+            autoStopped = true;
           }
+        }
+        if (!autoStopped) {
+          // The mid-run gh re-stage (issue #167, spec §4): only a
+          // still-running orb — an orb this pass is stopping gets its
+          // re-stage + re-probe on the wake's shared start path instead.
+          await _lifecycleGhRestage(record, now);
         }
         return;
       case 'stopped':
@@ -2534,6 +2565,51 @@ class OrbService {
           await _lifecycleStopped(record, now);
         }
     }
+  }
+
+  /// The mid-run gh re-stage (issue #167, spec §4): a running orb whose
+  /// post-commit push is failing (§3.1) may be pushing with a gh token that
+  /// died after staging — revoked, rotated, or an app-OAuth expiry; the boot
+  /// validation ran once, at the start (#166). The staged file lives on the
+  /// state-dir mount, which is the running container's own `GH_CONFIG_DIR`
+  /// (`/root/.local/gh`, §4), so re-writing it updates the running orb's gh
+  /// with no `docker cp` and no restart — gh re-reads `hosts.yml` on every
+  /// call. Hence: re-stage the host's current token (fixes "the token
+  /// rotated, the host has the new one"; a passing stage clears
+  /// `push-failed`), then re-run the authoritative in-container probe —
+  /// the host's token may be dead too (a full revocation, a logged-out
+  /// host), in which case the probe (or the stage's own refusal) writes the
+  /// `gh-auth-failed` cause and the card shows the real reason — no wake.
+  ///
+  /// Runs only here, never in [list] (the hot path stays probe-free,
+  /// §2.2/§2.9). Gated per marker generation (the marker's mtime): while
+  /// the marker persists, at most one re-stage + probe per
+  /// [ghRestageBackoff]; a fresh failure after a clearing re-attempts
+  /// promptly. The marker re-read is host-side (the file the hook writes);
+  /// every failure swallows to the next pass, like the rest of the per-orb
+  /// step (the pass never throws).
+  Future<void> _lifecycleGhRestage(OrbRecord record, DateTime now) async {
+    final marker = File('${stateRoot.path}/${record.id}/push-failed');
+    if (!marker.existsSync()) {
+      // No failed push: the boot-time staging stands (or the hook's last
+      // push cleared the marker — a new failure is a new generation).
+      _ghRestage.remove(record.id);
+      return;
+    }
+    final generation = marker.lastModifiedSync();
+    final gate = _ghRestage[record.id];
+    if (gate != null &&
+        gate.$1 == generation &&
+        now.difference(gate.$2) < ghRestageBackoff) {
+      return; // The same generation, still inside the backoff.
+    }
+    _ghRestage[record.id] = (generation, now);
+    // Best effort, in this order: the re-stage (a passing one clears
+    // `push-failed` and `gh-auth-failed`), then the probe — which
+    // early-returns when nothing is staged, so a dead host token costs
+    // exactly the host-side stage, no container probe.
+    await _stageGhConfig(record.id);
+    await verifyGhAuth(record.id, 'orb-${record.id}');
   }
 
   /// The stopped-orb candidate rule: merged-PR bypass first (a merged orb
