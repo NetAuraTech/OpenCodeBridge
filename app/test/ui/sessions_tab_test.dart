@@ -1243,10 +1243,13 @@ void main() {
 
           // No persistent sidebar: the wide rail and list column are gone.
           expect(listPane, findsNothing);
-          // No overlay drawer until opened: the list is not on screen yet.
-          expect(drawer, findsNothing);
+          // No scrim until opened. The drawer itself is already built —
+          // parked off-screen to the left (the list stays warm so the open
+          // is a slide, not a cold rebuild).
           expect(scrim, findsNothing);
-          expect(find.byKey(const ValueKey('sessions-list')), findsNothing);
+          final parked = tester.getRect(drawer);
+          expect(parked.right, lessThanOrEqualTo(0));
+          expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
 
           // The detail fills the screen (no selection yet, so the empty hint),
           // flush to the left edge — nothing to the left of it.
@@ -1316,8 +1319,9 @@ void main() {
           await tester.pumpAndSettle();
           await tester.tap(find.byKey(const ValueKey('session-ses_1')));
           await tester.pumpAndSettle();
-          // The selection closed the drawer and shows the detail underneath.
-          expect(drawer, findsNothing);
+          // The selection closed the drawer (parked off-screen) and shows the
+          // detail underneath.
+          expect(tester.getRect(drawer).right, lessThanOrEqualTo(0));
           expect(scrim, findsNothing);
           expect(find.byType(StructuredSessionPanel), findsOneWidget);
           expect(find.text('fix the flaky test'), findsWidgets);
@@ -1330,7 +1334,7 @@ void main() {
           expect(drawer, findsOneWidget);
           await tester.tapAt(const Offset(350, 400));
           await tester.pumpAndSettle();
-          expect(drawer, findsNothing);
+          expect(tester.getRect(drawer).right, lessThanOrEqualTo(0));
           expect(scrim, findsNothing);
           // Still on the session that was selected, not reset.
           expect(find.byType(StructuredSessionPanel), findsOneWidget);
@@ -1353,8 +1357,9 @@ void main() {
         await tester.tap(find.byKey(const ValueKey('session-ses_3')));
         await tester.pumpAndSettle();
 
-        // The drawer is gone and the detail underneath shows that session.
-        expect(drawer, findsNothing);
+        // The drawer is parked off-screen and the detail underneath shows that
+        // session.
+        expect(tester.getRect(drawer).right, lessThanOrEqualTo(0));
         expect(scrim, findsNothing);
         expect(find.byType(StructuredSessionPanel), findsOneWidget);
         expect(
@@ -1942,7 +1947,14 @@ void main() {
 
             await tester.tap(find.byKey(const ValueKey('session-ses_1')));
             await tester.pumpAndSettle();
-            expect(find.byKey(const ValueKey('sessions-drawer')), findsNothing);
+            // The drawer is parked off-screen again (the list stays warm in
+            // the tree — it is never destroyed on close).
+            expect(
+              tester
+                  .getRect(find.byKey(const ValueKey('sessions-drawer')))
+                  .right,
+              lessThanOrEqualTo(0),
+            );
             expect(find.byType(StructuredSessionPanel), findsOneWidget);
             expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
           }
