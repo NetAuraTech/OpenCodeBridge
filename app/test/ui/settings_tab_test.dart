@@ -179,6 +179,44 @@ void main() {
       expect(settings.notifyTurnEnded, isTrue);
     });
 
+    testWidgets('the desktop sound toggle (issue #246) defaults on and '
+        'persists off', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = await pumpSettings(tester, mode: AppMode.client);
+
+      // The sound switch sits with the push toggles, below them. The generic
+      // scroll helper stops as soon as the tile is *any* amount in view,
+      // which leaves its centre (the tap target) below the viewport: drag a
+      // few more steps until the centre is comfortably on screen.
+      await scrollSettings(tester, find.byKey(const ValueKey('sound-events')));
+      final switchFinder = find.byKey(const ValueKey('sound-events'));
+      for (var i = 0; i < 10; i++) {
+        final center = tester.getCenter(switchFinder, warnIfMissed: false);
+        if (center.dy > 80 && center.dy < 520) break;
+        await tester.drag(find.byType(ListView), const Offset(0, -200));
+        await tester.pump();
+      }
+      final tile = tester
+          .widgetList<SwitchListTile>(
+            find.byKey(const ValueKey('sound-events')),
+          )
+          .single;
+      expect(tile.value, isTrue); // On by default.
+      expect(settings.soundEvents, isTrue);
+
+      await tester.tap(find.byKey(const ValueKey('sound-events')));
+      await tester.pump();
+      expect(settings.soundEvents, isFalse);
+      expect(
+        (await AppSettings.load()).soundEvents,
+        isFalse,
+      ); // Persisted across launches.
+
+      await tester.tap(find.byKey(const ValueKey('sound-events')));
+      await tester.pump();
+      expect(settings.soundEvents, isTrue);
+    });
+
     testWidgets('shows the app version', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await pumpSettings(tester, mode: AppMode.client);

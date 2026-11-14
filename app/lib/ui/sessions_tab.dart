@@ -74,6 +74,7 @@ class SessionsTab extends StatefulWidget {
     this.settings,
     this.onThemeModeChanged,
     this.onOrbChipTapped,
+    this.onEventSource,
   });
 
   /// The tunnel's Access login (issue #23, client mode); `null` in server
@@ -136,6 +137,14 @@ class SessionsTab extends StatefulWidget {
   /// the user taps an orb chip on a session row, so the caller (the shell)
   /// can switch to the Orbs tab and highlight that orb's card.
   final ValueChanged<String>? onOrbChipTapped;
+
+  /// Hands the tab's unified-event source to the caller (issue #246) so an
+  /// app-level listener (the desktop session sounds) can subscribe to the
+  /// *same* stream the tab uses — no second SSE connection. Called with the
+  /// [EventSource] when it is set up, and with `null` when it is torn down
+  /// (so a source that appears and disappears as the tunnel URL changes is
+  /// tracked). `null` leaves the source to the tab alone.
+  final void Function(EventSource? source)? onEventSource;
 
   @override
   State<SessionsTab> createState() => SessionsTabState();
@@ -388,6 +397,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
     unawaited(_events!.connect());
     _eventsSub = _events!.events.listen(_onBridgeEvent);
+    // The same stream, shared with the app-level listeners (issue #246's
+    // desktop sounds): one SSE connection serves every consumer.
+    widget.onEventSource?.call(_events);
   }
 
   /// Stops the event source, disconnecting it only when the tab owns it.
@@ -397,6 +409,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     final source = _events;
     if (source == null) return;
     _events = null;
+    widget.onEventSource?.call(null);
     if (_ownsEvents) {
       _ownsEvents = false;
       unawaited(source.disconnect());

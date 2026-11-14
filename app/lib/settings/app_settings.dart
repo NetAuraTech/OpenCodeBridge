@@ -21,6 +21,7 @@ class AppSettings {
   static const String _keyNotifyTurnEnded = 'notify.turnEnded';
   static const String _keyNotifyDocker = 'notify.dockerContainer';
   static const String _keyFirebaseProject = 'notify.firebaseProject';
+  static const String _keySoundEvents = 'sound.events';
 
   final SharedPreferences _prefs;
 
@@ -86,6 +87,14 @@ class AppSettings {
 
   set notifyDockerContainer(bool value) =>
       _prefs.setBool(_keyNotifyDocker, value);
+
+  /// The desktop session-sound toggle (issue #246): on by default, so a
+  /// fresh install plays the sounds until the user turns them off. Desktop
+  /// only — the app never plays the sounds on Android (FCM push covers
+  /// those moments there), so the toggle is a no-op off desktop.
+  bool get soundEvents => _prefs.getBool(_keySoundEvents) ?? true;
+
+  set soundEvents(bool value) => _prefs.setBool(_keySoundEvents, value);
 
   /// The Firebase project's `google-services.json` (issue #24, pasted in
   /// Settings): the FCM token's setup step. `''` when not set yet.

@@ -10,6 +10,7 @@ import 'bridge/bridge_server.dart';
 import 'client/connection_monitor.dart';
 import 'notify/notification_service.dart';
 import 'settings/app_settings.dart';
+import 'sound/session_sound.dart';
 import 'tunnel_url.dart';
 import 'ui/home_shell.dart';
 import 'ui/mode_choice_screen.dart';
@@ -43,6 +44,11 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
   AccessSession? _access;
   NotificationService? _notifications;
 
+  /// The desktop session-sound service (issue #246), created once the
+  /// settings are loaded (its toggle reads them live). `null` until then;
+  /// the shell hands it the event source (see [HomeShell.onEventSource]).
+  SessionSoundService? _sounds;
+
   /// The desktop host: server or client at every launch.
   bool get _showsModeChoice => defaultTargetPlatform == TargetPlatform.linux;
 
@@ -66,6 +72,9 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
   Future<void> _boot() async {
     final settings = await AppSettings.load();
     if (!mounted) return;
+    // The desktop session sounds (issue #246): the toggle is read from the
+    // live settings on every event, so a change in Settings applies at once.
+    _sounds = SessionSoundService.live(() => settings.soundEvents);
     setState(() => _settings = settings);
     if (!_showsModeChoice) {
       await _enter(settings, AppMode.client);
@@ -249,6 +258,10 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
           // re-themes from the same settings (issue #49).
           if (mounted) setState(() {});
         },
+        // The desktop session sounds (issue #246): the app-level listener
+        // subscribes to the Sessions tab's event stream — the same stream,
+        // so the sounds play on any tab and in an unfocused window alike.
+        onEventSource: (source) => unawaited(_sounds?.attach(source)),
       ),
     );
   }
@@ -257,6 +270,7 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _monitor.dispose();
+    unawaited(_sounds?.detach());
     unawaited(_notifications?.stop());
     final bridge = _bridge;
     if (bridge != null) bridge.stop();
