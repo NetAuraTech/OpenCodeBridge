@@ -353,15 +353,23 @@ class _FakeDocker {
 }
 
 /// The GitRunner seam (the move-to-orb's create probes the remote and the
-/// host identity).
+/// identity, both at the checkout — the fake is keyed on the working
+/// directory, issue #240).
 class _FakeGit {
-  final List<List<String>> args = [];
+  final List<(String?, List<String>)> calls = [];
+
   final Map<String, GitCliResult> results = {};
 
   GitRunner get run => (List<String> argv, {String? workingDirectory}) async {
-    args.add(List.of(argv));
-    return results[argv.join(' ')] ??
-        const GitCliResult(exitCode: 0, stdout: '', stderr: '');
+    calls.add((workingDirectory, List.of(argv)));
+    final directory = workingDirectory ?? '*';
+    final key = '$directory ${argv.join(' ')}';
+    return results[key] ??
+        const GitCliResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'fatal: no such config',
+        );
   };
 }
 
@@ -552,19 +560,22 @@ void main() {
       final context = OrbBuildContext(dir: Directory('${root.path}/ctx'));
       await context.materialize();
       git = _FakeGit();
-      git.results['remote get-url origin'] = const GitCliResult(
+      // The git calls run at the project checkout (issue #240): the identity
+      // read is keyed on the working directory like in the main orb suite.
+      git.results['${checkout.path} remote get-url origin'] =
+          const GitCliResult(
+            exitCode: 0,
+            stdout: 'https://github.com/acme/app.git\n',
+            stderr: '',
+          );
+      git.results['${checkout.path} config user.name'] = const GitCliResult(
         exitCode: 0,
-        stdout: 'https://github.com/acme/app.git\n',
+        stdout: 'HeinTouchableFR\n',
         stderr: '',
       );
-      git.results['config user.name'] = const GitCliResult(
+      git.results['${checkout.path} config user.email'] = const GitCliResult(
         exitCode: 0,
-        stdout: 'Lhomme Aymeric\n',
-        stderr: '',
-      );
-      git.results['config user.email'] = const GitCliResult(
-        exitCode: 0,
-        stdout: 'aymeric@example.com\n',
+        stdout: 'HeinTouchableFR@users.noreply.github.com\n',
         stderr: '',
       );
       docker = _FakeDocker();
@@ -2246,7 +2257,7 @@ void main() {
 
           // The create ran (the git remote probe, the labeled container,
           // the env injection, the start) and the move landed on it.
-          expect(git.args, isNotEmpty);
+          expect(git.calls, isNotEmpty);
           expect(
             docker.runArgs.any((a) => a.first == 'create' && a.contains('-l')),
             isTrue,

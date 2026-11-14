@@ -216,7 +216,8 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   /// The env the bridge passes at `docker create` (spec §2.3): `ORB_ID`
   /// (the orb id, which the hook bakes into its push refspec),
   /// `ORB_REPO_URL` (the project's GitHub remote url, spec §4),
-  /// `ORB_GIT_NAME`/`ORB_GIT_EMAIL` (the host's git identity, copied verbatim
+  /// `ORB_GIT_NAME`/`ORB_GIT_EMAIL` (the project checkout's git identity —
+  /// repo-local first, global fallback — copied verbatim
   /// — ADR-0001, the app never sees the values),
   /// `ORB_BASE_BRANCH` (optional, issue #100 spec §3.3: the seed's branch —
   /// the first-start clone checks that branch out instead of the remote's
