@@ -136,6 +136,42 @@ class SessionsClient {
     }
   }
 
+  /// Archives ([archived] true) or unarchives (false) a session (issue
+  /// #234): the bridge's `POST /api/sessions/{id}/archive` pass-through with
+  /// the `{"archived": archived}` body, which the service answers 204 for.
+  /// The seam stays faithful either way — an archived session's per-id routes
+  /// keep working — so the home list only filters its surface from the row's
+  /// `archived` fact. The row's flag flips on the `session.archived` /
+  /// `session.unarchived` events the same route emits (issue #235), so the
+  /// caller does not re-fetch. A failure surfaces as a
+  /// [SessionsClientError] (unknown session → 404, malformed body → 400).
+  Future<void> archive(String id, bool archived) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'POST',
+        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/archive'),
+        body: jsonEncode({'archived': archived}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
+      await response.drain<void>();
+      if (response.statusCode != HttpStatus.noContent) {
+        throw SessionsClientError(
+          response.statusCode,
+          'archive of $id was not accepted',
+        );
+      }
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Deletes a session (spec section 5, endpoint 4): the bridge performs the
   /// service deletion and the persistence-record removal in one action.
   Future<void> delete(String id) async {

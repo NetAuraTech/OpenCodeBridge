@@ -194,6 +194,13 @@ void main() {
     expect(sender.sent, isEmpty);
   });
 
+  test('the archive events (issue #235) are not push events: archiving is a '
+      'local housekeeping act, merged into the row, not announced', () async {
+    await dispatcher.write(opencode('session.archived'));
+    await dispatcher.write(opencode('session.unarchived'));
+    expect(sender.sent, isEmpty);
+  });
+
   test('the body falls back to the session id when the labeler '
       'is absent or fails', () async {
     final bareSender = _FakeSender();

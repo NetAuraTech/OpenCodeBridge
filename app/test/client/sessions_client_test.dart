@@ -23,6 +23,7 @@ void main() {
   late List<String> setAgentBodies;
   late List<String> renameBodies;
   late List<String> moveBodies;
+  late List<String> archiveBodies;
   late List<String> btwBodies;
   late List<String> connectBodies;
   late List<String> worktreesQueries;
@@ -34,6 +35,7 @@ void main() {
   var failDelete = false;
   var failProjects = false;
   var failDetail = false;
+  var failArchive = false;
 
   setUp(() async {
     deletedPaths = [];
@@ -45,6 +47,7 @@ void main() {
     setAgentBodies = [];
     renameBodies = [];
     moveBodies = [];
+    archiveBodies = [];
     btwBodies = [];
     connectBodies = [];
     worktreesQueries = [];
@@ -53,6 +56,7 @@ void main() {
     failDelete = false;
     failProjects = false;
     failDetail = false;
+    failArchive = false;
     server = await HttpServer.bind('127.0.0.1', 0);
     server.listen((request) async {
       final response = request.response;
@@ -522,6 +526,23 @@ void main() {
           response.statusCode = HttpStatus.noContent;
         }
       } else if (request.method == 'POST' &&
+          request.uri.path.endsWith('/archive')) {
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/archive'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else if (failArchive) {
+          response.statusCode = HttpStatus.badGateway;
+          response.write(jsonEncode({'error': 'opencode_unreachable'}));
+        } else {
+          archiveBodies.add(raw);
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'POST' &&
           request.uri.path.endsWith('/btw')) {
         final raw = await utf8.decodeStream(request);
         final id = request.uri.path.substring(
@@ -654,6 +675,43 @@ void main() {
       expect(e.statusCode, HttpStatus.notFound);
     }
   });
+
+  test('archive posts {"archived": true} to POST /api/sessions/{id}/archive '
+      'and accepts 204', () async {
+    await client.archive('ses_1', true);
+    expect(archiveBodies, [
+      jsonEncode({'archived': true}),
+    ]);
+  });
+
+  test('unarchive posts {"archived": false} and accepts 204', () async {
+    await client.archive('ses_1', false);
+    expect(archiveBodies, [
+      jsonEncode({'archived': false}),
+    ]);
+  });
+
+  test('archive maps the bridge 404 to SessionsClientError(404)', () async {
+    try {
+      await client.archive('ses_missing', true);
+      fail('expected SessionsClientError');
+    } on SessionsClientError catch (e) {
+      expect(e.statusCode, HttpStatus.notFound);
+    }
+  });
+
+  test(
+    'archive maps a non-204 to SessionsClientError with the status',
+    () async {
+      failArchive = true;
+      try {
+        await client.archive('ses_1', true);
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.badGateway);
+      }
+    },
+  );
 
   test('projects parses the rows into Project objects', () async {
     final rows = await client.projects();
