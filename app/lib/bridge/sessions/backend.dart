@@ -225,6 +225,14 @@ class SessionsBackend {
   /// Delete (spec §5 endpoint 4): the service `DELETE`.
   Future<void> delete(String id) => service.deleteSession(id);
 
+  /// Archive or unarchive (issue #234): a pass-through beside [delete], the
+  /// service's single-verb `PATCH` (`{"archived": bool}`, one call each way,
+  /// `204`). The seam stays faithful — [list] keeps returning the archived
+  /// rows, each carrying its [Session.archived] fact; the app hides them on
+  /// its own surface (issue #235).
+  Future<void> archive(String id, bool archived) =>
+      service.archive(id, archived);
+
   // The structured-view reads/writes (spec §5, endpoints 5–9) are pure
   // pass-throughs to the service seam, so they are exposed directly.
   Future<SessionDetail> getDetail(String id) => service.getDetail(id);
@@ -374,7 +382,8 @@ class SessionsBackend {
   Future<String> plugins() => service.plugins();
 
   /// One home-list row, from the service's session plus its project name,
-  /// active fact, waiting fact (issue #208), and pinned fact (issue #237).
+  /// active fact, waiting fact (issue #208), pinned fact (issue #237), and
+  /// the archived fact (issue #234).
   Session _row(
     OpencodeSession s,
     Map<String, String> names,
@@ -395,6 +404,7 @@ class SessionsBackend {
       orb: s.orb,
       waiting: waiting,
       pinned: pinned,
+      archived: s.archived,
     );
   }
 }

@@ -2144,8 +2144,8 @@ void main() {
           );
 
           // The home-list wire shape carries no unread field; the row still
-          // carries the existing active fact and the waiting fact (issue
-          // #208), and nothing else.
+          // carries the existing active fact, the waiting fact (issue #208),
+          // and the archived fact (issue #234), and nothing else.
           final row = (await client.list()).single;
           final wire = row.toJson();
           expect(wire.containsKey('unread'), isFalse);
@@ -2161,6 +2161,7 @@ void main() {
               'active',
               'waiting',
               'pinned',
+              'archived',
             },
           );
         },

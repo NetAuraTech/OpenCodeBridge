@@ -84,6 +84,10 @@ class CompositeOpencodeService implements OpencodeService {
               created: session.created,
               location: session.location,
               orb: entry.key,
+              // The rebuild copies only the model's fields: the archived
+              // fact must ride through or an archived orb session would
+              // leak into the home list as unarchived (research Q4).
+              archived: session.archived,
             ),
         ]);
       } catch (_) {
@@ -256,6 +260,10 @@ class CompositeOpencodeService implements OpencodeService {
     await service.deleteSession(id);
     _owner.remove(id);
   }
+
+  @override
+  Future<void> archive(String id, bool archived) async =>
+      (await _route(id)).archive(id, archived);
 
   // The host-only surface: the registries are identical across orbs (spec
   // §7.4) and creation happens on the host.

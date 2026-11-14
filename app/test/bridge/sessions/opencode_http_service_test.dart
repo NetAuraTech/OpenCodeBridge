@@ -17,13 +17,15 @@ import 'cancel_contract.dart';
 /// small pages to exercise the client's cursor loop.
 void main() {
   const password = 'secret';
-  // The service's `order=desc` (newest first) page order.
+  // The service's `order=desc` (newest first) page order. `ses_3` carries the
+  // service's `time.archived` fact (issue #234, the research's raw list item):
+  // a number while archived; absent or `null` when not.
   final allSessions = [
     {
       'id': 'ses_3',
       'title': 'c',
       'projectID': 'p2',
-      'time': {'created': 300},
+      'time': {'created': 300, 'archived': 301},
       'location': {'directory': '/c'},
     },
     {
@@ -340,6 +342,7 @@ void main() {
   final generateBodies = <Map<String, Object?>>[];
   final connectBodies = <Map<String, Object?>>[];
   final renameBodies = <Map<String, Object?>>[];
+  final archivedBodies = <Map<String, Object?>>[];
   final deletedPaths = <String>[];
   // Cancel-a-turn (issue #158): the recorded `/api/session/{id}/interrupt`
   // paths, in request order.
@@ -555,8 +558,22 @@ void main() {
         );
       } else if (path == '/api/session/ses_1' && req.method == 'PATCH') {
         final body = await utf8.decodeStream(req);
-        renameBodies.add(jsonDecode(body) as Map<String, Object?>);
+        final decoded = jsonDecode(body) as Map<String, Object?>;
+        // The service's single PATCH verb carries either `title` (rename) or
+        // `archived` (issue #234); the fake records each by its own field.
+        if (decoded.containsKey('archived')) {
+          archivedBodies.add(decoded);
+        } else {
+          renameBodies.add(decoded);
+        }
         resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_orb_archived' &&
+          req.method == 'PATCH') {
+        final body = await utf8.decodeStream(req);
+        archivedBodies.add(jsonDecode(body) as Map<String, Object?>);
+        resp.statusCode = HttpStatus.noContent;
+      } else if (path == '/api/session/ses_unknown' && req.method == 'PATCH') {
+        resp.statusCode = HttpStatus.notFound;
       } else if (path == '/api/session/ses_1/move' && req.method == 'POST') {
         final body = await utf8.decodeStream(req);
         moveBodies.add(jsonDecode(body) as Map<String, Object?>);
@@ -700,8 +717,78 @@ void main() {
         expect(list.first.projectId, 'p2');
         expect(list.first.created, 300);
         expect(list.first.location, '/c');
+        // The archived fact rides the row (issue #234): ses_3 carries
+        // `time.archived` in the fake's raw list; the other two do not.
+        expect(list.map((s) => s.archived).toList(), [true, false, false]);
       },
     );
+
+    test('listSessions derives archived from time.archived '
+        '(issue #234: set -> true, absent or null -> false)', () async {
+      // Replay the research's raw list items (unreshaped service JSON)
+      // through the real parser, one item per shape:
+      //  - `time.archived` set (a number) -> archived (v2.1.4 shape);
+      //  - `time.archived: null` -> not archived (the v2.2.7 shape, the
+      //    service's explicit null after an unarchive);
+      //  - `time` without an `archived` key -> not archived (the common
+      //    shape);
+      //  - no `time` at all -> not archived (tolerance).
+      final rawSessions = [
+        {
+          'id': 'ses_arch_set',
+          'title': 'archived',
+          'projectID': 'p1',
+          'time': {'created': 100, 'archived': 1794581973085},
+          'location': {'directory': '/a'},
+        },
+        {
+          'id': 'ses_arch_null',
+          'title': 'null',
+          'projectID': 'p1',
+          'time': {'created': 200, 'archived': null},
+          'location': {'directory': '/b'},
+        },
+        {
+          'id': 'ses_arch_absent',
+          'title': 'absent',
+          'projectID': 'p1',
+          'time': {'created': 300},
+          'location': {'directory': '/c'},
+        },
+        {'id': 'ses_arch_notime', 'title': 'no time', 'projectID': 'p1'},
+      ];
+      final pageServer = await HttpServer.bind('127.0.0.1', 0);
+      pageServer.listen((req) async {
+        final resp = req.response;
+        resp.headers.contentType = ContentType.json;
+        if (req.uri.path == '/api/session') {
+          resp.write(
+            jsonEncode({
+              'data': rawSessions,
+              'cursor': {'next': null},
+            }),
+          );
+        } else {
+          resp.statusCode = HttpStatus.notFound;
+        }
+        await resp.close();
+      });
+      try {
+        final service = OpencodeHttpService(
+          baseUrl: Uri.parse('http://127.0.0.1:${pageServer.port}/'),
+          password: password,
+        );
+        final list = await service.listSessions();
+        expect(list.map((s) => (s.id, s.archived)).toList(), [
+          ('ses_arch_set', true),
+          ('ses_arch_null', false),
+          ('ses_arch_absent', false),
+          ('ses_arch_notime', false),
+        ]);
+      } finally {
+        await pageServer.close(force: true);
+      }
+    });
 
     test('projectNames derives names from canonical when absent', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
@@ -1591,6 +1678,41 @@ void main() {
       expect(renameBodies, [
         {'title': 'the new title'},
       ]);
+    });
+
+    test(
+      'archive PATCHes the session with the single-verb body (issue #234)',
+      () async {
+        archivedBodies.clear();
+        await service.archive('ses_1', true);
+        expect(archivedBodies, [
+          {'archived': true},
+        ]);
+      },
+    );
+
+    test(
+      'unarchive PATCHes the session with `archived: false` (issue #234)',
+      () async {
+        archivedBodies.clear();
+        await service.archive('ses_orb_archived', false);
+        expect(archivedBodies, [
+          {'archived': false},
+        ]);
+      },
+    );
+
+    test('archive on an unknown session propagates the service 404', () async {
+      await expectLater(
+        service.archive('ses_unknown', true),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            HttpStatus.notFound,
+          ),
+        ),
+      );
     });
 
     test('move posts the new directory', () async {

@@ -98,6 +98,13 @@ class FakeService implements OpencodeService {
     sessions.removeWhere((s) => s.id == id);
   }
 
+  final List<(String, bool)> archived = [];
+
+  @override
+  Future<void> archive(String id, bool archived) async {
+    this.archived.add((id, archived));
+  }
+
   @override
   Future<SessionDetail> getDetail(String id) async {
     detailCalls.add(id);
@@ -289,6 +296,25 @@ const orbSession = OpencodeSession(
   location: '/orb',
 );
 
+// An archived session (issue #234): the flag rides the row, and the
+// composite's orb-row rebuild must carry it through.
+const archivedOrbSession = OpencodeSession(
+  id: 'ses_orb_archived',
+  title: 'orb archived',
+  projectId: 'p1',
+  created: 250,
+  location: '/orb-arch',
+  archived: true,
+);
+const archivedHostSession = OpencodeSession(
+  id: 'ses_host_archived',
+  title: 'host archived',
+  projectId: 'p1',
+  created: 260,
+  location: '/host-arch',
+  archived: true,
+);
+
 OrbRecord runningOrb(String id, {String url = 'http://127.0.0.1:41234'}) =>
     OrbRecord(
       id: id,
@@ -350,6 +376,32 @@ void main() {
         expect(hostRow.orb, isNull);
       },
     );
+
+    test('an archived orb session keeps the flag through the rebuild; '
+        'an archived host row passes through (issue #234)', () async {
+      final host = FakeService(sessions: [hostSession, archivedHostSession]);
+      final orb1 = FakeService(sessions: [orbSession, archivedOrbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+
+      final all = await composite.listSessions();
+      final byId = {for (final s in all) s.id: s};
+
+      // The orb row rebuild must carry the flag (or the archived orb
+      // session leaks into the home list as unarchived, research Q4).
+      expect(byId['ses_orb_archived']!.archived, isTrue);
+      expect(byId['ses_orb_archived']!.orb, 'orb1');
+      // A non-archived orb row stays unarchived through the rebuild.
+      expect(byId['ses_orb']!.archived, isFalse);
+      // Host rows pass through unchanged, archived or not.
+      expect(byId['ses_host_archived']!.archived, isTrue);
+      expect(byId['ses_host_archived']!.orb, isNull);
+      expect(byId['ses_host']!.archived, isFalse);
+    });
 
     test('a stopped orb (no url) gets no upstream and no rows', () async {
       final host = FakeService(sessions: [hostSession]);
@@ -641,6 +693,43 @@ void main() {
 
       expect(host.deleted, ['ses_host']);
     });
+
+    test('archive routes to the owning orb (issue #234)', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final orb1 = FakeService(sessions: [orbSession, archivedOrbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+      await composite.listSessions();
+
+      await composite.archive('ses_orb_archived', true);
+
+      expect(orb1.archived, [('ses_orb_archived', true)]);
+      expect(host.archived, isEmpty);
+    });
+
+    test(
+      'an archive of a host session routes to the host (issue #234)',
+      () async {
+        final host = FakeService(sessions: [hostSession]);
+        final orb1 = FakeService(sessions: [orbSession]);
+        final composite = makeComposite(
+          host: host,
+          orbs: () async => [runningOrb('orb1')],
+          passwords: (_) async => 'pw1',
+          upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+        );
+        await composite.listSessions();
+
+        await composite.archive('ses_host', false);
+
+        expect(host.archived, [('ses_host', false)]);
+        expect(orb1.archived, isEmpty);
+      },
+    );
 
     test('cancelTurn routes to the owning orb', () async {
       final host = FakeService(sessions: [hostSession]);
