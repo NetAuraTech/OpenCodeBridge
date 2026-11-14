@@ -5,15 +5,36 @@ import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  test('defaults: no mode yet, no tunnel url, no push enabled', () async {
-    SharedPreferences.setMockInitialValues({});
-    final settings = await AppSettings.load();
-    expect(settings.lastMode, isNull);
-    expect(settings.tunnelUrl, '');
-    expect(settings.notifyPermissionAsked, isFalse);
-    expect(settings.notifyTurnEnded, isFalse);
-    expect(settings.notifyDockerContainer, isFalse);
-  });
+  test(
+    'defaults: no mode yet, no tunnel url, no push enabled, sounds on',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      expect(settings.lastMode, isNull);
+      expect(settings.tunnelUrl, '');
+      expect(settings.notifyPermissionAsked, isFalse);
+      expect(settings.notifyTurnEnded, isFalse);
+      expect(settings.notifyDockerContainer, isFalse);
+      // The desktop session-sound toggle (issue #246) defaults on: a fresh
+      // install plays the sounds until the user turns them off.
+      expect(settings.soundEvents, isTrue);
+    },
+  );
+
+  test(
+    'the desktop sound toggle defaults on and persists (issue #246)',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      expect(settings.soundEvents, isTrue);
+
+      settings.soundEvents = false;
+      expect((await AppSettings.load()).soundEvents, isFalse);
+
+      (await AppSettings.load()).soundEvents = true;
+      expect((await AppSettings.load()).soundEvents, isTrue);
+    },
+  );
 
   test('persists the last mode for the next launch', () async {
     SharedPreferences.setMockInitialValues({});

@@ -6,6 +6,7 @@ import '../access/access_session.dart';
 import '../app_mode.dart';
 import '../client/authenticated_http.dart';
 import '../client/connection_monitor.dart';
+import '../client/events_client.dart';
 import '../notify/deep_link.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
@@ -32,6 +33,7 @@ class HomeShell extends StatefulWidget {
     this.onPushProjectCommitted,
     this.onServiceAccountCommitted,
     this.onThemeModeChanged,
+    this.onEventSource,
   });
 
   final ConnectionMonitor monitor;
@@ -75,6 +77,13 @@ class HomeShell extends StatefulWidget {
   /// the Settings tab's Theme section and the structured view's `/themes`
   /// command call it after the choice is persisted.
   final VoidCallback? onThemeModeChanged;
+
+  /// Hands the Sessions tab's unified-event source to the app (issue #246):
+  /// the desktop session sounds subscribe to the same stream the tab uses,
+  /// so the sounds play on any tab and in an unfocused window alike, on one
+  /// SSE connection. Called with the source when it comes up and with
+  /// `null` when it goes away (the tunnel URL cleared).
+  final void Function(EventSource? source)? onEventSource;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -203,6 +212,9 @@ class _HomeShellState extends State<HomeShell> {
                 });
               }
             },
+            // The desktop session sounds (issue #246): the app-level listener
+            // rides the tab's event stream (no second SSE connection).
+            onEventSource: widget.onEventSource,
           ),
           OrbsTab(
             apiBase: _apiBase,

@@ -16,7 +16,8 @@ import 'tunnel_setup_wizard.dart';
 /// Light, Dark, or System), host connection (client mode: the tunnel URL),
 /// the Access login (issue #23), the tunnel status (issue #22), the push
 /// setup (issue #24: the Firebase project pasted once, and the three
-/// per-event toggles), and the app version.
+/// per-event toggles), the desktop session-sound toggle (issue #246), and
+/// the app version.
 class SettingsTab extends StatefulWidget {
   const SettingsTab({
     super.key,
@@ -175,6 +176,18 @@ class _SettingsTabState extends State<SettingsTab> {
         onChanged: (value) {
           setState(() => widget.settings.notifyDockerContainer = value);
           widget.onNotifyToggled?.call();
+        },
+      ),
+      // The desktop session-sound toggle (issue #246): on by default. It is
+      // in the Notifications family like the push toggles above it, but it
+      // drives the local sounds only — the change needs no push
+      // re-registration (the sound service reads the setting live).
+      SwitchListTile(
+        key: const ValueKey('sound-events'),
+        title: const Text('Sound on session events (desktop)'),
+        value: widget.settings.soundEvents,
+        onChanged: (value) {
+          setState(() => widget.settings.soundEvents = value);
         },
       ),
       if (widget.mode == AppMode.client)
