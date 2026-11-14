@@ -248,9 +248,20 @@ class BridgeServer {
   /// The spawn surface's task service (issue #99, spec §8.2/§8.3): the
   /// wake-or-create + dispatch + wait + completion injection behind the
   /// global `orb_spawn`/`orb_wait` tools; `null` when this machine has no
-  /// orbs service or no sessions backend, in which case the spawn endpoints
-  /// report `opencode_unavailable`.
-  final OrbTaskService? _tasks;
+  /// orbs service or the sessions backend has not resolved yet, in which
+  /// case the spawn endpoints report `opencode_unavailable` (issue #211:
+  /// the re-arm sets it the moment the backend resolves, so a persisted
+  /// `running` task is re-watched and its completion is not lost).
+  OrbTaskService? _tasks;
+
+  /// Whether [stop] has begun: the task-service re-arm (issue #211) checks
+  /// it so it never builds a task service for a bridge that is going away.
+  bool _closed = false;
+
+  /// The re-arm timer for the task service (issue #211); `null` when the
+  /// backend resolved at start (no re-arm needed) or the re-arm has fired /
+  /// been cancelled. Cancelled in [stop].
+  Timer? _tasksArmTimer;
 
   /// The listener on the host's docker-bridge address (spec §8.5): orb
   /// containers reach the bridge as `http://host.docker.internal:<port>`,
@@ -544,6 +555,25 @@ class BridgeServer {
         }),
       );
     }
+    // The completion watcher's re-arm (issue #211, defect #1): when the host
+    // sessions backend did not resolve at start (no readable opencode
+    // descriptor), the task service was not built and a persisted `running`
+    // task would not be watched — the orb auto-wakes and finishes its turn
+    // with no one to detect the completion. The backend (the host service)
+    // may come up after the bridge does: a failed boot a later `opencode
+    // serve` replaces, a slow service, a pre-boot-order relaunch. Re-probe
+    // the descriptor on a pace and build the task service — which loads the
+    // persisted tasks, re-watches the still-running ones, and arms the
+    // completion watcher — the moment it resolves; until then the spawn
+    // surface answers `opencode_unavailable` (the 503 window the
+    // reproduction locks).
+    if (taskService == null &&
+        orbService != null &&
+        backend == null &&
+        orbs == null &&
+        sessions == null) {
+      bridge._armTasksWhenBackendResolves(orbList, orbPassword);
+    }
     return bridge;
   }
 
@@ -674,6 +704,9 @@ class BridgeServer {
   Uri get healthUri => baseUri.replace(path: healthPath);
 
   Future<void> stop() async {
+    _closed = true;
+    _tasksArmTimer?.cancel();
+    _tasksArmTimer = null;
     _orbs?.stopLifecyclePass();
     _tasks?.close();
     await _server.close(force: true);
@@ -688,6 +721,55 @@ class BridgeServer {
     // attached to that the app does not own (the user's / a TUI's) is never
     // touched.
     await _opencodeBoot?.stop();
+  }
+
+  /// The completion watcher's re-arm (issue #211, defect #1): when the host
+  /// sessions backend did not resolve at start (no readable opencode
+  /// descriptor), the task service was not built and a persisted `running`
+  /// task would not be watched — the orb auto-wakes and finishes its turn
+  /// with no one to detect the completion. The backend (the host service)
+  /// may come up after the bridge does: a failed boot a later `opencode
+  /// serve` replaces, a slow service, a pre-boot-order relaunch. Re-probe
+  /// the descriptor on a pace and build the task service — which loads the
+  /// persisted tasks, re-watches the still-running ones, and arms the
+  /// completion watcher — the moment it resolves; until then the spawn
+  /// surface answers `opencode_unavailable` (the 503 window the
+  /// reproduction locks).
+  void _armTasksWhenBackendResolves(
+    Future<List<OrbRecord>> Function() orbList,
+    Future<String?> Function(String) orbPassword,
+  ) {
+    const pace = Duration(seconds: 2);
+    void probe() {
+      if (_closed || _tasks != null) return;
+      unawaited(
+        BridgeServer._defaultSessions(orbList, orbPassword).then(
+          (resolved) {
+            if (_closed || _tasks != null) return;
+            if (resolved == null) {
+              // Not yet: the host service is not up (or the descriptor is
+              // still being written). Retry on the next pass.
+              _tasksArmTimer = Timer(pace, probe);
+              return;
+            }
+            _tasks = OrbTaskService(
+              orbs: _orbs!,
+              sessions: resolved,
+              file: File(
+                '${homeDirectory()}/.config/opencodebridge/tasks.json',
+              ),
+            );
+          },
+          onError: (Object _) {
+            // A degraded read (a torn descriptor): the next pass retries.
+            if (_closed || _tasks != null) return;
+            _tasksArmTimer = Timer(pace, probe);
+          },
+        ),
+      );
+    }
+
+    _tasksArmTimer = Timer(pace, probe);
   }
 
   /// The default sessions backend: the aggregate [CompositeOpencodeService]
