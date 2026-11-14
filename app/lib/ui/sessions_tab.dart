@@ -43,8 +43,12 @@ const Duration kDrawerSlideDuration = Duration(milliseconds: 200);
 ///
 /// Shows every session of the shared opencode service, grouped by project
 /// (collapsible), newest first, with the active indicator and a per-session
-/// delete action. Tapping any row opens the structured view (spec §6). The
-/// global New project button (issue #54) opens a filesystem browser that
+/// archive (non-destructive, issue #235) and delete action. Archived rows
+/// are hidden from the default **Active** surface and collected under the
+/// **Archived** surface (a render filter over the same rows, no bridge
+/// change). Tapping any row — archived or not — opens the structured view
+/// (spec §6). The global New project button (issue #54) opens a filesystem
+/// browser that
 /// creates a session at the directory you pick; each project group carries a
 /// New session button of its own that creates in that project directly. Both
 /// create the session on the shared service and open its structured view.
@@ -240,6 +244,21 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// screens); it resets to closed whenever the narrow layout (re)builds.
   bool _drawerOpen = false;
 
+  /// The home list's surface (issue #235): `null` shows **Active** (the
+  /// default — the rows that are not archived, matching the TUI's own
+  /// default, the research's Q1), `true` shows **Archived** (the rows that
+  /// are). A render filter over the same fetched rows — the list keeps
+  /// fetching every row (the seam is faithful, issue #234) and the two
+  /// surfaces are the same flag read two ways (Q7's lower-effort shape).
+  /// Transient, like the drawer: not persisted.
+  bool? _showingArchived;
+
+  /// The id whose archive/unarchive (issue #235) is in flight: its row's
+  /// menu is gone for the call. The tap does not re-fetch: the
+  /// `session.archived` / `session.unarchived` event the route emits flips
+  /// the row's flag in place and moves it between the surfaces.
+  String? _archivingId;
+
   @override
   void initState() {
     super.initState();
@@ -381,6 +400,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// - `session.renamed` — the agent named the session on its first turn:
   ///   the row's title is patched in place. A rename for a session the list
   ///   does not know reloads instead (its create was missed).
+  /// - `session.archived` / `session.unarchived` (issue #235) — the session
+  ///   was archived or brought back (from the TUI, a second client, or this
+  ///   app's own archive tap): the row's `archived` fact is patched in
+  ///   place, no refetch, so the surface filter (Active / Archived) moves
+  ///   it. An archive for a session the list does not know reloads instead
+  ///   (its create was missed), like any other unknown id.
   /// - `session.deleted` / the bridge-native `session.closed` — drop the row.
   /// - The turn boundaries (`session.execution.*`) move the row's active dot
   ///   in place, no refetch. A turn ending on a session that is not shown in
@@ -424,6 +449,19 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         } else if (event.type == 'session.deleted' ||
             event.type == BridgeEventType.sessionClosed) {
           _patchRow(sessionId, drop: true);
+        }
+        return;
+      // The archive's two faces (issue #235): the row's `archived` fact is
+      // flipped in place — no refetch — and the surface filter (Active /
+      // Archived) moves it accordingly. A known row's flip is the whole
+      // action (the tap that caused it re-fetches nothing); an unknown id
+      // (a create was missed) reloads, like any other unknown session.
+      case 'session.archived':
+      case 'session.unarchived':
+        if (sessionId == null || !_hasRow(rows, sessionId)) {
+          unawaited(_refreshFromEvents());
+        } else {
+          _patchRow(sessionId, archived: event.type == 'session.archived');
         }
         return;
       case 'session.execution.started':
@@ -507,15 +545,17 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   /// Replaces the row [id] in place: a new [title], an [active] dot, a
-  /// re-derived [waiting] fact (issue #209), or ([drop]) nothing — the row is
-  /// gone. A drop also clears the detail pane when it shows that row and drops
-  /// its unread mark (issue #207); a patch otherwise carries the pane's row
-  /// along.
+  /// re-derived [waiting] fact (issue #209), an [archived] fact (issue #235,
+  /// from the `session.archived` / `session.unarchived` events), or ([drop])
+  /// nothing — the row is gone. A drop also clears the detail pane when it
+  /// shows that row and drops its unread mark (issue #207); a patch
+  /// otherwise carries the pane's row along.
   void _patchRow(
     String id, {
     String? title,
     bool? active,
     bool? waiting,
+    bool? archived,
     bool drop = false,
   }) {
     final rows = _rows;
@@ -535,7 +575,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _rows = [
         for (final session in rows)
           if (session.id == id)
-            session.copyWith(title: title, active: active, waiting: waiting)
+            session.copyWith(
+              title: title,
+              active: active,
+              waiting: waiting,
+              archived: archived,
+            )
           else
             session,
       ];
@@ -545,6 +590,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           title: title,
           active: active,
           waiting: waiting,
+          archived: archived,
         );
       }
     });
@@ -849,9 +895,19 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// The rows grouped by project, newest first (the rows arrive pre-sorted,
-  /// so grouping preserves the order).
-  List<_ProjectGroup> get _groups => _groupByProject(_rows ?? const []);
+  /// The rows of the home list's current surface (issue #235): the default
+  /// **Active** surface is `!archived` (matching the TUI's own default, the
+  /// research's Q1), the **Archived** surface is `archived`. A render filter
+  /// over [_rows] — the list keeps fetching every row (the seam is faithful,
+  /// issue #234); no bridge behaviour change.
+  List<Session> get _surfaceRows => [
+    for (final session in _rows ?? const <Session>[])
+      if (session.archived == (_showingArchived ?? false)) session,
+  ];
+
+  /// The rows of the current surface, grouped by project, newest first (the
+  /// rows arrive pre-sorted, so grouping preserves the order).
+  List<_ProjectGroup> get _groups => _groupByProject(_surfaceRows);
 
   /// A project group's subtitle (issue #207): the session count, with the
   /// active count appended ("N sessions (M active)") only while at least one
@@ -1031,7 +1087,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   Widget _buildListPane() {
-    final rows = _rows ?? const <Session>[];
+    final showingArchived = _showingArchived ?? false;
+    final rows = _surfaceRows;
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(
@@ -1039,8 +1096,20 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.only(top: 8),
         children: [
-          _NewSessionButton(busy: _newSessionBusy, onPressed: _newProject),
-          if (rows.isEmpty) const _CenteredMessage(text: 'No sessions yet.'),
+          if (!showingArchived)
+            _NewSessionButton(busy: _newSessionBusy, onPressed: _newProject),
+          // The Active / Archived surfaces (issue #235): a render filter over
+          // the same rows, so the toggle re-renders only (no fetch).
+          _SurfaceFilter(
+            showingArchived: showingArchived,
+            onToggle: _toggleArchivedSurface,
+          ),
+          if (rows.isEmpty)
+            _CenteredMessage(
+              text: showingArchived
+                  ? 'No archived sessions yet.'
+                  : 'No sessions yet.',
+            ),
           for (final group in _groups)
             ExpansionTile(
               key: ValueKey('project-${group.project.id}'),
@@ -1048,20 +1117,28 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
               title: Text(group.project.name),
               subtitle: Text(_groupSubtitle(group)),
               children: [
-                _GroupNewSessionButton(
-                  projectId: group.project.id,
-                  busy: _newSessionBusy,
-                  onPressed: () => _createInProject(group.project.id),
-                ),
+                if (!showingArchived)
+                  _GroupNewSessionButton(
+                    projectId: group.project.id,
+                    busy: _newSessionBusy,
+                    onPressed: () => _createInProject(group.project.id),
+                  ),
                 for (final s in group.sessions)
                   _SessionRow(
                     session: s,
                     deleting: _deletingId == s.id,
+                    archiving: _archivingId == s.id,
                     moving: _movingId == s.id,
                     exporting: _exportingId == s.id,
                     unread: _unread.contains(s.id),
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
+                    onArchive: _client == null
+                        ? null
+                        : () => _archiveSession(s, true),
+                    onUnarchive: _client == null
+                        ? null
+                        : () => _archiveSession(s, false),
                     onMoveToOrb: _moveToOrb,
                     onExportWorkspace: _exportWorkspace,
                     orb: _orbOf(s.orb),
@@ -1181,8 +1258,46 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
+  /// Flips the home list's surface (issue #235) between **Active** (the
+  /// default, `null`) and **Archived** (the archived rows). A render filter
+  /// over the same fetched rows — no bridge call, no re-fetch; the rows that
+  /// the filter shows or hides are the same ones, carrying the same flag.
+  void _toggleArchivedSurface() {
+    if (!mounted) return;
+    setState(() => _showingArchived = _showingArchived != true);
+  }
+
+  /// The row's Archive / Unarchive (issue #235): the non-destructive exit
+  /// beside Delete. Archive hides the session from the Active surface — the
+  /// session itself keeps running and stays fully usable per-id (the
+  /// research's Q2), and it can be unarchived from the Archived surface.
+  /// No destructive confirm (at most a note in the menu); the call does not
+  /// re-fetch: the `session.archived` / `session.unarchived` event the route
+  /// emits flips the row's flag in place and the surface filter moves it.
+  Future<void> _archiveSession(Session session, bool archived) async {
+    final client = _client;
+    if (client == null || _archivingId != null) return;
+    setState(() => _archivingId = session.id);
+    try {
+      await client.archive(session.id, archived);
+    } on SessionsClientError catch (e) {
+      if (!mounted) return;
+      _snackBar(
+        'Could not ${archived ? 'archive' : 'unarchive'} the session '
+        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _snackBar('Could not ${archived ? 'archive' : 'unarchive'} the session.');
+    } finally {
+      if (mounted) setState(() => _archivingId = null);
+    }
+  }
+
   /// The tap target of a row: the structured view, every row (spec §6); the
-  /// session stays fully usable without a TUI.
+  /// session stays fully usable without a TUI. An archived row opens straight
+  /// into the view, no unarchive-first dance (the per-id routes work while
+  /// archived — the research's Q2).
   VoidCallback? _rowTap(Session session) {
     final client = _client;
     if (client == null) return null;
@@ -1330,6 +1445,83 @@ class _NewSessionButton extends StatelessWidget {
   );
 }
 
+/// The home list's Active / Archived surfaces (issue #235): a two-option
+/// toggle over the same fetched rows. **Active** (the default) shows the
+/// rows that are not archived; **Archived** shows the ones that are. It is a
+/// render filter, so a toggle re-renders the list — no fetch, no bridge
+/// call. Transient like the drawer: the choice is not persisted.
+class _SurfaceFilter extends StatelessWidget {
+  const _SurfaceFilter({required this.showingArchived, required this.onToggle});
+
+  /// True while the Archived surface is shown (the default is Active).
+  final bool showingArchived;
+
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    key: const ValueKey('sessions-surface-filter'),
+    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+    child: Row(
+      children: [
+        _SurfaceChip(
+          key: const ValueKey('sessions-surface-active'),
+          label: 'Active',
+          selected: !showingArchived,
+          onTap: showingArchived ? onToggle : null,
+        ),
+        const SizedBox(width: 8),
+        _SurfaceChip(
+          key: const ValueKey('sessions-surface-archived'),
+          label: 'Archived',
+          selected: showingArchived,
+          onTap: showingArchived ? null : onToggle,
+        ),
+      ],
+    ),
+  );
+}
+
+/// One option of the home list's surface filter (issue #235).
+class _SurfaceChip extends StatelessWidget {
+  const _SurfaceChip({
+    super.key,
+    required this.label,
+    required this.selected,
+    this.onTap,
+  });
+
+  final String label;
+
+  final bool selected;
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? scheme.primary : scheme.surface,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: selected ? scheme.primary : scheme.outline),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: selected ? scheme.onPrimary : scheme.onSurface,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A project group's New session action (spec §5, fill-in †): creates a
 /// session directly in the group's project, no picker.
 class _GroupNewSessionButton extends StatelessWidget {
@@ -1420,12 +1612,15 @@ class _SessionRow extends StatelessWidget {
   const _SessionRow({
     required this.session,
     required this.deleting,
+    required this.archiving,
     required this.moving,
     required this.exporting,
     required this.onDelete,
     required this.orb,
     this.unread = false,
     this.onTap,
+    this.onArchive,
+    this.onUnarchive,
     this.onMoveToOrb,
     this.onExportWorkspace,
     this.onOrbChipTapped,
@@ -1454,6 +1649,12 @@ class _SessionRow extends StatelessWidget {
 
   final bool deleting;
 
+  /// True while the row's archive/unarchive (issue #235) is in flight: the
+  /// menu is gone for the call (one request at a time, like Delete's). The
+  /// row's flag itself flips on the `session.archived` /
+  /// `session.unarchived` event the route emits.
+  final bool archiving;
+
   /// True while the row's host→orb move (issue #97) is in flight: the row
   /// shows progress, and the menu is gone for the whole blocking move.
   final bool moving;
@@ -1464,6 +1665,16 @@ class _SessionRow extends StatelessWidget {
   final bool exporting;
 
   final ValueChanged<Session> onDelete;
+
+  /// The row's Archive (issue #235, the Active surface): the non-destructive
+  /// exit — no destructive confirm. `null` when the row has no archive seam
+  /// (no client).
+  final VoidCallback? onArchive;
+
+  /// The row's Unarchive (issue #235, the Archived surface): brings the
+  /// session back to the Active surface. `null` when the row has no archive
+  /// seam (no client).
+  final VoidCallback? onUnarchive;
 
   /// The host → orb move (issue #97): the menu's "Move to orb…" item,
   /// offered to host sessions only (`session.orb == null`).
@@ -1646,7 +1857,7 @@ class _SessionRow extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
               ],
-              deleting || moving || exporting
+              deleting || archiving || moving || exporting
                   ? const SizedBox(
                       width: 20,
                       height: 20,
@@ -1659,6 +1870,10 @@ class _SessionRow extends StatelessWidget {
                         switch (action) {
                           case 'delete':
                             onDelete(session);
+                          case 'archive':
+                            onArchive?.call();
+                          case 'unarchive':
+                            onUnarchive?.call();
                           case 'move-to-orb':
                             onMoveToOrb?.call(session);
                           case 'export-workspace':
@@ -1666,6 +1881,32 @@ class _SessionRow extends StatelessWidget {
                         }
                       },
                       itemBuilder: (context) => [
+                        // The archive's two faces (issue #235): **Archive**
+                        // on the Active surface (the row is not archived
+                        // yet), **Unarchive** on the Archived surface (it is).
+                        // Non-destructive — no confirm dialog; the menu
+                        // carries the note instead. The row moves between
+                        // surfaces on the event the route emits.
+                        if (session.archived)
+                          const PopupMenuItem(
+                            value: 'unarchive',
+                            child: Text('Unarchive'),
+                          )
+                        else
+                          const PopupMenuItem(
+                            value: 'archive',
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('Archive'),
+                                Text(
+                                  'Hides it from the list; you can '
+                                  'unarchive it later.',
+                                ),
+                              ],
+                            ),
+                          ),
                         // Orb sessions only (issue #98, spec §3.4): the
                         // `docker cp` export of the orb's workspace.
                         if (session.orb != null)

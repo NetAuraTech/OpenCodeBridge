@@ -64,6 +64,29 @@ const _orbOne = Session(
   orb: 'orb_1',
 );
 
+/// An archived session in the `app` project (issue #235): hidden from the
+/// default Active surface, shown on the Archived one.
+const _archivedA = Session(
+  id: 'ses_arch_a',
+  title: 'archived alpha',
+  project: SessionProject(id: 'p1', name: 'app'),
+  created: 150,
+  location: '/code/app',
+  active: false,
+  archived: true,
+);
+
+/// An archived session in the `infra` project (issue #235).
+const _archivedB = Session(
+  id: 'ses_arch_b',
+  title: 'archived beta',
+  project: SessionProject(id: 'p2', name: 'infra'),
+  created: 150,
+  location: '/code/infra',
+  active: false,
+  archived: true,
+);
+
 /// A session living on a running orb (spec §9.2), built per call so each test
 /// gets its own list (a `const` fixture would be canonicalised in the cache).
 Session _orbSession() => Session(
@@ -97,6 +120,14 @@ class _FakeSessionsClient extends SessionsClient {
   final List<(String, String)> moved = [];
   final List<(String, String)> prompts = [];
   final List<(String, String, PermissionReply)> replies = [];
+
+  /// The archive calls (`archive`), in order (issue #235's Archive /
+  /// Unarchive): the id and the flag it was asked to carry.
+  final List<(String, bool)> archivedCalls = [];
+
+  /// When set, `archive` throws it (the failure the row's action reports).
+  Object? archiveError;
+
   var listCalls = 0;
 
   /// The cancel calls (`cancel`), in order (issue #165's row Stop).
@@ -114,7 +145,9 @@ class _FakeSessionsClient extends SessionsClient {
     listCalls++;
     final error = listError;
     if (error is Object) throw error;
-    return rows;
+    // A fresh snapshot on every call, like the real client (which decodes a
+    // new list per request): the tab's held rows are not the fake's list.
+    return List<Session>.of(rows);
   }
 
   @override
@@ -158,6 +191,16 @@ class _FakeSessionsClient extends SessionsClient {
     );
     rows.insert(0, session);
     return session;
+  }
+
+  @override
+  Future<void> archive(String id, bool archived) async {
+    archivedCalls.add((id, archived));
+    final error = archiveError;
+    if (error is Object) throw error;
+    // Like the bridge's state change: the row's flag carries the call.
+    final index = rows.indexWhere((s) => s.id == id);
+    if (index != -1) rows[index] = rows[index].copyWith(archived: archived);
   }
 
   @override
@@ -2393,6 +2436,312 @@ void main() {
           events.emit(permEvent('permission.asked', 'ses_orb1'));
           await tester.pumpAndSettle();
           expect(client.listCalls, 2, reason: 'a create was missed');
+        },
+      );
+    });
+
+    group('archive (issue #235)', () {
+      /// The service's archive events, as the bridge re-emits them verbatim:
+      /// the durable aggregate id is the session id.
+      BridgeEvent archiveEvent(String type, String sessionId) => BridgeEvent(
+        id: 'evt_$type',
+        created: 0,
+        type: type,
+        data: {'sessionID': sessionId},
+        durable: Durable(aggregateID: sessionId, seq: 1),
+      );
+
+      testWidgets(
+        'archived rows are hidden by default on the Active surface, the '
+        'Archived surface shows only archived rows, and the toggle never '
+        'refetches (same rows, same flag)',
+        (tester) async {
+          final client = await _pumpTab(tester, rows: [_two, _archivedA]);
+          expect(client.listCalls, 1);
+
+          // Default is Active: the archived row is not rendered, the active
+          // one is.
+          expect(find.text('archived alpha'), findsNothing);
+          expect(find.text('refactor auth'), findsOneWidget);
+          expect(
+            find.byKey(const ValueKey('sessions-surface-active')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+            findsOneWidget,
+          );
+
+          // The Archived surface shows the archived row only, without any
+          // fetch: a render filter over the same rows.
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(client.listCalls, 1, reason: 'no refetch: a render filter');
+          expect(find.text('archived alpha'), findsOneWidget);
+          expect(find.text('refactor auth'), findsNothing);
+          expect(find.text('1 session'), findsOneWidget);
+          // The New project action belongs to the Active surface only.
+          expect(find.byKey(const ValueKey('sessions-new')), findsNothing);
+
+          // Back to Active: the archived row is hidden again, no fetch.
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-active')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(client.listCalls, 1, reason: 'no refetch: a render filter');
+          expect(find.text('archived alpha'), findsNothing);
+          expect(find.text('refactor auth'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'an empty Archived surface says so, and an all-archived list shows '
+        'an empty Active surface',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one]);
+
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('No archived sessions yet.'), findsOneWidget);
+
+          // Fresh tab: every row archived — the Active surface is empty.
+          await tester.pumpWidget(const SizedBox());
+          await _pumpTab(tester, rows: [_archivedA, _archivedB]);
+          expect(find.text('No sessions yet.'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'the row menu offers Archive on the Active surface and Unarchive on '
+        'the Archived surface, beside Delete',
+        (tester) async {
+          await _pumpTab(tester, rows: [_one, _archivedB]);
+
+          // Active surface row: Archive beside Delete, no Unarchive.
+          await tester.tap(
+            find.byKey(const ValueKey('menu-ses_1')),
+            warnIfMissed: false,
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Archive'), findsOneWidget);
+          expect(find.text('Unarchive'), findsNothing);
+          expect(find.text('Delete session…'), findsOneWidget);
+          await tester.tapAt(const Offset(5, 5)); // The barrier closes it.
+          await tester.pumpAndSettle();
+
+          // Archived surface: Unarchive beside Delete, no Archive.
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(const ValueKey('menu-ses_arch_b')),
+            warnIfMissed: false,
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('Unarchive'), findsOneWidget);
+          expect(find.text('Archive'), findsNothing);
+          expect(find.text('Delete session…'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'tapping Archive hides the session with no destructive confirm and no '
+        'manual reload (the event moves it)',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one, _two],
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          expect(find.text('fix the flaky test'), findsOneWidget);
+
+          await tester.tap(
+            find.byKey(const ValueKey('menu-ses_1')),
+            warnIfMissed: false,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Archive'));
+          await tester.pump();
+
+          // Non-destructive: no confirm dialog of any kind.
+          expect(find.byType(AlertDialog), findsNothing);
+          // The client call went out with the flag; no re-fetch on the tap.
+          expect(client.archivedCalls, [('ses_1', true)]);
+          expect(client.listCalls, 1, reason: 'no re-fetch on the tap');
+
+          // The route's event arrives (from the service, as the bridge
+          // re-emits it): the row flips in place and the Active surface
+          // drops it, without a reload.
+          events.emit(archiveEvent('session.archived', 'ses_1'));
+          await tester.pumpAndSettle();
+
+          expect(client.listCalls, 1, reason: 'flipped in place, no reload');
+          expect(find.text('fix the flaky test'), findsNothing);
+          expect(find.text('refactor auth'), findsOneWidget);
+
+          // The Archived surface shows it.
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('fix the flaky test'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'a session.archived event (from the TUI or a second client) flips the '
+        'row in place — no reload — and the surface filter moves it; '
+        'unarchive brings it back the same way',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one, _three],
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          expect(find.text('fix the flaky test'), findsOneWidget);
+
+          // A second client (or the TUI) archives ses_1: the event arrives.
+          events.emit(archiveEvent('session.archived', 'ses_1'));
+          await tester.pumpAndSettle();
+
+          // Flipped in place: no refetch, and the Active surface lost the
+          // row (its project group's subtitle dropped with it).
+          expect(client.listCalls, 1, reason: 'flipped in place, no reload');
+          expect(find.text('fix the flaky test'), findsNothing);
+          expect(find.text('docker logs'), findsOneWidget);
+          expect(find.text('1 session'), findsOneWidget);
+
+          // The Archived surface shows it; its menu's Unarchive brings it
+          // back, on the event the route emits (still no reload).
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('fix the flaky test'), findsOneWidget);
+          await tester.tap(
+            find.byKey(const ValueKey('menu-ses_1')),
+            warnIfMissed: false,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Unarchive'));
+          await tester.pump();
+          expect(client.archivedCalls, [('ses_1', false)]);
+          expect(find.byType(AlertDialog), findsNothing);
+          events.emit(archiveEvent('session.unarchived', 'ses_1'));
+          await tester.pumpAndSettle();
+          expect(client.listCalls, 1, reason: 'flipped in place, no reload');
+          // The surface is still Archived, and the row left it.
+          expect(find.text('fix the flaky test'), findsNothing);
+          // On the Active surface it is back.
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-active')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('fix the flaky test'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'a session.unarchived event reappears the row on the Active surface '
+        'without a reload',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_archivedA],
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          expect(find.text('No sessions yet.'), findsOneWidget);
+
+          // The TUI (or a second client) unarchives it: the event arrives.
+          events.emit(archiveEvent('session.unarchived', 'ses_arch_a'));
+          await tester.pumpAndSettle();
+
+          expect(client.listCalls, 1, reason: 'flipped in place, no reload');
+          // It is back on the Active surface (the default), unarchived.
+          expect(find.text('archived alpha'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'an archive event naming a session the list does not know reloads '
+        '(a missed create), like any other unknown-session event',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_one], events: events);
+          expect(client.listCalls, 1);
+
+          // ses_orb1 is not in the list (its create was missed): the archive
+          // event for it must not be swallowed.
+          client.rows.insert(0, _orbSession().copyWith(archived: true));
+          events.emit(archiveEvent('session.archived', 'ses_orb1'));
+          await tester.pumpAndSettle();
+          expect(client.listCalls, 2, reason: 'a create was missed');
+        },
+      );
+
+      testWidgets('a failed archive shows a snackbar and the row stays put', (
+        tester,
+      ) async {
+        final events = _FakeEventsSource();
+        final client = await _pumpTab(tester, rows: [_one], events: events);
+        client.archiveError = const SessionsClientError(500, 'boom');
+
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Archive'));
+        await tester.pumpAndSettle();
+
+        expect(client.archivedCalls, [('ses_1', true)]);
+        expect(
+          find.textContaining('Could not archive the session'),
+          findsOneWidget,
+        );
+        // The row stays on the Active surface (the flag did not flip).
+        expect(find.text('fix the flaky test'), findsOneWidget);
+        // The menu is back (the in-flight state cleared): retryable.
+        await tester.tap(
+          find.byKey(const ValueKey('menu-ses_1')),
+          warnIfMissed: false,
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Archive'), findsOneWidget);
+      });
+
+      testWidgets(
+        'tapping an archived row opens the structured view directly, without '
+        'unarchiving it',
+        (tester) async {
+          final client = await _pumpTab(tester, rows: [_archivedA]);
+
+          await tester.tap(
+            find.byKey(const ValueKey('sessions-surface-archived')),
+          );
+          await tester.pumpAndSettle();
+          expect(find.text('archived alpha'), findsOneWidget);
+
+          await tester.tap(find.byKey(const ValueKey('session-ses_arch_a')));
+          await tester.pumpAndSettle();
+
+          // The structured view opened on the archived session, in the
+          // detail pane; the open did not unarchive it.
+          expect(find.byType(StructuredSessionPanel), findsOneWidget);
+          expect(client.archivedCalls, isEmpty);
         },
       );
     });
