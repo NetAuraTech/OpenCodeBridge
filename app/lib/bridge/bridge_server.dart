@@ -33,6 +33,7 @@ import 'sessions/opencode_http_service.dart';
 import 'sessions/opencode_service_boot.dart';
 import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
+import 'sessions/order_store.dart';
 import 'tunnel/cloudflared_binary.dart';
 import 'tunnel/cloudflared_config.dart';
 import 'tunnel/tunnel_cli.dart';
@@ -70,6 +71,7 @@ class BridgeServer {
     this._pushDispatcher,
     this._turnTracker,
     this._opencodeBoot,
+    this._sessionOrder,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -307,6 +309,13 @@ class BridgeServer {
   /// `not_configured`.
   final OpencodeServiceBooter? _opencodeBoot;
 
+  /// The session order store (issue #237): the app-owned
+  /// `sessionID -> position` map behind the home list's pinned-first sort.
+  /// Built once at start (the app-owned file, the same pattern as the tunnel
+  /// config and the task service) and shared by the order route (write +
+  /// emit) and the sessions backend's list read (sort + pinned + prune).
+  final SessionOrderStore _sessionOrder;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -384,6 +393,7 @@ class BridgeServer {
     bool autoLifecyclePass = false,
     Duration? lifecyclePassInterval,
     OpencodeServiceBooter? bootstrapOpencode,
+    File? sessionOrderFile,
   }) async {
     final server = await HttpServer.bind(host, port);
     // The host opencode service boot (issue #153, ADR-0002/ADR-0008): it runs
@@ -431,8 +441,19 @@ class BridgeServer {
         orbService?.list() ?? Future.value(const []);
     Future<String?> orbPassword(String id) =>
         orbService?.lastPassword(id) ?? Future.value(null);
+    // The backend: the caller's, or the bridge's own default (the aggregate
+    // composite over the host service and the running orbs).
     final backend =
         sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
+    // The session order store (issue #237): the app-owned
+    // `sessionID -> position` map. Built once, shared by the order route
+    // (write + emit) and the backend's list read (sort + pinned fact + orphan
+    // prune); the file is injectable for tests. The caller's backend keeps
+    // the store it already carries (a test's injected store).
+    final sessionOrder = SessionOrderStore(file: sessionOrderFile);
+    if (backend != null && backend.orderStore == null) {
+      backend.orderStore = sessionOrder;
+    }
     orbBackend = backend;
     // The spawn surface's task service (issue #99): the host default wires
     // the orb lifecycle service and the composite sessions backend — both
@@ -528,6 +549,7 @@ class BridgeServer {
       pushDispatcher,
       turnTracker,
       bootstrapOpencode,
+      sessionOrder,
     );
     speed?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
@@ -597,6 +619,7 @@ class BridgeServer {
       _tunnelSetupService,
       _dockerLogKeepAlive,
       _notify,
+      _sessionOrder,
     );
   }
 
@@ -1184,6 +1207,7 @@ class BridgeServer {
     TunnelSetup Function(TunnelSupervisor) tunnelSetup,
     Duration dockerLogKeepAlive,
     NotifyService? notify,
+    SessionOrderStore? sessionOrder,
   ) async {
     final response = request.response;
     response.headers.contentType = ContentType.json;
@@ -1566,6 +1590,23 @@ class BridgeServer {
         final moveId = BridgeServer._moveToOrbIn(request.uri.path);
         if (moveId != null) {
           await BridgeServer._handleMoveToOrb(request, moveId, sessions, orbs);
+          return;
+        }
+      }
+      // The session order (issue #237): the bridge's own app-owned
+      // `sessionID -> position` map, written by the app to re-order the home
+      // list's pinned block. Checked before the command-menu fallthrough (its
+      // subpath would otherwise read as a `/` command to it).
+      if (request.method == 'PATCH') {
+        final order = BridgeServer._sessionOrderIn(request.uri.path);
+        if (order != null) {
+          await BridgeServer._handleSessionOrder(
+            request,
+            order,
+            sessions,
+            events,
+            sessionOrder,
+          );
           return;
         }
       }
@@ -2276,6 +2317,17 @@ class BridgeServer {
     return (Uri.decodeComponent(id), sub);
   }
 
+  /// The session id in a session-order path (issue #237), or `null` when
+  /// [path] is not `api/sessions/{id}/order`.
+  static String? _sessionOrderIn(String path) {
+    const prefix = '/api/sessions/';
+    const suffix = '/order';
+    if (!path.startsWith(prefix) || !path.endsWith(suffix)) return null;
+    final id = path.substring(prefix.length, path.length - suffix.length);
+    if (id.isEmpty || id.contains('/')) return null;
+    return Uri.decodeComponent(id);
+  }
+
   /// The structured view's `/` command menu, per-session commands (issue
   /// #46): thin pass-throughs of the shared-service command endpoints. The
   /// service is the single source of truth, so the effect is reflected live
@@ -2697,6 +2749,95 @@ class BridgeServer {
         response.write(jsonEncode({'error': 'opencode_unreachable'}));
       }
     }
+    await response.close();
+  }
+
+  /// The session order (issue #237): `PATCH /api/sessions/{id}/order` writes
+  /// the session's position in the bridge's app-owned order store (the home
+  /// list's pinned block) and emits the bridge-native
+  /// `session.order.changed` on the unified stream. The body is
+  /// `{"position": <num|null>}` — a number pins the session at that
+  /// position, `null` (or an absent field) clears the pin, and anything else
+  /// is a 400 `invalid_body`. Unknown session id is a 404 `not_found` (the
+  /// same "does the service still have this id" check as the reopen guard).
+  /// On success: 204, no body.
+  static Future<void> _handleSessionOrder(
+    HttpRequest request,
+    String id,
+    SessionsBackend? sessions,
+    EventHub? events,
+    SessionOrderStore? orderStore,
+  ) async {
+    final response = request.response;
+    if (sessions == null || orderStore == null) {
+      BridgeServer._unavailable(response);
+      return;
+    }
+    final (known, position) = await BridgeServer._orderBody(request);
+    if (!known) {
+      await BridgeServer._invalidBody(response);
+      return;
+    }
+    try {
+      await BridgeServer._orderWrite(
+        response,
+        sessions,
+        events,
+        orderStore,
+        id,
+        position,
+      );
+    } on OpencodeServiceError catch (e) {
+      BridgeServer._serviceError(response, e);
+      await response.close();
+    }
+  }
+
+  /// The order body's tri-state: whether the request is well-formed, and the
+  /// position to write (`null` = clear). The body must be a JSON object whose
+  /// `position` is absent, `null`, or a number; anything else (a non-object
+  /// body, a string/bool/object/array position) is malformed.
+  static Future<(bool, num?)> _orderBody(HttpRequest request) async {
+    final body = await BridgeServer._jsonBody(request);
+    final position = body?['position'];
+    if (body == null || (position != null && position is! num)) {
+      return (false, null);
+    }
+    return (true, position as num?);
+  }
+
+  /// The order write: set or clear the store, emit
+  /// `session.order.changed`, answer 204.
+  static Future<void> _orderWrite(
+    HttpResponse response,
+    SessionsBackend sessions,
+    EventHub? events,
+    SessionOrderStore orderStore,
+    String id,
+    num? position,
+  ) async {
+    if (!await sessions.exists(id)) {
+      response.statusCode = HttpStatus.notFound;
+      response.write(jsonEncode({'error': 'not_found'}));
+      await response.close();
+      return;
+    }
+    if (position == null) {
+      await orderStore.clear(id);
+    } else {
+      await orderStore.set(id, position);
+    }
+    // Bridge-native `session.order.changed` (issue #237): every connected
+    // app re-sorts the row on the event, without a refetch. `position` is
+    // `null` when the pin was cleared. No durable seq (a bridge-native
+    // side-effect, like `session.closed`).
+    events?.emit(
+      bridgeEvent(
+        type: BridgeEventType.sessionOrderChanged,
+        data: {'sessionID': id, 'position': position},
+      ),
+    );
+    response.statusCode = HttpStatus.noContent;
     await response.close();
   }
 

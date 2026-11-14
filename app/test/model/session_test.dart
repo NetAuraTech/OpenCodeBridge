@@ -20,6 +20,7 @@ void main() {
         'location': '/run/media/x/opencodebridge',
         'active': true,
         'waiting': false,
+        'pinned': false,
       });
     });
 
@@ -73,6 +74,42 @@ void main() {
       );
       expect(session.toJson()['orb'], 'orb_1');
       expect(Session.fromJson(session.toJson()), session);
+    });
+
+    test('toJson carries the pinned fact and fromJson round-trips it', () {
+      // The bridge-owned pin fact (issue #237): always present in the wire
+      // shape, like waiting (a client that does not know the field parses the
+      // row fine).
+      const session = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+        pinned: true,
+      );
+      expect(session.toJson()['pinned'], true);
+      expect(Session.fromJson(session.toJson()), session);
+      // A row without the field parses (a client that does not know it).
+      expect(
+        Session.fromJson(const {
+          'id': 'ses_1',
+          'title': 't',
+          'project': {'id': 'p', 'name': 'n'},
+          'created': 42,
+          'location': '/x',
+          'active': false,
+        }),
+        const Session(
+          id: 'ses_1',
+          title: 't',
+          project: SessionProject(id: 'p', name: 'n'),
+          created: 42,
+          location: '/x',
+          active: false,
+        ),
+      );
     });
 
     test('fromJson is tolerant of a missing or partial row', () {
