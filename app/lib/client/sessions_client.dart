@@ -813,6 +813,43 @@ class SessionsClient {
     await _postField(id, 'move', 'directory', directory);
   }
 
+  /// Set or clear the session's position in the home list's pinned block
+  /// (issue #237/238): the bridge's own app-owned order store, not a service
+  /// pass-through. [position] is the pin position (a number — the pin time,
+  /// epoch millis, for the pin-only first shape) or `null` to un-pin. The
+  /// bridge answers `204`; an unknown session id is a `404`, a malformed body
+  /// a `400`, each surfaced as a [SessionsClientError]. The bridge also emits
+  /// the `session.order.changed` event on the unified stream, so every
+  /// connected app re-sorts its row in place (no refetch here — the caller
+  /// patches its own list from the write's outcome).
+  Future<void> setOrder(String id, num? position) async {
+    final client = HttpClient();
+    try {
+      final response = await bridgeRequest(
+        client,
+        'PATCH',
+        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/order'),
+        body: jsonEncode({'position': position}),
+        contentType: ContentType.json,
+        auth: _auth,
+      );
+      await response.drain<void>();
+      if (response.statusCode != HttpStatus.noContent &&
+          response.statusCode != HttpStatus.ok) {
+        throw SessionsClientError(
+          response.statusCode,
+          'order of $id was not accepted',
+        );
+      }
+    } on SessionsClientError {
+      rethrow;
+    } catch (error) {
+      throw SessionsClientError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Move the session onto the orb [orbName] (issue #97): one action,
   /// entirely through the bridge — the target orb is woken (or created)
   /// before the session's export/import/delete. The bridge blocks for the

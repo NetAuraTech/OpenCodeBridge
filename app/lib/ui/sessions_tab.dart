@@ -185,6 +185,14 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// The fetched rows, `null` until the first successful load.
   List<Session>? _rows;
 
+  /// The cached list's pin positions (issue #237/238), keyed by session id:
+  /// the row's pin position, or `null`/absent when the row is un-pinned. A
+  /// cold start reads each row's `pinned` field (the read is pre-sorted) and
+  /// the first `session.order.changed` for a row records its position; from
+  /// then on the in-place re-sort keys off these. Reconciled (dropped) when a
+  /// row leaves the list, like the unread marks.
+  final Map<String, num> _positions = {};
+
   /// The last load failure, if any.
   String? _error;
 
@@ -210,6 +218,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// lands (success or failure) — a failure leaves the dot on, so the control
   /// is offered again to retry.
   String? _stoppingId;
+
+  /// The id whose pin / unpin (issue #238) is in flight: its pin control shows
+  /// a busy spinner and ignores further presses. Cleared when the order write
+  /// lands (success or failure) — a failure leaves the row's pin state as it
+  /// was, so the control is offered again to retry.
+  String? _pinningId;
 
   /// The deep-link session awaiting a loaded list (issue #24): set when the
   /// target arrives before the rows; a failed load leaves it for the next
@@ -490,6 +504,21 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           _endUnread(sessionId);
         }
         return;
+      // The bridge-native order change (issue #237/238): a session's position
+      // in the home list's pinned block changed — a pin from this device (the
+      // write's own echo) or from another device / agent. A known row's pin
+      // fact is patched in place and the list re-sorts (no refetch), the same
+      // merge posture as the title and the archived fact; a row the list does
+      // not know (a missed create) reloads, like any other unknown-session
+      // event.
+      case BridgeEventType.sessionOrderChanged:
+        if (sessionId == null) return;
+        if (_hasRow(rows, sessionId)) {
+          _setOrder(sessionId, _positionOf(event), rows);
+        } else {
+          unawaited(_refreshFromEvents());
+        }
+        return;
       // The pending permission and question facts (issue #209): the same
       // events the structured view already consumes (`permission.asked` /
       // `permission.replied`, `form.created` / `form.replied` /
@@ -544,6 +573,15 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     return title is String && title.isNotEmpty ? title : null;
   }
 
+  /// The position a `session.order.changed` payload carries (its
+  /// `data.position`): the row's new pin position, or `null` when the pin was
+  /// cleared. A non-numeric value (malformed) reads as `null`, the safe
+  /// default (an unknown position un-pins rather than corrupting the order).
+  num? _positionOf(BridgeEvent event) {
+    final position = event.data['position'];
+    return position is num ? position : null;
+  }
+
   /// Replaces the row [id] in place: a new [title], an [active] dot, a
   /// re-derived [waiting] fact (issue #209), an [archived] fact (issue #235,
   /// from the `session.archived` / `session.unarchived` events), or ([drop])
@@ -566,6 +604,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
           for (final session in rows)
             if (session.id != id) session,
         ];
+        _positions.remove(id);
         if (_selectedSession?.id == id) _selectedSession = null;
         _unread.remove(id);
       });
@@ -631,6 +670,102 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _patchRow(id, waiting: waiting);
     } on SessionsClientError {
       // Keep the last word on screen (the structured view does too).
+    }
+  }
+
+  /// Patches row [id]'s pin fact in place from [position] (issue #237/238)
+  /// and re-sorts the cached list — no refetch. This is the merge point for
+  /// both pin paths: the bridge-native `session.order.changed` (a pin from
+  /// another device or agent, or this device's own echo) and a successful
+  /// local pin write (whose outcome the caller [setOrder] applies here the
+  /// same way).
+  ///
+  /// The row's `pinned` fact flips to `position != null` and the list
+  /// re-sorts pinned-first, then the current order (the cached list already
+  /// holds the bridge's position-ascending pinned block; a position the list
+  /// has not seen — a cold start's `pinned` field, or an echo for a row it
+  /// has not re-ordered — keeps the row where the read placed it).
+  /// [Session.copyWith] (not a re-fetch) is the seam, like the title and the
+  /// archived fact. A row that is not in the list (a missed create) is a
+  /// no-op here — the unknown-session path of [_onBridgeEvent] reloads.
+  void _setOrder(String id, num? position, List<Session> rows) {
+    final row = rows.where((session) => session.id == id).firstOrNull;
+    if (row == null) return;
+    final pinned = position != null;
+    // No-ops that would waste a re-sort and a build: a redundant un-pin of an
+    // already-un-pinned row, or a re-echo of a pin this list already applied
+    // (the same position, the row already pinned).
+    if (!pinned && !row.pinned) return;
+    if (pinned && row.pinned && _positions[id] == position) return;
+    if (position != null) {
+      _positions[id] = position;
+    } else {
+      _positions.remove(id);
+    }
+    setState(() {
+      _rows = [
+        for (final session in rows)
+          if (session.id == id) session.copyWith(pinned: pinned) else session,
+      ];
+      _resort();
+      final selected = _selectedSession;
+      if (selected != null && selected.id == id) {
+        _selectedSession = selected.copyWith(pinned: pinned);
+      }
+    });
+  }
+
+  /// The in-place re-sort of the cached home list (issue #237/238): the pinned
+  /// rows first — known positions ascending (a tie, or a position the list has
+  /// not seen, keeps the row's current place: the read already placed the
+  /// pinned block position-ascending, so a cold start's `pinned` field renders
+  /// in place) — then the unpinned rows newest-created. Stable: rows that
+  /// compare equal keep their current order, so a re-sort never scrambles the
+  /// block.
+  ///
+  /// [List.sort] is not stable, so the rows are ordered by a (key, index)
+  /// pair: the key first, the original index as the tie-breaker. The index is
+  /// the row's current position, which for a cold start is exactly the
+  /// bridge's order — the app never has to re-derive it.
+  ///
+  /// Unlike the bridge's [SessionsBackend.homeListOrder] (which treats an
+  /// unknown position as *unpinned* — correct for the store's own read), the
+  /// app treats a *pinned* row with an unknown position as *keeping its place*:
+  /// the cached list has no position for a cold-start row, and un-pinning-then-
+  /// sorting would drag it out of the block.
+  void _resort() {
+    final rows = _rows;
+    if (rows == null) return;
+    final indexed = [
+      for (var i = 0; i < rows.length; i++) (row: rows[i], index: i),
+    ];
+    indexed.sort((a, b) {
+      final aPinned = a.row.pinned;
+      final bPinned = b.row.pinned;
+      // Pinned rows sort before unpinned rows.
+      if (aPinned != bPinned) return aPinned ? -1 : 1;
+      if (!aPinned) {
+        // Both unpinned: newest-created first (the read's plain order).
+        final byCreated = b.row.created.compareTo(a.row.created);
+        if (byCreated != 0) return byCreated;
+        return a.index.compareTo(b.index); // Tie: current order.
+      }
+      // Both pinned: known positions ascending (a tie breaks by created,
+      // like the bridge); a position the list has not seen keeps the row's
+      // current place (the index tie-breaker below).
+      final posA = _positions[a.row.id];
+      final posB = _positions[b.row.id];
+      if (posA != null && posB != null) {
+        final byPosition = posA.compareTo(posB);
+        if (byPosition != 0) return byPosition;
+        final byCreated = b.row.created.compareTo(a.row.created);
+        if (byCreated != 0) return byCreated;
+      }
+      // Unknown position(s), a created tie, or a position tie: current order.
+      return a.index.compareTo(b.index);
+    });
+    for (var i = 0; i < indexed.length; i++) {
+      rows[i] = indexed[i].row;
     }
   }
 
@@ -703,6 +838,11 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       setState(() {
         _rows = rows;
         _loading = false;
+        // The read is authoritative and pre-sorted (pinned-first): the stale
+        // in-place positions (the exact pin times we learned from echoes) are
+        // no longer needed — a fresh list starts the in-place reorder fresh
+        // (issue #238).
+        _positions.clear();
         _reconcileSelection(rows);
         _reconcileUnread(rows);
       });
@@ -1145,6 +1285,8 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     onOrbChipTapped: widget.onOrbChipTapped,
                     onStop: _client == null ? null : () => _stopTurn(s),
                     stopping: _stoppingId == s.id,
+                    onPin: _client == null ? null : () => _setPin(s),
+                    pinning: _pinningId == s.id,
                   ),
               ],
             ),
@@ -1302,6 +1444,45 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     final client = _client;
     if (client == null) return null;
     return () => _openStructured(session);
+  }
+
+  /// The row's pin / unpin (issue #238): one action, entirely through the
+  /// bridge's order route — pin writes the pin time (the current epoch
+  /// millis; the pin time *is* the stored position, so the pinned block
+  /// orders by pin time, newest-pinned last), unpin clears it (`null`). The
+  /// row shows progress meanwhile, and on success the row moves into the
+  /// pinned block (or back to its created-order place) in place — no refetch.
+  /// A failed write (a `404`, a network error) is reported and leaves the
+  /// list unchanged, so the control is offered again to retry.
+  ///
+  /// The position the row sorts by after a local pin is this device's pin
+  /// time. The bridge's `session.order.changed` echo (carrying the same
+  /// position) re-sorts to the identical place, so the local patch and the
+  /// echo agree — no flap, no double move.
+  Future<void> _setPin(Session session) async {
+    final client = _client;
+    if (client == null || _pinningId != null) return;
+    final pinning = !session.pinned;
+    final position = pinning ? DateTime.now().millisecondsSinceEpoch : null;
+    setState(() => _pinningId = session.id);
+    try {
+      await client.setOrder(session.id, position);
+      if (!mounted) return;
+      // Success: patch the cached row in place and re-sort (no refetch).
+      final rows = _rows;
+      if (rows != null) _setOrder(session.id, position, rows);
+    } on SessionsClientError catch (e) {
+      if (!mounted) return;
+      _snackBar(
+        'Could not ${pinning ? 'pin' : 'unpin'} the session '
+        '(status ${e.statusCode == 0 ? 'unreachable' : '${e.statusCode}'}).',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _snackBar('Could not ${pinning ? 'pin' : 'unpin'} the session.');
+    } finally {
+      if (mounted) setState(() => _pinningId = null);
+    }
   }
 }
 
@@ -1626,6 +1807,8 @@ class _SessionRow extends StatelessWidget {
     this.onOrbChipTapped,
     this.onStop,
     this.stopping = false,
+    this.onPin,
+    this.pinning = false,
   });
 
   final Session session;
@@ -1697,6 +1880,17 @@ class _SessionRow extends StatelessWidget {
   /// True while the row's Stop is in flight: the control shows a busy
   /// spinner and ignores further presses (one request per turn).
   final bool stopping;
+
+  /// The row's pin / unpin (issue #238): toggles the session's place in the
+  /// home list's pinned block through the bridge's order route. Offered on
+  /// every row (host and orb alike — the pin keys on the session id, which a
+  /// host↔orb move preserves). `null` when the row has no order seam (no
+  /// client).
+  final VoidCallback? onPin;
+
+  /// True while the row's pin / unpin write is in flight: the control shows a
+  /// busy spinner and ignores further presses (one request per tap).
+  final bool pinning;
 
   /// The status dot's state (issue #209), in precedence order: `waiting`
   /// (the row's `waiting` fact) beats `active` (the `active` fact) beats
@@ -1854,6 +2048,34 @@ class _SessionRow extends StatelessWidget {
                         )
                       : const Icon(Icons.stop, size: 18),
                   onPressed: stopping ? null : onStop,
+                ),
+                const SizedBox(width: 4),
+              ],
+              // The row's pin / unpin (issue #238): a filled pin while the row
+              // is in the pinned block, an outlined one while it is not — the
+              // state is carried by the icon (filled vs. outline), not by a
+              // separate badge. Offered on every row with a client (host and
+              // orb alike — the pin keys on the session id, which a host↔orb
+              // move preserves); gone while the row shows a progress spinner
+              // (delete, archive, move, export); busy (spinner, ignores
+              // presses) while the order write is in flight.
+              if (onPin != null && !deleting && !moving && !exporting) ...[
+                IconButton(
+                  key: ValueKey('pin-${session.id}'),
+                  tooltip: session.pinned ? 'Unpin session' : 'Pin session',
+                  icon: pinning
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(
+                          session.pinned
+                              ? Icons.push_pin
+                              : Icons.push_pin_outlined,
+                          size: 18,
+                        ),
+                  onPressed: pinning ? null : onPin,
                 ),
                 const SizedBox(width: 4),
               ],

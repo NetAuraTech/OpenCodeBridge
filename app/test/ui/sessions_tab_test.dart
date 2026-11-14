@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/access_session.dart';
 import 'package:opencodebridge/access/token_store.dart';
+import 'package:opencodebridge/bridge/events/bridge_event.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/fs_client.dart';
 import 'package:opencodebridge/client/orbs_client.dart';
@@ -108,6 +109,11 @@ class _FakeSessionsClient extends SessionsClient {
   /// see.
   final List<Session> rows;
 
+  /// The bridge's order store, emulated (issue #238): the pinned positions a
+  /// successful `setOrder` writes, keyed by session id. A `list` read reflects
+  /// them (pinned-first), like the real bridge's `SessionsBackend.list`.
+  final Map<String, num> positions = {};
+
   Object? listError;
   Object? deleteError;
   Object? createError;
@@ -140,6 +146,17 @@ class _FakeSessionsClient extends SessionsClient {
   /// to sequence it against the row's busy state).
   Completer<void>? cancelGate;
 
+  /// The order writes (`setOrder`), in order (issue #238's row pin): the
+  /// (id, position) pairs.
+  final List<(String, num?)> orderWrites = [];
+
+  /// When set, `setOrder` throws it (the failure the row pin reports).
+  Object? orderError;
+
+  /// When set, `setOrder` awaits it before returning (the order write held in
+  /// flight, to sequence it against the row's busy state).
+  Completer<void>? orderGate;
+
   @override
   Future<List<Session>> list() async {
     listCalls++;
@@ -147,7 +164,43 @@ class _FakeSessionsClient extends SessionsClient {
     if (error is Object) throw error;
     // A fresh snapshot on every call, like the real client (which decodes a
     // new list per request): the tab's held rows are not the fake's list.
-    return List<Session>.of(rows);
+    //
+    // The bridge's home-list read (issue #237/238) is pinned-first (position
+    // ascending), then the unpinned newest-created. Emulated from the rows'
+    // pinned facts and the order-store positions a successful `setOrder`
+    // recorded — a row is pinned when its flag is set or the store holds a
+    // position for it (the bridge derives `pinned` from the store). So a
+    // re-fetch (a delete, a move, a missed create) returns the row in its
+    // pinned place.
+    bool pinnedAt(Session r) => r.pinned || positions.containsKey(r.id);
+    final indexed = [
+      for (var i = 0; i < rows.length; i++) (row: rows[i], index: i),
+    ];
+    indexed.sort((a, b) {
+      final aPinned = pinnedAt(a.row);
+      final bPinned = pinnedAt(b.row);
+      if (aPinned != bPinned) return aPinned ? -1 : 1;
+      if (!aPinned) {
+        final byCreated = b.row.created.compareTo(a.row.created);
+        if (byCreated != 0) return byCreated;
+        return a.index.compareTo(b.index);
+      }
+      final posA = positions[a.row.id];
+      final posB = positions[b.row.id];
+      if (posA != null && posB != null) {
+        final byPosition = posA.compareTo(posB);
+        if (byPosition != 0) return byPosition;
+        final byCreated = b.row.created.compareTo(a.row.created);
+        if (byCreated != 0) return byCreated;
+      }
+      return a.index.compareTo(b.index);
+    });
+    // The bridge derives each row's `pinned` fact from the store, so the read
+    // carries it (a later fetch reflects a successful `setOrder`).
+    return [
+      for (final entry in indexed)
+        entry.row.copyWith(pinned: pinnedAt(entry.row)),
+    ];
   }
 
   @override
@@ -157,6 +210,22 @@ class _FakeSessionsClient extends SessionsClient {
     cancelled.add(id);
     final error = cancelError;
     if (error is Object) throw error;
+  }
+
+  @override
+  Future<void> setOrder(String id, num? position) async {
+    final gate = orderGate;
+    if (gate != null) await gate.future;
+    orderWrites.add((id, position));
+    final error = orderError;
+    if (error is Object) throw error;
+    // The bridge's order store: a successful write records (or clears) the
+    // row's position, which a later `list` read reflects (pinned-first).
+    if (position == null) {
+      positions.remove(id);
+    } else {
+      positions[id] = position;
+    }
   }
 
   @override
@@ -216,6 +285,24 @@ class _FakeSessionsClient extends SessionsClient {
     final error = moveError;
     if (error is Object) throw error;
     moved.add((id, orbName));
+    // The move preserves the session id and every row fact but its orb: the
+    // bridge re-reads the row with its orb set (issue #238's move test relies
+    // on this — the pin keys on the id, so the pinned place must hold).
+    final index = rows.indexWhere((s) => s.id == id);
+    if (index == -1) return;
+    final existing = rows[index];
+    rows[index] = Session(
+      id: existing.id,
+      title: existing.title,
+      project: existing.project,
+      created: existing.created,
+      location: existing.location,
+      active: existing.active,
+      orb: orbName,
+      waiting: existing.waiting,
+      pinned: existing.pinned,
+      archived: existing.archived,
+    );
   }
 
   @override
@@ -2742,6 +2829,413 @@ void main() {
           // detail pane; the open did not unarchive it.
           expect(find.byType(StructuredSessionPanel), findsOneWidget);
           expect(client.archivedCalls, isEmpty);
+        },
+      );
+    });
+
+    group('pin / unpin (issue #238)', () {
+      /// The bridge-native order-change event (no durable seq; the session id
+      /// and the new position — `null` when the pin was cleared — in data).
+      BridgeEvent orderEvent(String id, num? position) => BridgeEvent(
+        id: 'evt_order_$id',
+        created: 0,
+        type: BridgeEventType.sessionOrderChanged,
+        data: {'sessionID': id, 'position': position},
+      );
+
+      testWidgets(
+        'every row offers a pin control that mirrors the pinned state '
+        '(filled when pinned, outlined when not)',
+        (tester) async {
+          await _pumpTab(
+            tester,
+            rows: [
+              _two.copyWith(pinned: true), // pinned
+              _one, // not
+            ],
+          );
+          expect(
+            find.byKey(const ValueKey('pin-ses_2')),
+            findsOneWidget,
+            reason: 'a pinned row offers the pin control',
+          );
+          expect(
+            find.byKey(const ValueKey('pin-ses_1')),
+            findsOneWidget,
+            reason: 'an unpinned row offers the pin control too',
+          );
+          // The control's icon mirrors the row's pinned state: filled for the
+          // pinned row, outlined for the unpinned one.
+          final pinnedIcon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_2')),
+              matching: find.byType(Icon),
+            ),
+          );
+          final outlinedIcon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(pinnedIcon.icon, Icons.push_pin);
+          expect(outlinedIcon.icon, Icons.push_pin_outlined);
+        },
+      );
+
+      testWidgets(
+        'pinning an unpinned row calls the order route with a pin position, '
+        'moves it into the pinned block, and does not refetch',
+        (tester) async {
+          // The read is pre-sorted (pinned-first): the newest, then the older.
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_two, _one], // newest first, none pinned
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          // The newer row (ses_2) sits above the older one.
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            ),
+          );
+
+          // Tap the pin on the older row (ses_1): it joins the pinned block.
+          await tester.tap(find.byKey(const ValueKey('pin-ses_1')));
+          await tester.pumpAndSettle();
+
+          // The order route was called with a numeric pin position (the pin
+          // time — current epoch millis, positive), for that row only.
+          expect(client.orderWrites, hasLength(1));
+          expect(client.orderWrites.single.$1, 'ses_1');
+          expect(client.orderWrites.single.$2, isA<num>());
+          expect(client.orderWrites.single.$2, isNot(null));
+          expect(client.orderWrites.single.$2! > 0, isTrue);
+
+          // The row moved into the pinned block (now first), and no refetch
+          // happened (the list was patched in place and re-sorted).
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            ),
+          );
+          // The control now reads as pinned (filled).
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin);
+          expect(client.listCalls, 1, reason: 'no refetch: patched in place');
+        },
+      );
+
+      testWidgets(
+        'unpinning a pinned row calls the order route with null, returns it '
+        'to its created-order place, and does not refetch',
+        (tester) async {
+          // A pinned row (pinned earlier, so it is first) and a newer unpinned
+          // row: the read is pre-sorted pinned-first.
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [
+              _one.copyWith(pinned: true),
+              _two,
+            ], // pinned first, then newest-created
+            events: events,
+          );
+          expect(client.listCalls, 1);
+
+          await tester.tap(find.byKey(const ValueKey('pin-ses_1')));
+          await tester.pumpAndSettle();
+
+          // The order route was called with a null position (the un-pin), for
+          // that row.
+          expect(client.orderWrites, [('ses_1', null)]);
+
+          // The row returned to its created-order place among the unpinned:
+          // ses_2 (newer) is now above ses_1 (older).
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            ),
+          );
+          // The control now reads as unpinned (outlined).
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin_outlined);
+          expect(client.listCalls, 1, reason: 'no refetch: patched in place');
+        },
+      );
+
+      testWidgets(
+        'a session.order.changed for a known row re-sorts in place, without a '
+        'refetch',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_two, _one], // newest first, none pinned
+            events: events,
+          );
+          expect(client.listCalls, 1);
+
+          // A pin from another device (or this device's own echo): the row's
+          // pin fact is patched in place and the list re-sorts — no refetch.
+          events.emit(orderEvent('ses_1', 1712345678901));
+          await tester.pumpAndSettle();
+
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            ),
+          );
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin);
+          expect(client.listCalls, 1, reason: 'no refetch: merged in place');
+        },
+      );
+
+      testWidgets(
+        'a session.order.changed that clears the pin (null position) returns '
+        'the row to its created-order place, in place',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [
+              _one.copyWith(pinned: true),
+              _two,
+            ], // pinned first, then newest-created
+            events: events,
+          );
+          expect(client.listCalls, 1);
+
+          events.emit(orderEvent('ses_1', null));
+          await tester.pumpAndSettle();
+
+          // ses_2 (newer) is now above ses_1 (older): back in created order.
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            ),
+          );
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin_outlined);
+          expect(client.listCalls, 1, reason: 'no refetch: merged in place');
+        },
+      );
+
+      testWidgets(
+        'a session.order.changed naming a session the list does not know '
+        'reloads (a missed create), like any other unknown-session event',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(tester, rows: [_one], events: events);
+          expect(client.listCalls, 1);
+
+          // ses_orb1 is not in the list: the order event must not be swallowed
+          // — it reloads, coalesced and quiet, so the fresh row (with its
+          // pinned fact) arrives.
+          events.emit(orderEvent('ses_orb1', 5));
+          await tester.pumpAndSettle();
+          expect(client.listCalls, 2, reason: 'a create was missed');
+        },
+      );
+
+      testWidgets(
+        'a cold start renders the pinned block first, straight from the read '
+        '(no re-sort needed)',
+        (tester) async {
+          // The read is already pre-sorted pinned-first (pinned rows by
+          // position, then unpinned by newest-created); the app renders it
+          // without re-fetching or re-sorting. Pinned: ses_1 (position 100),
+          // ses_2 (position 200) → ses_1 before ses_2. Unpinned by created
+          // descending: ses_4 (400), ses_3 (200).
+          await _pumpTab(
+            tester,
+            rows: [
+              _one.copyWith(pinned: true), // pinned (position 100) — first
+              _two.copyWith(pinned: true), // pinned (position 200) — second
+              _four, // newest unpinned
+              _three, // older unpinned
+            ],
+          );
+          // The pinned block leads the list, in position order (ses_1 before
+          // ses_2), ahead of every unpinned row; the unpinned rows stay in
+          // newest-created order.
+          double y(Key key) => tester.getTopLeft(find.byKey(key)).dy;
+          expect(
+            y(const ValueKey('session-ses_1')),
+            lessThan(y(const ValueKey('session-ses_2'))),
+          );
+          expect(
+            y(const ValueKey('session-ses_2')),
+            lessThan(y(const ValueKey('session-ses_4'))),
+          );
+          expect(
+            y(const ValueKey('session-ses_4')),
+            lessThan(y(const ValueKey('session-ses_3'))),
+          );
+        },
+      );
+
+      testWidgets(
+        'a failed pin write is surfaced and leaves the list unchanged',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_two, _one],
+            events: events,
+          );
+          expect(client.listCalls, 1);
+          client.orderError = const SessionsClientError(404, 'not_found');
+
+          await tester.tap(find.byKey(const ValueKey('pin-ses_1')));
+          await tester.pumpAndSettle();
+
+          // The failure is surfaced to the user…
+          expect(
+            find.textContaining('Could not pin the session'),
+            findsOneWidget,
+          );
+          // …and the list is unchanged: the row stays in its created-order
+          // place, still reads as unpinned, and no refetch happened.
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            ),
+          );
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin_outlined);
+          expect(client.listCalls, 1, reason: 'the list is left unchanged');
+        },
+      );
+
+      testWidgets(
+        'a failed unpin write is surfaced and leaves the list unchanged',
+        (tester) async {
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_one.copyWith(pinned: true), _two], // pinned first
+            events: events,
+          );
+          client.orderError = const SessionsClientError(404, 'not_found');
+
+          await tester.tap(find.byKey(const ValueKey('pin-ses_1')));
+          await tester.pumpAndSettle();
+
+          expect(
+            find.textContaining('Could not unpin the session'),
+            findsOneWidget,
+          );
+          // The pinned row stays pinned (the write failed).
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin);
+        },
+      );
+
+      testWidgets(
+        'the pin survives a host-to-orb move: the row keeps its id and its '
+        'pinned place',
+        (tester) async {
+          // A host row (un-pinned, so the pin is applied here) and a newer
+          // host row. The pin keys on the session id — not the orb — so the
+          // move must keep the row's pinned place: it keeps its id, and the
+          // re-fetch returns it pinned, now attributed to the orb.
+          final events = _FakeEventsSource();
+          final client = await _pumpTab(
+            tester,
+            rows: [_two, _one], // newest first, host, none pinned
+            events: events,
+          );
+          expect(client.listCalls, 1);
+
+          // Pin the host row (ses_1): it joins the pinned block, first.
+          await tester.tap(find.byKey(const ValueKey('pin-ses_1')));
+          await tester.pumpAndSettle();
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            ),
+          );
+
+          // Move the (now pinned) host row onto an orb. The row keeps its id
+          // and its pinned fact; it is now an orb row.
+          await tester.tap(
+            find.byKey(const ValueKey('menu-ses_1')),
+            warnIfMissed: false,
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Move to orb…'));
+          await tester.pumpAndSettle();
+          // The name prompt is open (its labelled "Orb name" field).
+          await tester.enterText(
+            find.byKey(const ValueKey('move-to-orb-name')),
+            'dev',
+          );
+          await tester.pump();
+          await tester.tap(find.byKey(const ValueKey('move-to-orb-confirm')));
+          await tester.pumpAndSettle();
+
+          // The move was issued for the pinned row…
+          expect(client.moved, [('ses_1', 'dev')]);
+          // …and the row kept its id (same key) and its pinned place (still
+          // first, ahead of the newer unpinned row), reading as pinned.
+          expect(find.byKey(const ValueKey('session-ses_1')), findsOneWidget);
+          expect(
+            tester.getTopLeft(find.byKey(const ValueKey('session-ses_1'))).dy,
+            lessThan(
+              tester.getTopLeft(find.byKey(const ValueKey('session-ses_2'))).dy,
+            ),
+          );
+          final icon = tester.widget<Icon>(
+            find.descendant(
+              of: find.byKey(const ValueKey('pin-ses_1')),
+              matching: find.byType(Icon),
+            ),
+          );
+          expect(icon.icon, Icons.push_pin);
+          // The row now wears its orb (the move landed): the host label is
+          // gone for it and the orb chip is present.
+          expect(find.byKey(const ValueKey('orb-chip-dev')), findsOneWidget);
         },
       );
     });
