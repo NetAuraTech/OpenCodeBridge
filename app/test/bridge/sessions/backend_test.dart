@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/order_store.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/permission.dart';
@@ -556,6 +558,218 @@ void main() {
     });
   });
 
+  // The user-controlled display order (issue #237): the bridge-owned order
+  // store keys on the session id, so the home list reads pinned-first —
+  // the pinned block position ascending, then the unpinned newest-created.
+
+  group('SessionsBackend.list ordering (issue #237)', () {
+    late Directory dir;
+    late File file;
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('oc-be-order');
+      file = File('${dir.path}/session-order.json');
+    });
+
+    tearDown(() async {
+      await dir.delete(recursive: true);
+    });
+
+    test(
+      'pinned rows come first, position ascending, then newest-created',
+      () async {
+        final store = SessionOrderStore(file: file);
+        await store.set('ses_1', 2);
+        await store.set('ses_3', 0);
+        final service = FakeOpencodeService(
+          sessions: [s1, s2, s3],
+          names: {'p1': 'proj-one', 'p2': 'proj-two'},
+        );
+        final backend = SessionsBackend(service: service, orderStore: store);
+
+        final rows = await backend.list();
+
+        // The pinned block (position ascending): ses_3 (0) then ses_1 (2);
+        // then the unpinned newest-created: ses_2 (created 300).
+        expect(rows.map((r) => r.id).toList(), ['ses_3', 'ses_1', 'ses_2']);
+        expect(rows.byId('ses_3').pinned, isTrue);
+        expect(rows.byId('ses_1').pinned, isTrue);
+        expect(rows.byId('ses_2').pinned, isFalse);
+      },
+    );
+
+    test(
+      'the position follows a session moved host to orb (id preserved)',
+      () async {
+        final store = SessionOrderStore(file: file);
+        await store.set('ses_1', 0);
+        final backend = SessionsBackend(
+          service: FakeOpencodeService(
+            sessions: [s1, s2, s3],
+            names: {'p1': 'proj-one', 'p2': 'proj-two'},
+          ),
+          orderStore: store,
+        );
+
+        var rows = await backend.list();
+        expect(rows.first.id, 'ses_1');
+        expect(rows.first.pinned, isTrue);
+        expect(rows.first.orb, isNull);
+
+        // The session moves onto an orb: the id is preserved (the move's
+        // contract), the row's location/orb facts change, and the store —
+        // keyed on the id alone — keeps it in its pinned place.
+        const moved = OpencodeSession(
+          id: 'ses_1',
+          title: 'one',
+          projectId: 'p1',
+          created: 100,
+          location: '/one',
+          orb: 'orb_7',
+        );
+        rows = await SessionsBackend(
+          service: FakeOpencodeService(
+            sessions: [moved, s2, s3],
+            names: {'p1': 'proj-one', 'p2': 'proj-two'},
+          ),
+          orderStore: store,
+        ).list();
+
+        expect(rows.first.id, 'ses_1');
+        expect(rows.first.pinned, isTrue);
+        expect(rows.first.orb, 'orb_7');
+      },
+    );
+
+    test('orphan store entries are pruned on the list read', () async {
+      final store = SessionOrderStore(file: file);
+      await store.set('ses_1', 1);
+      // The orphan: a position for a session the service no longer has.
+      await store.set('ses_gone', 0);
+      final backend = SessionsBackend(
+        service: FakeOpencodeService(sessions: [s1, s2], names: const {}),
+        orderStore: store,
+      );
+
+      final rows = await backend.list();
+
+      expect(rows.byId('ses_1').pinned, isTrue);
+      final onDisk = jsonDecode(file.readAsStringSync()) as Map;
+      expect(onDisk, {'ses_1': 1});
+    });
+
+    test(
+      'a store failure degrades to the unpinned order, never the list',
+      () async {
+        final service = FakeOpencodeService(
+          sessions: [s1, s2],
+          names: const {},
+        );
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _ThrowingOrderStore(),
+        );
+
+        final rows = await backend.list();
+
+        expect(rows.map((r) => r.id).toList(), ['ses_2', 'ses_1']);
+        expect(rows.every((r) => !r.pinned), isTrue);
+      },
+    );
+
+    test('the comparator: pinned first (position ascending), then '
+        'created descending', () {
+      // The scripted positions: e and b tie at 0 (created descending breaks
+      // the tie: e (500) before b (0)), a sits at 2; c and d are unpinned.
+      final position = <String, num?>{'a': 2, 'b': 0, 'e': 0};
+      final rows = [
+        const Session(
+          id: 'a',
+          title: 'a',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 1000,
+          location: '/a',
+          active: false,
+          pinned: true,
+        ),
+        const Session(
+          id: 'b',
+          title: 'b',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 0,
+          location: '/b',
+          active: false,
+          pinned: true,
+        ),
+        const Session(
+          id: 'c',
+          title: 'c',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 999,
+          location: '/c',
+          active: false,
+        ),
+        const Session(
+          id: 'd',
+          title: 'd',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 1,
+          location: '/d',
+          active: false,
+        ),
+        // A position tie with b: created descending breaks it (e before b).
+        const Session(
+          id: 'e',
+          title: 'e',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 500,
+          location: '/e',
+          active: false,
+          pinned: true,
+        ),
+      ];
+
+      rows.sort(
+        (a, b) => SessionsBackend.homeListOrder(a, b, (id) => position[id]),
+      );
+
+      expect(rows.map((r) => r.id).toList(), ['e', 'b', 'a', 'c', 'd']);
+    });
+
+    test('the comparator without pins keeps today\'s newest-created order', () {
+      final rows = [
+        const Session(
+          id: 'a',
+          title: 'a',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 100,
+          location: '/a',
+          active: false,
+        ),
+        const Session(
+          id: 'b',
+          title: 'b',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 300,
+          location: '/b',
+          active: false,
+        ),
+        const Session(
+          id: 'c',
+          title: 'c',
+          project: SessionProject(id: 'p', name: 'p'),
+          created: 200,
+          location: '/c',
+          active: false,
+        ),
+      ];
+
+      rows.sort((a, b) => SessionsBackend.homeListOrder(a, b, (id) => null));
+
+      expect(rows.map((r) => r.id).toList(), ['b', 'c', 'a']);
+    });
+  });
+
   group('SessionsBackend.create', () {
     test('creates on the service and returns the row', () async {
       final created = const OpencodeSession(
@@ -1027,4 +1241,23 @@ void main() {
 extension on List<Session> {
   /// The row with [id] (the waiting tests' look-up).
   Session byId(String id) => firstWhere((row) => row.id == id);
+}
+
+/// An order store that fails every read (the degraded-store test): the list
+/// must fall back to the unpinned order rather than fail.
+class _ThrowingOrderStore implements SessionOrderStore {
+  @override
+  File get file => throw StateError('store down');
+
+  @override
+  Map<String, num> load() => throw StateError('store down');
+
+  @override
+  Future<void> set(String id, num position) async {}
+
+  @override
+  Future<void> clear(String id) async {}
+
+  @override
+  Future<void> prune(Set<String> keep) async {}
 }

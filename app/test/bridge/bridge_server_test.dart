@@ -15,6 +15,7 @@ import 'package:opencodebridge/bridge/notify/firebase_service_account.dart';
 import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/order_store.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service_boot.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/bridge/tunnel/cloudflared_binary.dart';
@@ -346,6 +347,7 @@ void main() {
         'location': '/two',
         'active': false,
         'waiting': false,
+        'pinned': false,
       });
       expect(rows[1]['active'], true);
       expect(rows[1]['waiting'], false);
@@ -1717,6 +1719,319 @@ void main() {
     });
   });
 
+  group('BridgeServer session order (issue #237)', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeService service;
+    late _FakeEventUpstream upstream;
+    late EventHub hub;
+    late Directory dir;
+    late File file;
+
+    setUp(() async {
+      service = _FakeService();
+      upstream = _FakeEventUpstream();
+      hub = EventHub(service: upstream);
+      dir = await Directory.systemTemp.createTemp('oc-order-route');
+      file = File('${dir.path}/session-order.json');
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: SessionOrderStore(file: file),
+        ),
+        events: hub,
+        sessionOrderFile: file,
+      );
+      base = server.baseUri;
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test(
+      'PATCH /api/sessions/{id}/order sets the position and is 204',
+      () async {
+        final (status, body) = await _patchRaw(
+          base,
+          'api/sessions/ses_one/order',
+          jsonEncode({'position': 2}),
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+
+        final (listStatus, listBody) = await _get(base, 'api/sessions');
+        expect(listStatus, 200);
+        final rows = (jsonDecode(listBody) as List)
+            .cast<Map<String, Object?>>();
+        // The pinned block (position ascending) comes before the unpinned
+        // newest-created block, and the row carries the pinned fact.
+        expect(rows.map((r) => r['id']), ['ses_one', 'ses_two', 'ses_three']);
+        expect(rows[0]['pinned'], true);
+        expect(rows[1]['pinned'], false);
+        expect(rows[2]['pinned'], false);
+      },
+    );
+
+    test('a fractional position is accepted as a num', () async {
+      final (status, _) = await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 1.5}),
+      );
+      expect(status, 204);
+      expect(jsonDecode(file.readAsStringSync()), {
+        'ses_one': 1.5,
+      }, reason: 'the position is persisted as the num it was sent as');
+    });
+
+    test('position null clears the pin and is 204', () async {
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+
+      final (status, body) = await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': null}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+
+      final (listStatus, listBody) = await _get(base, 'api/sessions');
+      expect(listStatus, 200);
+      final rows = (jsonDecode(listBody) as List).cast<Map<String, Object?>>();
+      // Back to the newest-created order among the unpinned.
+      expect(rows.map((r) => r['id']), ['ses_two', 'ses_three', 'ses_one']);
+      expect(rows.every((r) => r['pinned'] == false), isTrue);
+    });
+
+    test('a missing position field clears the pin and is 204', () async {
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+
+      final (status, body) = await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(file.existsSync(), isFalse);
+    });
+
+    test('an unknown session id is 404', () async {
+      final (status, body) = await _patchRaw(
+        base,
+        'api/sessions/ses_missing/order',
+        jsonEncode({'position': 0}),
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      expect(file.existsSync(), isFalse);
+    });
+
+    for (final malformed in [
+      jsonEncode({'position': 'two'}),
+      jsonEncode({
+        'position': {'n': 1},
+      }),
+      jsonEncode({
+        'position': ['0'],
+      }),
+      jsonEncode(['not', 'an', 'object']),
+      'not json at all',
+    ]) {
+      test('a malformed body ($malformed) is 400', () async {
+        final (status, body) = await _patchRaw(
+          base,
+          'api/sessions/ses_one/order',
+          malformed,
+        );
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+        expect(file.existsSync(), isFalse);
+      });
+    }
+
+    test(
+      'a successful set emits a bridge-native session.order.changed',
+      () async {
+        final tap = await _SseTap.open(base);
+        try {
+          await _until(() => tap.ready);
+          final (status, _) = await _patchRaw(
+            base,
+            'api/sessions/ses_one/order',
+            jsonEncode({'position': 0}),
+          );
+          expect(status, 204);
+          await _until(
+            () => tap.dataPayloads.any((p) => p.contains('order.changed')),
+            message: 'expected the session.order.changed frame',
+          );
+          final frame = jsonDecode(
+            tap.dataPayloads.firstWhere((p) => p.contains('order.changed')),
+          ) as Map<String, Object?>;
+          expect(frame['type'], 'session.order.changed');
+          expect(frame['data'], {'sessionID': 'ses_one', 'position': 0});
+          expect(
+            frame.containsKey('durable'),
+            isFalse,
+            reason: 'bridge-native events carry no durable seq',
+          );
+        } finally {
+          await tap.close();
+        }
+      },
+    );
+
+    test('a successful clear emits session.order.changed with a null '
+        'position', () async {
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+      final tap = await _SseTap.open(base);
+      try {
+        await _until(() => tap.ready);
+        final (status, _) = await _patchRaw(
+          base,
+          'api/sessions/ses_one/order',
+          jsonEncode({'position': null}),
+        );
+        expect(status, 204);
+        await _until(
+          () => tap.dataPayloads.any((p) => p.contains('order.changed')),
+          message: 'expected the session.order.changed frame',
+        );
+        final frame = jsonDecode(
+          tap.dataPayloads.firstWhere((p) => p.contains('order.changed')),
+        ) as Map<String, Object?>;
+        expect(frame['type'], 'session.order.changed');
+        expect(frame['data'], {'sessionID': 'ses_one', 'position': null});
+        expect(frame.containsKey('durable'), isFalse);
+      } finally {
+        await tap.close();
+      }
+    });
+
+    test('a rejected write (404/400) emits no order event', () async {
+      final tap = await _SseTap.open(base);
+      try {
+        await _until(() => tap.ready);
+        await _patchRaw(
+          base,
+          'api/sessions/ses_missing/order',
+          jsonEncode({'position': 0}),
+        );
+        await _patchRaw(
+          base,
+          'api/sessions/ses_one/order',
+          jsonEncode({'position': 'two'}),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(tap.dataPayloads, isEmpty);
+      } finally {
+        await tap.close();
+      }
+    });
+
+    test(
+      'the order survives a bridge restart (the store is persisted)',
+      () async {
+        await _patchRaw(
+          base,
+          'api/sessions/ses_three/order',
+          jsonEncode({'position': 0}),
+        );
+        await server.stop();
+
+        // A new bridge over the same app-owned file: the position is still
+        // there, and the home list reads it back in the pinned block.
+        final restarted = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(
+            service: service,
+            orderStore: SessionOrderStore(file: file),
+          ),
+          events: hub,
+          sessionOrderFile: file,
+        );
+        try {
+          final (status, body) = await _get(restarted.baseUri, 'api/sessions');
+          expect(status, 200);
+          final rows = (jsonDecode(body) as List).cast<Map<String, Object?>>();
+          expect(rows.map((r) => r['id']), ['ses_three', 'ses_two', 'ses_one']);
+          expect(rows[0]['pinned'], true);
+        } finally {
+          await restarted.stop();
+        }
+      },
+    );
+
+    test(
+      'the default bridge wires the app-owned order file (issue #237)',
+      () async {
+        // The route is served by the bridge itself (no injection): the default
+        // path is `~/.config/opencodebridge/session-order.json`.
+        final marker =
+            '${Platform.environment['HOME'] ?? '/'}'
+            '/.config/opencodebridge/session-order.json';
+        final markerFile = File(marker);
+        final saved = markerFile.existsSync()
+            ? markerFile.readAsStringSync()
+            : null;
+        // The test sessions: the default sessions backend is fake here only
+        // because the bridge is started without one — the route answers 503,
+        // but the store the route would use is the app-owned file's.
+        final bare = await BridgeServer.start(
+          port: 0,
+          sessions: SessionsBackend(service: service),
+          events: hub,
+        );
+        try {
+          final (status, _) = await _patchRaw(
+            bare.baseUri,
+            'api/sessions/ses_one/order',
+            jsonEncode({'position': 0}),
+          );
+          expect(status, 204);
+          expect(markerFile.existsSync(), isTrue);
+          expect(jsonDecode(markerFile.readAsStringSync()), {'ses_one': 0});
+        } finally {
+          await bare.stop();
+          if (saved == null) {
+            await markerFile.delete();
+          } else {
+            markerFile.writeAsStringSync(saved);
+          }
+        }
+      },
+    );
+
+    test(
+      'a body-less PATCH is 400 (the body is checked before the session)',
+      () async {
+        final (status, body) = await _patchRaw(
+          base,
+          'api/sessions/ses_missing/order',
+          '',
+        );
+        expect(status, 400);
+        expect(jsonDecode(body), {'error': 'invalid_body'});
+      },
+    );
+  });
+
   group('BridgeServer events', () {
     late BridgeServer server;
     late Uri base;
@@ -1955,6 +2270,7 @@ void main() {
           'location': '/created',
           'active': false,
           'waiting': false,
+          'pinned': false,
         });
       },
     );
@@ -2033,6 +2349,7 @@ void main() {
           'location': dir.path,
           'active': false,
           'waiting': false,
+          'pinned': false,
         });
       },
     );
@@ -3513,6 +3830,22 @@ Future<(int, String)> _delete(Uri base, String path) async {
     final response = await request.close();
     final body = await response.transform(const Utf8Decoder()).join();
     return (response.statusCode, body);
+  } finally {
+    client.close(force: true);
+  }
+}
+
+Future<(int, String)> _patchRaw(Uri base, String path, String body) async {
+  final client = HttpClient();
+  try {
+    final request = await client.patchUrl(base.replace(path: path));
+    request.headers.contentType = ContentType.json;
+    if (body.isNotEmpty) {
+      request.write(body);
+    }
+    final response = await request.close();
+    final raw = await response.transform(const Utf8Decoder()).join();
+    return (response.statusCode, raw);
   } finally {
     client.close(force: true);
   }

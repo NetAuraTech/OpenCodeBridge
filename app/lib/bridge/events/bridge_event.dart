@@ -10,6 +10,13 @@ abstract class BridgeEventType {
   /// app drops it from its list.
   static const String sessionClosed = 'session.closed';
 
+  /// A session's position in the home list's pinned block changed (issue
+  /// #237): the app re-sorts the row on the event, without a refetch.
+  /// `data` carries `sessionID` and `position` (the new position, or `null`
+  /// when the pin was cleared). No durable seq (a bridge-native side-effect,
+  /// like `session.closed`).
+  static const String sessionOrderChanged = 'session.order.changed';
+
   /// A session's turn was cancelled (a Stop from a panel, issue #164): the
   /// bridge carries it out and reports the outcome to every watcher, not only
   /// the panel that asked. `data` carries `sessionID` and — when a message was

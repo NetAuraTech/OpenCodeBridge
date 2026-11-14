@@ -7,18 +7,30 @@ import '../../model/question.dart';
 import '../../model/session.dart';
 import '../../model/session_detail.dart';
 import 'opencode_service.dart';
+import 'order_store.dart';
 
 /// The bridge's sessions backend (spec §5 endpoints 1 & 4, §6): it owns the
 /// [OpencodeService] seam and composes it into the home-list rows.
 ///
 /// - [list] merges the service session list and the service's active list,
-///   newest first.
+///   pinned-first (issue #237: the pinned block position ascending, then the
+///   unpinned newest-created).
 /// - [create] creates the session on the service (spec §5 fill-in †).
 /// - [delete] performs the service `DELETE`.
+/// - [setOrder] / [clearOrder] move the session's position in the bridge's
+///   app-owned order store (issue #237, the home list's user-controlled
+///   display order).
 class SessionsBackend {
-  SessionsBackend({required this.service});
+  SessionsBackend({required this.service, this.orderStore});
 
   final OpencodeService service;
+
+  /// The bridge's order store (issue #237): the persisted `sessionID ->
+  /// position` map behind the home list's pinned-first sort. `null` when the
+  /// bridge has no order store wired (the list falls back to the plain
+  /// newest-created order). Mutable: the bridge's start wires it into a
+  /// caller-provided backend after construction.
+  SessionOrderStore? orderStore;
 
   /// The service's project list (spec §5 fill-in †): what the app's project
   /// picker offers and what [create] takes as its only parameter.
@@ -114,9 +126,15 @@ class SessionsBackend {
     return false;
   }
 
-  /// The home-list rows, newest first (spec §5 endpoint 1, §6). Each row
-  /// carries its waiting fact, re-evaluated per session from the service's
-  /// pending states (issue #208).
+  /// The home-list rows (spec §5 endpoint 1, §6), pinned-first (issue #237):
+  /// the pinned block (a position set in the bridge's order store) in
+  /// position ascending order, then the unpinned newest-created (the plain
+  /// order's sort). Each row carries its waiting fact, re-evaluated per
+  /// session from the service's pending states (issue #208), and its pinned
+  /// fact, derived from the order store (issue #237). The store's map is
+  /// pruned to the live session ids on the read (no orphan growth).
+  /// A store failure degrades the read to the unpinned order — the list
+  /// itself stays up, like the waiting fact's degraded-orb posture.
   Future<List<Session>> list() async {
     final sessions = await service.listSessions();
     final names = await service.projectNames();
@@ -128,13 +146,64 @@ class SessionsBackend {
       for (final session in sessions) _waiting(session.id),
     ]);
 
+    // The bridge-owned order map (issue #237), pruned to the live ids; a
+    // store failure degrades the list to the unpinned order.
+    final orderStore = this.orderStore;
+    Map<String, num> positions = const {};
+    if (orderStore != null) {
+      try {
+        positions = orderStore.load();
+        await orderStore.prune({for (final s in sessions) s.id});
+      } catch (_) {
+        positions = const {};
+      }
+    }
+
     final rows = [
       for (var i = 0; i < sessions.length; i++)
-        _row(sessions[i], names, active, waiting: waiting[i]),
+        _row(
+          sessions[i],
+          names,
+          active,
+          waiting: waiting[i],
+          pinned: positions.containsKey(sessions[i].id),
+        ),
     ];
-    rows.sort((a, b) => b.created.compareTo(a.created));
+    rows.sort((a, b) => homeListOrder(a, b, (id) => positions[id]));
     return rows;
   }
+
+  /// The home list's sort comparator (issue #237): the pinned rows first, in
+  /// position ascending order (a position tie breaks by created descending,
+  /// the unpinned order), then the unpinned rows in created descending order.
+  /// [positionOf] answers a row's position (`null` = unpinned); it is the
+  /// store's map lookup, injected so the comparator is unit-testable on its
+  /// own.
+  static int homeListOrder(
+    Session a,
+    Session b,
+    num? Function(String id) positionOf,
+  ) {
+    final posA = positionOf(a.id);
+    final posB = positionOf(b.id);
+    if (posA != null && posB != null) {
+      final byPosition = posA.compareTo(posB);
+      if (byPosition != 0) return byPosition;
+      return b.created.compareTo(a.created);
+    }
+    if (posA != null) return -1; // Pinned before unpinned.
+    if (posB != null) return 1;
+    return b.created.compareTo(a.created);
+  }
+
+  /// Set [id]'s position in the order store (issue #237): the session joins
+  /// the home list's pinned block.
+  Future<void> setOrder(String id, num position) =>
+      orderStore!.set(id, position);
+
+  /// Clear [id]'s position in the order store (issue #237): the session
+  /// returns to the unpinned newest-created order.
+  Future<void> clearOrder(String id) => orderStore!.clear(id);
 
   /// The row's waiting fact (issue #208): whether the service still holds a
   /// pending permission request for [id], or, when it holds none, a pending
@@ -305,12 +374,13 @@ class SessionsBackend {
   Future<String> plugins() => service.plugins();
 
   /// One home-list row, from the service's session plus its project name,
-  /// active fact, and waiting fact (spec §6; the waiting fact, issue #208).
+  /// active fact, waiting fact (issue #208), and pinned fact (issue #237).
   Session _row(
     OpencodeSession s,
     Map<String, String> names,
     Set<String> active, {
     bool waiting = false,
+    bool pinned = false,
   }) {
     return Session(
       id: s.id,
@@ -324,6 +394,7 @@ class SessionsBackend {
       active: active.contains(s.id),
       orb: s.orb,
       waiting: waiting,
+      pinned: pinned,
     );
   }
 }

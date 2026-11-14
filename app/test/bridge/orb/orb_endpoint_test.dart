@@ -876,6 +876,7 @@ void main() {
         'active': false,
         'orb': 'aaaa',
         'waiting': false,
+        'pinned': false,
       });
       expect(orbs.sessionOrbId, 'aaaa');
     });

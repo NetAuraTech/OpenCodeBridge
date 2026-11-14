@@ -2160,6 +2160,7 @@ void main() {
               'location',
               'active',
               'waiting',
+              'pinned',
             },
           );
         },

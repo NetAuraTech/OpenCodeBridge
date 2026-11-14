@@ -44,6 +44,7 @@ class Session {
     required this.active,
     this.orb,
     this.waiting = false,
+    this.pinned = false,
   });
 
   final String id;
@@ -70,12 +71,25 @@ class Session {
   /// false (the degraded-orb posture).
   final bool waiting;
 
+  /// True while the bridge's order store (issue #237) holds a position for
+  /// the session — the row sits in the home list's pinned block. A
+  /// bridge-owned fact, derived by the backend from the store (it does not
+  /// come from the service seam); `false` when the store holds no entry.
+  final bool pinned;
+
   /// The row with the given fields replaced: the home list patches rows in
   /// place from live events (a title the agent assigns, the active dot moving)
   /// without a refetch. [waiting] is the row's waiting fact (issue #208),
   /// re-derived by the tab from the service's pending states on the same
   /// permission/question events the structured view consumes (issue #209).
-  Session copyWith({String? title, bool? active, bool? waiting}) => Session(
+  /// [pinned] is the row's pin fact (issue #237), re-derived by the tab from
+  /// the `session.order.changed` bridge event the same way.
+  Session copyWith({
+    String? title,
+    bool? active,
+    bool? waiting,
+    bool? pinned,
+  }) => Session(
     id: id,
     title: title ?? this.title,
     project: project,
@@ -84,6 +98,7 @@ class Session {
     active: active ?? this.active,
     orb: orb,
     waiting: waiting ?? this.waiting,
+    pinned: pinned ?? this.pinned,
   );
 
   Map<String, Object?> toJson() => {
@@ -95,6 +110,7 @@ class Session {
     'active': active,
     if (orb != null) 'orb': orb,
     'waiting': waiting,
+    'pinned': pinned,
   };
 
   factory Session.fromJson(Object? json) {
@@ -108,6 +124,7 @@ class Session {
       active: map['active'] as bool? ?? false,
       orb: map['orb'] as String?,
       waiting: map['waiting'] as bool? ?? false,
+      pinned: map['pinned'] as bool? ?? false,
     );
   }
 
@@ -121,13 +138,23 @@ class Session {
       other.location == location &&
       other.active == active &&
       other.orb == orb &&
-      other.waiting == waiting;
+      other.waiting == waiting &&
+      other.pinned == pinned;
 
   @override
-  int get hashCode =>
-      Object.hash(id, title, project, created, location, active, orb, waiting);
+  int get hashCode => Object.hash(
+    id,
+    title,
+    project,
+    created,
+    location,
+    active,
+    orb,
+    waiting,
+    pinned,
+  );
 
   @override
   String toString() =>
-      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb, waiting: $waiting)';
+      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb, waiting: $waiting, pinned: $pinned)';
 }
