@@ -434,24 +434,6 @@ class BridgeServer {
     final backend =
         sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
     orbBackend = backend;
-    // The spawn surface's task service (issue #99): the host default wires
-    // the orb lifecycle service and the composite sessions backend — both
-    // required, and both only built by the bridge itself (a test faking
-    // either one injects [tasks], or the spawn endpoints answer 503).
-    final taskService =
-        tasks ??
-        (orbService != null &&
-                backend != null &&
-                orbs == null &&
-                sessions == null
-            ? OrbTaskService(
-                orbs: orbService,
-                sessions: backend,
-                file: File(
-                  '${homeDirectory()}/.config/opencodebridge/tasks.json',
-                ),
-              )
-            : null);
     final fsService = fs ?? const LinuxFsService();
     final eventHub =
         events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
@@ -501,6 +483,29 @@ class BridgeServer {
         senderFactory: notifySenderFactory,
       );
     }
+    // The spawn surface's task service (issue #99): the host default wires
+    // the orb lifecycle service, the composite sessions backend, and —
+    // built first, above — the push service the completion fallback pushes
+    // through (issue #212): the task service starts watching the moment it
+    // is built, so the fallback must be wired before a persisted task can
+    // settle. Both the orbs and the backend are required, and both are only
+    // built by the bridge itself (a test faking either one injects [tasks],
+    // or the spawn endpoints answer 503).
+    final taskService =
+        tasks ??
+        (orbService != null &&
+                backend != null &&
+                orbs == null &&
+                sessions == null
+            ? OrbTaskService(
+                orbs: orbService,
+                sessions: backend,
+                file: File(
+                  '${homeDirectory()}/.config/opencodebridge/tasks.json',
+                ),
+                notify: notifyService,
+              )
+            : null);
     final tunnelSupervisor = tunnel;
     final tunnelSetupService =
         tunnelSetup ??
@@ -694,6 +699,10 @@ class BridgeServer {
     );
     _notify = service;
     _pushDispatcher = newDispatcher;
+    // Keep the task service's push fallback (issue #212) pointed at the live
+    // service: it reads [notify] at push time, and a completion settling after
+    // this reload must push through the new sender, not the closed one.
+    _tasks?.notify = service;
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -758,6 +767,9 @@ class BridgeServer {
               file: File(
                 '${homeDirectory()}/.config/opencodebridge/tasks.json',
               ),
+              // The push fallback (issue #212): the live notify service as of
+              // the re-arm; [reloadNotify] keeps the running service in sync.
+              notify: _notify,
             );
           },
           onError: (Object _) {
