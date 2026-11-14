@@ -205,16 +205,38 @@ class _FakeDocker {
   }
 }
 
-/// The GitRunner seam, scripted by the argv (the remote probe and the
-/// identity read).
+/// The GitRunner seam, scripted by the working directory + argv (the remote
+/// probe and the identity read run at the checkout; `null` is the bridge's
+/// own directory — no git call answers there, an unscripted call is a
+/// `fatal: no such config`-shaped failure). [home] is the host's `$HOME`
+/// (the global git config layer): a `config` read at the checkout falls back
+/// to the global entry there, the same two-layer walk real `git config`
+/// does on its own (issue #240).
 class _FakeGit {
-  final List<List<String>> args = [];
+  final List<(String?, List<String>)> calls = [];
+
   final Map<String, GitCliResult> results = {};
 
+  String? home;
+
   GitRunner get run => (List<String> argv, {String? workingDirectory}) async {
-    args.add(List.of(argv));
-    return results[argv.join(' ')] ??
-        const GitCliResult(exitCode: 0, stdout: '', stderr: '');
+    calls.add((workingDirectory, List.of(argv)));
+    final key = '${workingDirectory ?? '*'} ${argv.join(' ')}';
+    final scripted = results[key];
+    if (scripted != null) return scripted;
+    final global = home;
+    if (workingDirectory != null &&
+        global != null &&
+        argv.length == 2 &&
+        argv.first == 'config' &&
+        results.containsKey('$global ${argv.join(' ')}')) {
+      return results['$global ${argv.join(' ')}']!;
+    }
+    return const GitCliResult(
+      exitCode: 1,
+      stdout: '',
+      stderr: 'fatal: no such config',
+    );
   };
 }
 
@@ -261,18 +283,32 @@ void main() {
       stateRoot = Directory('${root.path}/state');
       context = OrbBuildContext(dir: Directory('${root.path}/ctx'));
       await context.materialize();
-      git = _FakeGit();
-      git.results['remote get-url origin'] = const GitCliResult(
+      // The git calls run at the project checkout (the remote probe and the
+      // identity read, issue #240): the fake is keyed on the working
+      // directory, with the `$HOME` layer as the global fallback.
+      git = _FakeGit()..home = home.path;
+      git.results['${checkout.path} remote get-url origin'] =
+          const GitCliResult(
+            exitCode: 0,
+            stdout: 'https://github.com/acme/app.git\n',
+            stderr: '',
+          );
+      git.results['${checkout.path} config user.name'] = const GitCliResult(
         exitCode: 0,
-        stdout: 'https://github.com/acme/app.git\n',
+        stdout: 'HeinTouchableFR\n',
         stderr: '',
       );
-      git.results['config user.name'] = const GitCliResult(
+      git.results['${checkout.path} config user.email'] = const GitCliResult(
+        exitCode: 0,
+        stdout: 'HeinTouchableFR@users.noreply.github.com\n',
+        stderr: '',
+      );
+      git.results['${home.path} config user.name'] = const GitCliResult(
         exitCode: 0,
         stdout: 'Lhomme Aymeric\n',
         stderr: '',
       );
-      git.results['config user.email'] = const GitCliResult(
+      git.results['${home.path} config user.email'] = const GitCliResult(
         exitCode: 0,
         stdout: 'aymeric@example.com\n',
         stderr: '',
@@ -401,9 +437,9 @@ void main() {
           '-e',
           'ORB_REPO_URL=https://github.com/acme/app.git',
           '-e',
-          'ORB_GIT_NAME=Lhomme Aymeric',
+          'ORB_GIT_NAME=HeinTouchableFR',
           '-e',
-          'ORB_GIT_EMAIL=aymeric@example.com',
+          'ORB_GIT_EMAIL=HeinTouchableFR@users.noreply.github.com',
           '-l',
           'ocb.orb=true',
           '-l',
@@ -654,16 +690,17 @@ void main() {
           ],
         ]);
         expect(docker.spawnArgs, isEmpty);
-        expect(git.args, isEmpty);
+        expect(git.calls, isEmpty);
       },
     );
 
     test('a project with no remote is refused', () async {
-      git.results['remote get-url origin'] = const GitCliResult(
-        exitCode: 1,
-        stdout: '',
-        stderr: 'error: No remote named origin',
-      );
+      git.results['${checkout.path} remote get-url origin'] =
+          const GitCliResult(
+            exitCode: 1,
+            stdout: '',
+            stderr: 'error: No remote named origin',
+          );
 
       await expectLater(
         service().create(
@@ -683,11 +720,12 @@ void main() {
     });
 
     test('a non-GitHub remote is refused', () async {
-      git.results['remote get-url origin'] = const GitCliResult(
-        exitCode: 0,
-        stdout: 'https://gitlab.com/acme/app.git\n',
-        stderr: '',
-      );
+      git.results['${checkout.path} remote get-url origin'] =
+          const GitCliResult(
+            exitCode: 0,
+            stdout: 'https://gitlab.com/acme/app.git\n',
+            stderr: '',
+          );
 
       await expectLater(
         service().create(
@@ -706,12 +744,14 @@ void main() {
       expect(docker.runArgs, hasLength(1));
     });
 
-    test('a missing host git identity is refused', () async {
-      git.results['config user.name'] = const GitCliResult(
-        exitCode: 1,
-        stdout: '',
-        stderr: 'fatal: no such config',
-      );
+    test('a missing git identity is refused only when the repo AND the global '
+        'config lack it (issue #240)', () async {
+      // The setUp scripts both layers (repo at the checkout, global at
+      // $HOME); both answers are now "no such config".
+      git.results.remove('${checkout.path} config user.name');
+      git.results.remove('${checkout.path} config user.email');
+      git.results.remove('${home.path} config user.name');
+      git.results.remove('${home.path} config user.email');
 
       await expectLater(
         service().create(
@@ -720,15 +760,117 @@ void main() {
           checkout: checkout.path,
         ),
         throwsA(
-          isA<OrbRefusalError>().having(
-            (e) => e.code,
-            'code',
-            OrbRefusalError.missingGitIdentity,
-          ),
+          isA<OrbRefusalError>()
+              .having((e) => e.code, 'code', OrbRefusalError.missingGitIdentity)
+              .having(
+                (e) => e.message,
+                'message',
+                'no git identity in the project checkout or the global '
+                    'git config (user.name / user.email) — the orb '
+                    'commits as the checkout identity (spec §3.1); set '
+                    'it and retry',
+              ),
         ),
       );
+      // The reads ran at the checkout (git falls back to the global
+      // config on its own — there is no $HOME probe).
+      expect(
+        git.calls.where((c) => c.$2.first == 'config' && c.$1 == checkout.path),
+        hasLength(2),
+      );
+      expect(git.calls.where((c) => c.$1 != checkout.path), isEmpty);
       expect(docker.runArgs, hasLength(1));
     });
+
+    test('the identity is the checkout git identity: repo-local wins over the '
+        'global (issue #240)', () async {
+      checkoutEnv();
+      hostConfig();
+      const password = 'pw-ident-123';
+      final http = await HttpServer.bind('127.0.0.1', 0);
+      http.listen((request) {
+        final auth = request.headers.value('authorization') ?? '';
+        request.response.statusCode =
+            auth == 'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
+            ? 200
+            : 401;
+        unawaited(request.response.close());
+      });
+      docker.ports =
+          '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+      docker.logs = 'server password $password\n';
+
+      await service().create(
+        project: 'proj-1',
+        name: 'dev',
+        checkout: checkout.path,
+      );
+      await http.close(force: true);
+
+      // The repo-pinned values (the GitHub noreply address) beat the
+      // different global ones (the setUp default).
+      final create = docker.runArgs.firstWhere((a) => a.first == 'create');
+      expect(
+        create,
+        containsAllInOrder([
+          '-e',
+          'ORB_GIT_NAME=HeinTouchableFR',
+          '-e',
+          'ORB_GIT_EMAIL=HeinTouchableFR@users.noreply.github.com',
+        ]),
+      );
+      // The read ran at the checkout, never at $HOME.
+      expect(git.calls.where((c) => c.$2.first == 'config'), hasLength(2));
+      for (final call in git.calls) {
+        expect(call.$1, checkout.path);
+      }
+    });
+
+    test(
+      'a global-only identity falls back to the global value (issue #240)',
+      () async {
+        checkoutEnv();
+        hostConfig();
+        const password = 'pw-global-123';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          final auth = request.headers.value('authorization') ?? '';
+          request.response.statusCode =
+              auth ==
+                  'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
+              ? 200
+              : 401;
+          unawaited(request.response.close());
+        });
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"${http.port}"}]}';
+        docker.logs = 'server password $password\n';
+
+        // The repo pins nothing: the reads fall back to the global layer.
+        git.results.remove('${checkout.path} config user.name');
+        git.results.remove('${checkout.path} config user.email');
+
+        final record = await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        );
+        await http.close(force: true);
+
+        // The global value is used for both keys.
+        final create = docker.runArgs.firstWhere((a) => a.first == 'create');
+        expect(
+          create,
+          containsAllInOrder([
+            '-e',
+            'ORB_GIT_NAME=Lhomme Aymeric',
+            '-e',
+            'ORB_GIT_EMAIL=aymeric@example.com',
+          ]),
+        );
+        expect(record.state, 'running');
+      },
+    );
 
     test(
       'a seeded create passes ORB_BASE_BRANCH and the ocb.base label',
@@ -823,11 +965,12 @@ void main() {
         );
         // ls-remote finds the branch on the remote (the parent may be
         // stopped — the probe never touches the container).
-        git.results['ls-remote --heads origin orb/seed9'] = const GitCliResult(
-          exitCode: 0,
-          stdout: 'deadbeef\trefs/heads/orb/seed9\n',
-          stderr: '',
-        );
+        git.results['${checkout.path} ls-remote --heads origin orb/seed9'] =
+            const GitCliResult(
+              exitCode: 0,
+              stdout: 'deadbeef\trefs/heads/orb/seed9\n',
+              stderr: '',
+            );
 
         final base = await service().seedBranch(
           project: 'proj-1',
@@ -836,7 +979,13 @@ void main() {
         );
         expect(base, 'orb/seed9');
         // The probe ran from the project checkout, against origin.
-        expect(git.args.last, ['ls-remote', '--heads', 'origin', 'orb/seed9']);
+        expect(git.calls.last.$1, checkout.path);
+        expect(git.calls.last.$2, [
+          'ls-remote',
+          '--heads',
+          'origin',
+          'orb/seed9',
+        ]);
       },
     );
 
@@ -876,11 +1025,8 @@ void main() {
         stderr: '',
       );
       // The remote has no such branch (no commits pushed): empty output.
-      git.results['ls-remote --heads origin orb/seed9'] = const GitCliResult(
-        exitCode: 0,
-        stdout: '',
-        stderr: '',
-      );
+      git.results['${checkout.path} ls-remote --heads origin orb/seed9'] =
+          const GitCliResult(exitCode: 0, stdout: '', stderr: '');
 
       await expectLater(
         service().seedBranch(
@@ -906,7 +1052,7 @@ void main() {
       );
       expect(base, isNull);
       // No remote probe ran for a nonexistent seed.
-      expect(git.args.where((a) => a.first == 'ls-remote'), isEmpty);
+      expect(git.calls.where((c) => c.$2.first == 'ls-remote'), isEmpty);
     });
 
     test(

@@ -27,7 +27,7 @@ class GitCliResult {
 }
 
 /// Runs one git CLI argv and waits for it to exit (the short commands: the
-/// remote probe and the host identity read). [workingDirectory] is the
+/// remote probe and the identity read). [workingDirectory] is the
 /// child's working directory (the checkout-relative commands); `null`
 /// inherits the bridge's.
 typedef GitRunner = Future<GitCliResult> Function(
@@ -138,8 +138,9 @@ class OrbRefusalError implements Exception {
   /// is gh-backed, spec §3).
   static const String nonGithubRemote = 'non_github_remote';
 
-  /// The host git config has no commit identity (spec §3.1: the orb commits
-  /// as the host's `user.name`/`user.email`).
+  /// The project checkout's git identity (repo-local first, global fallback)
+  /// lacks `user.name`/`user.email` (spec §3.1: the orb commits as the
+  /// checkout identity).
   static const String missingGitIdentity = 'missing_git_identity';
 
   /// The orb is not wakeable: its state is not `stopped` (issue #97, spec
@@ -520,7 +521,7 @@ class OrbService {
     // The up-front refusals (spec §2.3), in order.
     await _refuseIfNameTaken(project, name);
     final remote = await _remoteUrl(checkout);
-    final gitIdentity = await _hostGitIdentity();
+    final gitIdentity = await _checkoutGitIdentity(checkout);
 
     final tag = await imageBuilder.ensureImage();
 
@@ -3020,21 +3021,26 @@ class OrbService {
     return url;
   }
 
-  Future<(String, String)> _hostGitIdentity() async {
-    final name = await _gitConfigValue('user.name');
-    final email = await _gitConfigValue('user.email');
+  Future<(String, String)> _checkoutGitIdentity(String checkout) async {
+    // Resolved the way `git commit` resolves it inside the repo (issue #240):
+    // `git config` run at the checkout reads the repo-local config first and
+    // falls back to the global config on its own — no two-layer read here.
+    // Refuse only when both layers lack the value.
+    final name = await _gitConfigValue('user.name', checkout);
+    final email = await _gitConfigValue('user.email', checkout);
     if (name.isEmpty || email.isEmpty) {
       throw const OrbRefusalError(
         OrbRefusalError.missingGitIdentity,
-        'the host git config has no user.name / user.email — the orb '
-        'commits as the host identity (spec §3.1); set them and retry',
+        'no git identity in the project checkout or the global git config '
+        '(user.name / user.email) — the orb commits as the checkout identity '
+        '(spec §3.1); set it and retry',
       );
     }
     return (name, email);
   }
 
-  Future<String> _gitConfigValue(String key) async {
-    final result = await git(['config', key], workingDirectory: home);
+  Future<String> _gitConfigValue(String key, String checkout) async {
+    final result = await git(['config', key], workingDirectory: checkout);
     if (result.exitCode != 0) return '';
     return result.stdout.trim();
   }
