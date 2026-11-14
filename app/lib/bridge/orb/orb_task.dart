@@ -24,6 +24,7 @@ class OrbTask {
     this.summary = '',
     this.pr,
     this.completed,
+    this.notified = false,
     this.textHash,
     this.dispatchId,
   });
@@ -99,6 +100,15 @@ class OrbTask {
   /// Epoch millis of the completion, or `null` while running.
   int? completed;
 
+  /// The persisted "notified" fact (issue #212): whether a settled task's
+  /// completion has been delivered to its caller in-app. `false` while a
+  /// settled task still owes its completion injection (the caller was
+  /// unreachable when it settled — the bridge retries on the next chance the
+  /// caller is reachable, and the push went out once as the out-of-band
+  /// fallback), `true` once the injection has landed. A notified task is
+  /// never re-injected. Irrelevant while the task is running.
+  bool notified;
+
   /// Whether the task has reached its terminal status.
   bool get isDone => completed != null;
 
@@ -126,6 +136,10 @@ class OrbTask {
     'results': results,
     if (pr != null) 'pr': pr,
     if (completed != null) 'completed': completed,
+    // Always written (issue #212): a settled task that still owes its
+    // completion injection must reload as not-yet-notified, so the retry
+    // resumes — only-when-true would be indistinguishable from a delivered one.
+    'notified': notified,
   };
 
   factory OrbTask.fromJson(Object? json) {
@@ -149,6 +163,11 @@ class OrbTask {
       summary: map['summary'] as String? ?? '',
       pr: map['pr'] as String?,
       completed: (map['completed'] as num?)?.toInt(),
+      // A record written before the fact existed (issue #212): a settled one
+      // was already delivered (or dropped) by the old one-shot injection —
+      // treat it as notified so a reload never re-injects it. A running one
+      // reads false (harmless: it settles through the new path).
+      notified: map['notified'] as bool? ?? (map['completed'] != null),
     );
   }
 }

@@ -7,6 +7,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/notify/fcm_sender.dart';
+import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_task_service.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
@@ -17,6 +19,7 @@ import 'package:opencodebridge/model/orb.dart';
 import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
+import 'package:opencodebridge/notify/notify_kind.dart';
 
 const _project = OpencodeProject(
   id: 'prj_1',
@@ -95,6 +98,11 @@ class _FakeOpencode extends OpencodeService {
   /// Session ids whose `prompt` fails (a dead calling session).
   final Set<String> failingPrompts = {};
 
+  /// The `prompt` that **landed** (was delivered): (session id, text). A
+  /// failing prompt (a dead session) is recorded in [prompts] but not here —
+  /// the completion-injection retry counts only the landed ones (issue #212).
+  final List<(String, String)> landed = [];
+
   /// The service's active list (issue #169's idle settle reads it through
   /// the backend's detailWithActive).
   Set<String> activeIds = {};
@@ -126,6 +134,7 @@ class _FakeOpencode extends OpencodeService {
     if (failingPrompts.contains(id)) {
       throw const OpencodeServiceError(404, 'no such session');
     }
+    landed.add((id, text));
   }
 
   @override
@@ -262,6 +271,34 @@ class _FakeOrbs implements OrbService {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// The scripted [FcmSender]: records every push (the issue #212 fallback's
+/// out-of-band deliveries) instead of sending one.
+class _FakePushSender extends FcmSender {
+  final List<_Push> sent = [];
+
+  @override
+  Future<void> send({
+    required String token,
+    required String title,
+    required String body,
+    required String link,
+  }) async {
+    sent.add(_Push(token, title, body, link));
+  }
+
+  @override
+  Future<void> close() async {}
+}
+
+class _Push {
+  const _Push(this.token, this.title, this.body, this.link);
+
+  final String token;
+  final String title;
+  final String body;
+  final String link;
+}
+
 void main() {
   late Directory temp;
   late File tasksFile;
@@ -271,10 +308,23 @@ void main() {
   late Duration waitGrace;
   late Duration settleIdleWindow;
   late Duration settleMissingWindow;
+  late _FakePushSender pushSender;
 
   /// Every service a test builds (the completion watcher polls on its own):
   /// torn down with the temp dir, so no writer outlives it.
   final services = <OrbTaskService>[];
+
+  /// A [NotifyService] backed by [pushSender] with [token] registered for the
+  /// push events the completion fallback uses (issue #212's push seam). Tests
+  /// wire it onto a service with `service.notify = pushNotify()`.
+  NotifyService pushNotify({
+    String token = 'tok',
+    Set<NotifyKind> kinds = const {NotifyKind.turnEnded},
+  }) {
+    final created = NotifyService(sender: pushSender);
+    created.registerDevice(token, kinds);
+    return created;
+  }
 
   OrbTaskService newService() {
     final created = OrbTaskService(
@@ -295,6 +345,7 @@ void main() {
     tasksFile = File('${temp.path}/tasks.json');
     orbs = _FakeOrbs();
     backend = _FakeBackend(_FakeOpencode());
+    pushSender = _FakePushSender();
     waitGrace = const Duration(seconds: 1);
     settleIdleWindow = const Duration(seconds: 30);
     settleMissingWindow = const Duration(seconds: 30);
@@ -1223,6 +1274,146 @@ void main() {
           .$2;
       expect(injection, contains('Orb worker done'));
       expect(injection, isNot(contains('PR:')));
+    });
+  });
+
+  // Durable, retried, push-backed completion delivery (issue #212): the
+  // completion reaches the caller even when the in-app injection cannot land
+  // at the settle instant. The injection is primary and retried until it
+  // lands (a notified task never re-injects); the push is the out-of-band
+  // fallback, dispatched once when the caller is unreachable at settle.
+  group('durable completion delivery (issue #212)', () {
+    test(
+      'a settled task whose injection fails is not-yet-notified; when the '
+      'caller is reachable the injection lands and it is marked notified',
+      () async {
+        scriptCompletedTask();
+        // The caller is unreachable when the completion lands (the app was
+        // closed at the moment the orb finished): the injection fails.
+        backend.opencode.failingPrompts.add('ses_caller');
+        service.notify = pushNotify();
+
+        final task = await service.spawn(
+          task: 'do the thing',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        await until(() => task.isDone);
+
+        // Settled, but the delivery is owed: persisted not-yet-notified …
+        final settledDecoded = jsonDecode(tasksFile.readAsStringSync());
+        expect(settledDecoded[0]['notified'], isFalse);
+        // … and the push went out once as the out-of-band fallback.
+        expect(pushSender.sent, hasLength(1));
+
+        // The caller is reachable again (it wakes / the host service is up):
+        // the watcher re-injects until it lands …
+        backend.opencode.failingPrompts.remove('ses_caller');
+        await until(
+          () => backend.opencode.landed.any((p) => p.$1 == 'ses_caller'),
+        );
+        // … and the task is marked notified.
+        await until(() => service.task(task.id)!.notified);
+
+        // Delivered exactly once: one landed injection (no duplicate), one
+        // push (no double push) across the retry and fallback paths.
+        expect(
+          backend.opencode.landed.where((p) => p.$1 == 'ses_caller'),
+          hasLength(1),
+        );
+        expect(pushSender.sent, hasLength(1));
+        expect(service.task(task.id)!.notified, isTrue);
+      },
+    );
+
+    test('a settled task whose caller never becomes reachable is pushed (the '
+        'out-of-band fallback)', () async {
+      scriptCompletedTask();
+      // The caller is unreachable when the completion lands and stays so
+      // (it never becomes reachable in-app): the push is the fallback.
+      backend.opencode.failingPrompts.add('ses_caller');
+      service.notify = pushNotify();
+
+      final task = await service.spawn(
+        task: 'do the thing',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      await until(() => task.isDone);
+      await until(() => pushSender.sent.isNotEmpty);
+
+      // The push carries the orb/task completion content: the orb, the
+      // branch, and the PR link — and the calling session's deep-link.
+      final push = pushSender.sent.single;
+      expect(push.title, 'Orb worker done');
+      expect(push.body, 'work on branch orb/a1b2c3 — PR: https://gh/pr/1');
+      expect(push.link, 'opencodebridge://session/ses_caller');
+
+      // The in-app injection never landed (the caller is still unreachable):
+      // the task stays not-yet-notified, and no second push went out.
+      expect(backend.opencode.landed.any((p) => p.$1 == 'ses_caller'), isFalse);
+      expect(service.task(task.id)!.notified, isFalse);
+      expect(pushSender.sent, hasLength(1));
+    });
+
+    test(
+      'a restart resumes the retry: a settled not-yet-notified task is '
+      're-injected when the caller is reachable, without a second push',
+      () async {
+        scriptCompletedTask();
+        backend.opencode.failingPrompts.add('ses_caller');
+        service.notify = pushNotify();
+
+        final task = await service.spawn(
+          task: 'do the thing',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        await until(() => task.isDone);
+        // Settled with the injection failed: not-yet-notified, the push went
+        // out once at the settle.
+        await until(() => pushSender.sent.length == 1);
+
+        // The bridge dies (the app was closed): the in-process service stops.
+        service.close();
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        // The app reopens: a fresh service over the same file, and the caller
+        // is reachable now (the host service came up). The retry re-injects …
+        backend.opencode.failingPrompts.remove('ses_caller');
+        final restarted = newService();
+        restarted.notify = pushNotify();
+        await until(() => restarted.task(task.id)!.notified);
+
+        // … exactly one in-app injection (no duplicate), the task is marked
+        // notified, and the push was NOT re-sent (no double push) across the
+        // restart.
+        expect(
+          backend.opencode.landed.where((p) => p.$1 == 'ses_caller'),
+          hasLength(1),
+        );
+        expect(restarted.task(task.id)!.notified, isTrue);
+        expect(pushSender.sent, hasLength(1));
+      },
+    );
+
+    test('a reachable caller at settle is injected (no push); the existing '
+        'behavior is unchanged', () async {
+      scriptCompletedTask();
+      service.notify = pushNotify();
+
+      final task = await service.spawn(
+        task: 'do the thing',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      await until(() => task.isDone);
+
+      // The caller was reachable at the settle: the injection landed and
+      // marked the task notified, with no push dispatched.
+      expect(service.task(task.id)!.notified, isTrue);
+      expect(backend.opencode.landed.any((p) => p.$1 == 'ses_caller'), isTrue);
+      expect(pushSender.sent, isEmpty);
     });
   });
 
