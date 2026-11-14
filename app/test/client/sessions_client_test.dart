@@ -29,6 +29,8 @@ void main() {
   late List<String> worktreesQueries;
   // The `@` menu's file search (issue #58): recorded `GET .../files` tokens.
   late List<String> filesQueries;
+  // The session order (issue #238): recorded `PATCH .../order` (id, body) pairs.
+  late List<(String, String)> orderWrites;
   late SessionsClient client;
 
   var failList = false;
@@ -36,6 +38,9 @@ void main() {
   var failProjects = false;
   var failDetail = false;
   var failArchive = false;
+  // The order route (issue #238): a `false` body (`{"position":"nope"}`)
+  // answers the bridge's 400 `invalid_body`.
+  var failOrderBody = false;
 
   setUp(() async {
     deletedPaths = [];
@@ -52,11 +57,13 @@ void main() {
     connectBodies = [];
     worktreesQueries = [];
     filesQueries = [];
+    orderWrites = [];
     failList = false;
     failDelete = false;
     failProjects = false;
     failDetail = false;
     failArchive = false;
+    failOrderBody = false;
     server = await HttpServer.bind('127.0.0.1', 0);
     server.listen((request) async {
       final response = request.response;
@@ -523,6 +530,26 @@ void main() {
           response.write(jsonEncode({'error': 'not_found'}));
         } else {
           moveBodies.add(raw);
+          response.statusCode = HttpStatus.noContent;
+        }
+      } else if (request.method == 'PATCH' &&
+          request.uri.path.endsWith('/order')) {
+        // The session order (issue #238): the bridge's own app-owned map,
+        // not a service pass-through. `{"position": <num|null>}`; unknown id
+        // is 404, a malformed body is 400.
+        final raw = await utf8.decodeStream(request);
+        final id = request.uri.path.substring(
+          '/api/sessions/'.length,
+          request.uri.path.length - '/order'.length,
+        );
+        if (id == 'ses_missing') {
+          response.statusCode = HttpStatus.notFound;
+          response.write(jsonEncode({'error': 'not_found'}));
+        } else if (failOrderBody) {
+          response.statusCode = HttpStatus.badRequest;
+          response.write(jsonEncode({'error': 'invalid_body'}));
+        } else {
+          orderWrites.add((id, raw));
           response.statusCode = HttpStatus.noContent;
         }
       } else if (request.method == 'POST' &&
@@ -1221,6 +1248,44 @@ void main() {
       () async {
         expect(await client.worktrees('ses_1'), '{"worktrees":true}');
         expect(worktreesQueries, ['ses_1']);
+      },
+    );
+  });
+
+  group('session order (issue #238)', () {
+    test('setOrder pins with a numeric position and accepts 204', () async {
+      await client.setOrder('ses_2', 1712345678901);
+      expect(orderWrites, [
+        ('ses_2', jsonEncode({'position': 1712345678901})),
+      ]);
+    });
+
+    test('setOrder un-pins with a null position and accepts 204', () async {
+      await client.setOrder('ses_1', null);
+      expect(orderWrites, [
+        ('ses_1', jsonEncode({'position': null})),
+      ]);
+    });
+
+    test('setOrder maps the bridge 404 to SessionsClientError(404)', () async {
+      try {
+        await client.setOrder('ses_missing', 5);
+        fail('expected SessionsClientError');
+      } on SessionsClientError catch (e) {
+        expect(e.statusCode, HttpStatus.notFound);
+      }
+    });
+
+    test(
+      'setOrder maps a malformed body to SessionsClientError(400)',
+      () async {
+        failOrderBody = true;
+        try {
+          await client.setOrder('ses_1', 5);
+          fail('expected SessionsClientError');
+        } on SessionsClientError catch (e) {
+          expect(e.statusCode, HttpStatus.badRequest);
+        }
       },
     );
   });
