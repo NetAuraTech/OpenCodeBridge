@@ -348,9 +348,14 @@ void main() {
         'active': false,
         'waiting': false,
         'pinned': false,
+        'archived': false,
       });
       expect(rows[1]['active'], true);
       expect(rows[1]['waiting'], false);
+      // The archived fact rides every row (issue #234): ses_three is
+      // archived on the service, so its row carries the flag — and it is
+      // still listed (the seam is faithful; the app filters its surface).
+      expect(rows[1]['archived'], true);
     });
 
     test('GET /api/sessions rows carry the waiting fact per pending '
@@ -1623,6 +1628,64 @@ void main() {
       expect(service.btws, isEmpty);
     });
 
+    test('POST .../archive with {"archived":true} maps 1:1 to the service '
+        'PATCH and is 204 (issue #234)', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/archive',
+        jsonEncode({'archived': true}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.archived, [('ses_one', true)]);
+    });
+
+    test('POST .../archive with {"archived":false} unarchives '
+        '(issue #234)', () async {
+      final (status, body) = await _postRaw(
+        base,
+        'api/sessions/ses_one/archive',
+        jsonEncode({'archived': false}),
+      );
+      expect(status, 204);
+      expect(body, isEmpty);
+      expect(service.archived, [('ses_one', false)]);
+    });
+
+    test('POST .../archive with a malformed or missing bool body is 400 '
+        '(issue #234)', () async {
+      for (final raw in <String>[
+        jsonEncode({}),
+        jsonEncode({'archived': 'true'}),
+        jsonEncode({'archived': 1}),
+        jsonEncode({'wrong': true}),
+        '',
+      ]) {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_one/archive',
+          raw,
+        );
+        expect(status, 400, reason: raw);
+        expect(jsonDecode(body), {'error': 'invalid_body'}, reason: raw);
+      }
+      expect(service.archived, isEmpty);
+    });
+
+    test(
+      'POST .../archive for an unknown session is 404 (issue #234)',
+      () async {
+        final (status, body) = await _postRaw(
+          base,
+          'api/sessions/ses_missing/archive',
+          jsonEncode({'archived': true}),
+        );
+        expect(status, 404);
+        expect(jsonDecode(body), {'error': 'not_found'});
+        expect(service.archived, isEmpty);
+      },
+    );
+
     test('GET .../export, /diff, /stats return the service payload', () async {
       for (final (sub, payload) in const [
         ('export', '{"info":"export"}'),
@@ -2271,6 +2334,7 @@ void main() {
           'active': false,
           'waiting': false,
           'pinned': false,
+          'archived': false,
         });
       },
     );
@@ -2350,6 +2414,7 @@ void main() {
           'active': false,
           'waiting': false,
           'pinned': false,
+          'archived': false,
         });
       },
     );
@@ -3457,6 +3522,12 @@ class _FakeService implements OpencodeService {
     }
   }
 
+  @override
+  Future<void> archive(String id, bool archived) async {
+    if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
+    this.archived.add((id, archived));
+  }
+
   // The structured-view ops are keyed to the scripted session: any other id
   // is a 404, so the endpoint tests can exercise the unknown-session path.
   bool _known(String id) => detail != null && id == detail!.id;
@@ -3607,6 +3678,7 @@ class _FakeService implements OpencodeService {
   final List<String> moved = [];
   final List<(String, String)> btws = [];
   final List<(String, String)> integrationsConnected = [];
+  final List<(String, bool)> archived = [];
 
   @override
   Future<List<OpencodeCommand>> listCommands() async => commands;
@@ -3791,6 +3863,9 @@ const _three = OpencodeSession(
   projectId: 'p2',
   created: 200,
   location: '/three',
+  // The wire-contract row: an archived session is still listed (the seam is
+  // faithful) and carries the flag (issue #234).
+  archived: true,
 );
 
 /// Assert the question group's recorded answer: the (session, form) pair and

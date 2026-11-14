@@ -810,6 +810,18 @@ class OpencodeHttpService implements OpencodeService {
     );
   }
 
+  /// Archive or unarchive the session (issue #234): the service's single
+  /// `PATCH /api/session/{id}` verb with the `{"archived": bool}` body — one
+  /// call each way, `204` on success. A non-2xx (the service's 404 for an
+  /// unknown session) propagates as the typed [OpencodeServiceError].
+  @override
+  Future<void> archive(String id, bool archived) async {
+    await _patch(
+      _base.replace(path: '/api/session/${Uri.encodeComponent(id)}'),
+      jsonEncode({'archived': archived}),
+    );
+  }
+
   /// The session's transcript (the service's
   /// `GET /api/experimental/session/{id}/export`), as decoded JSON.
   @override
@@ -1316,6 +1328,14 @@ class OpencodeHttpService implements OpencodeService {
     ];
   }
 
+  /// The session's archived fact (issue #234): its `time.archived` is set
+  /// (a number) while archived; absent or `null` when not (the v2.2.7 shape
+  /// is an explicit `null` after an unarchive — either way, not archived).
+  static bool _archivedFrom(Map<String, Object?> item) {
+    final time = item['time'];
+    return time is Map<String, Object?> && time['archived'] != null;
+  }
+
   /// One session object (the service's `Session`), from a list item or the
   /// create response.
   static OpencodeSession _sessionFrom(Map<String, Object?> item) {
@@ -1325,6 +1345,7 @@ class OpencodeHttpService implements OpencodeService {
       projectId: item['projectID'] as String? ?? '',
       created: _nestedInt(item, 'time', 'created'),
       location: _nestedString(item, 'location', 'directory'),
+      archived: _archivedFrom(item),
     );
   }
 

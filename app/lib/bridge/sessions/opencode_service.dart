@@ -29,6 +29,7 @@ class OpencodeSession {
     required this.created,
     required this.location,
     this.orb,
+    this.archived = false,
   });
 
   final String id;
@@ -46,6 +47,13 @@ class OpencodeSession {
   /// The orb id when this session lives on a running orb (stamped by the
   /// aggregate), else `null` (host sessions).
   final String? orb;
+
+  /// True when the service reports the session archived (issue #234): its
+  /// `time.archived` is set (a number) — absent or `null` when not. The seam
+  /// stays faithful ([OpencodeService.listSessions] still returns archived
+  /// rows); the app filters its own home-list surface from this fact (issue
+  /// #235).
+  final bool archived;
 }
 
 /// One project as the shared opencode service reports it (`GET /api/project`):
@@ -137,6 +145,14 @@ abstract class OpencodeService {
 
   /// Delete a session (and its child sessions) on the service.
   Future<void> deleteSession(String id);
+
+  /// Archive or unarchive the session (issue #234): the service's
+  /// `PATCH /api/session/{id}` with the single-verb `{"archived": bool}` body
+  /// (one call each way; `204`). The service is the single source of truth
+  /// for the archived fact, so the effect is reflected in the home list on
+  /// the next refresh (and live through the `session.archived` /
+  /// `session.unarchived` events the event hub already re-emits).
+  Future<void> archive(String id, bool archived);
 
   /// The session's detail: state plus costs and token usage (spec §5,
   /// endpoint 5).

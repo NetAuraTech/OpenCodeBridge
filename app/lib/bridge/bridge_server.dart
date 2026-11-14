@@ -2511,6 +2511,21 @@ class BridgeServer {
           final answer = await sessions.generate(id, prompt);
           await BridgeServer._jsonOk(response, jsonEncode({'text': answer}));
           return;
+        case ('POST', ['archive']):
+          // Archive / unarchive (issue #234): the single-verb pass-through
+          // beside the other per-session commands. The service's `{"archived":
+          // bool}` body maps 1:1 from the bridge's command body; the service
+          // `PATCH` answers 204. A missing or non-bool `archived` is a 400;
+          // an unknown session is the service's 404 (the _serviceError
+          // mapping below).
+          final archived = BridgeServer._boolField(body, 'archived');
+          if (archived == null) {
+            await BridgeServer._invalidBody(response);
+            return;
+          }
+          await sessions.archive(id, archived);
+          await BridgeServer._noContent(response);
+          return;
         case ('GET', ['diff']):
           final data = await sessions.diff(id);
           await BridgeServer._jsonOk(response, jsonEncode(data));
@@ -2545,6 +2560,13 @@ class BridgeServer {
   static String? _stringField(Map<String, Object?>? body, String key) {
     final value = body?[key];
     return value is String ? value : null;
+  }
+
+  /// A bool field of a command body, or `null` when absent or not a bool
+  /// (the archive command's `archived` fact, issue #234).
+  static bool? _boolField(Map<String, Object?>? body, String key) {
+    final value = body?[key];
+    return value is bool ? value : null;
   }
 
   /// The `model` field of a set-model body as the service's `Model.Ref`, or

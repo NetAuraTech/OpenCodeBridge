@@ -56,6 +56,7 @@ class FakeOpencodeService implements OpencodeService {
   final Map<String, List<QuestionForm>?> questionsBySession;
 
   final List<String> deleted = [];
+  final List<(String, bool)> archived = [];
 
   final List<String> created = [];
   final List<(ModelRef?, String?)> createdWith = [];
@@ -118,6 +119,11 @@ class FakeOpencodeService implements OpencodeService {
   @override
   Future<void> deleteSession(String id) async {
     deleted.add(id);
+  }
+
+  @override
+  Future<void> archive(String id, bool archived) async {
+    this.archived.add((id, archived));
   }
 
   @override
@@ -392,6 +398,17 @@ const s3 = OpencodeSession(
   location: '/three',
 );
 
+// An archived session (issue #234): the seam stays faithful — archived rows
+// are still listed, so exists() and _defaultModel() still see them.
+const sArchived = OpencodeSession(
+  id: 'ses_archived',
+  title: 'archived',
+  projectId: 'p1',
+  created: 400,
+  location: '/archived',
+  archived: true,
+);
+
 void main() {
   group('SessionsBackend.list', () {
     test('merges active and project name; newest first', () async {
@@ -420,6 +437,24 @@ void main() {
       );
       expect(rows[1].active, isTrue);
       expect(rows[2].active, isFalse);
+    });
+
+    test('the archived fact rides every row (issue #234)', () async {
+      final service = FakeOpencodeService(
+        sessions: [s1, sArchived],
+        names: {'p1': 'proj-one'},
+        active: const {},
+      );
+      final backend = SessionsBackend(service: service);
+
+      final rows = await backend.list();
+
+      // Newest first: the archived row sorts by created like any other.
+      expect(rows.map((r) => r.id).toList(), ['ses_archived', 'ses_1']);
+      expect(rows.byId('ses_archived').archived, isTrue);
+      expect(rows.byId('ses_1').archived, isFalse);
+      // The row shape carries the fact the bridge contract way.
+      expect(rows.byId('ses_archived').toJson()['archived'], true);
     });
 
     test('unknown project id falls back', () async {
@@ -770,6 +805,21 @@ void main() {
     });
   });
 
+  group('SessionsBackend.archive', () {
+    test(
+      'passes the archive fact through to the service (issue #234)',
+      () async {
+        final service = FakeOpencodeService(sessions: [s1, sArchived]);
+        final backend = SessionsBackend(service: service);
+
+        await backend.archive('ses_1', true);
+        await backend.archive('ses_archived', false);
+
+        expect(service.archived, [('ses_1', true), ('ses_archived', false)]);
+      },
+    );
+  });
+
   group('SessionsBackend.create', () {
     test('creates on the service and returns the row', () async {
       final created = const OpencodeSession(
@@ -909,6 +959,56 @@ void main() {
         expect(service.modelsSet, [('ses_new', model)]);
       },
     );
+
+    test('_defaultModel() still sees an archived session (issue #234: the seam '
+        'is faithful, so the copy-model heuristic is untouched)', () async {
+      const model = ModelRef(id: 'gpt', providerId: 'openai', variant: 'high');
+      final created = const OpencodeSession(
+        id: 'ses_new',
+        title: 'new',
+        projectId: 'p1',
+        created: 500,
+        location: '/one',
+      );
+      // The archived session is the one that already carries a model: the
+      // heuristic must still read its detail and copy the model from it.
+      final archived = const OpencodeSession(
+        id: 'ses_old',
+        title: 'old',
+        projectId: 'p1',
+        created: 100,
+        location: '/one',
+        archived: true,
+      );
+      final service = FakeOpencodeService(
+        sessions: [created, archived],
+        names: {'p1': 'one'},
+        createdSession: created,
+        detailById: {
+          'ses_old': SessionDetail(
+            id: 'ses_old',
+            title: 'old',
+            location: '/one',
+            cost: 0,
+            tokens: const TokenUsage(
+              input: 0,
+              output: 0,
+              reasoning: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+            ),
+            model: model,
+            agent: 'build',
+          ),
+        },
+      );
+      final backend = SessionsBackend(service: service);
+
+      await backend.create('p1');
+
+      expect(service.createdWith.single, (model, null));
+      expect(service.modelsSet, [('ses_new', model)]);
+    });
   });
 
   group('SessionsBackend.createInDirectory', () {
@@ -1055,6 +1155,17 @@ void main() {
       expect(await backend.exists('ses_1'), isTrue);
       expect(await backend.exists('ses_gone'), isFalse);
     });
+
+    test(
+      'an archived session still satisfies exists() '
+      '(issue #234: the seam is faithful — archived rows are still listed)',
+      () async {
+        final service = FakeOpencodeService(sessions: [s1, sArchived]);
+        final backend = SessionsBackend(service: service);
+
+        expect(await backend.exists('ses_archived'), isTrue);
+      },
+    );
   });
 
   group('SessionsBackend structured view', () {

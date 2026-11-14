@@ -45,6 +45,7 @@ class Session {
     this.orb,
     this.waiting = false,
     this.pinned = false,
+    this.archived = false,
   });
 
   final String id;
@@ -77,18 +78,29 @@ class Session {
   /// come from the service seam); `false` when the store holds no entry.
   final bool pinned;
 
+  /// True when the session is archived (issue #234): the service's
+  /// `time.archived` is set. The bridge carries it on every home-list row
+  /// (the seam stays faithful — archived rows are still returned); the app
+  /// filters its own home-list surface from this fact (issue #235). The home
+  /// list flips it in place from the `session.archived` /
+  /// `session.unarchived` events the same seam's copyWith exists for.
+  final bool archived;
+
   /// The row with the given fields replaced: the home list patches rows in
   /// place from live events (a title the agent assigns, the active dot moving)
   /// without a refetch. [waiting] is the row's waiting fact (issue #208),
   /// re-derived by the tab from the service's pending states on the same
   /// permission/question events the structured view consumes (issue #209).
   /// [pinned] is the row's pin fact (issue #237), re-derived by the tab from
-  /// the `session.order.changed` bridge event the same way.
+  /// the `session.order.changed` bridge event the same way. [archived] is the
+  /// row's archived fact (issue #234), flipped in place from the service's
+  /// `session.archived` / `session.unarchived` events (issue #235).
   Session copyWith({
     String? title,
     bool? active,
     bool? waiting,
     bool? pinned,
+    bool? archived,
   }) => Session(
     id: id,
     title: title ?? this.title,
@@ -99,6 +111,7 @@ class Session {
     orb: orb,
     waiting: waiting ?? this.waiting,
     pinned: pinned ?? this.pinned,
+    archived: archived ?? this.archived,
   );
 
   Map<String, Object?> toJson() => {
@@ -111,6 +124,7 @@ class Session {
     if (orb != null) 'orb': orb,
     'waiting': waiting,
     'pinned': pinned,
+    'archived': archived,
   };
 
   factory Session.fromJson(Object? json) {
@@ -125,6 +139,7 @@ class Session {
       orb: map['orb'] as String?,
       waiting: map['waiting'] as bool? ?? false,
       pinned: map['pinned'] as bool? ?? false,
+      archived: map['archived'] as bool? ?? false,
     );
   }
 
@@ -139,7 +154,8 @@ class Session {
       other.active == active &&
       other.orb == orb &&
       other.waiting == waiting &&
-      other.pinned == pinned;
+      other.pinned == pinned &&
+      other.archived == archived;
 
   @override
   int get hashCode => Object.hash(
@@ -152,9 +168,10 @@ class Session {
     orb,
     waiting,
     pinned,
+    archived,
   );
 
   @override
   String toString() =>
-      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb, waiting: $waiting, pinned: $pinned)';
+      'Session(id: $id, title: $title, project: $project, created: $created, location: $location, active: $active, orb: $orb, waiting: $waiting, pinned: $pinned, archived: $archived)';
 }

@@ -21,7 +21,88 @@ void main() {
         'active': true,
         'waiting': false,
         'pinned': false,
+        'archived': false,
       });
+    });
+
+    test('toJson always carries the archived fact (default false)', () {
+      const session = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+      );
+      expect(session.toJson()['archived'], false);
+
+      const archived = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+        archived: true,
+      );
+      expect(archived.toJson()['archived'], true);
+    });
+
+    test('fromJson parses the archived fact and defaults it to false', () {
+      const archived = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+        archived: true,
+      );
+      // A row carrying the fact parses it; the round trip keeps it.
+      expect(Session.fromJson(archived.toJson()).archived, isTrue);
+      expect(Session.fromJson(archived.toJson()), archived);
+      // A row without the fact (an older bridge) stays false.
+      expect(
+        Session.fromJson(const {'id': 'ses_6', 'archived': null}).archived,
+        isFalse,
+      );
+      expect(Session.fromJson(const {'id': 'ses_7'}).archived, isFalse);
+      expect(
+        Session.fromJson(const {'id': 'ses_8', 'archived': true}).archived,
+        isTrue,
+      );
+    });
+
+    test('copyWith flips the archived fact in place', () {
+      const session = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+      );
+      expect(session.copyWith(archived: true).archived, isTrue);
+      // The original row is untouched (the app patches rows in place from the
+      // session.archived / session.unarchived events, issue #235).
+      expect(session.archived, isFalse);
+      expect(
+        session.copyWith(archived: true).copyWith(archived: false),
+        session,
+      );
+      // An archived row keeps the fact on an unrelated copyWith, and an
+      // explicit flip back lands the unarchived original.
+      const archived = Session(
+        id: 'ses_1',
+        title: 't',
+        project: SessionProject(id: 'p', name: 'n'),
+        created: 42,
+        location: '/x',
+        active: false,
+        archived: true,
+      );
+      expect(archived.copyWith(title: 'renamed').archived, isTrue);
+      expect(archived.copyWith(archived: false), session);
     });
 
     test('toJson carries the waiting fact and fromJson round-trips it', () {
