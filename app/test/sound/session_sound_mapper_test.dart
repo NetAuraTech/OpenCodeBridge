@@ -52,7 +52,7 @@ void main() {
   });
 
   group('the trigger set', () {
-    test('a finished turn plays the success chime', () {
+    test('a finished turn plays the success ding', () {
       expect(
         mapper.soundFor(opencode('session.execution.succeeded')),
         SessionSound.success,
