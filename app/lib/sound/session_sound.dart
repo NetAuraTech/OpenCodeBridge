@@ -11,20 +11,19 @@ import '../client/events_client.dart';
 /// tone, so the event→sound mapping (and the error vs. success distinction)
 /// is asserted against tones, not raw asset paths.
 enum SessionSound {
-  /// The turn finished cleanly (a bright single "ding" with a light echo
-  /// tail).
+  /// The turn finished cleanly (a bright single "ding", quick decay).
   success,
 
-  /// The turn failed (a low, distinct "boop" — clearly not the success
-  /// ding).
+  /// The turn failed (a low, drawn-out "boop" — the only low tone, and
+  /// the longest tail).
   error,
 
-  /// The turn was interrupted, or stopped from a panel (a short, neutral
-  /// mid note).
+  /// The turn was interrupted, or stopped from a panel (a short, neutral,
+  /// snappy mid note).
   stopped,
 
-  /// A permission was requested or a question asked (a softer, lower "tap"
-  /// with a wider echo — attention without the success brightness).
+  /// A permission was requested or a question asked (a rich mid chime —
+  /// attention without the success brightness).
   attention,
 }
 

@@ -73,8 +73,8 @@ flutter:
 
   # The short, subtle session-event sounds (issue #246), played on desktop
   # when a turn ends, fails, is stopped, or a permission/question arrives:
-  # generated mono 16-bit PCM WAVs, each a single note with a light echo
-  # tail (tools/gen_session_tones.py).
+  # generated mono 16-bit PCM WAVs, each a single struck bell with one
+  # smooth decay tail (tools/gen_session_tones.py).
   assets:
     - assets/sounds/
 
