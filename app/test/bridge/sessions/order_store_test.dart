@@ -108,31 +108,4 @@ void main() {
       expect(store.load(), isEmpty);
     });
   });
-
-  group('SessionOrderStore.prune', () {
-    test('removes the orphan entries (issue #237: no orphan growth)', () async {
-      final store = SessionOrderStore(file: file);
-      await store.set('ses_live', 0);
-      await store.set('ses_gone', 1);
-      await store.prune({'ses_live'});
-      expect(store.load(), {'ses_live': 0});
-      // The pruning is durable, not just in-memory.
-      final onDisk = jsonDecode(file.readAsStringSync()) as Map;
-      expect(onDisk, {'ses_live': 0});
-    });
-
-    test('is a no-op when nothing is orphaned', () async {
-      final store = SessionOrderStore(file: file);
-      await store.set('ses_1', 0);
-      await store.set('ses_2', 1);
-      await store.prune({'ses_1', 'ses_2'});
-      expect(store.load(), {'ses_1': 0, 'ses_2': 1});
-    });
-
-    test('is safe on a missing file', () async {
-      final store = SessionOrderStore(file: file);
-      await store.prune({'ses_1'});
-      expect(store.load(), isEmpty);
-    });
-  });
 }

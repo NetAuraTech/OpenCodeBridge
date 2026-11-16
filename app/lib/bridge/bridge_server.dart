@@ -33,6 +33,7 @@ import 'sessions/opencode_http_service.dart';
 import 'sessions/opencode_service_boot.dart';
 import 'sessions/paths.dart';
 import 'sessions/opencode_service.dart';
+import 'sessions/order_cleanup.dart';
 import 'sessions/order_store.dart';
 import 'sessions/session_lifecycle.dart';
 import 'tunnel/cloudflared_binary.dart';
@@ -316,7 +317,8 @@ class BridgeServer {
   /// `sessionID -> position` map behind the home list's pinned-first sort.
   /// Built once at start (the app-owned file, the same pattern as the tunnel
   /// config and the task service) and shared by the order route (write +
-  /// emit) and the sessions backend's list read (sort + pinned + prune).
+  /// emit), the sessions backend's list read (sort + pinned), and the
+  /// order-cleanup listener (the observed-deletion `clear`, issue #292).
   final SessionOrderStore _sessionOrder;
 
   /// Starts the bridge on [host] and [port].
@@ -450,8 +452,9 @@ class BridgeServer {
         sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
     // The session order store (issue #237): the app-owned
     // `sessionID -> position` map. Built once, shared by the order route
-    // (write + emit) and the backend's list read (sort + pinned fact + orphan
-    // prune); the file is injectable for tests. The caller's backend keeps
+    // (write + emit), the backend's list read (sort + pinned fact), and the
+    // order-cleanup listener (the observed-deletion `clear`, issue #292).
+    // The file is injectable for tests. The caller's backend keeps
     // the store it already carries (a test's injected store).
     final sessionOrder = SessionOrderStore(file: sessionOrderFile);
     if (backend != null && backend.orderStore == null) {
@@ -499,6 +502,13 @@ class BridgeServer {
         turnTracker = TurnTracker();
         eventHub.add(turnTracker);
         emit = eventHub.emit;
+      }
+      // The order store's cleanup listener (issue #292): the read no longer
+      // prunes the order map, so the entry of a session the bridge observes
+      // being deleted or closed is removed from the store on the event
+      // (tapping the same unified stream the turn tracker does).
+      if (eventHub != null && backend.orderStore != null) {
+        eventHub.add(OrderStoreCleanup(store: backend.orderStore!));
       }
       lifecycle = SessionLifecycle(
         serviceCancel: (id) => backend.cancel(id),

@@ -676,10 +676,12 @@ void main() {
       },
     );
 
-    test('orphan store entries are pruned on the list read', () async {
+    test('the list read keeps the position of a session it does not see '
+        '(issue #292: no prune on the read)', () async {
       final store = SessionOrderStore(file: file);
       await store.set('ses_1', 1);
-      // The orphan: a position for a session the service no longer has.
+      // The "orphan": a position for a session absent from this read (a
+      // degraded pass, a waking orb, the boot window) — not deleted.
       await store.set('ses_gone', 0);
       final backend = SessionsBackend(
         service: FakeOpencodeService(sessions: [s1, s2], names: const {}),
@@ -689,8 +691,37 @@ void main() {
       final rows = await backend.list();
 
       expect(rows.byId('ses_1').pinned, isTrue);
+      // The position the read did not see is kept: the read no longer
+      // prunes it (cleanup is on the observed deletion, issue #292).
       final onDisk = jsonDecode(file.readAsStringSync()) as Map;
-      expect(onDisk, {'ses_1': 1});
+      expect(onDisk, {'ses_1': 1, 'ses_gone': 0});
+
+      // Once the session is visible again it reappears in the pinned block,
+      // position ascending (ses_gone at 0 before ses_1 at 1).
+      // A later read that sees the session again: it reappears in the
+      // pinned block, position ascending (ses_gone at 0 before ses_1 at 1).
+      final rowsVisible = await SessionsBackend(
+        service: FakeOpencodeService(
+          sessions: [
+            s1,
+            s2,
+            const OpencodeSession(
+              id: 'ses_gone',
+              title: 'gone',
+              projectId: 'p1',
+              created: 50,
+              location: '/gone',
+            ),
+          ],
+          names: const {},
+        ),
+        orderStore: store,
+      ).list();
+      expect(rowsVisible.map((r) => r.id).toList(), [
+        'ses_gone',
+        'ses_1',
+        'ses_2',
+      ]);
     });
 
     test(
@@ -1368,7 +1399,4 @@ class _ThrowingOrderStore implements SessionOrderStore {
 
   @override
   Future<void> clear(String id) async {}
-
-  @override
-  Future<void> prune(Set<String> keep) async {}
 }
