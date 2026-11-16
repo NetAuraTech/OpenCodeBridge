@@ -2551,6 +2551,85 @@ void main() {
     );
 
     testWidgets(
+      'live overlays change only their own fields: the row\'s in-flight retry '
+      'survives a text delta, a tool card, and a step stat (issue #264)',
+      (tester) async {
+        // The row the overlays land on: an in-flight assistant that already
+        // carries the provider's in-flight retry (issue #156). The load brings
+        // it in; each overlay changes 1–3 of its own fields and must keep the
+        // rest — so the retry (a live-only field none of them touch) survives.
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'go'),
+            SessionMessage(
+              id: 'msg_1',
+              role: 'assistant',
+              text: 'Hel',
+              retry: MessageRetry(
+                attempt: 2,
+                at: 1794332643505,
+                error: StructuredError(
+                  type: 'provider.rate-limit',
+                  message: 'retry me',
+                  status: 429,
+                ),
+              ),
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+        final noticeKey = const ValueKey('message-retry');
+
+        // The in-flight retry shows from the loaded row alone.
+        expect(find.byKey(noticeKey), findsOneWidget);
+        expect(find.textContaining('Retry due · attempt 2'), findsOneWidget);
+
+        // The delta flush grows the text — a content update that touches only
+        // the text; the retry notice must survive the rebuild.
+        events.add(
+          _event(
+            'session.text.delta',
+            aggregateID: 'ses_1',
+            data: const {'assistantMessageID': 'msg_1', 'delta': 'lo'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 60));
+        expect(find.text('Hello'), findsOneWidget);
+        expect(find.byKey(noticeKey), findsOneWidget);
+
+        // A tool-card append touches only the tools list: the retry survives.
+        events.add(
+          _event(
+            'session.tool.input.started',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'tool_1',
+              'name': 'shell',
+            },
+          ),
+        );
+        await tester.pump();
+        expect(find.byKey(noticeKey), findsOneWidget);
+
+        // A step stat touches only the five turn-stats fields: the retry
+        // survives.
+        events.add(
+          _event(
+            'session.step.streamed',
+            aggregateID: 'ses_1',
+            data: const {'assistantMessageID': 'msg_1'},
+          ),
+        );
+        await tester.pump();
+        expect(find.byKey(noticeKey), findsOneWidget);
+        await events.close();
+      },
+    );
+
+    testWidgets(
       'deltas coalesce: buffered until the flush, one rebuild for a burst',
       (tester) async {
         final client = _FakeClient(details: const [_detail0]);
