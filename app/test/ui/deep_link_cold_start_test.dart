@@ -14,6 +14,7 @@ import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/notify/deep_link.dart';
+import 'package:opencodebridge/ui/deep_link_target.dart';
 import 'package:opencodebridge/ui/docker_tab.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
 
@@ -113,10 +114,11 @@ class _FakeEventsSource implements EventSource {
   Future<void> reconnect() async {}
 }
 
-/// The shell's deep-link wiring (the [HomeShell] one, issue #24): the tabs
-/// mount with their targets at `null`, the tapped notification's link
-/// arrives as an update (buffered until the shell subscribes), and the
-/// shell hands each tab its target, which the tab consumes.
+/// The shell's deep-link wiring (the app's one, issue #287): the app holds
+/// a [DeepLinkTarget] (the stable owner) and feeds it from the service's
+/// stream (`deepLinks.listen(target.apply)`); the shell listens to the
+/// model to switch the tab, and each tab reads its target from the model
+/// and clears it through [DeepLinkTarget.consume] when it opens it.
 class _Shell extends StatefulWidget {
   const _Shell({required this.links});
 
@@ -129,10 +131,6 @@ class _Shell extends StatefulWidget {
 class _ShellState extends State<_Shell> {
   int _tab = 0;
 
-  String? _sessionTarget;
-  String? _containerTarget;
-  StreamSubscription<DeepLink>? _links;
-
   final _FakeSessionsClient _sessions = _FakeSessionsClient();
 
   final _FakeDockerClient _docker = _FakeDockerClient();
@@ -141,28 +139,30 @@ class _ShellState extends State<_Shell> {
 
   final _FakeEventsSource _dockerEvents = _FakeEventsSource();
 
+  /// The stable owner (the app's [DeepLinkTarget], issue #287): held by
+  /// this state across the test, fed from the raw stream, read by the tabs.
+  late final DeepLinkTarget _target = DeepLinkTarget();
+
+  StreamSubscription<DeepLink>? _links;
+
   @override
   void initState() {
     super.initState();
-    _links = widget.links.listen(_onDeepLink);
+    // The app's wiring: the service's stream feeds the model.
+    _links = widget.links.listen(_target.apply);
+    // The shell's wiring: listen to the model to switch the tab.
+    _target.addListener(_onDeepLinkTarget);
   }
 
-  void _onDeepLink(DeepLink link) {
-    setState(() {
-      if (link.isSession) {
-        _containerTarget = null;
-        _sessionTarget = link.id;
-        _tab = 0;
-      } else {
-        _sessionTarget = null;
-        _containerTarget = link.id;
-        _tab = 1;
-      }
-    });
+  void _onDeepLinkTarget() {
+    final target = _target.target;
+    if (target == null) return;
+    setState(() => _tab = target.isSession ? 0 : 1);
   }
 
   @override
   void dispose() {
+    _target.removeListener(_onDeepLinkTarget);
     _links?.cancel();
     super.dispose();
   }
@@ -176,19 +176,13 @@ class _ShellState extends State<_Shell> {
           apiBase: _bridge,
           client: _sessions,
           events: _sessionEvents,
-          deepLinkSession: _sessionTarget,
-          onDeepLinkSessionConsumed: () {
-            _sessionTarget = null;
-          },
+          deepLinks: _target,
         ),
         DockerTab(
           apiBase: _bridge,
           client: _docker,
           events: _dockerEvents,
-          deepLinkContainer: _containerTarget,
-          onDeepLinkContainerConsumed: () {
-            _containerTarget = null;
-          },
+          deepLinks: _target,
         ),
       ],
     ),

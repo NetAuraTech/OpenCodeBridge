@@ -17,7 +17,8 @@ import 'notify_kind.dart';
 /// `firebase_messaging`), requests the notification permission, and
 /// registers the token with the bridge — with the events the Settings
 /// toggles have enabled, re-registering on every toggle change. Tapped
-/// notifications surface as [deepLinks].
+/// notifications surface as [deepLinks] (the app applies each one to the
+/// one-shot target model it owns, issue #287).
 ///
 /// It runs only where FCM can: Android (the desktop hosts are no-ops).
 /// Every setup step degrades to push-off, never to an error: no Firebase

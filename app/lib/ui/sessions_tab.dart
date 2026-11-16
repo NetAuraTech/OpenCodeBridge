@@ -12,6 +12,7 @@ import '../client/sessions_client.dart';
 import '../model/orb.dart';
 import '../model/session.dart';
 import '../settings/app_settings.dart';
+import 'deep_link_target.dart';
 import 'home_list_state.dart';
 import 'new_project_dialog.dart';
 import 'structured_view.dart';
@@ -68,8 +69,7 @@ class SessionsTab extends StatefulWidget {
     this.events,
     this.auth,
     this.access,
-    this.deepLinkSession,
-    this.onDeepLinkSessionConsumed,
+    this.deepLinks,
     this.onOpenSettings,
     this.settings,
     this.onThemeModeChanged,
@@ -110,13 +110,14 @@ class SessionsTab extends StatefulWidget {
   /// and disconnected by the tab); tests inject a scripted source.
   final EventSource? events;
 
-  /// The one-shot deep link (issue #24): the session to open in the
-  /// structured view when a tapped notification targets it; `null` when
-  /// there is nothing to open. The tab consumes it through
-  /// [onDeepLinkSessionConsumed] (which the caller uses to clear the
-  /// target, so a later identical link is a new event).
-  final String? deepLinkSession;
-  final VoidCallback? onDeepLinkSessionConsumed;
+  /// The one-shot deep-link target (issues #24, #287): the model a tapped
+  /// notification's link landed on — the session to open in the structured
+  /// view when the target is one; `null` when this device has no push
+  /// registration (or the target is a container, the Docker tab's). The tab
+  /// reads it from the model (not from a widget parameter) and clears it
+  /// through [DeepLinkTarget.consume] when it opens it, so a later identical
+  /// link is a new event.
+  final DeepLinkTarget? deepLinks;
 
   /// Opens the app's Settings tab (the structured view's `/settings`
   /// command, issue #46); the shell provides it. `null` leaves `/settings`
@@ -233,11 +234,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// was, so the control is offered again to retry.
   String? _pinningId;
 
-  /// The deep-link session awaiting a loaded list (issue #24): set when the
-  /// target arrives before the rows; a failed load leaves it for the next
-  /// successful one.
-  String? _deepLinkPending;
-
   /// The sidebar's collapsed choice (issue #132): restored from the settings
   /// at the launch, persisted on every toggle. Collapsed, the list pane is
   /// gone entirely and the detail takes the full width; only the toggle stays
@@ -278,6 +274,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _setupEvents(base);
       widget.access?.addListener(_onAccessState);
       unawaited(_load());
+      // A target already on the model (a cold-start tap, issue #24, or a
+      // remounted shell re-reading its stable owner, issue #287): the
+      // in-flight load opens it when it lands ([_load]'s success path);
+      // when the list is already loaded (a remount) open it now, deferred
+      // out of the build phase.
+      _openDeepLink();
     } else {
       _loading = false;
     }
@@ -324,34 +326,36 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       _setupEvents(widget.apiBase!);
       _load();
     }
-    final target = widget.deepLinkSession;
-    if (target != null && target != oldWidget.deepLinkSession) {
-      // The target arrives as a widget update, which runs during the build
-      // phase: open it after the frame so the [Navigator.push] below never
-      // happens mid-build (a push mid-build corrupts the navigator's
-      // history, leaving the view with no route back to the list).
+    // The deep-link target (issue #24) is read from the model (issue
+    // #287): it arrives as a model change, which lands here as a widget
+    // update during the build phase — open it after the frame so the open
+    // never happens mid-build (a push mid-build corrupts the navigator's
+    // history, leaving the view with no route back to the list).
+    final target = widget.deepLinks?.target;
+    if (target != null && target.isSession) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _openDeepLink(target);
+        if (mounted) _openDeepLink();
       });
     }
   }
 
-  /// A tapped notification targeted a session (issue #24): open it in the
-  /// detail pane (issue #131), whose banner shows the pending permission.
-  /// Consumed immediately (the caller clears the target); when the list has
-  /// not loaded yet, the target waits for it in [_deepLinkPending].
-  void _openDeepLink(String id) {
-    widget.onDeepLinkSessionConsumed?.call();
+  /// Opens the model's deep-link target when it is a session (issue #24):
+  /// the detail pane (issue #131), whose banner shows the pending
+  /// permission. No-op when there is no session target or the list has not
+  /// loaded yet — then the model keeps holding the target (it is a stable
+  /// owner, issue #287) and the next successful load opens it ([_load]'s
+  /// success path calls back here). The consume lands in
+  /// [_openDeepLinkRow], the moment the row is actually opened.
+  void _openDeepLink() {
+    final target = widget.deepLinks?.target;
+    if (target == null) return;
     final rows = _list.rows;
-    if (rows == null) {
-      _deepLinkPending = id;
-      return;
-    }
-    _openDeepLinkRow(id, rows);
+    if (rows == null) return; // The load is in flight: it opens it.
+    _openDeepLinkRow(target.id, rows);
   }
 
   void _openDeepLinkRow(String id, List<Session> rows) {
-    _deepLinkPending = null;
+    widget.deepLinks?.consume();
     final row = rows.where((session) => session.id == id).firstOrNull;
     if (row == null) return; // The session is gone (deleted in the meantime).
     _selectSession(row);
@@ -489,7 +493,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     try {
       final rows = await client.list();
       if (!mounted) return;
-      final pending = _deepLinkPending;
       // The read is authoritative and pre-sorted (pinned-first): the stale
       // in-place positions (the exact pin times we learned from echoes) are
       // no longer needed — a fresh list starts the in-place reorder fresh
@@ -497,7 +500,9 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       // against the rows inside [HomeListState.applyRead].
       _list.applyRead(rows);
       setState(() => _loading = false);
-      if (pending != null) _openDeepLinkRow(pending, rows);
+      // A deep-link target set while the list was still loading (issue
+      // #24): the model kept it; open it now, from the fresh rows.
+      _openDeepLink();
       unawaited(_loadOrbs());
     } on SessionsClientError catch (e) {
       if (!mounted) return;

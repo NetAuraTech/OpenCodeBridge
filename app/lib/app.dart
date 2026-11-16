@@ -8,10 +8,12 @@ import 'access/token_store.dart';
 import 'app_mode.dart';
 import 'bridge/bridge_server.dart';
 import 'client/connection_monitor.dart';
+import 'notify/deep_link.dart';
 import 'notify/notification_service.dart';
 import 'settings/app_settings.dart';
 import 'sound/session_sound.dart';
 import 'tunnel_url.dart';
+import 'ui/deep_link_target.dart';
 import 'ui/home_shell.dart';
 import 'ui/mode_choice_screen.dart';
 
@@ -43,6 +45,19 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
   String? _serverError;
   AccessSession? _access;
   NotificationService? _notifications;
+
+  /// The one-shot deep-link target (issues #24, #287), held by the app
+  /// across shell remounts: the shell mounts and disposes freely (a
+  /// re-login, a reconnect), but a target set while it was away stays on
+  /// the model — the remounted shell re-reads it, and its tab opens it on
+  /// its next load. Created with the client entry (with the tunnel URL),
+  /// cleared on every re-entry.
+  DeepLinkTarget? _deepLinkTarget;
+
+  /// The subscription feeding the tapped-notification links into
+  /// [_deepLinkTarget] (the notify layer stays a source of [DeepLink]
+  /// values; the one-shot lives on the model).
+  StreamSubscription<DeepLink>? _deepLinksSub;
 
   /// The desktop session-sound service (issue #246), created once the
   /// settings are loaded (its toggle reads them live). `null` until then;
@@ -120,6 +135,7 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
       _monitor.setAuth(null);
       await _notifications?.stop();
       _notifications = null;
+      _clearDeepLinkTarget();
     } else {
       _mode = mode;
       _serverError = null;
@@ -130,6 +146,7 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
         _monitor.setAuth(null);
         await _notifications?.stop();
         _notifications = null;
+        _clearDeepLinkTarget();
       } else {
         // The session and the monitor read the tunnel URL live: the Settings
         // field writes it on every keystroke, so the login and the health
@@ -178,17 +195,34 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
     final old = _notifications;
     _notifications = null;
     unawaited(old?.stop());
+    _clearDeepLinkTarget();
     final notifications = NotificationService(
       settings: settings,
       bridgeBase: parseTunnelUrl(settings.tunnelUrl).replace(path: '/'),
       auth: session.authorizationHeader,
     );
     _notifications = notifications;
+    // The one-shot model for this device's taps (issue #287): a fresh one
+    // per push flow, and the tapped links feed it — the notify layer stays
+    // a source of [DeepLink] values, the one-shot lives on the model.
+    final target = DeepLinkTarget();
+    _deepLinkTarget = target;
+    _deepLinksSub = notifications.deepLinks.listen(target.apply);
     unawaited(notifications.start());
-    // The new service has a fresh deep-link stream: rebuild HomeShell so it
-    // subscribes to it (and the Settings tab's status text picks up the
-    // saved project).
+    // The new service has a fresh deep-link target: rebuild HomeShell so it
+    // points at it (and the Settings tab's status text picks up the saved
+    // project).
     if (mounted) setState(() {});
+  }
+
+  /// Tears down this device's deep-link wiring (a re-entry, the tunnel URL
+  /// cleared, the app's dispose): the model's target is cleared, so a
+  /// remounted shell never re-opens a stale link.
+  void _clearDeepLinkTarget() {
+    _deepLinksSub?.cancel();
+    _deepLinksSub = null;
+    _deepLinkTarget?.consume();
+    _deepLinkTarget = null;
   }
 
   /// The app's [MaterialApp] (issue #49): the theme follows the persisted
@@ -237,7 +271,7 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
         onTunnelUrlCommitted: () => _enter(settings, AppMode.client),
         auth: _mode == AppMode.client ? _access?.authorizationHeader : null,
         access: _mode == AppMode.client ? _access : null,
-        deepLinks: _notifications?.deepLinks,
+        deepLinks: _deepLinkTarget,
         onNotifyToggled: () {
           unawaited(_notifications?.reregister());
         },
@@ -271,6 +305,7 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
     WidgetsBinding.instance.removeObserver(this);
     _monitor.dispose();
     unawaited(_sounds?.detach());
+    _clearDeepLinkTarget();
     unawaited(_notifications?.stop());
     final bridge = _bridge;
     if (bridge != null) bridge.stop();
