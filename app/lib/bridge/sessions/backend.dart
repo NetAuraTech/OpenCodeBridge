@@ -140,8 +140,11 @@ class SessionsBackend {
   /// position ascending order, then the unpinned newest-created (the plain
   /// order's sort). Each row carries its waiting fact, re-evaluated per
   /// session from the service's pending states (issue #208), and its pinned
-  /// fact, derived from the order store (issue #237). The store's map is
-  /// pruned to the live session ids on the read (no orphan growth).
+  /// fact, derived from the order store (issue #237). The read keeps every
+  /// stored position for every session it sees and the ones it does not see
+  /// (issue #292: a session invisible on a read keeps its pin); the entry is
+  /// cleaned when the bridge observes the session being deleted or closed,
+  /// not on the read.
   /// A store failure degrades the read to the unpinned order — the list
   /// itself stays up, like the waiting fact's degraded-orb posture.
   Future<List<Session>> list() async {
@@ -155,14 +158,14 @@ class SessionsBackend {
       for (final session in sessions) composer.waitingOf(session.id),
     ]);
 
-    // The bridge-owned order map (issue #237), pruned to the live ids; a
+    // The bridge-owned order map (issue #237), kept in full (issue #292: the
+    // read no longer prunes the positions of sessions it does not see); a
     // store failure degrades the list to the unpinned order.
     final orderStore = this.orderStore;
     Map<String, num> positions = const {};
     if (orderStore != null) {
       try {
         positions = orderStore.load();
-        await orderStore.prune({for (final s in sessions) s.id});
       } catch (_) {
         positions = const {};
       }
