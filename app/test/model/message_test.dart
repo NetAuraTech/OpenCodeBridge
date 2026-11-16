@@ -459,6 +459,233 @@ void main() {
     });
   });
 
+  group('SessionMessage.replaceLiveFields (issue #263)', () {
+    // The fully-populated message every test starts from: every field of the
+    // contract set, identity and verdict included.
+    final base = SessionMessage(
+      id: 'msg_live',
+      role: 'assistant',
+      text: 'the streamed text',
+      reasoning: 'the streamed reasoning',
+      contextTokens: 4096,
+      tools: const [
+        ToolCall(
+          id: 'call_1',
+          name: 'bash',
+          status: 'completed',
+          input: {'command': 'ls'},
+        ),
+      ],
+      created: 1000,
+      streamed: 1100,
+      completed: 1200,
+      outputTokens: 50,
+      reasoningTokens: 12,
+      retry: const MessageRetry(
+        attempt: 2,
+        at: 1300,
+        error: StructuredError(
+          type: 'provider.rate-limit',
+          message: 'HTTP 429',
+          status: 429,
+        ),
+      ),
+      outcome: 'succeeded',
+    );
+
+    test('replacing one live field keeps every untouched field', () {
+      final updated = base.replaceLiveFields(text: 'the new text');
+      expect(updated.text, 'the new text');
+      // Streamed content.
+      expect(updated.reasoning, base.reasoning);
+      expect(updated.tools, base.tools);
+      // Turn stats.
+      expect(updated.created, base.created);
+      expect(updated.streamed, base.streamed);
+      expect(updated.completed, base.completed);
+      expect(updated.outputTokens, base.outputTokens);
+      expect(updated.reasoningTokens, base.reasoningTokens);
+      // Live retry state.
+      expect(updated.retry, base.retry);
+      expect(updated.error, isNull);
+      // Identity and verdict.
+      expect(updated.id, base.id);
+      expect(updated.role, base.role);
+      expect(updated.contextTokens, base.contextTokens);
+      expect(updated.outcome, base.outcome);
+    });
+
+    test('replacing a two-to-three field subset preserves the rest', () {
+      final updated = base.replaceLiveFields(
+        completed: 9999,
+        outputTokens: 60,
+        reasoningTokens: 14,
+      );
+      expect(updated.completed, 9999);
+      expect(updated.outputTokens, 60);
+      expect(updated.reasoningTokens, 14);
+      // The other live fields.
+      expect(updated.text, base.text);
+      expect(updated.reasoning, base.reasoning);
+      expect(updated.tools, base.tools);
+      expect(updated.created, base.created);
+      expect(updated.streamed, base.streamed);
+      expect(updated.retry, base.retry);
+      expect(updated.error, isNull);
+      // And the non-live fields.
+      expect(updated.id, base.id);
+      expect(updated.role, base.role);
+      expect(updated.contextTokens, base.contextTokens);
+      expect(updated.outcome, base.outcome);
+    });
+
+    test('a delta flush (append text, then reasoning) preserves tools and stats', () {
+      final flushed = base.replaceLiveFields(
+        text: '${base.text} more text',
+        reasoning: '${base.reasoning} more reasoning',
+      );
+      expect(flushed.text, '${base.text} more text');
+      expect(flushed.reasoning, '${base.reasoning} more reasoning');
+      expect(flushed.tools, base.tools);
+      expect(flushed.created, base.created);
+      expect(flushed.streamed, base.streamed);
+      expect(flushed.completed, base.completed);
+      expect(flushed.outputTokens, base.outputTokens);
+      expect(flushed.reasoningTokens, base.reasoningTokens);
+      expect(flushed.id, base.id);
+      expect(flushed.retry, base.retry);
+      expect(flushed.outcome, base.outcome);
+    });
+
+    test('a step-event stats update (all five stats) preserves the content', () {
+      final updated = base.replaceLiveFields(
+        created: 2000,
+        streamed: 2100,
+        completed: 2200,
+        outputTokens: 80,
+        reasoningTokens: 20,
+      );
+      expect(updated.created, 2000);
+      expect(updated.streamed, 2100);
+      expect(updated.completed, 2200);
+      expect(updated.outputTokens, 80);
+      expect(updated.reasoningTokens, 20);
+      expect(updated.text, base.text);
+      expect(updated.reasoning, base.reasoning);
+      expect(updated.tools, base.tools);
+      expect(updated.retry, base.retry);
+      expect(updated.error, isNull);
+      expect(updated.id, base.id);
+      expect(updated.role, base.role);
+      expect(updated.contextTokens, base.contextTokens);
+      expect(updated.outcome, base.outcome);
+    });
+
+    test('a tool-card update (replace the tools list) preserves the content', () {
+      const newTools = [
+        ToolCall(id: 'call_1', name: 'bash', status: 'streaming'),
+        ToolCall(name: 'read', status: 'running'),
+      ];
+      final updated = base.replaceLiveFields(tools: newTools);
+      expect(updated.tools, newTools);
+      expect(updated.text, base.text);
+      expect(updated.reasoning, base.reasoning);
+      expect(updated.created, base.created);
+      expect(updated.streamed, base.streamed);
+      expect(updated.completed, base.completed);
+      expect(updated.outputTokens, base.outputTokens);
+      expect(updated.reasoningTokens, base.reasoningTokens);
+      expect(updated.retry, base.retry);
+      expect(updated.id, base.id);
+      expect(updated.outcome, base.outcome);
+    });
+
+    test(
+      'retry and error clear to null when passed explicitly '
+      '(the poll’s landing case), everything else preserved',
+      () {
+        final landed = base.replaceLiveFields(
+          retry: null,
+          error: null,
+        );
+        expect(landed.retry, isNull);
+        expect(landed.error, isNull);
+        expect(landed.text, base.text);
+        expect(landed.reasoning, base.reasoning);
+        expect(landed.tools, base.tools);
+        expect(landed.created, base.created);
+        expect(landed.streamed, base.streamed);
+        expect(landed.completed, base.completed);
+        expect(landed.outputTokens, base.outputTokens);
+        expect(landed.reasoningTokens, base.reasoningTokens);
+        expect(landed.id, base.id);
+        expect(landed.role, base.role);
+        expect(landed.contextTokens, base.contextTokens);
+        expect(landed.outcome, base.outcome);
+      },
+    );
+
+    test('retry and error are settable on a message that carried none', () {
+      const plain = SessionMessage(id: 'm_plain', role: 'assistant', text: 'hi');
+      const retry = MessageRetry(
+        attempt: 1,
+        at: 42,
+        error: StructuredError(type: 'provider.rate-limit', message: 'HTTP 429'),
+      );
+      const err = StructuredError(
+        type: 'provider.no-route',
+        message: 'Model unavailable',
+      );
+      final withRetry = plain.replaceLiveFields(retry: retry);
+      expect(withRetry.retry, retry);
+      expect(withRetry.error, isNull);
+      final withError = plain.replaceLiveFields(error: err);
+      expect(withError.error, err);
+      expect(withError.retry, isNull);
+      // The untouched fields (including the carried content) are preserved.
+      expect(withRetry.text, 'hi');
+      expect(withError.text, 'hi');
+      expect(withRetry.id, 'm_plain');
+      expect(withError.role, 'assistant');
+    });
+
+    test('a no-op replace (nothing passed) returns an equal message', () {
+      final updated = base.replaceLiveFields();
+      expect(updated, base);
+    });
+
+    test('liveOnlyFields is exactly the ten live fields', () {
+      expect(SessionMessage.liveOnlyFields, {
+        'text',
+        'reasoning',
+        'tools',
+        'created',
+        'streamed',
+        'completed',
+        'outputTokens',
+        'reasoningTokens',
+        'retry',
+        'error',
+      });
+      // Identity and verdict are not live.
+      expect(SessionMessage.liveOnlyFields.contains('id'), isFalse);
+      expect(SessionMessage.liveOnlyFields.contains('role'), isFalse);
+      expect(
+        SessionMessage.liveOnlyFields.contains('contextTokens'),
+        isFalse,
+      );
+      expect(SessionMessage.liveOnlyFields.contains('outcome'), isFalse);
+    });
+
+    test('a replaced message keeps id, role, contextTokens, and outcome', () {
+      final updated = base.replaceLiveFields(text: 't', tools: const []);
+      expect(updated.id, 'msg_live');
+      expect(updated.role, 'assistant');
+      expect(updated.contextTokens, 4096);
+      expect(updated.outcome, 'succeeded');
+    });
+  });
+
   group('Wire tolerance', () {
     test('unknown fields are ignored', () {
       final tc = ToolCall.fromJson({
