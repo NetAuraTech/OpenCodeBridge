@@ -82,9 +82,8 @@ LiveOrbUpstreams fakeSource({
   required Directory tmp,
 }) => LiveOrbUpstreams(
   orbService: bareService(tmp),
-  orbList: () => listError == null
-      ? Future.value(records)
-      : Future.error(listError),
+  orbList: () =>
+      listError == null ? Future.value(records) : Future.error(listError),
   orbPassword: (id) => Future.value(passwords[id]),
 );
 
@@ -110,11 +109,7 @@ void main() {
           password: password,
         );
         if (inGate) {
-          expect(
-            upstream,
-            isA<OrbUpstream>(),
-            reason: '$state/$url/$password',
-          );
+          expect(upstream, isA<OrbUpstream>(), reason: '$state/$url/$password');
         } else {
           expect(upstream, isNull, reason: '$state/$url/$password');
         }
@@ -147,8 +142,7 @@ void main() {
       expect(upstream.key, '$_url|$_pw');
     });
 
-    test('equality is id + url + password: a respawn changes the value',
-        () {
+    test('equality is id + url + password: a respawn changes the value', () {
       final a = OrbUpstream.reachable(
         id: 'a',
         state: 'running',
@@ -188,28 +182,30 @@ void main() {
   });
 
   group('live() — the live upstream set with credentials', () {
-    test('exactly the gate-passing orbs, in list order, with their keys',
-        () async {
-      final source = fakeSource(
-        tmp: tmp,
-        records: [
-          record('a', 'running', url: _url), // In: url + password.
-          record('b', 'running', url: _url), // Out: still booting (no line).
-          record('c', 'stopped'), // Out: not running (no url either).
-          record('d', 'running'), // Out: no url.
-          record('e', 'orphan'), // Out: no container.
-        ],
-        passwords: {'a': _pw, 'd': 'pwe'},
-      );
-      final live = await source.live();
-      expect([for (final u in live) u.id], equals(const ['a']));
-      // The descriptor carries its credentials and its reconciliation key;
-      // the out-gate rows carry no value at all — there is no "upstream
-      // without a password" form.
-      expect(live.single.url, _url);
-      expect(live.single.password, _pw);
-      expect(live.single.key, '$_url|$_pw');
-    });
+    test(
+      'exactly the gate-passing orbs, in list order, with their keys',
+      () async {
+        final source = fakeSource(
+          tmp: tmp,
+          records: [
+            record('a', 'running', url: _url), // In: url + password.
+            record('b', 'running', url: _url), // Out: still booting (no line).
+            record('c', 'stopped'), // Out: not running (no url either).
+            record('d', 'running'), // Out: no url.
+            record('e', 'orphan'), // Out: no container.
+          ],
+          passwords: {'a': _pw, 'd': 'pwe'},
+        );
+        final live = await source.live();
+        expect([for (final u in live) u.id], equals(const ['a']));
+        // The descriptor carries its credentials and its reconciliation key;
+        // the out-gate rows carry no value at all — there is no "upstream
+        // without a password" form.
+        expect(live.single.url, _url);
+        expect(live.single.password, _pw);
+        expect(live.single.key, '$_url|$_pw');
+      },
+    );
 
     test('two gate-passing orbs keep the list order', () async {
       final source = fakeSource(
@@ -337,51 +333,51 @@ void main() {
         '"ocb.branch":"orb/b","ocb.created":"2026-01-01T00:00:00.000Z"}';
     const portsA = '{"4096/tcp":[{"HostIp":"0.0.0.0","HostPort":"49153"}]}';
 
-    DockerRunner docker({required bool up}) => (argv,
-            {workingDirectory}) async {
-      if (!up) {
-        return const DockerCliResult(
-          exitCode: 1,
-          stdout: '',
-          stderr: 'docker is down',
-        );
-      }
-      DockerCliResult out(String stdout) =>
-          DockerCliResult(exitCode: 0, stdout: stdout, stderr: '');
-      if (argv[0] == 'ps') return out('orb-a\norb-b\n');
-      if (argv[0] == 'inspect') {
-        if (argv.contains('{{json .Config.Labels}}')) {
-          return out('$labelsA\n$labelsB');
-        }
-        if (argv.contains('{{.State.Status}}')) {
-          return out('running\nexited\n');
-        }
-        if (argv.contains('{{json .NetworkSettings.Ports}}')) {
-          return out('$portsA\n{}');
-        }
-      }
-      if (argv[0] == 'volume' && argv[1] == 'ls') {
-        return out('orb-b-workspace\n');
-      }
-      if (argv[0] == 'volume' && argv[1] == 'inspect') {
-        return out('{"ocb.id":"b"}\n');
-      }
-      if (argv[0] == 'logs') {
-        switch (argv[1]) {
-          case 'orb-a':
-            return out('boot line\nserver password pwa\nmore\n');
-          case 'orb-b':
-            return out('boot line\nserver password pwb\n');
-          default:
+    DockerRunner docker({required bool up}) =>
+        (argv, {workingDirectory}) async {
+          if (!up) {
             return const DockerCliResult(
               exitCode: 1,
               stdout: '',
-              stderr: 'no such container',
+              stderr: 'docker is down',
             );
-        }
-      }
-      throw StateError('unexpected docker argv: $argv');
-    };
+          }
+          DockerCliResult out(String stdout) =>
+              DockerCliResult(exitCode: 0, stdout: stdout, stderr: '');
+          if (argv[0] == 'ps') return out('orb-a\norb-b\n');
+          if (argv[0] == 'inspect') {
+            if (argv.contains('{{json .Config.Labels}}')) {
+              return out('$labelsA\n$labelsB');
+            }
+            if (argv.contains('{{.State.Status}}')) {
+              return out('running\nexited\n');
+            }
+            if (argv.contains('{{json .NetworkSettings.Ports}}')) {
+              return out('$portsA\n{}');
+            }
+          }
+          if (argv[0] == 'volume' && argv[1] == 'ls') {
+            return out('orb-b-workspace\n');
+          }
+          if (argv[0] == 'volume' && argv[1] == 'inspect') {
+            return out('{"ocb.id":"b"}\n');
+          }
+          if (argv[0] == 'logs') {
+            switch (argv[1]) {
+              case 'orb-a':
+                return out('boot line\nserver password pwa\nmore\n');
+              case 'orb-b':
+                return out('boot line\nserver password pwb\n');
+              default:
+                return const DockerCliResult(
+                  exitCode: 1,
+                  stdout: '',
+                  stderr: 'no such container',
+                );
+            }
+          }
+          throw StateError('unexpected docker argv: $argv');
+        };
 
     OrbService service({required bool up}) => OrbService(
       imageBuilder: OrbImageBuilder(

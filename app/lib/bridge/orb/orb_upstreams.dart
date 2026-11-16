@@ -203,8 +203,8 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
     required OrbService orbService,
     Future<List<OrbRecord>> Function()? orbList,
     Future<String?> Function(String)? orbPassword,
-  })  : orbList = orbList ?? orbService.list,
-        orbPassword = orbPassword ?? orbService.lastPassword;
+  }) : orbList = orbList ?? orbService.list,
+       orbPassword = orbPassword ?? orbService.lastPassword;
 
   /// The running orb list (labels; `url` only for a running orb). May
   /// throw when docker is down (the source degrades: empty [live],
@@ -240,12 +240,14 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
     if (records == null) return UpstreamVerdict.unknown;
     for (final record in records) {
       if (record.id != orbId) continue;
-      final reachable = OrbUpstream.reachable(
-        id: record.id,
-        state: record.state,
-        url: record.url,
-        password: await orbPassword(record.id),
-      ) != null;
+      final reachable =
+          OrbUpstream.reachable(
+            id: record.id,
+            state: record.state,
+            url: record.url,
+            password: await orbPassword(record.id),
+          ) !=
+          null;
       return reachable ? UpstreamVerdict.reachable : UpstreamVerdict.unroutable;
     }
     return UpstreamVerdict.gone;
