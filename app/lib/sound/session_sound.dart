@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../bridge/events/bridge_event.dart';
+import '../bridge/sessions/cancel_dedup.dart';
 import '../client/events_client.dart';
 
 /// The sounds a session event can call for (issue #246): one per distinct
@@ -53,11 +54,11 @@ extension SessionSoundAsset on SessionSound {
 /// question resolved (`form.replied` / `form.cancelled`) is not an event the
 /// user needs to hear about.
 class SessionSoundMapper {
-  /// The sessions whose cancel the bridge already announced as
-  /// `session.turn.cancelled`, so the service's own terminal for that same
-  /// turn (`session.execution.interrupted`) is not sounded again. Cleared
-  /// when the session's next turn starts.
-  final Set<String> _cancelled = {};
+  /// The cancel's follow-on dedup (issues #164, #258): the service's own
+  /// terminal for a cancelled turn (`session.execution.interrupted`) is not
+  /// sounded again — the classifier says when it is the follow-on of a
+  /// cancel already sounded as the stopped tone, not a genuine interrupt.
+  final CancelDedup _dedup = CancelDedup();
 
   /// The [SessionSound] [event.type] calls for — `null` when the event plays
   /// nothing (a non-trigger, an event without a session, or the suppressed
@@ -69,11 +70,11 @@ class SessionSoundMapper {
         // A fresh turn: a stale cancel marker (its terminal missed, e.g.
         // across a service restart) must not suppress this turn's later
         // outcomes.
-        if (sessionId != null) _cancelled.remove(sessionId);
+        if (sessionId != null) _dedup.started(sessionId);
         return null;
       case BridgeEventType.turnCancelled:
         if (sessionId == null) return null;
-        _cancelled.add(sessionId);
+        _dedup.cancelled(sessionId);
         return SessionSound.stopped;
       case 'session.execution.succeeded':
         return _namesSession(sessionId) ? SessionSound.success : null;
@@ -81,7 +82,7 @@ class SessionSoundMapper {
         return _namesSession(sessionId) ? SessionSound.error : null;
       case 'session.execution.interrupted':
         if (sessionId == null) return null;
-        if (_cancelled.remove(sessionId)) {
+        if (_dedup.isCancelledFollowOn(sessionId)) {
           // The cancel already sounded this turn's end as "stopped": its
           // service terminal is the same stop, not a new outcome.
           return null;

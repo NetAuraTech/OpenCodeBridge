@@ -4,6 +4,7 @@ import 'dart:convert';
 import '../../notify/deep_link.dart';
 import '../events/bridge_event.dart';
 import '../events/event_hub.dart';
+import '../sessions/cancel_dedup.dart';
 import '../../notify/notify_kind.dart';
 import 'notify_service.dart';
 
@@ -47,12 +48,12 @@ class PushDispatcher implements EventConnection {
 
   final Completer<void> _done = Completer<void>();
 
-  /// The sessions whose cancel the bridge already announced as "Turn stopped"
-  /// (issue #164). The service settles a cancelled turn with its own terminal
-  /// `session.execution.interrupted`; remembering the cancel lets the
-  /// dispatcher suppress that follow-on instead of re-announcing it as an
-  /// interrupt. Cleared when the session's next turn starts.
-  final Set<String> _cancelled = {};
+  /// The cancel's follow-on dedup (issues #164, #258): the service settles
+  /// a cancelled turn with its own terminal `session.execution.interrupted`,
+  /// and this classifier says when that terminal is the follow-on of a
+  /// cancel the dispatcher already announced as "Turn stopped" (suppress
+  /// it) rather than a genuine interrupt.
+  final CancelDedup _dedup = CancelDedup();
 
   @override
   Future<void> get done => _done.future;
@@ -73,7 +74,7 @@ class PushDispatcher implements EventConnection {
         // A fresh turn: a stale cancel marker (a terminal missed across a
         // restart) must not suppress this turn's later outcomes.
         final id = event.sessionId;
-        if (id != null) _cancelled.remove(id);
+        if (id != null) _dedup.started(id);
         break;
       case 'permission.asked':
       case 'session.execution.succeeded':
@@ -99,7 +100,7 @@ class PushDispatcher implements EventConnection {
   Future<void> _reportCancel(_Event event) async {
     final sessionId = event.sessionId;
     if (sessionId == null) return;
-    _cancelled.add(sessionId);
+    _dedup.cancelled(sessionId);
     await _service.publish(
       NotifyKind.turnEnded,
       title: 'Turn stopped',
@@ -112,7 +113,7 @@ class PushDispatcher implements EventConnection {
     final sessionId = event.sessionId;
     if (sessionId == null) return;
     if (event.type == 'session.execution.interrupted' &&
-        _cancelled.remove(sessionId)) {
+        _dedup.isCancelledFollowOn(sessionId)) {
       // The cancel already reported this turn's end as "Turn stopped": its
       // service terminal is the same stop, not a new outcome.
       return;
