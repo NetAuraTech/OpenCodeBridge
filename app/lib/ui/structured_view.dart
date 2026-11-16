@@ -1344,37 +1344,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       }
       _setMessageAt(
         index,
-        _rebuildLiveFields(current, retry: message.retry, error: message.error),
+        current.replaceLiveFields(retry: message.retry, error: message.error),
       );
       changed = true;
     }
     return changed;
   }
-
-  /// A [SessionMessage] copy with only [retry] and [error] replaced: every
-  /// other field (the streamed text / reasoning / tools the events grew) is
-  /// kept. Used to land a retried step's live state without disturbing the
-  /// in-flight content.
-  SessionMessage _rebuildLiveFields(
-    SessionMessage message, {
-    MessageRetry? retry,
-    StructuredError? error,
-  }) => SessionMessage(
-    id: message.id,
-    role: message.role,
-    text: message.text,
-    reasoning: message.reasoning,
-    contextTokens: message.contextTokens,
-    tools: message.tools,
-    created: message.created,
-    streamed: message.streamed,
-    completed: message.completed,
-    outputTokens: message.outputTokens,
-    reasoningTokens: message.reasoningTokens,
-    retry: retry,
-    error: error,
-    outcome: message.outcome,
-  );
 
   /// (Re-)indexes the loaded history so the live maps track every message
   /// and tool call it already carries (a turn may be running when the view
@@ -1568,25 +1543,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     return created;
   }
 
-  /// A [SessionMessage] copy with [text] and/or [tools] replaced.
-  SessionMessage _rebuildMessage(
-    SessionMessage message, {
-    String? text,
-    String? reasoning,
-    List<ToolCall>? tools,
-  }) => SessionMessage(
-    id: message.id,
-    role: message.role,
-    text: text ?? message.text,
-    reasoning: reasoning ?? message.reasoning,
-    tools: tools ?? message.tools,
-    created: message.created,
-    streamed: message.streamed,
-    completed: message.completed,
-    outputTokens: message.outputTokens,
-    reasoningTokens: message.reasoningTokens,
-  );
-
   /// Fills in the in-flight step [id]'s turn-stats fields (issue #122) from
   /// the live `session.step.*` events, keeping everything else: the live
   /// footer reads them off the message list with the exact same fold as the
@@ -1606,18 +1562,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     final message = _messages[index];
     _setMessageAt(
       index,
-      SessionMessage(
-        id: message.id,
-        role: message.role,
-        text: message.text,
-        reasoning: message.reasoning,
-        contextTokens: message.contextTokens,
-        tools: message.tools,
-        created: created ?? message.created,
-        streamed: streamed ?? message.streamed,
-        completed: completed ?? message.completed,
-        outputTokens: outputTokens ?? message.outputTokens,
-        reasoningTokens: reasoningTokens ?? message.reasoningTokens,
+      message.replaceLiveFields(
+        created: created,
+        streamed: streamed,
+        completed: completed,
+        outputTokens: outputTokens,
+        reasoningTokens: reasoningTokens,
       ),
     );
   }
@@ -1693,8 +1643,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         final message = _messages[index];
         _setMessageAt(
           index,
-          _rebuildMessage(
-            message,
+          message.replaceLiveFields(
             text: (message.text ?? '') + entry.value.toString(),
           ),
         );
@@ -1705,8 +1654,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         final message = _messages[index];
         _setMessageAt(
           index,
-          _rebuildMessage(
-            message,
+          message.replaceLiveFields(
             reasoning: (message.reasoning ?? '') + entry.value.toString(),
           ),
         );
@@ -1762,7 +1710,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       if (text != null) {
         final index = _ensureCompactionMessage();
         final message = _messages[index];
-        _setMessageAt(index, _rebuildMessage(message, text: text));
+        _setMessageAt(index, message.replaceLiveFields(text: text));
       }
     });
   }
@@ -1984,7 +1932,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     final message = _messages[index];
     final tools = List<ToolCall>.of(message.tools)
       ..add(ToolCall(id: toolId, name: name, status: 'running'));
-    _setMessageAt(index, _rebuildMessage(message, tools: tools));
+    _setMessageAt(index, message.replaceLiveFields(tools: tools));
     _liveTools[toolId] = tools.length - 1;
     _liveToolsOf[toolId] = messageId;
   }
@@ -2000,7 +1948,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     if (toolIndex >= message.tools.length) return;
     final tools = List<ToolCall>.of(message.tools);
     tools[toolIndex] = update(tools[toolIndex]);
-    _setMessageAt(index, _rebuildMessage(message, tools: tools));
+    _setMessageAt(index, message.replaceLiveFields(tools: tools));
   }
 
   /// A [ToolCall] copy with [name], [status], [input], [error], [patch], and
