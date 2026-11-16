@@ -4,7 +4,6 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
-import '../bridge/events/bridge_event.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/fs_client.dart';
@@ -13,6 +12,7 @@ import '../client/sessions_client.dart';
 import '../model/orb.dart';
 import '../model/session.dart';
 import '../settings/app_settings.dart';
+import 'home_list_state.dart';
 import 'new_project_dialog.dart';
 import 'structured_view.dart';
 
@@ -191,16 +191,15 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// word is never dropped.
   bool _refreshAgain = false;
 
-  /// The fetched rows, `null` until the first successful load.
-  List<Session>? _rows;
-
-  /// The cached list's pin positions (issue #237/238), keyed by session id:
-  /// the row's pin position, or `null`/absent when the row is un-pinned. A
-  /// cold start reads each row's `pinned` field (the read is pre-sorted) and
-  /// the first `session.order.changed` for a row records its position; from
-  /// then on the in-place re-sort keys off these. Reconciled (dropped) when a
-  /// row leaves the list, like the unread marks.
-  final Map<String, num> _positions = {};
+  /// The home list's merged state (issue #266): the fetched rows, the pin
+  /// positions the in-place reorder keys off, the unread marks, and the
+  /// selected row — owned by the [HomeListState] module, which this widget
+  /// feeds (a fresh read from [_load], a decoded event from
+  /// [_onBridgeEvent]) and renders exactly as before the extraction. The
+  /// load's lifecycle (in-flight, quiet, the last error) and the deep link
+  /// stay here: they are the widget's client transaction and navigation
+  /// intent, not row facts.
+  final HomeListState _list = HomeListState();
 
   /// The last load failure, if any.
   String? _error;
@@ -238,22 +237,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// target arrives before the rows; a failed load leaves it for the next
   /// successful one.
   String? _deepLinkPending;
-
-  /// The session shown in the detail pane (issue #131): `null` shows the
-  /// empty-state hint. Selecting a row (or a deep link, or a newly created
-  /// session) swaps the pane in place; the list stays visible.
-  Session? _selectedSession;
-
-  /// The ids whose turn ended while they were not shown in the detail pane
-  /// (issue #207): their row wears the violet unread dot. In memory only, per
-  /// running app instance — it is not persisted and is not part of the
-  /// sessions API contract. Driven by the unified event stream's turn
-  /// boundaries (no list refetch for the dot itself) and pruned from the rows
-  /// on every reload, so a session that leaves the list (deleted) drops its
-  /// mark. Opening the session (row tap, narrow drawer, or a deep link) clears
-  /// it, and a new turn starting on it clears it too (the "finished" fact is
-  /// stale once the turn is live again).
-  final Set<String> _unread = <String>{};
 
   /// The sidebar's collapsed choice (issue #132): restored from the settings
   /// at the launch, persisted on every toggle. Collapsed, the list pane is
@@ -359,7 +342,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// not loaded yet, the target waits for it in [_deepLinkPending].
   void _openDeepLink(String id) {
     widget.onDeepLinkSessionConsumed?.call();
-    final rows = _rows;
+    final rows = _list.rows;
     if (rows == null) {
       _deepLinkPending = id;
       return;
@@ -416,260 +399,47 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
-  /// The list's own reaction to the unified event stream (spec §8). The
-  /// stream carries every service's events (host and orbs alike, issue
-  /// #95), and a session id is globally unique: no service needs naming.
-  ///
-  /// - `session.created` — a session appeared, typically one the agent
-  ///   spawned on an orb. The rows were fetched before it existed, so the
-  ///   list reloads (coalesced, and quiet so the rows stay on screen).
-  ///   This is what makes a spawned session show up without switching tabs.
-  /// - `session.renamed` — the agent named the session on its first turn:
-  ///   the row's title is patched in place. A rename for a session the list
-  ///   does not know reloads instead (its create was missed).
-  /// - `session.archived` / `session.unarchived` (issue #235) — the session
-  ///   was archived or brought back (from the TUI, a second client, or this
-  ///   app's own archive tap): the row's `archived` fact is patched in
-  ///   place, no refetch, so the surface filter (Active / Archived) moves
-  ///   it. An archive for a session the list does not know reloads instead
-  ///   (its create was missed), like any other unknown id.
-  /// - `session.deleted` / the bridge-native `session.closed` — drop the row.
-  /// - The turn boundaries (`session.execution.*`) move the row's active dot
-  ///   in place, no refetch. A turn ending on a session that is not shown in
-  ///   the detail pane also lights its violet unread dot (issue #207); a new
-  ///   turn starting clears it (the "finished" fact is stale once the turn is
-  ///   live again).
-  /// - The bridge-native `session.turn.cancelled` (issue #164) — a cancelled
-  ///   turn: the row's active dot goes out in place, no refetch, so a session
-  ///   stopped from a panel no longer reads as busy (and lights the unread dot
-  ///   when not shown, like any other terminal).
-  /// - The pending permission and question events (`permission.asked` /
-  ///   `permission.replied`, `form.created` / `form.replied` /
-  ///   `form.cancelled` — issue #209, the same events the structured view
-  ///   consumes) — a known row re-derives its waiting fact in place from the
-  ///   service's pending states (no list reload), so its dot turns orange when
-  ///   a permission or question appears and reverts (green while active, none
-  ///   otherwise) when it resolves.
-  ///
-  /// Any other event naming an unknown session (a streamed delta, the first
-  /// turn of a just-spawned orb session whose create preceded its upstream's
-  /// attach) reloads too, coalesced: the list must never stay short of rows
-  /// until the next manual refresh or app foreground.
+  /// The list's own reaction to the unified event stream (spec §8): the
+  /// event's merged state is the module's to compute (the per-event
+  /// semantics live in [HomeListState.applyEvent], which also names its
+  /// verdict), so this is the verdict's dispatch: reload the list (the
+  /// module reloaded nothing — a missed create, an unknown session),
+  /// re-derive the waiting fact (the lookups and their failure posture stay
+  /// in the widget), or simply rebuild from the merged state (the event
+  /// patched a row in place — a title, an active dot, an archived fact, an
+  /// order change, an unread mark). The stream carries every service's
+  /// events (host and orbs alike, issue #95), and a session id is globally
+  /// unique: no service needs naming.
   void _onBridgeEvent(BridgeEvent event) {
     if (!mounted) return;
-    final rows = _rows;
-    if (rows == null) return; // The initial load is still in flight.
-    final sessionId = _sessionOf(event);
-    switch (event.type) {
-      case 'session.created':
-      case 'session.renamed':
-      case 'session.deleted':
-      case BridgeEventType.sessionClosed:
-        // `created` always reloads, even for a known id: the row's location,
-        // project or orb attribution is not something the id alone proves.
-        if (event.type == 'session.created' ||
-            sessionId == null ||
-            !_hasRow(rows, sessionId)) {
-          unawaited(_refreshFromEvents());
-        } else if (event.type == 'session.renamed') {
-          _patchRow(sessionId, title: _titleOf(event));
-        } else if (event.type == 'session.deleted' ||
-            event.type == BridgeEventType.sessionClosed) {
-          _patchRow(sessionId, drop: true);
-        }
-        return;
-      // The archive's two faces (issue #235): the row's `archived` fact is
-      // flipped in place — no refetch — and the surface filter (Active /
-      // Archived) moves it accordingly. A known row's flip is the whole
-      // action (the tap that caused it re-fetches nothing); an unknown id
-      // (a create was missed) reloads, like any other unknown session.
-      case 'session.archived':
-      case 'session.unarchived':
-        if (sessionId == null || !_hasRow(rows, sessionId)) {
-          unawaited(_refreshFromEvents());
-        } else {
-          _patchRow(sessionId, archived: event.type == 'session.archived');
-        }
-        return;
-      case 'session.execution.started':
-        if (sessionId != null) {
-          _setActive(sessionId, true, rows);
-          _clearUnread(sessionId);
-        }
-        return;
-      case 'session.execution.succeeded':
-      case 'session.execution.failed':
-      case 'session.execution.interrupted':
-        if (sessionId != null) {
-          _setActive(sessionId, false, rows);
-          _endUnread(sessionId);
-        }
-        return;
-      // The bridge-native cancel (issue #164): the session's turn was stopped
-      // (from a panel), so its active dot goes out in place — no refetch. The
-      // service's own terminal for the cancelled turn (`interrupted`) would
-      // settle it too, but this clears it the instant the cancel lands. As
-      // any other terminal, it lights the unread dot when the session is not
-      // shown (issue #207).
-      case BridgeEventType.turnCancelled:
-        if (sessionId != null) {
-          _setActive(sessionId, false, rows);
-          _endUnread(sessionId);
-        }
-        return;
-      // The bridge-native order change (issue #237/238): a session's position
-      // in the home list's pinned block changed — a pin from this device (the
-      // write's own echo) or from another device / agent. A known row's pin
-      // fact is patched in place and the list re-sorts (no refetch), the same
-      // merge posture as the title and the archived fact; a row the list does
-      // not know (a missed create) reloads, like any other unknown-session
-      // event.
-      case BridgeEventType.sessionOrderChanged:
-        if (sessionId == null) return;
-        if (_hasRow(rows, sessionId)) {
-          _setOrder(sessionId, _positionOf(event), rows);
-        } else {
-          unawaited(_refreshFromEvents());
-        }
-        return;
-      // The pending permission and question facts (issue #209): the same
-      // events the structured view already consumes (`permission.asked` /
-      // `permission.replied`, `form.created` / `form.replied` /
-      // `form.cancelled`). A known row re-derives its waiting fact in place,
-      // no list reload — the dot flips orange (or off) the instant the
-      // permission or question appears or resolves.
-      case 'permission.asked':
-      case 'permission.replied':
-      case 'form.created':
-      case 'form.replied':
-      case 'form.cancelled':
-        if (sessionId == null) return;
-        if (_hasRow(rows, sessionId)) {
-          unawaited(_setWaiting(sessionId, rows));
-        } else {
-          // The row is not known: a create was missed (a spawned orb session),
-          // so the list reloads, like any other event naming an unknown
-          // session — the waiting fact arrives with the fresh row.
-          unawaited(_refreshFromEvents());
-        }
-        return;
-      default:
-        if (sessionId != null && !_hasRow(rows, sessionId)) {
-          unawaited(_refreshFromEvents());
-        }
+    if (_list.rows == null) return; // The initial load is still in flight.
+    final verdict = _list.applyEvent(event);
+    if (verdict == ListStateVerdict.reload) {
+      // Coalesced and quiet: the rows stay on screen while the load runs.
+      unawaited(_refreshFromEvents());
+    } else if (verdict == ListStateVerdict.reDeriveWaiting) {
+      final id = HomeListState.sessionOf(event);
+      if (id != null) unawaited(_setWaiting(id));
+    } else {
+      // The event was merged in place: rebuild from the module's state.
+      setState(() {});
     }
-  }
-
-  /// The session an event names: the durable aggregate id (every
-  /// session-scoped opencode event carries one), else `data.sessionID` (the
-  /// bridge-native events), else the `form`'s nested session id, else `null`.
-  String? _sessionOf(BridgeEvent event) {
-    final durable = event.durable;
-    if (durable != null) return durable.aggregateID;
-    final data = event.data;
-    final id = data['sessionID'];
-    if (id is String && id.isNotEmpty) return id;
-    final form = data['form'];
-    if (form is Map<String, Object?>) {
-      final nested = form['sessionID'];
-      if (nested is String && nested.isNotEmpty) return nested;
-    }
-    return null;
-  }
-
-  bool _hasRow(List<Session> rows, String id) =>
-      rows.where((session) => session.id == id).isNotEmpty;
-
-  /// The title a `session.renamed` payload carries (its `data.title`).
-  String? _titleOf(BridgeEvent event) {
-    final title = event.data['title'];
-    return title is String && title.isNotEmpty ? title : null;
-  }
-
-  /// The position a `session.order.changed` payload carries (its
-  /// `data.position`): the row's new pin position, or `null` when the pin was
-  /// cleared. A non-numeric value (malformed) reads as `null`, the safe
-  /// default (an unknown position un-pins rather than corrupting the order).
-  num? _positionOf(BridgeEvent event) {
-    final position = event.data['position'];
-    return position is num ? position : null;
-  }
-
-  /// Replaces the row [id] in place: a new [title], an [active] dot, a
-  /// re-derived [waiting] fact (issue #209), an [archived] fact (issue #235,
-  /// from the `session.archived` / `session.unarchived` events), or ([drop])
-  /// nothing — the row is gone. A drop also clears the detail pane when it
-  /// shows that row and drops its unread mark (issue #207); a patch
-  /// otherwise carries the pane's row along.
-  void _patchRow(
-    String id, {
-    String? title,
-    bool? active,
-    bool? waiting,
-    bool? archived,
-    bool drop = false,
-  }) {
-    final rows = _rows;
-    if (rows == null) return;
-    if (drop) {
-      setState(() {
-        _rows = [
-          for (final session in rows)
-            if (session.id != id) session,
-        ];
-        _positions.remove(id);
-        if (_selectedSession?.id == id) _selectedSession = null;
-        _unread.remove(id);
-      });
-      return;
-    }
-    setState(() {
-      _rows = [
-        for (final session in rows)
-          if (session.id == id)
-            session.copyWith(
-              title: title,
-              active: active,
-              waiting: waiting,
-              archived: archived,
-            )
-          else
-            session,
-      ];
-      final selected = _selectedSession;
-      if (selected != null && selected.id == id) {
-        _selectedSession = selected.copyWith(
-          title: title,
-          active: active,
-          waiting: waiting,
-          archived: archived,
-        );
-      }
-    });
-  }
-
-  /// Moves the row [id]'s active dot, only when it actually disagrees (the
-  /// turn boundaries arrive in pairs — the start right after the spawn).
-  void _setActive(String id, bool active, List<Session> rows) {
-    final row = rows.where((session) => session.id == id).firstOrNull;
-    if (row == null || row.active == active) return;
-    _patchRow(id, active: active);
   }
 
   /// Re-derives the row [id]'s waiting fact in place (issue #209) from the
   /// service's pending states — the same pending-permission and
-  /// pending-question endpoints the structured view consumes — and patches the
-  /// row when it disagrees. The question lookup runs only when the permission
-  /// lookup answered empty (a waiting session already has its answer), like
-  /// the backend's own derivation (issue #208). A known row whose lookup fails
-  /// keeps its dot (the last word) rather than flapping off; the row is
-  /// removed on its own delete event, so a stale dot never outlives the
-  /// session.
-  Future<void> _setWaiting(String id, List<Session> rows) async {
+  /// pending-question endpoints the structured view consumes — and hands the
+  /// result to the module, which patches the row when it disagrees. The
+  /// question lookup runs only when the permission lookup answered empty (a
+  /// waiting session already has its answer), like the backend's own
+  /// derivation (issue #208). A known row whose lookup fails keeps its dot
+  /// (the last word) rather than flapping off; the row is removed on its own
+  /// delete event, so a stale dot never outlives the session.
+  Future<void> _setWaiting(String id) async {
     final client = _client;
     // The row must be known now (a missed create reloads instead, the caller's
     // branch): issuing the lookups for a row the list does not hold is waste.
-    if (client == null || !_hasRow(rows, id)) return;
+    if (client == null || !_list.hasRow(id)) return;
     try {
       final permissions = await client.getPermissions(id);
       final waiting =
@@ -678,140 +448,12 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       // Re-read the current row: it may have changed while the lookups were in
       // flight (another event patched it, or the row was dropped). Guard
       // against the live value so a burst of events settles on the latest.
-      final current = _rows?.where((session) => session.id == id).firstOrNull;
+      final current = _list.rows?.where((s) => s.id == id).firstOrNull;
       if (current == null || current.waiting == waiting) return;
-      _patchRow(id, waiting: waiting);
+      _list.patchRow(id, waiting: waiting);
+      setState(() {});
     } on SessionsClientError {
       // Keep the last word on screen (the structured view does too).
-    }
-  }
-
-  /// Patches row [id]'s pin fact in place from [position] (issue #237/238)
-  /// and re-sorts the cached list — no refetch. This is the merge point for
-  /// both pin paths: the bridge-native `session.order.changed` (a pin from
-  /// another device or agent, or this device's own echo) and a successful
-  /// local pin write (whose outcome the caller [setOrder] applies here the
-  /// same way).
-  ///
-  /// The row's `pinned` fact flips to `position != null` and the list
-  /// re-sorts pinned-first, then the current order (the cached list already
-  /// holds the bridge's position-ascending pinned block; a position the list
-  /// has not seen — a cold start's `pinned` field, or an echo for a row it
-  /// has not re-ordered — keeps the row where the read placed it).
-  /// [Session.copyWith] (not a re-fetch) is the seam, like the title and the
-  /// archived fact. A row that is not in the list (a missed create) is a
-  /// no-op here — the unknown-session path of [_onBridgeEvent] reloads.
-  void _setOrder(String id, num? position, List<Session> rows) {
-    final row = rows.where((session) => session.id == id).firstOrNull;
-    if (row == null) return;
-    final pinned = position != null;
-    // No-ops that would waste a re-sort and a build: a redundant un-pin of an
-    // already-un-pinned row, or a re-echo of a pin this list already applied
-    // (the same position, the row already pinned).
-    if (!pinned && !row.pinned) return;
-    if (pinned && row.pinned && _positions[id] == position) return;
-    if (position != null) {
-      _positions[id] = position;
-    } else {
-      _positions.remove(id);
-    }
-    setState(() {
-      _rows = [
-        for (final session in rows)
-          if (session.id == id) session.copyWith(pinned: pinned) else session,
-      ];
-      _resort();
-      final selected = _selectedSession;
-      if (selected != null && selected.id == id) {
-        _selectedSession = selected.copyWith(pinned: pinned);
-      }
-    });
-  }
-
-  /// The in-place re-sort of the cached home list (issue #237/238): the pinned
-  /// rows first — known positions ascending (a tie, or a position the list has
-  /// not seen, keeps the row's current place: the read already placed the
-  /// pinned block position-ascending, so a cold start's `pinned` field renders
-  /// in place) — then the unpinned rows newest-created. Stable: rows that
-  /// compare equal keep their current order, so a re-sort never scrambles the
-  /// block.
-  ///
-  /// [List.sort] is not stable, so the rows are ordered by a (key, index)
-  /// pair: the key first, the original index as the tie-breaker. The index is
-  /// the row's current position, which for a cold start is exactly the
-  /// bridge's order — the app never has to re-derive it.
-  ///
-  /// Unlike the bridge's [SessionsBackend.homeListOrder] (which treats an
-  /// unknown position as *unpinned* — correct for the store's own read), the
-  /// app treats a *pinned* row with an unknown position as *keeping its place*:
-  /// the cached list has no position for a cold-start row, and un-pinning-then-
-  /// sorting would drag it out of the block.
-  void _resort() {
-    final rows = _rows;
-    if (rows == null) return;
-    final indexed = [
-      for (var i = 0; i < rows.length; i++) (row: rows[i], index: i),
-    ];
-    indexed.sort((a, b) {
-      final aPinned = a.row.pinned;
-      final bPinned = b.row.pinned;
-      // Pinned rows sort before unpinned rows.
-      if (aPinned != bPinned) return aPinned ? -1 : 1;
-      if (!aPinned) {
-        // Both unpinned: newest-created first (the read's plain order).
-        final byCreated = b.row.created.compareTo(a.row.created);
-        if (byCreated != 0) return byCreated;
-        return a.index.compareTo(b.index); // Tie: current order.
-      }
-      // Both pinned: known positions ascending (a tie breaks by created,
-      // like the bridge); a position the list has not seen keeps the row's
-      // current place (the index tie-breaker below).
-      final posA = _positions[a.row.id];
-      final posB = _positions[b.row.id];
-      if (posA != null && posB != null) {
-        final byPosition = posA.compareTo(posB);
-        if (byPosition != 0) return byPosition;
-        final byCreated = b.row.created.compareTo(a.row.created);
-        if (byCreated != 0) return byCreated;
-      }
-      // Unknown position(s), a created tie, or a position tie: current order.
-      return a.index.compareTo(b.index);
-    });
-    for (var i = 0; i < indexed.length; i++) {
-      rows[i] = indexed[i].row;
-    }
-  }
-
-  /// A turn ended on [id] (any terminal, issue #207): light the violet unread
-  /// dot in place when that session is not the one shown in the detail pane
-  /// (it was watched live, so no dot then). Only sets the mark when it is not
-  /// already set, so a burst of terminals does not churn the build.
-  void _endUnread(String id) {
-    if (_selectedSession?.id == id) return;
-    if (_unread.contains(id)) return;
-    setState(() => _unread.add(id));
-  }
-
-  /// A new turn started on [id] (issue #207): the "finished" fact is stale
-  /// once the turn is live again, so the unread dot goes out (the green active
-  /// dot is on instead). Only clears when it is set, so an already-read
-  /// session is a no-op. (Opening [id] in the detail pane clears it too —
-  /// that removal happens inside [_selectSession]'s `setState`, so the
-  /// selection and the mark update atomically.)
-  void _clearUnread(String id) {
-    if (!_unread.contains(id)) return;
-    setState(() => _unread.remove(id));
-  }
-
-  /// Drops the marks for rows that are no longer in the list (a deleted
-  /// session, issue #207); the surviving marks stay. Called from [_load]
-  /// (inside its `setState`, like [_reconcileSelection]) after the rows are in
-  /// place, so event-driven and foreground re-fetches prune deleted sessions
-  /// but never drop a still-valid mark.
-  void _reconcileUnread(List<Session> rows) {
-    final present = rows.map((session) => session.id).toSet();
-    for (final id in _unread.toList()) {
-      if (!present.contains(id)) _unread.remove(id);
     }
   }
 
@@ -848,17 +490,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       final rows = await client.list();
       if (!mounted) return;
       final pending = _deepLinkPending;
-      setState(() {
-        _rows = rows;
-        _loading = false;
-        // The read is authoritative and pre-sorted (pinned-first): the stale
-        // in-place positions (the exact pin times we learned from echoes) are
-        // no longer needed — a fresh list starts the in-place reorder fresh
-        // (issue #238).
-        _positions.clear();
-        _reconcileSelection(rows);
-        _reconcileUnread(rows);
-      });
+      // The read is authoritative and pre-sorted (pinned-first): the stale
+      // in-place positions (the exact pin times we learned from echoes) are
+      // no longer needed — a fresh list starts the in-place reorder fresh
+      // (issue #238). The module reconciles its selection and unread marks
+      // against the rows inside [HomeListState.applyRead].
+      _list.applyRead(rows);
+      setState(() => _loading = false);
       if (pending != null) _openDeepLinkRow(pending, rows);
       unawaited(_loadOrbs());
     } on SessionsClientError catch (e) {
@@ -878,16 +516,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         _loading = false;
       });
     }
-  }
-
-  /// Keeps the detail pane's selection in sync with the freshly loaded rows
-  /// (issue #131): refreshes the selected row's data when it still exists,
-  /// clears the selection when it is gone (e.g. deleted).
-  void _reconcileSelection(List<Session> rows) {
-    final selected = _selectedSession;
-    if (selected == null) return;
-    final fresh = rows.where((s) => s.id == selected.id).firstOrNull;
-    _selectedSession = fresh;
   }
 
   /// The orb list for the rows' chips (spec §9.2): the orb names and state
@@ -975,18 +603,16 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// detail shows underneath (issue #133).
   void _selectSession(Session session) {
     if (!mounted) return;
-    setState(() {
-      _selectedSession = session;
-      _drawerOpen = false;
-      // Opening the session in the detail pane clears its unread dot (issue
-      // #207), from every entry point (row tap, narrow drawer, deep link).
-      _unread.remove(session.id);
-    });
+    // The module clears the row's unread mark with the selection (issue
+    // #207), from every entry point (row tap, narrow drawer, deep link).
+    _list.select(session);
+    setState(() => _drawerOpen = false);
   }
 
   void _clearSelection() {
     if (!mounted) return;
-    setState(() => _selectedSession = null);
+    _list.select(null);
+    setState(() {});
   }
 
   /// Opens [session] in the detail pane (issue #131). Kept as the
@@ -1051,10 +677,10 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// The rows of the home list's current surface (issue #235): the default
   /// **Active** surface is `!archived` (matching the TUI's own default, the
   /// research's Q1), the **Archived** surface is `archived`. A render filter
-  /// over [_rows] — the list keeps fetching every row (the seam is faithful,
-  /// issue #234); no bridge behaviour change.
+  /// over the module's rows — the list keeps fetching every row (the seam is
+  /// faithful, issue #234); no bridge behaviour change.
   List<Session> get _surfaceRows => [
-    for (final session in _rows ?? const <Session>[])
+    for (final session in _list.rows ?? const <Session>[])
       if (session.archived == (_showingArchived ?? false)) session,
   ];
 
@@ -1085,10 +711,10 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
         text: 'No bridge configured. Set the tunnel URL in Settings.',
       );
     }
-    if (_loading && _rows == null) {
+    if (_loading && _list.rows == null) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_rows == null) {
+    if (_list.rows == null) {
       final error = _error ?? 'Could not load the session list.';
       return _ErrorState(message: error, onRetry: _load);
     }
@@ -1283,7 +909,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     archiving: _archivingId == s.id,
                     moving: _movingId == s.id,
                     exporting: _exportingId == s.id,
-                    unread: _unread.contains(s.id),
+                    unread: _list.isUnread(s.id),
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
                     onArchive: _client == null
@@ -1309,7 +935,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   Widget _buildDetailPane({required bool showClose}) {
-    final session = _selectedSession;
+    final session = _list.selected;
     final client = _client;
     if (session == null || client == null) {
       return const _CenteredMessage(
@@ -1481,9 +1107,11 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     try {
       await client.setOrder(session.id, position);
       if (!mounted) return;
-      // Success: patch the cached row in place and re-sort (no refetch).
-      final rows = _rows;
-      if (rows != null) _setOrder(session.id, position, rows);
+      // Success: patch the cached row in place and re-sort (no refetch) —
+      // the module's merge point for both pin paths (this write's outcome and
+      // the bridge's echo of it).
+      final changed = _list.setOrder(session.id, position);
+      if (changed) setState(() {});
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       _snackBar(
