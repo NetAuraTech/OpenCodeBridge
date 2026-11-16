@@ -8,6 +8,7 @@ import '../client/docker_client.dart';
 import '../client/events_client.dart';
 import '../model/compose_project.dart';
 import '../model/container.dart';
+import 'deep_link_target.dart';
 
 /// The Docker tab (issue #21): the host's container list, each row opening
 /// the detail (state, the start/stop/restart actions, the live log stream
@@ -22,8 +23,7 @@ class DockerTab extends StatefulWidget {
     this.events,
     this.auth,
     this.access,
-    this.deepLinkContainer,
-    this.onDeepLinkContainerConsumed,
+    this.deepLinks,
   });
 
   /// Where the bridge's docker API lives. `null` when this client has no
@@ -50,13 +50,14 @@ class DockerTab extends StatefulWidget {
   /// (owned and disconnected by the tab); tests inject a scripted source.
   final EventSource? events;
 
-  /// The one-shot deep link (issue #24): the container to open in its detail
-  /// when a tapped notification targets it; `null` when there is nothing to
-  /// open. The tab consumes it through [onDeepLinkContainerConsumed] (which
-  /// the caller uses to clear the target, so a later identical link is a new
-  /// event).
-  final String? deepLinkContainer;
-  final VoidCallback? onDeepLinkContainerConsumed;
+  /// The one-shot deep-link target (issues #24, #287): the model a tapped
+  /// notification's link landed on — the container to open in its detail
+  /// when the target is one; `null` when this device has no push
+  /// registration (or the target is a session, the Sessions tab's). The tab
+  /// reads it from the model (not from a widget parameter) and clears it
+  /// through [DeepLinkTarget.consume] when it opens it, so a later identical
+  /// link is a new event.
+  final DeepLinkTarget? deepLinks;
 
   @override
   State<DockerTab> createState() => DockerTabState();
@@ -94,11 +95,6 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
   /// True while a compose load is in flight.
   bool _composeLoading = true;
 
-  /// The deep-link container awaiting a loaded list (issue #24): set when
-  /// the target arrives before the rows; a failed load leaves it for the
-  /// next successful one.
-  String? _deepLinkPending;
-
   @override
   void initState() {
     super.initState();
@@ -110,6 +106,12 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
       widget.access?.addListener(_onAccessState);
       _load();
       _loadCompose();
+      // A target already on the model (a cold-start tap, issue #24, or a
+      // remounted shell re-reading its stable owner, issue #287): the
+      // in-flight load opens it when it lands ([_load]'s success path);
+      // when the list is already loaded (a remount) open it now, deferred
+      // out of the build phase.
+      _openDeepLink();
     } else {
       _loading = false;
       _composeLoading = false;
@@ -156,33 +158,36 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
       _load();
       _loadCompose();
     }
-    final target = widget.deepLinkContainer;
-    if (target != null && target != oldWidget.deepLinkContainer) {
-      // The target arrives as a widget update, which runs during the build
-      // phase: open it after the frame so the [Navigator.push] below never
-      // happens mid-build (a push mid-build corrupts the navigator's
-      // history, leaving the view with no route back to the list).
+    // The deep-link target (issue #24) is read from the model (issue
+    // #287): it arrives as a model change, which lands here as a widget
+    // update during the build phase — open it after the frame so the
+    // [Navigator.push] below never happens mid-build (a push mid-build
+    // corrupts the navigator's history, leaving the view with no route back
+    // to the list).
+    final target = widget.deepLinks?.target;
+    if (target != null && target.isContainer) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _openDeepLink(target);
+        if (mounted) _openDeepLink();
       });
     }
   }
 
-  /// A tapped notification targeted a container (issue #24): open its
-  /// detail. Consumed immediately (the caller clears the target); when the
-  /// list has not loaded yet, the target waits for it in [_deepLinkPending].
-  void _openDeepLink(String name) {
-    widget.onDeepLinkContainerConsumed?.call();
+  /// Opens the model's deep-link target when it is a container (issue
+  /// #24): its detail. No-op when there is no container target or the list
+  /// has not loaded yet — then the model keeps holding the target (it is a
+  /// stable owner, issue #287) and the next successful load opens it
+  /// ([_load]'s success path calls back here). The consume lands in
+  /// [_openDeepLinkRow], the moment the detail is actually pushed.
+  void _openDeepLink() {
+    final target = widget.deepLinks?.target;
+    if (target == null) return;
     final rows = _rows;
-    if (rows == null) {
-      _deepLinkPending = name;
-      return;
-    }
-    _openDeepLinkRow(name, rows);
+    if (rows == null) return; // The load is in flight: it opens it.
+    _openDeepLinkRow(target.id, rows);
   }
 
   void _openDeepLinkRow(String name, List<DockerContainer> rows) {
-    _deepLinkPending = null;
+    widget.deepLinks?.consume();
     final row = rows.where((container) => container.name == name).firstOrNull;
     if (row == null) return; // The container is gone (removed in the meantime).
     unawaited(_openDetail(row));
@@ -245,12 +250,13 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
     try {
       final rows = await client.list();
       if (!mounted) return;
-      final pending = _deepLinkPending;
       setState(() {
         _rows = rows;
         _loading = false;
       });
-      if (pending != null) _openDeepLinkRow(pending, rows);
+      // A deep-link target set while the list was still loading (issue
+      // #24): the model kept it; open it now, from the fresh rows.
+      _openDeepLink();
     } on DockerClientError catch (e) {
       if (!mounted) return;
       setState(() {

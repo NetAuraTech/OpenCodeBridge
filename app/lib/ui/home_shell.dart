@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
@@ -7,9 +5,9 @@ import '../app_mode.dart';
 import '../client/authenticated_http.dart';
 import '../client/connection_monitor.dart';
 import '../client/events_client.dart';
-import '../notify/deep_link.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
+import 'deep_link_target.dart';
 import 'docker_tab.dart';
 import 'orbs_tab.dart';
 import 'sessions_tab.dart';
@@ -54,10 +52,13 @@ class HomeShell extends StatefulWidget {
   /// tab; `null` in server mode or without a tunnel URL.
   final AccessSession? access;
 
-  /// The tapped-notification deep links (issue #24, client mode); `null`
-  /// when this device has no push registration (server mode, no tunnel URL
-  /// yet, or the flow never started).
-  final Stream<DeepLink>? deepLinks;
+  /// The one-shot deep-link target (issues #24, #287): the tapped
+  /// notification's link (who to open), owned by this model, which the app
+  /// holds across remounts so a target set while the shell was away is
+  /// still on the model when it comes back. `null` when this device has no
+  /// push registration (server mode, no tunnel URL yet, or the flow never
+  /// started).
+  final DeepLinkTarget? deepLinks;
 
   /// Re-registers this device's push with the Settings toggles as they are
   /// now (issue #24); the Settings tab calls it on every toggle change.
@@ -92,14 +93,6 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _tab = 0;
 
-  StreamSubscription<DeepLink>? _deepLinksSub;
-
-  /// The one-shot deep-link targets: the session id / container name to
-  /// open, `null` when there is nothing to open. Set by a tapped
-  /// notification, consumed by the tab that opens it (issue #24).
-  String? _sessionTarget;
-  String? _containerTarget;
-
   /// The one-shot orb highlight (the session → orb navigation, spec §9.2):
   /// the orb id whose card the Orbs tab should highlight, set when the
   /// Sessions tab's chip is tapped; consumed by the Orbs tab (which reports
@@ -107,62 +100,48 @@ class _HomeShellState extends State<HomeShell> {
   /// tap is a new event).
   String? _orbHighlight;
 
-  /// Subscribes to the deep links when the push flow comes up (the service
-  /// is created after the client entry, once the login is restored).
-  ///
-  /// Tolerates a stream that already carries a listener: the deep-link
-  /// stream is handed to the shell as a plain `Stream`, and a rebuilt
-  /// (remounted) shell with the same service in hand would otherwise
-  /// re-listen a single-subscription stream and crash the whole tree
-  /// (`Bad state: Stream has already been listened to.`). The stream
-  /// refuses the second listener, so the deep links stay quiet until the
-  /// service hands out a fresh one (a saved Firebase project does) —
-  /// never an error screen.
-  void _setDeepLinks(Stream<DeepLink>? stream) {
-    final sub = _deepLinksSub;
-    _deepLinksSub = null;
-    if (sub != null) sub.cancel();
-    if (stream == null) return;
-    try {
-      _deepLinksSub = stream.listen(_onDeepLink);
-    } on StateError {
-      // A listener already owns the stream: the shell keeps running.
-    }
-  }
-
-  /// A tapped notification: switch to its tab and hand it the target to
-  /// open (the tab consumes it through its `onDeepLink*Consumed` callback).
-  void _onDeepLink(DeepLink link) {
-    setState(() {
-      if (link.isSession) {
-        _containerTarget = null;
-        _sessionTarget = link.id;
-        _tab = 0;
-      } else {
-        _sessionTarget = null;
-        _containerTarget = link.id;
-        _tab = 2; // Docker sits behind the Orbs tab.
-      }
-    });
+  /// A tapped notification (issue #24): switch to its tab. The target to
+  /// open is already on the model (the notify layer put it there) — the tab
+  /// reads it from there and clears it through [DeepLinkTarget.consume]
+  /// when it opens it (issue #287).
+  void _onDeepLinkTarget() {
+    final target = widget.deepLinks?.target;
+    if (target == null) return;
+    // Docker sits behind the Orbs tab.
+    setState(() => _tab = target.isSession ? 0 : 2);
   }
 
   @override
   void initState() {
     super.initState();
-    _setDeepLinks(widget.deepLinks);
+    // The model is a stable owner (the app holds it across remounts):
+    // listening it means "switch the tab when the target changes" — and a
+    // target set while the shell was away is still on the model (the tabs
+    // open it on their next load), never dropped, and a re-attach can never
+    // throw. A listener does not replay an already-set target, so a remount
+    // (or a cold start whose link was buffered by the service) re-reads the
+    // model once here and lands on the right tab.
+    final target = widget.deepLinks?.target;
+    if (target != null) {
+      _tab = target.isSession ? 0 : 2; // Docker sits behind the Orbs tab.
+    }
+    widget.deepLinks?.addListener(_onDeepLinkTarget);
   }
 
   @override
   void didUpdateWidget(covariant HomeShell oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // A new push flow (a saved Firebase project) means a new model: re-attach
+    // to it so the tab switch follows the new service's taps.
     if (widget.deepLinks != oldWidget.deepLinks) {
-      _setDeepLinks(widget.deepLinks);
+      oldWidget.deepLinks?.removeListener(_onDeepLinkTarget);
+      widget.deepLinks?.addListener(_onDeepLinkTarget);
     }
   }
 
   @override
   void dispose() {
-    _deepLinksSub?.cancel();
+    widget.deepLinks?.removeListener(_onDeepLinkTarget);
     super.dispose();
   }
 
@@ -193,10 +172,7 @@ class _HomeShellState extends State<HomeShell> {
             onThemeModeChanged: widget.onThemeModeChanged,
             auth: widget.auth,
             access: widget.access,
-            deepLinkSession: _sessionTarget,
-            onDeepLinkSessionConsumed: () {
-              _sessionTarget = null;
-            },
+            deepLinks: widget.deepLinks,
             // The structured view's `/settings` command (issue #46): the view
             // closes itself, and the shell lands on the Settings tab.
             onOpenSettings: () {
@@ -229,10 +205,7 @@ class _HomeShellState extends State<HomeShell> {
             apiBase: _apiBase,
             auth: widget.auth,
             access: widget.access,
-            deepLinkContainer: _containerTarget,
-            onDeepLinkContainerConsumed: () {
-              _containerTarget = null;
-            },
+            deepLinks: widget.deepLinks,
           ),
           SettingsTab(
             settings: widget.settings,
