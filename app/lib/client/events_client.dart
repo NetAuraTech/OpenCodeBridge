@@ -43,6 +43,29 @@ class BridgeEvent {
 
   /// The durable position, or `null` when the event carries no seq.
   final Durable? durable;
+
+  /// The session this event belongs to, resolved across every shape the
+  /// stream carries: the durable aggregate id (every session-scoped opencode
+  /// event carries one), else `data.sessionID` (the bridge-native events and
+  /// opencode's non-durable ones, e.g. `permission.asked`), else the `form`'s
+  /// nested session id (`form.created` nests its session under `data.form`),
+  /// else `null` (a non-session event, e.g. `server.connected`).
+  ///
+  /// Consumers used to re-derive this by hand (issue #254, S2); this is the
+  /// one accessor that returns it for every current shape.
+  String? get sessionId {
+    final durable = this.durable;
+    if (durable != null) return durable.aggregateID;
+    final data = this.data;
+    final id = data['sessionID'];
+    if (id is String && id.isNotEmpty) return id;
+    final form = data['form'];
+    if (form is Map<String, Object?>) {
+      final nested = form['sessionID'];
+      if (nested is String && nested.isNotEmpty) return nested;
+    }
+    return null;
+  }
 }
 
 /// A detected gap in one session's durable seq: events were missed between

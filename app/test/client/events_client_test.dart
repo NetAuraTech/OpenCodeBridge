@@ -401,6 +401,85 @@ void main() {
       }
     });
   });
+
+  group('BridgeEvent.sessionId (issue #254, S2)', () {
+    BridgeEvent event({
+      String type = 'x',
+      Map<String, Object?>? data,
+      Durable? durable,
+    }) => BridgeEvent(
+      id: 'evt',
+      created: 0,
+      type: type,
+      data: data ?? const <String, Object?>{},
+      durable: durable,
+    );
+
+    test('a durable event reports its aggregate id (the session id)', () {
+      expect(
+        event(durable: Durable(aggregateID: 'ses_a', seq: 3)).sessionId,
+        'ses_a',
+      );
+    });
+
+    test('a durable id wins over a payload sessionID', () {
+      expect(
+        event(
+          durable: Durable(aggregateID: 'ses_durable', seq: 1),
+          data: {'sessionID': 'ses_data'},
+        ).sessionId,
+        'ses_durable',
+        reason: 'the durable aggregate id is authoritative',
+      );
+    });
+
+    test('a non-durable event reports its data.sessionID', () {
+      // The bridge-native events and opencode's non-durable ones (e.g.
+      // `permission.asked`) carry the session in `data`.
+      expect(event(data: {'sessionID': 'ses_data'}).sessionId, 'ses_data');
+    });
+
+    test('a form-nested event reports the form\'s session id', () {
+      // `form.created` nests its session under `data.form`.
+      expect(
+        event(
+          data: {
+            'form': {'sessionID': 'ses_form', 'type': 'question'},
+          },
+        ).sessionId,
+        'ses_form',
+      );
+    });
+
+    test('a form without a session id falls through to null', () {
+      expect(
+        event(
+          data: {
+            'form': {'type': 'question'},
+          },
+        ).sessionId,
+        isNull,
+      );
+    });
+
+    test('an empty string is not a session id', () {
+      expect(event(data: {'sessionID': ''}).sessionId, isNull);
+      expect(
+        event(
+          data: {
+            'form': {'sessionID': ''},
+          },
+        ).sessionId,
+        isNull,
+      );
+    });
+
+    test('a non-session event (no durable, no session) reports null', () {
+      // e.g. `server.connected`.
+      expect(event(type: 'server.connected').sessionId, isNull);
+      expect(event(data: {'other': 1}).sessionId, isNull);
+    });
+  });
 }
 
 const _tick = Duration(milliseconds: 5);
