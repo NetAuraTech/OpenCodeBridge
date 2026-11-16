@@ -211,8 +211,20 @@ class CompositeOpencodeService implements OpencodeService {
   Future<void> cancelTurn(String id) async => (await _route(id)).cancelTurn(id);
 
   @override
-  Future<bool> canCancelTurn(String id) async =>
-      (await _route(id)).canCancelTurn(id);
+  Future<bool> canCancelTurn(String id) async {
+    // The interrupt capability is a per-*client* fact (issue #165/#251): the
+    // service answers it statelessly from its remembered probe (the [OpencodeHttpService]
+    // reads `_interruptRoute != false` — the id is ignored). So the composite
+    // only needs to pick the right client, and it does so from the routing
+    // table in memory (the `sessionID -> orb` lookup) — no full per-id routing
+    // pass (no `_reconcileUpstreams`, no `_registerOwners`, no docker / orb
+    // session-list round-trip) is spent for a stateless answer. An unregistered
+    // id belongs to the host, exactly as the full `_route` would resolve it.
+    // (The detail read that asks this refreshes the table first via
+    // [activeSessionIds], so the owner is already known.)
+    final upstream = _upstreamFor(_owner[id]);
+    return (upstream?.service ?? host).canCancelTurn(id);
+  }
 
   @override
   Future<String> fork(String id) async {

@@ -18,9 +18,10 @@ import 'event_hub.dart';
 /// `session.execution.*` — or on the bridge's own `session.turn.cancelled`
 /// (so a cancel reads the session idle again, with no feedback loop).
 ///
-/// The cancel route ([OpencodeService.cancelTurn]) reads this when it carries
-/// out a stop: a running turn carries the in-flight message id into the
-/// `session.turn.cancelled` event; an idle session is not reported at all.
+/// The session-lifecycle module ([SessionLifecycle], issue #251) reads this
+/// when it carries out a stop: a running turn carries the in-flight message
+/// id into the `session.turn.cancelled` event; an idle session is not
+/// reported at all.
 class TurnTracker implements EventConnection {
   final Completer<void> _done = Completer<void>();
   final Map<String, _Turn> _turns = {};
