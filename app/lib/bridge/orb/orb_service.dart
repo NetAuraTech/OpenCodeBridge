@@ -10,6 +10,7 @@ import '../events/bridge_event.dart';
 import '../sessions/opencode_cli.dart';
 import '../sessions/opencode_http_service.dart';
 import '../sessions/opencode_service.dart';
+import '../sessions/session_row.dart';
 import '../../model/command.dart';
 import 'orb_image_builder.dart';
 
@@ -1970,18 +1971,13 @@ class OrbService {
     await _applyDefaultModel(service, session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
-    return Session(
-      id: session.id,
-      title: session.title,
-      project: SessionProject(
-        id: session.projectId,
-        name: names[session.projectId] ?? '',
-      ),
-      created: session.created,
-      location: session.location,
-      active: active.contains(session.id),
-      orb: id,
-    );
+    // The row's flags are composed through the one home-list row composer
+    // (W7b, issue #289): the orb's create no longer hand-builds its own
+    // `Session`. The `orb` fact is stamped here because the raw orb service's
+    // session carries no orb attribution (the composite stamps it in the
+    // list, but a create bypasses the composite).
+    return SessionRowComposer.composerFor(service)
+        .row(session, names, active, orb: id);
   }
 
   /// The model (with its thinking level / variant) to apply to a new orb

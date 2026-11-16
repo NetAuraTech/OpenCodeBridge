@@ -8,6 +8,7 @@ import '../../model/session.dart';
 import '../../model/session_detail.dart';
 import 'opencode_service.dart';
 import 'order_store.dart';
+import 'session_row.dart';
 
 /// The bridge's sessions backend (spec §5 endpoints 1 & 4, §6): it owns the
 /// [OpencodeService] seam and composes it into the home-list rows.
@@ -21,9 +22,17 @@ import 'order_store.dart';
 ///   app-owned order store (issue #237, the home list's user-controlled
 ///   display order).
 class SessionsBackend {
-  SessionsBackend({required this.service, this.orderStore});
+  SessionsBackend({required this.service, this.orderStore})
+    : composer = SessionRowComposer.composerFor(service);
 
   final OpencodeService service;
+
+  /// The single home-list row composition (W7b, issue #289): builds each row's
+  /// five per-row flags (active, waiting, pinned, archived, canCancel) and
+  /// holds each fact's degradation posture as a one-per-fact method.
+  /// Constructed once over the backend's [service], so the list/create reads
+  /// and the detail read all compose through the same instance.
+  final SessionRowComposer composer;
 
   /// The bridge's order store (issue #237): the persisted `sessionID ->
   /// position` map behind the home list's pinned-first sort. `null` when the
@@ -48,7 +57,7 @@ class SessionsBackend {
     await _applyDefaultModel(session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
-    return _row(session, names, active);
+    return composer.row(session, names, active);
   }
 
   /// Create a session at [directory] (issue #54's "New project"):
@@ -72,7 +81,7 @@ class SessionsBackend {
     await _applyDefaultModel(session.id, model);
     final names = await service.projectNames();
     final active = await service.activeSessionIds();
-    return _row(session, names, active);
+    return composer.row(session, names, active);
   }
 
   /// The model (with its thinking level / variant) to apply to a new
@@ -143,7 +152,7 @@ class SessionsBackend {
     // active (during a block it may have dropped out of the active list while
     // the pending request still stands).
     final waiting = await Future.wait([
-      for (final session in sessions) _waiting(session.id),
+      for (final session in sessions) composer.waitingOf(session.id),
     ]);
 
     // The bridge-owned order map (issue #237), pruned to the live ids; a
@@ -161,12 +170,12 @@ class SessionsBackend {
 
     final rows = [
       for (var i = 0; i < sessions.length; i++)
-        _row(
+        composer.row(
           sessions[i],
           names,
           active,
           waiting: waiting[i],
-          pinned: positions.containsKey(sessions[i].id),
+          pinned: SessionRowComposer.pinnedOf(positions, sessions[i].id),
         ),
     ];
     rows.sort((a, b) => homeListOrder(a, b, (id) => positions[id]));
@@ -205,23 +214,6 @@ class SessionsBackend {
   /// returns to the unpinned newest-created order.
   Future<void> clearOrder(String id) => orderStore!.clear(id);
 
-  /// The row's waiting fact (issue #208): whether the service still holds a
-  /// pending permission request for [id], or, when it holds none, a pending
-  /// question form. The question lookup runs only when the permission lookup
-  /// answered empty (a waiting session already has its answer). A failed
-  /// lookup degrades this session only — its fact stays false and the rest of
-  /// the list is intact, the same posture [CompositeOpencodeService] takes
-  /// for a degraded orb's routes.
-  Future<bool> _waiting(String id) async {
-    try {
-      final permissions = await service.pendingPermissions(id);
-      if (permissions.isNotEmpty) return true;
-      return (await service.pendingQuestions(id)).isNotEmpty;
-    } catch (_) {
-      return false;
-    }
-  }
-
   /// Delete (spec §5 endpoint 4): the service `DELETE`.
   Future<void> delete(String id) => service.deleteSession(id);
 
@@ -245,29 +237,14 @@ class SessionsBackend {
   /// one (issue #169): settling an outcome-less session needs the Active
   /// fact — a session idle and outcome-less has ended its turn, an active
   /// one is merely between steps.
+  ///
+  /// The active and canCancel facts are composed through the row composer
+  /// (W7b, issue #289): [SessionRowComposer.detailWithActive] is the one place
+  /// that detail's active + canCancel composition happens, over the same
+  /// per-fact postures as the home-list rows.
   Future<SessionDetail> detailWithActive(String id) async {
     final detail = await service.getDetail(id);
-    final active = await service.activeSessionIds();
-    // The cancel capability (issue #165): whether the routed service (host
-    // or the owning orb) can interrupt the turn. It rides the same detail
-    // read as [active], so the structured view learns it with the open. A
-    // lookup failure reads as capable: a wrongly-offered Stop still lands a
-    // clean, reportable 502 and stays offered to retry.
-    final canCancel = await _canCancel(id);
-    return detail.copyWithActive(active.contains(id), canCancel: canCancel);
-  }
-
-  /// The routed service's interrupt capability for [id] (issue #165), read
-  /// without cancelling (a probe would interrupt the live turn).
-  Future<bool> _canCancel(String id) async {
-    try {
-      return await service.canCancelTurn(id);
-    } catch (_) {
-      // The capability is a display fact, not a failure of the read: assume
-      // capable so a Stop is offered and, if truly unsupported, answers a
-      // reportable 502 the user can retry from.
-      return true;
-    }
+    return composer.detailWithActive(detail, id);
   }
 
   Future<List<SessionMessage>> getMessages(String id) =>
@@ -380,31 +357,4 @@ class SessionsBackend {
   Future<void> reload() => service.reload();
 
   Future<String> plugins() => service.plugins();
-
-  /// One home-list row, from the service's session plus its project name,
-  /// active fact, waiting fact (issue #208), pinned fact (issue #237), and
-  /// the archived fact (issue #234).
-  Session _row(
-    OpencodeSession s,
-    Map<String, String> names,
-    Set<String> active, {
-    bool waiting = false,
-    bool pinned = false,
-  }) {
-    return Session(
-      id: s.id,
-      title: s.title,
-      project: SessionProject(
-        id: s.projectId,
-        name: names[s.projectId] ?? s.projectId,
-      ),
-      created: s.created,
-      location: s.location,
-      active: active.contains(s.id),
-      orb: s.orb,
-      waiting: waiting,
-      pinned: pinned,
-      archived: s.archived,
-    );
-  }
 }
