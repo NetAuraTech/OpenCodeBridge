@@ -102,6 +102,16 @@ void main() {
       expect(list.rows?.map((s) => s.id).toList(), ['ses_2', 'ses_1']);
     });
 
+    test('session.created reloads for an unknown id, too', () {
+      readFresh();
+      expect(
+        list.applyEvent(_ev('session.created', session: 'ses_9')),
+        ListStateVerdict.reload,
+      );
+      // The merge changed nothing: the fresh read carries the new row.
+      expect(list.rows?.map((s) => s.id).toList(), ['ses_2', 'ses_1']);
+    });
+
     test('session.renamed patches the title in place, selection carried', () {
       readFresh();
       list.select(list.rows!.first); // ses_2
