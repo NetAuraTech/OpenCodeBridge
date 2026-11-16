@@ -15,6 +15,16 @@ import 'package:opencodebridge/model/session_detail.dart';
 /// loopback, in client mode the same API behind the tunnel (issue #23:
 /// every request carries `Authorization: Bearer` from [auth], refreshed
 /// on `401` — see [bridgeRequest]).
+///
+/// The client is the transport and the wire contract, exercised endpoint by
+/// endpoint against a real `HttpServer` in
+/// `test/client/sessions_client_test.dart`. Every endpoint runs through the
+/// one private frame, [_request]: open an `HttpClient`, [bridgeRequest] (which
+/// owns the 401 refresh), status-check against the endpoint's accepted codes,
+/// decode with the endpoint's decode (the `decode*` top-level functions below
+/// — the same decode the tests exercise), close the client, and wrap any
+/// non-[SessionsClientError] failure as one with status 0. The class stays
+/// concrete (the fakes subclass it); it absorbs no row-state logic.
 class SessionsClient {
   SessionsClient(this._base, {this._auth});
 
@@ -24,24 +34,46 @@ class SessionsClient {
   /// The Access login's header provider (issue #23); `null` in server mode.
   final AuthHeaderProvider? _auth;
 
-  /// Every session on the shared service, newest first (spec section 5,
-  /// endpoint 1).
-  Future<List<Session>> list() async {
+  /// The frame every endpoint runs through (the request the module used to
+  /// hand-roll per endpoint): open the client, [bridgeRequest] (which owns
+  /// the 401 refresh), then either a body-less action — status-check only —
+  /// or the decode: [decode] over the joined body.
+  ///
+  /// [expect] is the endpoint's accepted status codes; a status outside it
+  /// throws [SessionsClientError] with that status and the endpoint's
+  /// failure message — [failure] of the body text when the endpoint has one
+  /// (its own message, or a message read from the body, as [moveToOrb]'s
+  /// `_moveDetail` does), else the body text itself (the body-carrying
+  /// endpoints' long-standing behavior, a `204` answer included). Any other
+  /// failure becomes a [SessionsClientError] with status 0. [body] is `null`
+  /// for no body; otherwise it is JSON-encoded with a json content type.
+  Future<T?> _request<T>(
+    String method,
+    String path, {
+    Map<String, String>? query,
+    Object? body,
+    List<int> expect = const [HttpStatus.ok],
+    T? Function(Object? json)? decode,
+    String Function(String body)? failure,
+  }) async {
     final client = HttpClient();
     try {
       final response = await bridgeRequest(
         client,
-        'GET',
-        _base.replace(path: 'api/sessions'),
+        method,
+        _base.replace(path: path, queryParameters: query),
+        body: body == null ? null : jsonEncode(body),
+        contentType: body == null ? null : ContentType.json,
         auth: _auth,
       );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
+      final text = await response.transform(const Utf8Decoder()).join();
+      if (!expect.contains(response.statusCode)) {
+        throw SessionsClientError(
+          response.statusCode,
+          failure == null ? text : failure(text),
+        );
       }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) Session.fromJson(item)];
+      return decode == null ? null : decode(jsonDecode(text));
     } on SessionsClientError {
       rethrow;
     } catch (error) {
@@ -51,90 +83,41 @@ class SessionsClient {
     }
   }
 
+  /// Every session on the shared service, newest first (spec section 5,
+  /// endpoint 1).
+  Future<List<Session>> list() async =>
+      await _request('GET', 'api/sessions', decode: decodeSessionList) ??
+      const <Session>[];
+
   /// The project list (spec section 5, fill-in †): the new-session project
   /// picker's rows, id + display name + canonical directory.
-  Future<List<Project>> projects() async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'GET',
-        _base.replace(path: 'api/projects'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) Project.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<List<Project>> projects() async =>
+      await _request('GET', 'api/projects', decode: decodeProjectList) ??
+      const <Project>[];
 
   /// Create a session in [projectId]'s project (spec section 5, fill-in †,
   /// endpoint 2). The body is only the project id; the bridge creates the
   /// session on the shared service, records the launch, and returns the
   /// session.
-  Future<Session> create(String projectId) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions'),
-        body: jsonEncode({'project': projectId}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.created) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      return Session.fromJson(jsonDecode(body));
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<Session> create(String projectId) async => (await _request(
+    'POST',
+    'api/sessions',
+    body: {'project': projectId},
+    expect: const [HttpStatus.created],
+    decode: Session.fromJson,
+  ))!;
 
   /// Create a session whose working directory is [directory] as-is (issue
   /// #54's "New project"): the body is the directory; the bridge checks it
   /// exists on this host and creates the session on the shared service, which
   /// auto-creates a project for a directory it has never seen.
-  Future<Session> createInDirectory(String directory) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions'),
-        body: jsonEncode({'directory': directory}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.created) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      return Session.fromJson(jsonDecode(body));
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<Session> createInDirectory(String directory) async => (await _request(
+    'POST',
+    'api/sessions',
+    body: {'directory': directory},
+    expect: const [HttpStatus.created],
+    decode: Session.fromJson,
+  ))!;
 
   /// Archives ([archived] true) or unarchives (false) a session (issue
   /// #234): the bridge's `POST /api/sessions/{id}/archive` pass-through with
@@ -146,111 +129,43 @@ class SessionsClient {
   /// caller does not re-fetch. A failure surfaces as a
   /// [SessionsClientError] (unknown session → 404, malformed body → 400).
   Future<void> archive(String id, bool archived) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/archive'),
-        body: jsonEncode({'archived': archived}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(
-          response.statusCode,
-          'archive of $id was not accepted',
-        );
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/archive',
+      body: {'archived': archived},
+      expect: const [HttpStatus.noContent],
+      failure: (_) => 'archive of $id was not accepted',
+    );
   }
 
   /// Deletes a session (spec section 5, endpoint 4): the bridge performs the
   /// service deletion and the persistence-record removal in one action.
   Future<void> delete(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'DELETE',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}'),
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent &&
-          response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(
-          response.statusCode,
-          'delete of $id was not accepted',
-        );
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'DELETE',
+      'api/sessions/${Uri.encodeComponent(id)}',
+      expect: const [HttpStatus.noContent, HttpStatus.ok],
+      failure: (_) => 'delete of $id was not accepted',
+    );
   }
 
   /// The session's detail — state plus costs and token usage (spec
   /// section 5, endpoint 5).
-  Future<SessionDetail> getDetail(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      return SessionDetail.fromJson(jsonDecode(body));
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<SessionDetail> getDetail(String id) async => (await _request(
+    'GET',
+    'api/sessions/${Uri.encodeComponent(id)}',
+    decode: SessionDetail.fromJson,
+  ))!;
 
   /// The session's history as structured-view messages, the tools in
   /// flight included (spec section 5, endpoint 6).
-  Future<List<SessionMessage>> getMessages(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<SessionMessage>> getMessages(String id) async =>
+      await _request(
         'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/messages'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) SessionMessage.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/messages',
+        decode: decodeMessageList,
+      ) ??
+      const <SessionMessage>[];
 
   /// One page of the session's history, oldest-first within the page, with
   /// the cursor to the next (older) page (issue #124's bounded read). The
@@ -260,35 +175,14 @@ class SessionsClient {
     int limit = 50,
     String? cursor,
   }) async {
-    final client = HttpClient();
-    try {
-      final params = <String, String>{'limit': '$limit'};
-      if (cursor != null) params['cursor'] = cursor;
-      final uri = _base.replace(
-        path: 'api/sessions/${Uri.encodeComponent(id)}/messages/page',
-        queryParameters: params,
-      );
-      final response = await bridgeRequest(client, 'GET', uri, auth: _auth);
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final map = decoded is Map<String, Object?> ? decoded : const {};
-      final list = map['messages'] is List
-          ? map['messages']!
-          : const <Object?>[];
-      return MessagePage(
-        messages: [for (final item in list) SessionMessage.fromJson(item)],
-        nextCursor: map['cursor'] is String ? map['cursor'] as String : null,
-      );
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    final params = <String, String>{'limit': '$limit'};
+    if (cursor != null) params['cursor'] = cursor;
+    return (await _request(
+      'GET',
+      'api/sessions/${Uri.encodeComponent(id)}/messages/page',
+      query: params,
+      decode: decodeMessagePage,
+    ))!;
   }
 
   /// Send a prompt (spec section 5, endpoint 7). The prompt is enabled at
@@ -303,60 +197,26 @@ class SessionsClient {
     List<Map<String, Object?>>? files,
     List<Map<String, Object?>>? skills,
   }) async {
-    final requestBody = <String, Object?>{'text': text};
-    if (files != null && files.isNotEmpty) requestBody['files'] = files;
-    if (skills != null && skills.isNotEmpty) requestBody['skills'] = skills;
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/messages'),
-        body: jsonEncode(requestBody),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.accepted) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    final body = <String, Object?>{'text': text};
+    if (files != null && files.isNotEmpty) body['files'] = files;
+    if (skills != null && skills.isNotEmpty) body['skills'] = skills;
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/messages',
+      body: body,
+      expect: const [HttpStatus.accepted],
+    );
   }
 
   /// The session's pending permission requests (spec section 5, endpoint
   /// 8).
-  Future<List<PermissionRequest>> getPermissions(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<PermissionRequest>> getPermissions(String id) async =>
+      await _request(
         'GET',
-        _base.replace(
-          path: 'api/sessions/${Uri.encodeComponent(id)}/permissions',
-        ),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) PermissionRequest.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/permissions',
+        decode: decodePermissionList,
+      ) ??
+      const <PermissionRequest>[];
 
   /// Reply to a pending permission request (spec section 5, endpoint 9).
   Future<void> replyPermission(
@@ -364,35 +224,14 @@ class SessionsClient {
     String requestID,
     PermissionReply reply,
   ) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(
-          path:
-              'api/sessions/${Uri.encodeComponent(id)}/permissions/'
-              '${Uri.encodeComponent(requestID)}/reply',
-        ),
-        body: jsonEncode({'reply': reply.wire}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent &&
-          response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(
-          response.statusCode,
-          'reply to $requestID was not accepted',
-        );
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/permissions/'
+          '${Uri.encodeComponent(requestID)}/reply',
+      body: {'reply': reply.wire},
+      expect: const [HttpStatus.noContent, HttpStatus.ok],
+      failure: (_) => 'reply to $requestID was not accepted',
+    );
   }
 
   // The structured view's question forms (issue #50): the agent's `question`
@@ -401,32 +240,13 @@ class SessionsClient {
   // the form's field order.
 
   /// The session's pending question forms (issue #50).
-  Future<List<QuestionForm>> getQuestions(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<QuestionForm>> getQuestions(String id) async =>
+      await _request(
         'GET',
-        _base.replace(
-          path: 'api/sessions/${Uri.encodeComponent(id)}/questions',
-        ),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) QuestionForm.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/questions',
+        decode: decodeQuestionList,
+      ) ??
+      const <QuestionForm>[];
 
   /// Submit the answers to a pending question form [formID] (issue #50).
   /// [answers] has one entry per question, in the form's field order.
@@ -435,67 +255,26 @@ class SessionsClient {
     String formID,
     List<List<String>> answers,
   ) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(
-          path:
-              'api/sessions/${Uri.encodeComponent(id)}/questions/'
-              '${Uri.encodeComponent(formID)}/answer',
-        ),
-        body: jsonEncode({'answers': answers}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent &&
-          response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(
-          response.statusCode,
-          'answer to $formID was not accepted',
-        );
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/questions/'
+          '${Uri.encodeComponent(formID)}/answer',
+      body: {'answers': answers},
+      expect: const [HttpStatus.noContent, HttpStatus.ok],
+      failure: (_) => 'answer to $formID was not accepted',
+    );
   }
 
   /// Dismiss a pending question form [formID] (issue #50): the agent continues
   /// without an answer.
   Future<void> dismissQuestion(String id, String formID) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'DELETE',
-        _base.replace(
-          path:
-              'api/sessions/${Uri.encodeComponent(id)}/questions/'
-              '${Uri.encodeComponent(formID)}',
-        ),
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent &&
-          response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(
-          response.statusCode,
-          'dismiss of $formID was not accepted',
-        );
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'DELETE',
+      'api/sessions/${Uri.encodeComponent(id)}/questions/'
+          '${Uri.encodeComponent(formID)}',
+      expect: const [HttpStatus.noContent, HttpStatus.ok],
+      failure: (_) => 'dismiss of $formID was not accepted',
+    );
   }
 
   // The structured view's `/` command menu (issue #46). The per-session
@@ -504,288 +283,111 @@ class SessionsClient {
 
   /// The project's custom commands (the `/` menu's custom commands): the
   /// service's `GET /api/command` through the bridge.
-  Future<List<OpencodeCommand>> listCommands(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<OpencodeCommand>> listCommands(String id) async =>
+      await _request(
         'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/commands'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) OpencodeCommand.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/commands',
+        decode: decodeCommandList,
+      ) ??
+      const <OpencodeCommand>[];
 
   /// Run one of the project's custom commands (the `/` menu's custom
   /// commands): the service's `POST /api/session/{id}/command`, run with
   /// `delivery: steer` so it queues mid-turn like a prompt. [text] is the
   /// text typed after the command name.
   Future<void> runCommand(String id, String name, String text) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(
-          path:
-              'api/sessions/${Uri.encodeComponent(id)}/commands/'
-              '${Uri.encodeComponent(name)}',
-        ),
-        body: jsonEncode({'text': text}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.accepted) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/commands/'
+          '${Uri.encodeComponent(name)}',
+      body: {'text': text},
+      expect: const [HttpStatus.accepted],
+    );
   }
 
   /// The model registry (the `/` menu's `/models` picker): the service's
   /// `GET /api/model` through the bridge.
-  Future<List<ModelOption>> listModels(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<ModelOption>> listModels(String id) async =>
+      await _request(
         'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/models'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) ModelOption.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/models',
+        decode: decodeModelList,
+      ) ??
+      const <ModelOption>[];
 
   /// The session's current model (the `/` menu's `/variants` picker: the
   /// variants of the model the session is on), or `null` when the service
   /// reports none yet.
-  Future<ModelRef?> currentModel(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/model'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! Map<String, Object?>) {
-        throw SessionsClientError(0, 'model returned no payload');
-      }
-      final model = decoded['model'];
-      return model is Map<String, Object?> ? ModelRef.fromJson(model) : null;
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<ModelRef?> currentModel(String id) => _request(
+    'GET',
+    'api/sessions/${Uri.encodeComponent(id)}/model',
+    decode: decodeCurrentModel,
+  );
 
   /// Set the session's model (the `/` menu's `/models` pick): the service's
   /// `POST /api/session/{id}/model`.
   Future<void> setModel(String id, ModelRef model) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/models'),
-        body: jsonEncode({'model': model.toJson()}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/models',
+      body: {'model': model.toJson()},
+      expect: const [HttpStatus.noContent],
+    );
   }
 
   /// The agent registry (the `/` menu's `/agents` picker): the service's
   /// `GET /api/agent` through the bridge.
-  Future<List<AgentOption>> listAgents(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<AgentOption>> listAgents(String id) async =>
+      await _request(
         'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/agents'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) AgentOption.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/agents',
+        decode: decodeAgentList,
+      ) ??
+      const <AgentOption>[];
 
   /// Set the session's agent (the `/` menu's `/agents` pick): the service's
   /// `POST /api/session/{id}/agent`.
   Future<void> setAgent(String id, String agentId) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/agents'),
-        body: jsonEncode({'agent': agentId}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/agents',
+      body: {'agent': agentId},
+      expect: const [HttpStatus.noContent],
+    );
   }
 
   /// The skill registry (the `/` menu's `/skills`): the service's
   /// `GET /api/skill` through the bridge.
-  Future<List<SkillOption>> listSkills(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<SkillOption>> listSkills(String id) async =>
+      await _request(
         'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/skills'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [for (final item in list) SkillOption.fromJson(item)];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/skills',
+        decode: decodeSkillList,
+      ) ??
+      const <SkillOption>[];
 
   /// The session's files for the `@` mention menu's file rows (issue #58):
   /// the service's `GET /api/fs/find` through the bridge, re-queried per
   /// typed token (the TUI re-queries on every keystroke). Returns the
   /// matched file paths relative to the session's working directory.
-  Future<List<String>> findFiles(String id, String query) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<List<String>> findFiles(String id, String query) async =>
+      await _request(
         'GET',
-        _base.replace(
-          path: 'api/sessions/${Uri.encodeComponent(id)}/files',
-          queryParameters: {'query': query},
-        ),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      final list = decoded is List ? decoded : const <Object?>[];
-      return [
-        for (final item in list)
-          if (item is String) item,
-      ];
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+        'api/sessions/${Uri.encodeComponent(id)}/files',
+        query: {'query': query},
+        decode: decodeFileList,
+      ) ??
+      const <String>[];
 
   /// Activate a skill in the session (the `/` menu's `/skills` pick): the
   /// service's `POST /api/experimental/session/{id}/skill`.
   Future<void> activateSkill(String id, String skillId) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(
-          path:
-              'api/sessions/${Uri.encodeComponent(id)}/skills/'
-              '${Uri.encodeComponent(skillId)}',
-        ),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/skills/'
+          '${Uri.encodeComponent(skillId)}',
+      expect: const [HttpStatus.noContent],
+    );
   }
 
   /// Compact the session's context (the `/` menu's `/compact`).
@@ -823,31 +425,13 @@ class SessionsClient {
   /// connected app re-sorts its row in place (no refetch here — the caller
   /// patches its own list from the write's outcome).
   Future<void> setOrder(String id, num? position) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'PATCH',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/order'),
-        body: jsonEncode({'position': position}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      await response.drain<void>();
-      if (response.statusCode != HttpStatus.noContent &&
-          response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(
-          response.statusCode,
-          'order of $id was not accepted',
-        );
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'PATCH',
+      'api/sessions/${Uri.encodeComponent(id)}/order',
+      body: {'position': position},
+      expect: const [HttpStatus.noContent, HttpStatus.ok],
+      failure: (_) => 'order of $id was not accepted',
+    );
   }
 
   /// Move the session onto the orb [orbName] (issue #97): one action,
@@ -859,29 +443,13 @@ class SessionsClient {
   /// whose message carries the wire `details` (the named refusal, the
   /// failed boot's log tail, the failed move's detail) or its error code.
   Future<void> moveToOrb(String id, String orbName) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(
-          path: 'api/sessions/${Uri.encodeComponent(id)}/move-to-orb',
-        ),
-        body: jsonEncode({'orb': orbName}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, _moveDetail(body));
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/sessions/${Uri.encodeComponent(id)}/move-to-orb',
+      body: {'orb': orbName},
+      expect: const [HttpStatus.noContent],
+      failure: _moveDetail,
+    );
   }
 
   /// The user-facing text of a move wire error body: its `details` field,
@@ -909,64 +477,21 @@ class SessionsClient {
 
   /// Fork the session (the `/` menu's `/fork`), returning the new session's
   /// id.
-  Future<String> fork(String id) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/fork'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is Map<String, Object?> && decoded['id'] is String) {
-        return decoded['id'] as String;
-      }
-      throw SessionsClientError(HttpStatus.ok, 'fork returned no session id');
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<String> fork(String id) async => (await _request(
+    'POST',
+    'api/sessions/${Uri.encodeComponent(id)}/fork',
+    decode: decodeForkedId,
+  ))!;
 
   /// Ask a one-shot side question (the `/` menu's `/btw <question>`): the
   /// service's `POST /api/session/{id}/generate`, not added to the
   /// conversation. Returns the generated text.
-  Future<String> btw(String id, String prompt) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/btw'),
-        body: jsonEncode({'prompt': prompt}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is Map<String, Object?> && decoded['text'] is String) {
-        return decoded['text'] as String;
-      }
-      throw SessionsClientError(HttpStatus.ok, 'btw returned no text');
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<String> btw(String id, String prompt) async => (await _request(
+    'POST',
+    'api/sessions/${Uri.encodeComponent(id)}/btw',
+    body: {'prompt': prompt},
+    decode: decodeBtwText,
+  ))!;
 
   // The `/` menu's global commands (not tied to the open session).
 
@@ -992,37 +517,12 @@ class SessionsClient {
   Future<String> connectIntegration(
     String integrationId,
     String methodId,
-  ) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(
-          path:
-              'api/integrations/${Uri.encodeComponent(integrationId)}/connect',
-        ),
-        body: jsonEncode({'methodID': methodId}),
-        contentType: ContentType.json,
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! String) {
-        throw SessionsClientError(0, 'connect returned no payload');
-      }
-      return decoded;
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  ) async => (await _request(
+    'POST',
+    'api/integrations/${Uri.encodeComponent(integrationId)}/connect',
+    body: {'methodID': methodId},
+    decode: (json) => decodePayload('connect', json),
+  ))!;
 
   /// The service's info (the `/` menu's `/status`): the service's
   /// `GET /api/info`, as its decoded JSON.
@@ -1030,203 +530,196 @@ class SessionsClient {
 
   /// Pair a device (the `/` menu's `/pair`): the service's
   /// `POST /api/pair`, as its decoded JSON.
-  Future<String> pair() async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/pair'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! String) {
-        throw SessionsClientError(0, 'pair returned no payload');
-      }
-      return decoded;
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<String> pair() async => (await _request(
+    'POST',
+    'api/pair',
+    decode: (json) => decodePayload('pair', json),
+  ))!;
 
   /// Reload the service's configuration (the `/` menu's `/reload`).
   Future<void> reload() async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/reload'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+    await _request<void>(
+      'POST',
+      'api/reload',
+      expect: const [HttpStatus.noContent],
+    );
   }
 
   /// The open session's project's worktrees (the `/` menu's
   /// `/worktrees`): the service's `GET /api/worktree?projectID=…` (the
   /// project resolved from [sessionId] on the service), as its decoded JSON.
-  Future<String> worktrees(String sessionId) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'GET',
-        _base.replace(
-          path: 'api/worktrees',
-          queryParameters: {'sessionID': sessionId},
-        ),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! String) {
-        throw SessionsClientError(0, 'worktrees returned no payload');
-      }
-      return decoded;
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<String> worktrees(String sessionId) async => (await _request(
+    'GET',
+    'api/worktrees',
+    query: {'sessionID': sessionId},
+    decode: (json) => decodePayload('worktrees', json),
+  ))!;
 
   /// A body-less `POST` to the session's [sub] command endpoint expecting a
   /// 204 (the `/` menu's no-argument session commands).
-  Future<void> _postNoContent(String id, String sub) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/$sub'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<void> _postNoContent(String id, String sub) => _request<void>(
+    'POST',
+    'api/sessions/${Uri.encodeComponent(id)}/$sub',
+    expect: const [HttpStatus.noContent],
+  );
 
   /// A `POST` to the session's [sub] command endpoint carrying [field] as
   /// [value], expecting a 204 (the `/` menu's argument session commands).
-  Future<void> _postField(
-    String id,
-    String sub,
-    String field,
-    String value,
-  ) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
+  Future<void> _postField(String id, String sub, String field, String value) =>
+      _request<void>(
         'POST',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/$sub'),
-        body: jsonEncode({field: value}),
-        contentType: ContentType.json,
-        auth: _auth,
+        'api/sessions/${Uri.encodeComponent(id)}/$sub',
+        body: {field: value},
+        expect: const [HttpStatus.noContent],
       );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.noContent) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
 
   /// A `GET` of the session's [sub] payload endpoint, returning the
   /// service's decoded JSON as a string (the `/` menu's session "info"
   /// commands).
-  Future<String> _payload(String id, String sub) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'GET',
-        _base.replace(path: 'api/sessions/${Uri.encodeComponent(id)}/$sub'),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! String) {
-        throw SessionsClientError(0, '$sub returned no payload');
-      }
-      return decoded;
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<String> _payload(String id, String sub) async => (await _request(
+    'GET',
+    'api/sessions/${Uri.encodeComponent(id)}/$sub',
+    decode: (json) => decodePayload(sub, json),
+  ))!;
 
   /// A `GET` of the bridge's global [path] payload endpoint, returning the
   /// service's decoded JSON as a string (the `/` menu's global "info"
   /// commands).
-  Future<String> _globalPayload(String path) async {
-    final client = HttpClient();
-    try {
-      final response = await bridgeRequest(
-        client,
-        'GET',
-        _base.replace(path: path),
-        auth: _auth,
-      );
-      final body = await response.transform(const Utf8Decoder()).join();
-      if (response.statusCode != HttpStatus.ok) {
-        throw SessionsClientError(response.statusCode, body);
-      }
-      final decoded = jsonDecode(body);
-      if (decoded is! String) {
-        throw SessionsClientError(0, 'payload returned no string');
-      }
-      return decoded;
-    } on SessionsClientError {
-      rethrow;
-    } catch (error) {
-      throw SessionsClientError(0, '$error');
-    } finally {
-      client.close(force: true);
-    }
+  Future<String> _globalPayload(String path) async =>
+      (await _request('GET', path, decode: decodeGlobalPayload))!;
+}
+
+/// The home list's decode (spec section 5, endpoint 1): the bridge's session
+/// rows as the decoded JSON's list (a non-list decodes to no rows, each row
+/// through [Session.fromJson]). The shared decode of
+/// [SessionsClient.list] — the home-list tests exercise it directly.
+List<Session> decodeSessionList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) Session.fromJson(item)];
+}
+
+/// The project picker's decode (spec section 5, fill-in †): the bridge's
+/// project rows as the decoded JSON's list.
+List<Project> decodeProjectList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) Project.fromJson(item)];
+}
+
+/// The messages decode (spec section 5, endpoint 6): the history as the
+/// decoded JSON's list of structured-view messages.
+List<SessionMessage> decodeMessageList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) SessionMessage.fromJson(item)];
+}
+
+/// The paged messages decode (issue #124): the page's `{messages, cursor}`
+/// shape, oldest-first within the page, with the cursor to the next (older)
+/// page.
+MessagePage decodeMessagePage(Object? json) {
+  final map = json is Map<String, Object?> ? json : const {};
+  final list = map['messages'] is List ? map['messages']! : const <Object?>[];
+  return MessagePage(
+    messages: [for (final item in list) SessionMessage.fromJson(item)],
+    nextCursor: map['cursor'] is String ? map['cursor'] as String : null,
+  );
+}
+
+/// The permissions decode (spec section 5, endpoint 8): the pending
+/// permission requests as the decoded JSON's list.
+List<PermissionRequest> decodePermissionList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) PermissionRequest.fromJson(item)];
+}
+
+/// The question forms decode (issue #50): the pending question forms as the
+/// decoded JSON's list.
+List<QuestionForm> decodeQuestionList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) QuestionForm.fromJson(item)];
+}
+
+/// The project commands decode (the `/` menu's custom commands, issue #46):
+/// the decoded JSON's list.
+List<OpencodeCommand> decodeCommandList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) OpencodeCommand.fromJson(item)];
+}
+
+/// The model registry decode (the `/` menu's `/models` picker): the decoded
+/// JSON's list.
+List<ModelOption> decodeModelList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) ModelOption.fromJson(item)];
+}
+
+/// The agent registry decode (the `/` menu's `/agents` picker): the decoded
+/// JSON's list.
+List<AgentOption> decodeAgentList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) AgentOption.fromJson(item)];
+}
+
+/// The skill registry decode (the `/` menu's `/skills`): the decoded JSON's
+/// list.
+List<SkillOption> decodeSkillList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [for (final item in list) SkillOption.fromJson(item)];
+}
+
+/// The `@` mention menu's file decode (issue #58): the matched file paths —
+/// the decoded JSON's list, its string entries (non-strings skipped).
+List<String> decodeFileList(Object? json) {
+  final list = json is List ? json : const <Object?>[];
+  return [
+    for (final item in list)
+      if (item is String) item,
+  ];
+}
+
+/// The session model decode (the `/` menu's `/variants` picker): the
+/// session's current model from the response's nested `model` map, or `null`
+/// when the service reports none yet. The top level must be a map — a
+/// non-map is no payload at all.
+ModelRef? decodeCurrentModel(Object? json) {
+  if (json is! Map<String, Object?>) {
+    throw const SessionsClientError(0, 'model returned no payload');
   }
+  final model = json['model'];
+  return model is Map<String, Object?> ? ModelRef.fromJson(model) : null;
+}
+
+/// The fork decode: the new session's id from the fork response's `id` field
+/// (a missing id is a failure, not an empty result).
+String decodeForkedId(Object? json) {
+  if (json is Map<String, Object?> && json['id'] is String) {
+    return json['id'] as String;
+  }
+  throw const SessionsClientError(HttpStatus.ok, 'fork returned no session id');
+}
+
+/// The side-question decode (the `/` menu's `/btw`): the generated text from
+/// the response's `text` field (a missing text is a failure, not an empty
+/// result).
+String decodeBtwText(Object? json) {
+  if (json is Map<String, Object?> && json['text'] is String) {
+    return json['text'] as String;
+  }
+  throw const SessionsClientError(HttpStatus.ok, 'btw returned no text');
+}
+
+/// The "info" payload decode (the `/` menu's session and connect/pair
+/// commands): the service's decoded JSON must be a string — the text the
+/// command reports as-is. [sub] names the endpoint in the failure message.
+String decodePayload(String sub, Object? json) {
+  if (json is String) return json;
+  throw SessionsClientError(0, '$sub returned no payload');
+}
+
+/// The global "info" payload decode: the bridge's global endpoints wrap the
+/// service's payload in a JSON string, so the decoded JSON must be a string.
+String decodeGlobalPayload(Object? json) {
+  if (json is String) return json;
+  throw const SessionsClientError(0, 'payload returned no string');
 }
 
 /// A failure of a bridge sessions endpoint, carrying the bridge's status

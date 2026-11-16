@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/access_session.dart';
 import 'package:opencodebridge/access/token_store.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
+import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/fs_client.dart';
 import 'package:opencodebridge/client/orbs_client.dart';
@@ -103,16 +104,21 @@ Session _orbSession() => Session(
 /// A scripted [SessionsClient] for the tab tests.
 class _FakeSessionsClient extends SessionsClient {
   _FakeSessionsClient({this.rows = const []})
-    : super(Uri.parse('http://bridge.test/'));
+    : store = <String, num>{},
+      super(Uri.parse('http://bridge.test/'));
 
   /// The rows the client returns; delete mutates it, like a re-fetch would
   /// see.
   final List<Session> rows;
 
-  /// The bridge's order store, emulated (issue #238): the pinned positions a
-  /// successful `setOrder` writes, keyed by session id. A `list` read reflects
-  /// them (pinned-first), like the real bridge's `SessionsBackend.list`.
-  final Map<String, num> positions = {};
+  /// The bridge's order store, emulated (issue #238): the pinned positions,
+  /// keyed by session id. A test seeds it with the bridge's persisted store
+  /// when its rows come from a real read (the store's contents are what the
+  /// read's pinned block encodes); a successful `setOrder` writes (or
+  /// clears) its entry. A `list` read reflects it, like the real bridge's
+  /// `SessionsBackend.list` — which derives each row's `pinned` fact from
+  /// the store.
+  final Map<String, num> store;
 
   Object? listError;
   Object? deleteError;
@@ -165,42 +171,24 @@ class _FakeSessionsClient extends SessionsClient {
     // A fresh snapshot on every call, like the real client (which decodes a
     // new list per request): the tab's held rows are not the fake's list.
     //
-    // The bridge's home-list read (issue #237/238) is pinned-first (position
-    // ascending), then the unpinned newest-created. Emulated from the rows'
-    // pinned facts and the order-store positions a successful `setOrder`
-    // recorded — a row is pinned when its flag is set or the store holds a
-    // position for it (the bridge derives `pinned` from the store). So a
-    // re-fetch (a delete, a move, a missed create) returns the row in its
-    // pinned place.
-    bool pinnedAt(Session r) => r.pinned || positions.containsKey(r.id);
-    final indexed = [
-      for (var i = 0; i < rows.length; i++) (row: rows[i], index: i),
+    // The home-list read (issue #237/238) is the real bridge's, not a copy:
+    // each row's `pinned` fact is derived from the order store like
+    // `SessionsBackend.list` derives it (a row is pinned when its flag is set
+    // or the store holds a position for it), the rows are sorted with the
+    // bridge's own comparator, and the result goes out the wire contract
+    // (each row's `toJson`) and back through the client's real
+    // `decodeSessionList` — the fake exercises the production decode rather
+    // than handing the UI pre-built rows. So a re-fetch (a delete, a move, a
+    // missed create) returns the row in its pinned place, exactly like the
+    // real bridge's `list`.
+    final pinned = [
+      for (final row in rows)
+        row.copyWith(pinned: row.pinned || store.containsKey(row.id)),
     ];
-    indexed.sort((a, b) {
-      final aPinned = pinnedAt(a.row);
-      final bPinned = pinnedAt(b.row);
-      if (aPinned != bPinned) return aPinned ? -1 : 1;
-      if (!aPinned) {
-        final byCreated = b.row.created.compareTo(a.row.created);
-        if (byCreated != 0) return byCreated;
-        return a.index.compareTo(b.index);
-      }
-      final posA = positions[a.row.id];
-      final posB = positions[b.row.id];
-      if (posA != null && posB != null) {
-        final byPosition = posA.compareTo(posB);
-        if (byPosition != 0) return byPosition;
-        final byCreated = b.row.created.compareTo(a.row.created);
-        if (byCreated != 0) return byCreated;
-      }
-      return a.index.compareTo(b.index);
-    });
-    // The bridge derives each row's `pinned` fact from the store, so the read
-    // carries it (a later fetch reflects a successful `setOrder`).
-    return [
-      for (final entry in indexed)
-        entry.row.copyWith(pinned: pinnedAt(entry.row)),
-    ];
+    pinned.sort(
+      (a, b) => SessionsBackend.homeListOrder(a, b, (id) => store[id]),
+    );
+    return decodeSessionList([for (final row in pinned) row.toJson()]);
   }
 
   @override
@@ -222,9 +210,9 @@ class _FakeSessionsClient extends SessionsClient {
     // The bridge's order store: a successful write records (or clears) the
     // row's position, which a later `list` read reflects (pinned-first).
     if (position == null) {
-      positions.remove(id);
+      store.remove(id);
     } else {
-      positions[id] = position;
+      store[id] = position;
     }
   }
 
@@ -3072,11 +3060,11 @@ void main() {
         (tester) async {
           // The read is already pre-sorted pinned-first (pinned rows by
           // position, then unpinned by newest-created); the app renders it
-          // without re-fetching or re-sorting. Pinned: ses_1 (position 100),
-          // ses_2 (position 200) → ses_1 before ses_2. Unpinned by created
-          // descending: ses_4 (400), ses_3 (200).
-          await _pumpTab(
-            tester,
+          // without re-fetching or re-sorting. The bridge's order store holds
+          // ses_1 (position 100) and ses_2 (position 200) → ses_1 before
+          // ses_2; the unpinned rows are by created descending: ses_4 (400),
+          // ses_3 (200).
+          final client = _FakeSessionsClient(
             rows: [
               _one.copyWith(pinned: true), // pinned (position 100) — first
               _two.copyWith(pinned: true), // pinned (position 200) — second
@@ -3084,6 +3072,21 @@ void main() {
               _three, // older unpinned
             ],
           );
+          client.store.addAll({'ses_1': 100, 'ses_2': 200});
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: SessionsTab(
+                  apiBase: Uri.parse('http://bridge.test/'),
+                  client: client,
+                  fs: _FakeFsClient(),
+                  orbs: _FakeOrbsClient(),
+                  events: _FakeEventsSource(),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
           // The pinned block leads the list, in position order (ses_1 before
           // ses_2), ahead of every unpinned row; the unpinned rows stay in
           // newest-created order.
