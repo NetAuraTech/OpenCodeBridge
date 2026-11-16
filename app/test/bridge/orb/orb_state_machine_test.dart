@@ -71,36 +71,39 @@ void main() {
       bool? passwordSeen = true,
       String? shellFailed,
       String? cleanup,
-    }) =>
-      OrbState.compose(
-        dockerStatus: dockerStatus,
-        workspaceVolumePresent: workspace,
-        stateDirPresent: stateDir,
-        bootStage: bootStage,
-        bootPasswordSeen: passwordSeen,
-        shellFailedReason: shellFailed,
-        cleanupReason: cleanup,
-      );
+    }) => OrbState.compose(
+      dockerStatus: dockerStatus,
+      workspaceVolumePresent: workspace,
+      stateDirPresent: stateDir,
+      bootStage: bootStage,
+      bootPasswordSeen: passwordSeen,
+      shellFailedReason: shellFailed,
+      cleanupReason: cleanup,
+    );
 
     test('a running container with a finished boot is running', () {
       expect(compose().wire, 'running');
     });
 
     test('a created container is preparing (no stage yet)', () {
-      expect(compose(dockerStatus: 'created', passwordSeen: null).wire,
-          'preparing');
+      expect(
+        compose(dockerStatus: 'created', passwordSeen: null).wire,
+        'preparing',
+      );
     });
 
     test('a created container with a boot stage is preparing:<stage>', () {
       expect(
-        compose(dockerStatus: 'created', passwordSeen: null, bootStage: 'clone')
-            .wire,
+        compose(
+          dockerStatus: 'created',
+          passwordSeen: null,
+          bootStage: 'clone',
+        ).wire,
         'preparing:clone',
       );
     });
 
-    test('a running container before its password line is still preparing',
-        () {
+    test('a running container before its password line is still preparing', () {
       expect(
         compose(
           dockerStatus: 'running',
@@ -117,25 +120,29 @@ void main() {
     });
 
     test('an exited container with everything present is stopped', () {
-      expect(compose(dockerStatus: 'exited', passwordSeen: null).wire,
-          'stopped');
+      expect(
+        compose(dockerStatus: 'exited', passwordSeen: null).wire,
+        'stopped',
+      );
     });
 
-    test('a missing workspace volume is broken:workspace (the louder signal)',
-        () {
-      expect(
-        compose(
-          dockerStatus: 'exited',
-          passwordSeen: null,
-          workspace: false,
-          cleanup: 'uncommitted work',
-        ).wire,
-        'broken:workspace',
-      );
-      // And over a running container that is not booting: the broken checks
-      // do not run on the running side — the orb is running.
-      expect(compose(workspace: false).wire, 'running');
-    });
+    test(
+      'a missing workspace volume is broken:workspace (the louder signal)',
+      () {
+        expect(
+          compose(
+            dockerStatus: 'exited',
+            passwordSeen: null,
+            workspace: false,
+            cleanup: 'uncommitted work',
+          ).wire,
+          'broken:workspace',
+        );
+        // And over a running container that is not booting: the broken checks
+        // do not run on the running side — the orb is running.
+        expect(compose(workspace: false).wire, 'running');
+      },
+    );
 
     test('a missing state dir is broken:state', () {
       expect(
@@ -181,16 +188,14 @@ void main() {
 
     test('a running container ignores the shell and cleanup markers '
         '(the finished boot wins)', () {
-      expect(
-        compose(shellFailed: 'x', cleanup: 'y').wire,
-        'running',
-      );
+      expect(compose(shellFailed: 'x', cleanup: 'y').wire, 'running');
     });
 
     test('no container (volumes only) is orphan', () {
-      expect(compose(dockerStatus: null, workspace: true, stateDir: false)
-          .wire,
-          'orphan');
+      expect(
+        compose(dockerStatus: null, workspace: true, stateDir: false).wire,
+        'orphan',
+      );
     });
   });
 
@@ -215,8 +220,7 @@ void main() {
       }
     });
 
-    test('isUpdatable: running, stopped, and the cleanup_pending variants',
-        () {
+    test('isUpdatable: running, stopped, and the cleanup_pending variants', () {
       expect(s('running').isUpdatable, isTrue);
       expect(s('stopped').isUpdatable, isTrue);
       expect(s('cleanup_pending:uncommitted work').isUpdatable, isTrue);
@@ -238,8 +242,7 @@ void main() {
       }
     });
 
-    test('isSpawable: running, stopped, and the cleanup_pending variants',
-        () {
+    test('isSpawable: running, stopped, and the cleanup_pending variants', () {
       expect(s('running').isSpawable, isTrue);
       expect(s('stopped').isSpawable, isTrue);
       expect(s('cleanup_pending:uncommitted work').isSpawable, isTrue);
@@ -311,13 +314,7 @@ void main() {
   group('the composed state round-trips through the predicates', () {
     test('every state the composition can produce is a named one', () {
       final produced = <String>{
-        for (final docker in [
-          null,
-          'running',
-          'created',
-          'exited',
-          'dead',
-        ])
+        for (final docker in [null, 'running', 'created', 'exited', 'dead'])
           for (final workspace in [true, false])
             for (final stateDir in [true, false])
               for (final stage in [null, 'clone'])
@@ -368,8 +365,7 @@ void main() {
       await store.clearStopped('a');
     });
 
-    test(
-        'the cleanup-pending marker: mark carries the reason, clear drops '
+    test('the cleanup-pending marker: mark carries the reason, clear drops '
         'it, and an empty marker is no badge', () async {
       expect(store.cleanupPendingReason('a'), isNull);
       await store.markCleanupPending('a', 'uncommitted work');
@@ -397,29 +393,32 @@ void main() {
       expect(store.pushFailedGeneration('a'), isNull);
     });
 
-    test('the no-shell marker: the cause, and an empty marker names itself',
-        () async {
-      expect(store.shellFailedReason('a'), isNull);
-      final dir = await store.stateDir('a').create(recursive: true);
-      await File('${dir.path}/no-shell').writeAsString('shell: no login');
-      expect(store.shellFailedReason('a'), 'shell: no login');
-      await File('${dir.path}/no-shell').writeAsString('');
-      expect(store.shellFailedReason('a'), 'no usable shell');
-    });
+    test(
+      'the no-shell marker: the cause, and an empty marker names itself',
+      () async {
+        expect(store.shellFailedReason('a'), isNull);
+        final dir = await store.stateDir('a').create(recursive: true);
+        await File('${dir.path}/no-shell').writeAsString('shell: no login');
+        expect(store.shellFailedReason('a'), 'shell: no login');
+        await File('${dir.path}/no-shell').writeAsString('');
+        expect(store.shellFailedReason('a'), 'no usable shell');
+      },
+    );
 
-    test('the gh-auth marker: mark carries the cause, clear drops it',
-        () async {
-      expect(store.ghAuthFailedReason('a'), isNull);
-      await store.markGhAuthFailed('a', 'token invalid');
-      expect(store.ghAuthFailedReason('a'), 'token invalid');
-      await store.markGhAuthFailed('a', '');
-      expect(store.ghAuthFailedReason('a'), 'gh could not authenticate');
-      await store.clearGhAuthFailed('a');
-      expect(store.ghAuthFailedReason('a'), isNull);
-    });
+    test(
+      'the gh-auth marker: mark carries the cause, clear drops it',
+      () async {
+        expect(store.ghAuthFailedReason('a'), isNull);
+        await store.markGhAuthFailed('a', 'token invalid');
+        expect(store.ghAuthFailedReason('a'), 'token invalid');
+        await store.markGhAuthFailed('a', '');
+        expect(store.ghAuthFailedReason('a'), 'gh could not authenticate');
+        await store.clearGhAuthFailed('a');
+        expect(store.ghAuthFailedReason('a'), isNull);
+      },
+    );
 
-    test('a composed state from the store agrees with the raw facts',
-        () async {
+    test('a composed state from the store agrees with the raw facts', () async {
       // A stopped orb the pass has surfaced as guard-blocked.
       await store.stateDir('a').create(recursive: true);
       await store.setStopped('a');

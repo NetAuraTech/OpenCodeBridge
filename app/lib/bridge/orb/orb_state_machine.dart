@@ -120,11 +120,11 @@ class OrbState {
       'cleanup_pending' => OrbStateKind.cleanupPending,
       'orphan' => OrbStateKind.orphan,
       'broken' => switch (detail) {
-          'workspace' => OrbStateKind.brokenWorkspace,
-          'state' => OrbStateKind.brokenState,
-          'shell' => OrbStateKind.brokenShell,
-          _ => null,
-        },
+        'workspace' => OrbStateKind.brokenWorkspace,
+        'state' => OrbStateKind.brokenState,
+        'shell' => OrbStateKind.brokenShell,
+        _ => null,
+      },
       _ => null,
     };
   }
@@ -284,8 +284,7 @@ class OrbState {
   }
 
   @override
-  bool operator ==(Object other) =>
-      other is OrbState && other.wire == wire;
+  bool operator ==(Object other) => other is OrbState && other.wire == wire;
 
   @override
   int get hashCode => Object.hash(OrbState, wire);
