@@ -407,17 +407,19 @@ void main() {
       String type = 'x',
       Map<String, Object?>? data,
       Durable? durable,
-    }) =>
-        BridgeEvent(
-          id: 'evt',
-          created: 0,
-          type: type,
-          data: data ?? const <String, Object?>{},
-          durable: durable,
-        );
+    }) => BridgeEvent(
+      id: 'evt',
+      created: 0,
+      type: type,
+      data: data ?? const <String, Object?>{},
+      durable: durable,
+    );
 
     test('a durable event reports its aggregate id (the session id)', () {
-      expect(event(durable: Durable(aggregateID: 'ses_a', seq: 3)).sessionId, 'ses_a');
+      expect(
+        event(durable: Durable(aggregateID: 'ses_a', seq: 3)).sessionId,
+        'ses_a',
+      );
     });
 
     test('a durable id wins over a payload sessionID', () {
@@ -440,23 +442,34 @@ void main() {
     test('a form-nested event reports the form\'s session id', () {
       // `form.created` nests its session under `data.form`.
       expect(
-        event(data: {
-          'form': {'sessionID': 'ses_form', 'type': 'question'},
-        }).sessionId,
+        event(
+          data: {
+            'form': {'sessionID': 'ses_form', 'type': 'question'},
+          },
+        ).sessionId,
         'ses_form',
       );
     });
 
     test('a form without a session id falls through to null', () {
-      expect(event(data: {'form': {'type': 'question'}}).sessionId, isNull);
+      expect(
+        event(
+          data: {
+            'form': {'type': 'question'},
+          },
+        ).sessionId,
+        isNull,
+      );
     });
 
     test('an empty string is not a session id', () {
       expect(event(data: {'sessionID': ''}).sessionId, isNull);
       expect(
-        event(data: {
-          'form': {'sessionID': ''},
-        }).sessionId,
+        event(
+          data: {
+            'form': {'sessionID': ''},
+          },
+        ).sessionId,
         isNull,
       );
     });
