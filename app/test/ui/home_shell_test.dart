@@ -1,12 +1,58 @@
+import 'dart:async';
+
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/client/connection_monitor.dart';
+import 'package:opencodebridge/notify/deep_link.dart';
 import 'package:opencodebridge/notify/notification_service.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
+import 'package:opencodebridge/ui/deep_link_target.dart';
 import 'package:opencodebridge/ui/home_shell.dart';
 import 'package:opencodebridge/ui/orbs_tab.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// The app's deep-link wiring (issue #287), as a widget: the app holds a
+/// [DeepLinkTarget] (the stable owner) and feeds it from the service's
+/// tapped-link stream (`deepLinks.listen(target.apply)`), cancelling the
+/// feed on dispose. Owned by a widget (not the test body) because a
+/// test-body subscription to the service's live broadcast stream trips the
+/// `flutter_test` harness at teardown; the original stream-subscribing shell
+/// owned its subscription the same way.
+class _FeedWiring extends StatefulWidget {
+  const _FeedWiring({
+    required this.service,
+    required this.target,
+    required this.child,
+  });
+
+  final NotificationService service;
+  final DeepLinkTarget target;
+  final Widget child;
+
+  @override
+  State<_FeedWiring> createState() => _FeedWiringState();
+}
+
+class _FeedWiringState extends State<_FeedWiring> {
+  StreamSubscription<DeepLink>? _feed;
+
+  @override
+  void initState() {
+    super.initState();
+    _feed = widget.service.deepLinks.listen(widget.target.apply);
+  }
+
+  @override
+  void dispose() {
+    _feed?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
 
 void main() {
   group('HomeShell', () {
@@ -82,49 +128,127 @@ void main() {
       monitor.dispose();
     });
 
-    testWidgets('remounts with the same notification service deep-link stream '
-        'without crashing', (tester) async {
+    testWidgets('remounts with the same notification service deep-link '
+        'target without crashing', (tester) async {
       // The bug seen on a real device (the red screen after the Cloudflare
       // Access login): the shell's deep-link stream came from the
       // NotificationService, and a remounted shell (a rebuild that
-      // unmounts and re-inflates the HomeShell) re-listens the same stream
-      // object in `initState`. The stream must be re-listenable, or the
-      // second `listen` throws `Bad state: Stream has already been listened
-      // to.` and the whole tree is replaced by the red error screen.
+      // unmounts and re-inflates the HomeShell) re-listened the same stream
+      // object in `initState`. The stream had to be re-listenable, or the
+      // second `listen` threw `Bad state: Stream has already been listened
+      // to.` and the whole tree was replaced by the red error screen.
+      // (issue #287) The one-shot now lives on a [DeepLinkTarget] the app
+      // holds across remounts: the shell re-reads the model on the mount
+      // and re-attaches to it — a re-attach can never throw.
       SharedPreferences.setMockInitialValues({});
       final settings = await AppSettings.load();
       final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
       monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
-      // A real service (no `start()`, so no FCM / no timers) whose
-      // `deepLinks` is the stream the shell listens to.
+      // A real service (no `start()`, so no FCM / no timers) whose tapped
+      // links feed the model, as the app wires it.
       final notifications = NotificationService(
         settings: settings,
         bridgeBase: Uri.parse('http://127.0.0.1:1/'),
       );
+      final deepLinks = DeepLinkTarget();
 
       Widget pumpShell() => MaterialApp(
-        home: HomeShell(
-          monitor: monitor,
-          settings: settings,
-          mode: AppMode.client,
-          deepLinks: notifications.deepLinks,
+        home: _FeedWiring(
+          service: notifications,
+          target: deepLinks,
+          child: HomeShell(
+            monitor: monitor,
+            settings: settings,
+            mode: AppMode.client,
+            deepLinks: deepLinks,
+          ),
         ),
       );
 
-      // First mount: the shell subscribes.
+      // First mount: the shell attaches to the model.
       await tester.pumpWidget(pumpShell());
       await tester.pump();
       expect(tester.takeException(), isNull);
       expect(find.text('Sessions'), findsWidgets);
 
-      // Unmount, then remount the shell with the very same stream object
-      // (the service is still in hand). Without the re-listenable stream
-      // this throws and the tree is replaced by the red error screen.
+      // Unmount, then remount the shell with the very same model (the
+      // service is still in hand). Without the stable owner this was the
+      // red error screen.
       await tester.pumpWidget(const SizedBox());
       await tester.pumpWidget(pumpShell());
       await tester.pump();
       expect(tester.takeException(), isNull);
       expect(find.text('Sessions'), findsWidgets);
+
+      await tester.pumpWidget(const SizedBox());
+      monitor.dispose();
+    });
+
+    testWidgets('a deep link survives a shell remount with the same '
+        'service', (tester) async {
+      // The one-shot lives on a [DeepLinkTarget] the app holds across
+      // remounts (issue #287): a link delivered through the service while
+      // the shell is up must not be dropped when the shell is unmounted and
+      // remounted with the same service — the remounted shell re-reads the
+      // model (landing on the right tab) and the model still carries the
+      // target for its tab to open on its next load.
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
+      final notifications = NotificationService(
+        settings: settings,
+        bridgeBase: Uri.parse('http://127.0.0.1:1/'),
+      );
+      final deepLinks = DeepLinkTarget();
+
+      Widget pumpShell() => MaterialApp(
+        home: _FeedWiring(
+          service: notifications,
+          target: deepLinks,
+          child: HomeShell(
+            monitor: monitor,
+            settings: settings,
+            mode: AppMode.client,
+            deepLinks: deepLinks,
+          ),
+        ),
+      );
+
+      int selectedTab() => tester
+          .widget<NavigationBar>(find.byType(NavigationBar))
+          .selectedIndex;
+
+      // The shell is up (the Sessions tab by default). A tapped
+      // notification targeting a container is delivered through the service
+      // (the feed applies it to the model, the shell switches the tab).
+      await tester.pumpWidget(pumpShell());
+      await tester.pump();
+      expect(selectedTab(), 0);
+      notifications.openForTest(
+        RemoteMessage(
+          data: {'link': DeepLink.containerUri('probe').toString()},
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      // The shell switched to the Docker tab for the container target, and
+      // the model carries it.
+      expect(selectedTab(), 2);
+      expect(deepLinks.target, DeepLink.container('probe'));
+
+      // Unmount, then remount the shell with the same service (and the
+      // model the app holds with it): no dropped link, no red screen.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(pumpShell());
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+
+      // The remounted shell re-read the model (its tab is back on Docker)
+      // and the target is still on it for the tab to open.
+      expect(selectedTab(), 2);
+      expect(deepLinks.target, DeepLink.container('probe'));
 
       await tester.pumpWidget(const SizedBox());
       monitor.dispose();

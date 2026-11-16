@@ -15,7 +15,9 @@ import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
+import 'package:opencodebridge/notify/deep_link.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
+import 'package:opencodebridge/ui/deep_link_target.dart';
 import 'package:opencodebridge/ui/sessions_tab.dart';
 import 'package:opencodebridge/ui/structured_view.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -468,8 +470,7 @@ Future<_FakeSessionsClient> _pumpTab(
   _FakeFsClient? fs,
   _FakeOrbsClient? orbs,
   ValueChanged<String>? onOrbChipTapped,
-  String? deepLinkSession,
-  VoidCallback? onDeepLinkSessionConsumed,
+  DeepLinkTarget? deepLinks,
   FutureOr<void> Function()? onOpenSettings,
   AppSettings? settings,
 }) async {
@@ -485,8 +486,7 @@ Future<_FakeSessionsClient> _pumpTab(
           events: events ?? _FakeEventsSource(),
           access: access,
           onOrbChipTapped: onOrbChipTapped,
-          deepLinkSession: deepLinkSession,
-          onDeepLinkSessionConsumed: onDeepLinkSessionConsumed,
+          deepLinks: deepLinks,
           onOpenSettings: onOpenSettings,
           settings: settings,
         ),
@@ -508,7 +508,7 @@ Future<_FakeSessionsClient> _pumpTabNarrow(
   _FakeEventsSource? events,
   _FakeFsClient? fs,
   _FakeOrbsClient? orbs,
-  String? deepLinkSession,
+  DeepLinkTarget? deepLinks,
   AppSettings? settings,
 }) async {
   final client = _FakeSessionsClient(rows: List<Session>.of(rows));
@@ -523,7 +523,7 @@ Future<_FakeSessionsClient> _pumpTabNarrow(
           fs: fs ?? _FakeFsClient(),
           orbs: orbs ?? _FakeOrbsClient(),
           events: events ?? _FakeEventsSource(),
-          deepLinkSession: deepLinkSession,
+          deepLinks: deepLinks,
           settings: settings,
         ),
       ),
@@ -1150,23 +1150,29 @@ void main() {
           final fs = _FakeFsClient();
           final orbs = _FakeOrbsClient();
           final events = _FakeEventsSource();
-          var consumed = 0;
-          Future<void> pump(String? target) => tester.pumpWidget(
-            MaterialApp(
-              home: Scaffold(
-                body: SessionsTab(
-                  key: const ValueKey('sessions-tab'),
-                  apiBase: Uri.parse('http://bridge.test/'),
-                  client: client,
-                  fs: fs,
-                  orbs: orbs,
-                  events: events,
-                  deepLinkSession: target,
-                  onDeepLinkSessionConsumed: () => consumed++,
+          DeepLinkTarget? model;
+          // The target arrives on the model (issue #287): the tab reads it
+          // from there and clears it when it opens it.
+          Future<void> pump(String? target) {
+            final m = DeepLinkTarget();
+            if (target != null) m.apply(DeepLink.session(target));
+            model = m;
+            return tester.pumpWidget(
+              MaterialApp(
+                home: Scaffold(
+                  body: SessionsTab(
+                    key: const ValueKey('sessions-tab'),
+                    apiBase: Uri.parse('http://bridge.test/'),
+                    client: client,
+                    fs: fs,
+                    orbs: orbs,
+                    events: events,
+                    deepLinks: model,
+                  ),
                 ),
               ),
-            ),
-          );
+            );
+          }
 
           await pump(null);
           await tester.pump();
@@ -1174,7 +1180,8 @@ void main() {
           await pump('ses_3');
           await tester.pumpAndSettle();
 
-          expect(consumed, 1);
+          // The tab consumed the target: the model is clear.
+          expect(model?.target, isNull);
           expect(find.byType(StructuredSessionPanel), findsOneWidget);
           expect(find.byKey(const ValueKey('sessions-list')), findsOneWidget);
           expect(find.byType(StructuredSessionScreen), findsNothing);
@@ -2097,21 +2104,30 @@ void main() {
             tester.view.reset();
             final client = _FakeSessionsClient(rows: [_one, _three]);
             final events = _FakeEventsSource();
-            Future<void> pump(String? target) => tester.pumpWidget(
-              MaterialApp(
-                home: Scaffold(
-                  body: SessionsTab(
-                    key: const ValueKey('sessions-tab'),
-                    apiBase: Uri.parse('http://bridge.test/'),
-                    client: client,
-                    fs: _FakeFsClient(),
-                    orbs: _FakeOrbsClient(),
-                    events: events,
-                    deepLinkSession: target,
+            DeepLinkTarget? model;
+            // The target arrives on the model (issue #287): the tab reads
+            // it from there and clears it when it opens it.
+            Future<void> pump(String? target) {
+              final m = DeepLinkTarget();
+              if (target != null) m.apply(DeepLink.session(target));
+              model = m;
+              return tester.pumpWidget(
+                MaterialApp(
+                  home: Scaffold(
+                    body: SessionsTab(
+                      key: const ValueKey('sessions-tab'),
+                      apiBase: Uri.parse('http://bridge.test/'),
+                      client: client,
+                      fs: _FakeFsClient(),
+                      orbs: _FakeOrbsClient(),
+                      events: events,
+                      deepLinks: model,
+                    ),
                   ),
                 ),
-              ),
-            );
+              );
+            }
+
             await pump(null);
             await tester.pump();
             expect(client.listCalls, 1);
@@ -2124,6 +2140,8 @@ void main() {
             await tester.pumpAndSettle();
             expect(find.byType(StructuredSessionPanel), findsOneWidget);
             expect(find.byKey(const ValueKey('unread-ses_1')), findsNothing);
+            // The deep link was consumed: the model is clear.
+            expect(model?.target, isNull);
           }
         },
       );
