@@ -368,6 +368,75 @@ class SessionMessage {
   /// for an idle the service carried no outcome for.
   final String? outcome;
 
+  /// The live-only fields: the fields the structured view's overlay passes
+  /// replace in place on an in-flight message, and the only fields a live
+  /// update may touch (issue #263):
+  ///
+  /// - the streamed content: [text], [reasoning], [tools];
+  /// - the turn stats: [created], [streamed], [completed], [outputTokens],
+  ///   [reasoningTokens];
+  /// - the live retry state: [retry], [error].
+  ///
+  /// Everything else — [id], [role], [contextTokens], [outcome] — is identity
+  /// or verdict and is never touched by a live update. Defined once, on the
+  /// contract, so the overlay passes' field lists cannot drift from it.
+  static const Set<String> liveOnlyFields = {
+    'text',
+    'reasoning',
+    'tools',
+    'created',
+    'streamed',
+    'completed',
+    'outputTokens',
+    'reasoningTokens',
+    'retry',
+    'error',
+  };
+
+  /// This message with a subset of the [liveOnlyFields] replaced: each named
+  /// parameter replaces its field, and a field left out keeps its value.
+  /// [retry] and [error] additionally clear to `null` when passed explicitly
+  /// (a landed retry reads back with no retry, so `null` is an authoritative
+  /// value there — issue #156); an explicit `null` on any other field is not
+  /// a replace either — for those, an omitted parameter and a `null` one both
+  /// keep the message's value (see [_liveFieldAbsent]). [id], [role],
+  /// [contextTokens], and [outcome] are never settable parameters: they carry
+  /// through structurally, so identity and verdict can never be touched by a
+  /// live update (issue #263).
+  SessionMessage replaceLiveFields({
+    String? text,
+    String? reasoning,
+    List<ToolCall>? tools,
+    int? created,
+    int? streamed,
+    int? completed,
+    int? outputTokens,
+    int? reasoningTokens,
+    Object? retry = _liveFieldAbsent,
+    Object? error = _liveFieldAbsent,
+  }) {
+    return SessionMessage(
+      id: id,
+      role: role,
+      text: text ?? this.text,
+      reasoning: reasoning ?? this.reasoning,
+      contextTokens: contextTokens,
+      tools: tools ?? this.tools,
+      created: created ?? this.created,
+      streamed: streamed ?? this.streamed,
+      completed: completed ?? this.completed,
+      outputTokens: outputTokens ?? this.outputTokens,
+      reasoningTokens: reasoningTokens ?? this.reasoningTokens,
+      retry: identical(retry, _liveFieldAbsent)
+          ? this.retry
+          : retry as MessageRetry?,
+      error: identical(error, _liveFieldAbsent)
+          ? this.error
+          : error as StructuredError?,
+      outcome: outcome,
+    );
+  }
+
   Map<String, Object?> toJson() => {
     'id': id,
     'role': role,
@@ -512,6 +581,15 @@ Object? _nestedObject(Map<String, Object?> map, String outer, String inner) {
   final outerValue = map[outer];
   return outerValue is Map<String, Object?> ? outerValue[inner] : null;
 }
+
+/// The [SessionMessage.replaceLiveFields] "parameter not provided" default.
+/// A plain `null` default cannot distinguish "not provided → keep the
+/// message's value" from "provided as `null` → clear it" for `retry` and
+/// `error`; and `??` alone would let an explicit `null` clear
+/// `text`/`reasoning`/`created`/… — which must keep their value when left
+/// out. The sentinel makes an explicit `null` the unambiguous clear signal
+/// (issue #263).
+const Object _liveFieldAbsent = Object();
 
 bool _toolsEqual(List<ToolCall> a, List<ToolCall> b) {
   if (a.length != b.length) return false;
