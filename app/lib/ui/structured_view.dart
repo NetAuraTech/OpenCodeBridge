@@ -15,6 +15,7 @@ import '../client/sessions_client.dart';
 import '../model/command.dart';
 import '../model/message.dart';
 import '../model/permission.dart';
+import '../model/row_projection.dart';
 import '../model/question.dart';
 import '../model/session_detail.dart';
 import '../model/turn_stats.dart';
@@ -3164,45 +3165,34 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // reports nothing — the in-flight request owns the report.
   }
 
-  /// The per-Turn footer labels keyed by the history row they ride on
-  /// (issue #121's frozen footers, issue #124's running turn and the lazy
-  /// older Turns). While a turn is active, its label is the LIVE one
-  /// (issue #122: a ticking duration from the turn's first prompt, the
-  /// throughput settling in as each step completes, the live fold freezing
-  /// into the identical value at the turn's end); the older Turns' frozen
-  /// footers fill in as their messages page into view (gated by
-  /// [_oldestLoaded]). The walk back is proportional to the loaded history,
-  /// never more.
-  Map<int, String> _turnFooters() {
-    if (_messages.isEmpty) return const {};
-    // The Active turn's row carries the live label (its duration ticks to
-    // the injected clock); the settled turns keep their frozen ones.
-    return computeTurnFooters(
-      _messages,
-      oldestLoaded: _oldestLoaded,
-      active: _turnActive,
-      now: _turnActive ? widget.clock().millisecondsSinceEpoch : null,
+  /// The row projections of the chat list (issue #283), computed once per
+  /// build: what each row carries — its role classification, its in-flow
+  /// lines (the "Turn stopped" line, the provider retry line, the terminal
+  /// failure block), its turn-stats footer (issue #121's frozen footers,
+  /// issue #124's running turn and the lazy older Turns) and its live
+  /// footer flag, its in-flight flags, and its copy-key eligibility.
+  ///
+  /// A pure derivation of the history and the turn facts (the live
+  /// in-flight message ids, the compaction state, and the ticking clock —
+  /// the Active turn's footer label ticks to the injected clock, the
+  /// settled turns keep their frozen ones), composed at the same rank as
+  /// the per-turn derivations it feeds on (the footers and the failure
+  /// blocks), so the item builder renders the projections and contains no
+  /// role classification of its own: a new in-flow row kind is a derivation
+  /// change, asserted by a flat test. The walk is proportional to the
+  /// loaded history, never more.
+  List<RowProjection> _rowProjections() {
+    return computeRowProjections(
+      TurnFacts(
+        messages: _messages,
+        turnActive: _turnActive,
+        liveMessageIds: _liveMessages.keys.toSet(),
+        compacting: _compacting,
+        compactionIndex: _compactionIndex,
+        oldestLoaded: _oldestLoaded,
+        now: _turnActive ? widget.clock().millisecondsSinceEpoch : null,
+      ),
     );
-  }
-
-  /// The turn-failure blocks keyed by the row they ride on (issue #206): the
-  /// row that carries the terminal `error` — the error-carrying assistant row
-  /// in the exhausted-retry case, or the closing `idle` marker in the
-  /// non-retryable case, where no assistant row exists. A succeeded or
-  /// interrupted Turn carries no failure block. Read from the durable history
-  /// alone, so an older failed Turn keeps its block in the history as its
-  /// record body (like any past turn), and the live band's block does not
-  /// persist into the next turn (the next turn's marker resolves its own
-  /// window).
-  Map<int, TurnFailure> _turnFailures() {
-    final result = <int, TurnFailure>{};
-    for (var i = 0; i < _messages.length; i++) {
-      final message = _messages[i];
-      if (message.role != 'idle') continue;
-      final row = turnFailureAt(_messages, i);
-      if (row != null) result[row.rowIndex] = row.failure;
-    }
-    return result;
   }
 
   @override
@@ -3214,15 +3204,15 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // Scaffold's appBar slot would, and its auto-implied leading back
     // button follows the route: shown on a pushed route, absent when the
     // panel is embedded in the root route.
-    // The per-Turn footers, computed once per build (issue #124): the
-    // running turn's live label and the loaded Turns' frozen labels, keyed
-    // by the row each rides on.
-    final footers = _turnFooters();
-    // The turn-failure blocks keyed by the idle marker that closes each
-    // failed Turn (issue #157): a pure function of the loaded history, so
-    // the render is identical with or without an event stream (the no-events
-    // reopen and the live+normalize render agree after the boundary).
-    final failures = _turnFailures();
+    // The row projections, computed once per build (issue #283): the role
+    // classification, the in-flow lines, the per-Turn footer (issue
+    // #121/#124) and its live flag, the in-flight flags, and the copy-key
+    // eligibility of every row — a pure derivation of the history and the
+    // turn facts, so the render is identical with or without an event
+    // stream (the no-events reopen and the live+normalize render agree
+    // after the boundary). The item builder below renders the projections
+    // and classifies nothing.
+    final projections = _rowProjections();
     // The header outcome chip's verdict (issue #157): the newest closing
     // idle marker's outcome — the authoritative per-turn verdict — so a
     // failed turn shows `failed` instead of the previous turn's stale
@@ -3339,154 +3329,18 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                                                 );
                                               }
                                               // The list is reversed (newest at the anchor), so
-                                              // map the list index back to the chronological
-                                              // history index.
+                                              // map the list index back to the
+                                              // chronological history index. The
+                                              // row's projection (issue #283) was
+                                              // computed once for the build: this
+                                              // builder renders it — it holds no
+                                              // role classification of its own.
                                               final i =
                                                   _messages.length - 1 - index;
-                                              final message = _messages[i];
-                                              // The Turn's stats footer (issue #121's
-                                              // frozen footers, issue #124's live one and
-                                              // the lazy older Turns): keyed by the row it
-                                              // rides on, computed once for the build.
-                                              final footer = footers[i];
-                                              // The LIVE footer (issue #161's
-                                              // activity indicator rides on it):
-                                              // only the newest turn's row while
-                                              // the Turn runs; older rows keep
-                                              // their frozen footers.
-                                              final live =
-                                                  _turnActive &&
-                                                  i == _messages.length - 1;
-                                              if (message.role == 'idle') {
-                                                // The turn-boundary marker carries no
-                                                // content of its own — unless the
-                                                // Turn it closed carries an in-flow
-                                                // line:
-                                                //  - a neutral "Turn stopped" line
-                                                //    when the turn was interrupted
-                                                //    (issue #206, matching #164) — a
-                                                //    stop is not a failure;
-                                                //  - the terminal error block (issue
-                                                //    #157) when the failed Turn's error
-                                                //    rides on the marker itself (the
-                                                //    non-retryable case, probe Q3: no
-                                                //    assistant row exists to carry it).
-                                                final failure = failures[i];
-                                                return Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    if (message.outcome ==
-                                                        'interrupted')
-                                                      const _TurnStoppedLine(),
-                                                    if (failure != null)
-                                                      _TurnFailureBlock(
-                                                        failure: failure,
-                                                      ),
-                                                    _TurnStatsFooter(
-                                                      label: footer,
-                                                      active: live,
-                                                    ),
-                                                  ],
-                                                );
-                                              }
-                                              if (message.role ==
-                                                  'compaction') {
-                                                // The marker's copy button
-                                                // (issue #198): only when it
-                                                // carries a summary.
-                                                final copyKey =
-                                                    message.text != null
-                                                    ? 'copy-message-$i'
-                                                    : null;
-                                                return Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
-                                                  children: [
-                                                    _CompactionPane(
-                                                      message: message,
-                                                      inFlight:
-                                                          _compacting &&
-                                                          i == _compactionIndex,
-                                                      copyKey: copyKey,
-                                                      onCopy: copyKey == null
-                                                          ? null
-                                                          : () =>
-                                                                _copyMessage(i),
-                                                    ),
-                                                    _TurnStatsFooter(
-                                                      label: footer,
-                                                      active: live,
-                                                    ),
-                                                  ],
-                                                );
-                                              }
-                                              final inFlight =
-                                                  _turnActive &&
-                                                  message.id != null &&
-                                                  _liveMessages.containsKey(
-                                                    message.id,
-                                                  );
-                                              final retry = message.retry;
-                                              final failure = failures[i];
-                                              // The row's copy button (issue
-                                              // #198): every row carries it
-                                              // when it has content — the
-                                              // body, the reasoning, or a tool
-                                              // card — and never on a row
-                                              // without (a textless user
-                                              // prompt).
-                                              final copyKey =
-                                                  message.text != null ||
-                                                      message.reasoning !=
-                                                          null ||
-                                                      message.tools.isNotEmpty
-                                                  ? 'copy-message-$i'
-                                                  : null;
-                                              return Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  _MessagePane(
-                                                    message: message,
-                                                    inFlight: inFlight,
-                                                    copyKey: copyKey,
-                                                    onCopy: copyKey == null
-                                                        ? null
-                                                        : () => _copyMessage(i),
-                                                  ),
-                                                  // The row's in-flow status lines
-                                                  // (issue #206), rendered from the
-                                                  // loaded row itself — the durable
-                                                  // state is the source of truth, so a
-                                                  // turn launched or settled by
-                                                  // another client shows its line as
-                                                  // soon as the history is read:
-                                                  //  - the in-flight provider retry
-                                                  //    (issue #156): the amber
-                                                  //    `Retry due · attempt N · …`
-                                                  //    line, present only while the
-                                                  //    row carries a `retry` — gone
-                                                  //    (no trace) the moment it
-                                                  //    clears;
-                                                  //  - the terminal error block
-                                                  //    (issue #157) when the failed
-                                                  //    Turn's terminal error rides on
-                                                  //    this row (the exhausted-retry
-                                                  //    case, probe Q3: the
-                                                  //    assistant's terminal error,
-                                                  //    content was attempted).
-                                                  if (retry != null)
-                                                    _RetryNotice(retry: retry),
-                                                  if (failure != null)
-                                                    _TurnFailureBlock(
-                                                      failure: failure,
-                                                    ),
-                                                  _TurnStatsFooter(
-                                                    label: footer,
-                                                    active: live,
-                                                  ),
-                                                ],
+                                              final projection = projections[i];
+                                              return _Row(
+                                                projection: projection,
+                                                onCopy: () => _copyMessage(i),
                                               );
                                             },
                                           ),
@@ -3931,6 +3785,99 @@ class _CostBar extends StatelessWidget {
     final pct = used / limit * 100;
     final text = pct < 10 ? pct.toStringAsFixed(1) : pct.toStringAsFixed(0);
     return '$text%';
+  }
+}
+
+/// One row of the chat list (issue #283): renders a [RowProjection] — the
+/// derived what-the-row-carries — and nothing else. The classification that
+/// decides which children a row carries lives in the projection
+/// ([computeRowProjections]); this widget contains no role classification
+/// cascade. The in-flow lines ride their row in the order the projection
+/// carries them: the "Turn stopped" line, the provider retry line, the
+/// terminal failure block, and finally the turn-stats footer.
+class _Row extends StatelessWidget {
+  const _Row({required this.projection, required this.onCopy});
+
+  /// The row's projection: its kind, its in-flow lines, its footer (and its
+  /// live flag), its in-flight flags, and its copy-key eligibility.
+  final RowProjection projection;
+
+  /// Puts the row's plain text on the clipboard (issue #198); offered to
+  /// the panes only when [RowProjection.copyKey] is set.
+  final Future<void> Function() onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    final projection = this.projection;
+    final footer = _TurnStatsFooter(
+      label: projection.footer,
+      active: projection.live,
+    );
+    final copyKey = projection.copyKey;
+    final copy = copyKey == null ? null : onCopy;
+    switch (projection.kind) {
+      case RowKind.idleMarker:
+        // The turn-boundary marker carries no content of its own — unless
+        // the Turn it closed carries an in-flow line:
+        //  - a neutral "Turn stopped" line when the turn was interrupted
+        //    (issue #206, matching #164) — a stop is not a failure;
+        //  - the terminal error block (issue #157) when the failed Turn's
+        //    error rides on the marker itself (the non-retryable case,
+        //    probe Q3: no assistant row exists to carry it).
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (projection.stopped) const _TurnStoppedLine(),
+            if (projection.failure != null)
+              _TurnFailureBlock(failure: projection.failure!),
+            footer,
+          ],
+        );
+      case RowKind.compactionMarker:
+        // The marker's copy button (issue #198): only when it carries a
+        // summary.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _CompactionPane(
+              message: projection.message,
+              inFlight: projection.compactionInFlight,
+              copyKey: copyKey,
+              onCopy: copy,
+            ),
+            footer,
+          ],
+        );
+      case RowKind.messageRow:
+        final failure = projection.failure;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _MessagePane(
+              message: projection.message,
+              inFlight: projection.inFlight,
+              copyKey: copyKey,
+              onCopy: copy,
+            ),
+            // The row's in-flow status lines (issue #206), rendered from the
+            // loaded row itself — the durable state is the source of truth,
+            // so a turn launched or settled by another client shows its
+            // line as soon as the history is read:
+            //  - the in-flight provider retry (issue #156): the amber
+            //    `Retry due · attempt N · …` line, present only while the
+            //    row carries a `retry` — gone (no trace) the moment it
+            //    clears;
+            //  - the terminal error block (issue #157) when the failed
+            //    Turn's terminal error rides on this row (the exhausted-
+            //    retry case, probe Q3: the assistant's terminal error,
+            //    content was attempted).
+            if (projection.retry != null)
+              _RetryNotice(retry: projection.retry!),
+            if (failure != null) _TurnFailureBlock(failure: failure),
+            footer,
+          ],
+        );
+    }
   }
 }
 
