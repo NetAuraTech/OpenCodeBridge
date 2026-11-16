@@ -11,8 +11,10 @@ import 'paths.dart';
 /// The map is a flat JSON object (`Map<String, num>`) on disk. It is keyed on
 /// the session id — the one identity the composite host+orb list and the
 /// move primitive both preserve — so a session moved host↔orb keeps its
-/// place. Orphan entries (sessions that no longer exist) are pruned on list
-/// reads by the sessions backend, never here.
+/// place. Orphan entries (sessions that no longer exist) are cleaned when the
+/// bridge observes the session being deleted or closed (issue #292, the
+/// event-driven cleanup through [clear]) — a list read keeps every stored
+/// position, even the ones of sessions it does not see.
 class SessionOrderStore {
   SessionOrderStore({File? file}) : file = file ?? SessionOrderStore.host();
 
@@ -47,18 +49,11 @@ class SessionOrderStore {
     await _write(map);
   }
 
-  /// Remove [id]'s entry (the un-pin). A no-op when the session has no entry.
+  /// Remove [id]'s entry (the un-pin, and the observed-deletion cleanup,
+  /// issue #292). A no-op when the session has no entry.
   Future<void> clear(String id) async {
     final map = load();
     if (map.remove(id) == null) return;
-    await _write(map);
-  }
-
-  /// Drop every entry whose id is not in [keep] (the orphan pruning the list
-  /// read performs). No-op when nothing is orphaned.
-  Future<void> prune(Set<String> keep) async {
-    final map = load();
-    map.removeWhere((id, position) => !keep.contains(id));
     await _write(map);
   }
 

@@ -2041,6 +2041,175 @@ void main() {
       },
     );
 
+    test('a home-list read does not drop the pin of a session it does not see '
+        '(issue #292: no prune on the read)', () async {
+      // Seed the store with a position for ses_one; the first home-list read
+      // is one in which ses_one is not visible (its service has it, but a
+      // degraded pass / a waking orb / the boot window hides it), and the
+      // next read sees it again.
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+      service.removedFromService.add('ses_one');
+
+      final (invisibleStatus, invisibleBody) = await _get(base, 'api/sessions');
+      expect(invisibleStatus, 200);
+      final invisibleRows = (jsonDecode(invisibleBody) as List)
+          .cast<Map<String, Object?>>();
+      expect(invisibleRows.map((r) => r['id']), ['ses_two', 'ses_three']);
+
+      // The position survived the read that did not see the session: the
+      // store file still carries it (today this read prunes it away).
+      expect(
+        file.existsSync(),
+        isTrue,
+        reason: 'the invisible read must not drop the stored position',
+      );
+      expect(jsonDecode(file.readAsStringSync()), {'ses_one': 0});
+
+      // The session is visible again: the pin is back in the pinned block,
+      // first (position 0), with the pinned fact on the row.
+      service.removedFromService.remove('ses_one');
+      final (status, body) = await _get(base, 'api/sessions');
+      expect(status, 200);
+      final rows = (jsonDecode(body) as List).cast<Map<String, Object?>>();
+      expect(rows.map((r) => r['id']), ['ses_one', 'ses_two', 'ses_three']);
+      expect(rows[0]['pinned'], isTrue);
+    });
+
+    test('an orb session pinned while its orb is stopped keeps the position '
+        'across a bridge restart (issue #292: the wake window read does not '
+        'prune)', () async {
+      // Pin the session while it is visible.
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+      // The pinned session is not visible on the first read of the
+      // restarted bridge (the orb is stopped / crashed: its sessions are
+      // absent from the composite list until the startup recovery wakes it).
+      service.removedFromService.add('ses_one');
+      await server.stop();
+
+      // A fresh bridge over the same app-owned file — a new backend with a
+      // new store instance, as a restart makes.
+      final restarted = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: SessionOrderStore(file: file),
+        ),
+        events: hub,
+        sessionOrderFile: file,
+      );
+      try {
+        // The first read after the restart lands in the wake window: the
+        // pinned session is not visible on it.
+        final (status, body) = await _get(restarted.baseUri, 'api/sessions');
+        expect(status, 200);
+        final rows = (jsonDecode(body) as List).cast<Map<String, Object?>>();
+        expect(rows.map((r) => r['id']), ['ses_two', 'ses_three']);
+
+        // The position the wake-window read did not see is still there.
+        expect(
+          file.existsSync(),
+          isTrue,
+          reason: 'the wake-window read must not drop the stored position',
+        );
+        expect(jsonDecode(file.readAsStringSync()), {'ses_one': 0});
+
+        // The recovery wakes the orb: the session is visible again and the
+        // pin is back in the pinned block, first.
+        service.removedFromService.remove('ses_one');
+        final (status2, body2) = await _get(restarted.baseUri, 'api/sessions');
+        expect(status2, 200);
+        final rowsAgain = (jsonDecode(body2) as List)
+            .cast<Map<String, Object?>>();
+        expect(rowsAgain.map((r) => r['id']), [
+          'ses_one',
+          'ses_two',
+          'ses_three',
+        ]);
+        expect(rowsAgain[0]['pinned'], isTrue);
+      } finally {
+        await restarted.stop();
+      }
+    });
+
+    test('a DELETE of a pinned session cleans its order entry (the observed '
+        'deletion, issue #292)', () async {
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+
+      final (status, _) = await _delete(base, 'api/sessions/ses_one');
+      expect(status, 204);
+
+      // The observed deletion removes the entry (no orphan growth): the
+      // store is empty, so the file is gone.
+      await _until(
+        () => !file.existsSync(),
+        message: 'the order entry to be cleaned on the observed deletion',
+      );
+    });
+
+    test('a session.deleted on the stream cleans the order entry (the observed '
+        'deletion by event only, issue #292)', () async {
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+
+      // A service-side deletion the bridge only observes through the stream
+      // (durable, the aggregate id names the session): the listener clears
+      // the entry.
+      upstream.add(
+        OpencodeEvent(
+          raw: jsonEncode({
+            'id': 'evt_deleted',
+            'type': 'session.deleted',
+            'data': const <String, Object?>{},
+            'durable': {'aggregateID': 'ses_one', 'seq': 1, 'version': 1},
+          }),
+          type: 'session.deleted',
+        ),
+      );
+
+      await _until(
+        () => !file.existsSync(),
+        message: 'the order entry to be cleaned on the session.deleted event',
+      );
+    });
+
+    test('a bridge-native session.closed cleans the order entry (the observed '
+        'deletion by event only, issue #292)', () async {
+      await _patchRaw(
+        base,
+        'api/sessions/ses_one/order',
+        jsonEncode({'position': 0}),
+      );
+
+      // The bridge-native close (the data.sessionID shape, no durable): the
+      // listener clears the entry the same way.
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.sessionClosed,
+          data: {'sessionID': 'ses_one'},
+        ),
+      );
+
+      await _until(
+        () => !file.existsSync(),
+        message: 'the order entry to be cleaned on the session.closed event',
+      );
+    });
+
     test(
       'the default bridge wires the app-owned order file (issue #237)',
       () async {
