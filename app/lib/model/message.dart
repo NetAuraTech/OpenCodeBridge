@@ -91,6 +91,48 @@ class ToolCall {
     return rows.isEmpty ? null : rows;
   }
 
+  /// The file patch from a tool-state payload: the unified diff the terminal
+  /// renders, at `metadata.files[0].patch` (the same shape the events'
+  /// `session.tool.success` `data` and the history's tool `state` both
+  /// carry). `null` when the state carries no patch. The one owner of the
+  /// patch decode (issue #285), so a renamed wire field is a one-place change.
+  static String? patchFrom(Object? state) {
+    final map = state is Map<String, Object?> ? state : null;
+    if (map == null) return null;
+    final metadata = map['metadata'];
+    final files = metadata is Map<String, Object?> ? metadata['files'] : null;
+    if (files is List && files.isNotEmpty) {
+      final first = files.first;
+      if (first is Map<String, Object?> && first['patch'] is String) {
+        return first['patch'] as String;
+      }
+    }
+    return null;
+  }
+
+  /// The answers the user gave the agent's `question` tool (issue #50) from a
+  /// tool-state payload: `metadata.answers` (the same shape the events'
+  /// `session.tool.success` `data` and the history's tool `state` both carry).
+  /// `null` when the state carries no answers. Routes through [answersFrom],
+  /// so the answers decode lives in one place.
+  static List<List<String>>? answersFromState(Object? state) {
+    final map = state is Map<String, Object?> ? state : null;
+    final metadata = map?['metadata'];
+    return metadata is Map<String, Object?>
+        ? answersFrom(metadata['answers'])
+        : null;
+  }
+
+  /// The tool-state payload's patch and answers in one decode (issue #285):
+  /// the `metadata.files[0].patch` and `metadata.answers` a `session.tool`
+  /// event's `data` (the live path) and a history tool `state` (the history
+  /// path) both carry. The one place the tool-metadata shape decodes to the
+  /// model's (patch, answers), so both paths share it and a renamed wire
+  /// field is a one-place change.
+  static ({String? patch, List<List<String>>? answers}) fromToolState(
+    Object? state,
+  ) => (patch: patchFrom(state), answers: answersFromState(state));
+
   /// The "new file" unified diff of a [write] tool's content (every line
   /// added): the same shape the service's edit patches take, so the diff view
   /// renders the written file the way it renders an edit. The service doesn't

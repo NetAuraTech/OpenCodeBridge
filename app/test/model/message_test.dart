@@ -112,6 +112,112 @@ void main() {
     });
   });
 
+  // The tool-state decode (issue #285): the one place the tool-metadata
+  // payload (the shape both the events' `session.tool.success` `data` and the
+  // history's tool `state` carry) decodes to the model's (patch, answers).
+  // These pin the wire field names, so a renamed or added wire field is a
+  // one-place decode change: the value assertions here (and the client's
+  // events-side decode, which routes through the same decoders) are the
+  // choke point a rename has to break.
+  group('ToolCall tool-state decode (issue #285)', () {
+    // The tool-state payload: the unified diff under `metadata.files[0].patch`
+    // and the answers under `metadata.answers` — the shape the service's edit
+    // / `question` tools carry.
+    const state = {
+      'status': 'completed',
+      'metadata': {
+        'files': [
+          {'patch': '--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n'},
+        ],
+        'answers': [
+          ['Yes'],
+          ['Staging'],
+        ],
+      },
+    };
+
+    test('patchFrom reads metadata.files[0].patch', () {
+      expect(
+        ToolCall.patchFrom(state),
+        '--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n',
+      );
+    });
+
+    test('patchFrom is null when the state carries no patch', () {
+      expect(ToolCall.patchFrom(const {}), isNull);
+      expect(ToolCall.patchFrom(null), isNull);
+      expect(ToolCall.patchFrom('not a state'), isNull);
+      // No `metadata`, an empty `files`, or a non-String patch all read null.
+      expect(ToolCall.patchFrom(const {'metadata': {}}), isNull);
+      expect(
+        ToolCall.patchFrom(const {
+          'metadata': {'files': []},
+        }),
+        isNull,
+      );
+      expect(
+        ToolCall.patchFrom(const {
+          'metadata': {
+            'files': [
+              {'patch': 42},
+            ],
+          },
+        }),
+        isNull,
+      );
+    });
+
+    test('answersFromState reads metadata.answers', () {
+      expect(ToolCall.answersFromState(state), [
+        ['Yes'],
+        ['Staging'],
+      ]);
+    });
+
+    test('answersFromState is null when the state carries no answers', () {
+      expect(ToolCall.answersFromState(const {}), isNull);
+      expect(ToolCall.answersFromState(null), isNull);
+      expect(ToolCall.answersFromState(const {'metadata': {}}), isNull);
+    });
+
+    test('fromToolState decodes both facts in one place', () {
+      final facts = ToolCall.fromToolState(state);
+      expect(
+        facts.patch,
+        '--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n',
+      );
+      expect(facts.answers, [
+        ['Yes'],
+        ['Staging'],
+      ]);
+    });
+
+    test('fromToolState is tolerant of a state with only one fact', () {
+      // A state with a patch but no answers.
+      final patchOnly = ToolCall.fromToolState(const {
+        'metadata': {
+          'files': [
+            {'patch': 'p'},
+          ],
+        },
+      });
+      expect(patchOnly.patch, 'p');
+      expect(patchOnly.answers, isNull);
+      // A state with answers but no patch.
+      final answersOnly = ToolCall.fromToolState(const {
+        'metadata': {
+          'answers': [
+            ['A'],
+          ],
+        },
+      });
+      expect(answersOnly.patch, isNull);
+      expect(answersOnly.answers, [
+        ['A'],
+      ]);
+    });
+  });
+
   group('ToolCall.writePatch', () {
     const header =
         'Index: /x/a.txt\n'
