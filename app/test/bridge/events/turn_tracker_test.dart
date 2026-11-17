@@ -139,6 +139,40 @@ void main() {
     expect(tracker.isRunning('ses_1'), isFalse);
   });
 
+  test(
+    'a session id that arrives only as the form-nested id is resolved by the '
+    'envelope (issue #256, S2c)',
+    () {
+      // The session id arrives ONLY as `data.form.sessionID`: no durable seq,
+      // no top-level `data.sessionID`. The shared envelope's form-nested
+      // branch must resolve it, so the tracker attributes the turn to that
+      // session — the decode did not drop the frame. (A `session.execution.*`
+      // carrying only a form-nested id is not a shape the live stream emits;
+      // this exists to pin the form-nested branch through the consumer seam.)
+      tracker.write(
+        jsonEncode({
+          'id': 'evt_form_started',
+          'type': 'session.execution.started',
+          'data': {
+            'form': {'sessionID': 'ses_form'},
+          },
+        }),
+      );
+      expect(tracker.isRunning('ses_form'), isTrue);
+      // A terminal on the same shape closes that same session's turn.
+      tracker.write(
+        jsonEncode({
+          'id': 'evt_form_done',
+          'type': 'session.execution.succeeded',
+          'data': {
+            'form': {'sessionID': 'ses_form'},
+          },
+        }),
+      );
+      expect(tracker.isRunning('ses_form'), isFalse);
+    },
+  );
+
   test('attached to the hub it tracks off the fanned-out stream', () async {
     final upstream = _FakeUpstream();
     final hub = EventHub(service: upstream);

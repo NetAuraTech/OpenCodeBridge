@@ -1,7 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 
+import 'bridge_event.dart';
+import 'event_frame.dart';
 import 'event_hub.dart';
+import 'opencode_event_types.dart';
 
 /// The bridge's per-session turn state, re-derived from the unified event
 /// stream (issue #164): which sessions are running a turn right now, and —
@@ -17,6 +19,11 @@ import 'event_hub.dart';
 /// `session.execution.started` and closes on any terminal
 /// `session.execution.*` — or on the bridge's own `session.turn.cancelled`
 /// (so a cancel reads the session idle again, with no feedback loop).
+///
+/// The session identity is read from the shared event envelope's [BridgeEvent.
+/// sessionId] (the one owner of the session-identity rule, issue #254): the
+/// tracker decodes each frame with [parseEventFrame] and never re-derives the
+/// session id by hand (issue #256, S2c).
 ///
 /// The session-lifecycle module ([SessionLifecycle], issue #251) reads this
 /// when it carries out a stop: a running turn carries the in-flight message
@@ -38,20 +45,20 @@ class TurnTracker implements EventConnection {
 
   @override
   Future<void> write(String rawPayload) async {
-    final event = _parse(rawPayload);
+    final event = parseEventFrame(rawPayload);
     if (event == null) return;
-    final sessionID = event.sessionID;
+    final sessionID = event.sessionId;
     if (sessionID == null) return;
     final turn = _turns.putIfAbsent(sessionID, _Turn.new);
     switch (event.type) {
-      case 'session.execution.started':
+      case OpencodeEventType.sessionExecutionStarted:
         // A fresh turn: running, no message named until the stream names one.
         turn.running = true;
         turn.messageID = null;
-      case 'session.execution.succeeded':
-      case 'session.execution.failed':
-      case 'session.execution.interrupted':
-      case 'session.turn.cancelled':
+      case OpencodeEventType.sessionExecutionSucceeded:
+      case OpencodeEventType.sessionExecutionFailed:
+      case OpencodeEventType.sessionExecutionInterrupted:
+      case BridgeEventType.turnCancelled:
         // The turn ended (a terminal outcome, or our own cancel event): the
         // in-flight message is no longer in flight.
         turn.running = false;
@@ -71,44 +78,9 @@ class TurnTracker implements EventConnection {
   Future<void> close() async {
     if (!_done.isCompleted) _done.complete();
   }
-
-  _Event? _parse(String rawPayload) {
-    Object? decoded;
-    try {
-      decoded = jsonDecode(rawPayload);
-    } catch (_) {
-      return null; // A malformed payload is not an event.
-    }
-    if (decoded is! Map<String, Object?>) return null;
-    final type = decoded['type'];
-    if (type is! String) return null;
-    final data = decoded['data'] is Map<String, Object?>
-        ? decoded['data'] as Map<String, Object?>
-        : const <String, Object?>{};
-    // The session id: the durable aggregate id when the event carries one,
-    // otherwise the `data.sessionID` the bridge-native events carry.
-    String? sessionID;
-    final durable = decoded['durable'];
-    if (durable is Map<String, Object?>) {
-      final id = durable['aggregateID'];
-      if (id is String) sessionID = id;
-    }
-    if (sessionID == null && data['sessionID'] is String) {
-      sessionID = data['sessionID'] as String;
-    }
-    return _Event(type: type, data: data, sessionID: sessionID);
-  }
 }
 
 class _Turn {
   var running = false;
   String? messageID;
-}
-
-/// One event of the hub's stream, decoded to what the tracker needs.
-class _Event {
-  const _Event({required this.type, required this.data, this.sessionID});
-  final String type;
-  final Map<String, Object?> data;
-  final String? sessionID;
 }
