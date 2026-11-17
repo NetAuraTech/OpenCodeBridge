@@ -24,7 +24,8 @@ class OrbTask {
     this.summary = '',
     this.pr,
     this.completed,
-    this.notified = false,
+    this.deliveryOwed = false,
+    this.fallbackSent = false,
     this.textHash,
     this.dispatchId,
   });
@@ -100,14 +101,41 @@ class OrbTask {
   /// Epoch millis of the completion, or `null` while running.
   int? completed;
 
-  /// The persisted "notified" fact (issue #212): whether a settled task's
-  /// completion has been delivered to its caller in-app. `false` while a
-  /// settled task still owes its completion injection (the caller was
-  /// unreachable when it settled — the bridge retries on the next chance the
-  /// caller is reachable, and the push went out once as the out-of-band
-  /// fallback), `true` once the injection has landed. A notified task is
-  /// never re-injected. Irrelevant while the task is running.
-  bool notified;
+  /// The persisted **"delivery owed / done"** fact (issue #212, #260,
+  /// acceptance #1): whether a settled task's completion is still owed to its
+  /// caller in-app. `true` only for a settled task that has a caller and whose
+  /// in-app injection has not yet landed (the caller was unreachable when it
+  /// settled — the bridge retries the injection on the next chance it is
+  /// reachable, and the push went out once as the out-of-band fallback);
+  /// `false` while running, once the injection has landed, or for a task with
+  /// no caller (nothing to deliver). The settle path's delivery policy writes
+  /// this from its resulting state, and a restored plan reads it — a
+  /// restarted bridge resumes the retry from here and never re-sends the
+  /// fallback.
+  bool deliveryOwed;
+
+  /// The persisted **"fallback sent"** fact (issue #212, #260, acceptance #1):
+  /// whether the once-sent push fallback has already fired. `true` means the
+  /// push went out and must **never** go out again — even after a restart.
+  /// This is the push-exactly-once guarantee made into an explicit, readable
+  /// fact on the record, not a side effect of the retry step happening not to
+  /// call the push (issue #260).
+  bool fallbackSent;
+
+  /// Whether the completion has been delivered in-app (the old "notified"
+  /// reading): a settled task's [deliveryOwed] is `false`. Derived — it is not
+  /// persisted; the persisted truth is the explicit [deliveryOwed] /
+  /// [fallbackSent] facts above.
+  bool get notified => !deliveryOwed;
+
+  /// Adopts the delivery policy's resulting state (issue #260): writes this
+  /// record's explicit delivery facts from the state the plan reports. The
+  /// record is the truth — the settle path persists these after each delivery
+  /// step, and a restarted bridge restores the plan from them.
+  void applyDeliveryState({required bool owed, required bool fallbackSent}) {
+    deliveryOwed = owed;
+    this.fallbackSent = fallbackSent;
+  }
 
   /// Whether the task has reached its terminal status.
   bool get isDone => completed != null;
@@ -136,14 +164,21 @@ class OrbTask {
     'results': results,
     if (pr != null) 'pr': pr,
     if (completed != null) 'completed': completed,
-    // Always written (issue #212): a settled task that still owes its
-    // completion injection must reload as not-yet-notified, so the retry
-    // resumes — only-when-true would be indistinguishable from a delivered one.
-    'notified': notified,
+    // Always written (issue #212, #260): the delivery's explicit facts. A
+    // settled task that still owes its completion injection must reload as
+    // still-owed, so the retry resumes — only-when-true would be
+    // indistinguishable from a delivered one. And the fallback-sent fact is
+    // what makes "push exactly once" survive a restart (a settled, still-owed
+    // task whose push already went out must not be re-pushed).
+    'deliveryOwed': deliveryOwed,
+    'fallbackSent': fallbackSent,
   };
 
   factory OrbTask.fromJson(Object? json) {
     final map = json is Map<String, Object?> ? json : const {};
+    final caller = map['caller'] as String?;
+    final hasCaller = caller != null && caller.isNotEmpty;
+    final settled = map['completed'] != null;
     return OrbTask(
       id: map['id'] as String? ?? '',
       orb: map['orb'] as String? ?? '',
@@ -151,7 +186,7 @@ class OrbTask {
       orbName: map['orbName'] as String? ?? '',
       branch: map['branch'] as String? ?? '',
       session: map['session'] as String? ?? '',
-      callerSession: map['caller'] as String?,
+      callerSession: caller,
       callerDirectory: map['callerDirectory'] as String?,
       callerOrb: map['callerOrb'] as String?,
       createdOrb: map['createdOrb'] == true,
@@ -163,11 +198,20 @@ class OrbTask {
       summary: map['summary'] as String? ?? '',
       pr: map['pr'] as String?,
       completed: (map['completed'] as num?)?.toInt(),
-      // A record written before the fact existed (issue #212): a settled one
-      // was already delivered (or dropped) by the old one-shot injection —
-      // treat it as notified so a reload never re-injects it. A running one
-      // reads false (harmless: it settles through the new path).
-      notified: map['notified'] as bool? ?? (map['completed'] != null),
+      // The explicit delivery facts (issue #260); a new record carries them.
+      // A record written before they existed carries only the old `notified`
+      // fact (issue #212) — or neither (a pre-#212 one): a settled
+      // not-yet-notified one already pushed once at its settle, so it reads
+      // back still-owed (the retry re-injects) and fallback-sent (never
+      // re-pushed); a notified one (and a pre-#212 settled one, already
+      // delivered or dropped) reads not-owed. A running one reads not-owed
+      // (harmless: it settles through the new path).
+      deliveryOwed:
+          map['deliveryOwed'] as bool? ??
+          (settled && !((map['notified'] as bool?) ?? settled) && hasCaller),
+      fallbackSent:
+          map['fallbackSent'] as bool? ??
+          (settled && !((map['notified'] as bool?) ?? settled) && hasCaller),
     );
   }
 }

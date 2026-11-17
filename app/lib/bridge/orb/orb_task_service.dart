@@ -10,6 +10,7 @@ import '../../model/orb.dart';
 import '../../model/session_detail.dart';
 import '../../notify/deep_link.dart';
 import '../../notify/notify_kind.dart';
+import '../notify/delivery_policy.dart';
 import '../notify/notify_service.dart';
 import '../sessions/backend.dart';
 import '../sessions/opencode_service.dart';
@@ -78,13 +79,16 @@ class OrbPermissionError implements Exception {
 ///   (spec §7.2: the bridge aggregates the orb's opencode session, so the
 ///   session detail routes to the orb through the composite). At completion
 ///   the record takes the status, the agent's summary, the branch, and the
-///   PR URL if the branch has one, is persisted, and the completion message
-///   is **injected into the calling session** (spec §8.3) — and, issue #212,
-///   the delivery is durable: when the caller is unreachable the task is
-///   persisted not-yet-notified and re-injected on the next chance the caller
-///   is reachable (until it lands, a notified task never re-injects), while a
-///   push through [notify] (the FCM path, issue #24) goes out once as the
-///   out-of-band fallback so the user is told even when the app was closed.
+///   PR URL if the branch has one, is persisted, and the completion delivery
+///   goes out **through the delivery-policy module** (issue #259's
+///   [DeliveryPlan], #260): the in-app injection is the primary channel,
+///   retried until it lands (a landed task never re-injects), and the push
+///   (the FCM path, issue #24) is the once-sent fallback, armed on the
+///   primary's first failure and sent at most once for the delivery's whole
+///   life (issue #212, #244). The task record owns the delivery's explicit
+///   **owed** / **fallback-sent** facts ([OrbTask.deliveryOwed],
+///   [OrbTask.fallbackSent]) — persisted, so a restart resumes the retry
+///   without re-sending the fallback — and the plan is rebuilt from them.
 /// - **The spawn tree** ([canControl], spec §8.4): the creating-task records
 ///   are the tree's edges, keyed by session id; every agent-facing orb right
 ///   is scoped to the caller's tree, the human is unrestricted.
@@ -100,7 +104,7 @@ class OrbTaskService {
     this.waitGrace = defaultWaitGrace,
     this.settleIdleWindow = defaultSettleIdleWindow,
     this.settleMissingWindow = defaultSettleMissingWindow,
-    this.notify,
+    this.notifyProvider = _noNotify,
     Random? random,
   }) : _random = random ?? Random(),
        // The task service does not re-derive the composite's routing fact:
@@ -134,13 +138,20 @@ class OrbTaskService {
   /// The tasks file (`~/.config/opencodebridge/tasks.json`).
   final File file;
 
-  /// The push fallback's [NotifyService] (issue #212): the out-of-band push a
-  /// settled task sends when its caller cannot be reached in-app. Read at push
-  /// time (not captured at construction), so the bridge keeps it in sync —
-  /// `null` when push is not configured (the in-app retry stands alone).
-  /// Not `final`: the bridge's `reloadNotify` (the Settings service-account
-  /// save) swaps the live [NotifyService] under a running bridge.
-  NotifyService? notify;
+  /// The push fallback's live [NotifyService], read at push time (issue #212,
+  /// #260): the out-of-band push a settled task sends when its caller cannot be
+  /// reached in-app. The bridge injects this [NotifyService? Function()]
+  /// closure at construction, so the task service holds **no mutable notify
+  /// field** for the bridge to re-point on a reload (issue #260, acceptance
+  /// #3). The closure reads the bridge's live notify at push time, so a settle
+  /// after a `reloadNotify` (the Settings service-account save) pushes through
+  /// the current sender; a closure that returns `null` (push not configured,
+  /// the default [_noNotify]) leaves the in-app retry to stand alone.
+  final NotifyService? Function() notifyProvider;
+
+  /// The default [notifyProvider]: push is not configured, so the closure
+  /// returns `null` and the in-app retry owns the delivery alone.
+  static NotifyService? _noNotify() => null;
 
   /// The completion poll pace; also the test seam (tests drive completion
   /// with a scripted session detail rather than wall time).
@@ -201,6 +212,24 @@ class OrbTaskService {
   /// Per-project spawn serialization: two concurrent spawns of one project
   /// must not both decide "no orb — create".
   final Map<String, Future<void>> _spawningByProject = {};
+
+  /// The delivery plans of the settled tasks, keyed by task id (issue #260):
+  /// one [DeliveryPlan] per settled task, the owner of its **owed** /
+  /// **once-sent** decisions. Built at settle (a fresh plan), restored after a
+  /// restart from the record's persisted facts ([OrbTask.deliveryOwed] /
+  /// [OrbTask.fallbackSent]) — the plan itself is never serialized; the record
+  /// owns the durable state, and [planFor] rebuilds the plan from it. A
+  /// restored plan never re-sends the fallback (the policy's **once-sent**
+  /// decision, issue #259).
+  final Map<String, DeliveryPlan> _plans = {};
+
+  /// The task ids whose delivery step is in flight (issue #260): the settle's
+  /// first delivery and the watcher's retry share the one plan per task, so
+  /// exactly one of them may drive a task's delivery at a time — otherwise two
+  /// interleaved [DeliveryPlan.attempt] passes could both reach the once-sent
+  /// fallback and push twice. The watcher's retry skips a task another pass is
+  /// already delivering; the next pass retries it if it is still owed.
+  final Set<String> _delivering = {};
 
   bool _watching = false;
   bool _closed = false;
@@ -831,11 +860,18 @@ class OrbTaskService {
   /// Re-watch the persisted tasks the bridge (or the service) still owes
   /// work on (issue #212): the ones still running (their completion is not
   /// yet detected) and the settled ones whose completion has not been
-  /// delivered to the caller (notified false — the injection was attempted
-  /// and failed, the push went out once, and the in-app retry is owed until
-  /// the caller is reachable again). Their orb sessions live on, and the
-  /// injection target a possibly-dead caller (dropped then, spec §8.3).
+  /// delivered to the caller (the record's **owed** fact — the injection was
+  /// attempted and failed, the push went out once, and the in-app retry is
+  /// owed until the caller is reachable again). Their orb sessions live on,
+  /// and the injection target a possibly-dead caller (dropped then, spec
+  /// §8.3). The settled tasks' delivery plans are also restored here, from
+  /// the records' persisted facts, so the retry resumes and the once-sent
+  /// fallback is never re-sent (issue #260, the policy's **durable**
+  /// decision).
   Future<void> _resume() async {
+    for (final task in _tasks) {
+      if (task.isDone) planFor(task);
+    }
     if (_tasks.any(_owesWork)) _startWatching();
   }
 
@@ -848,14 +884,12 @@ class OrbTaskService {
   /// Stops the completion watcher (the bridge's [BridgeServer.stop]).
   void close() => _closed = true;
 
-  /// Whether the watcher still owes [task] work (issue #212): it is running
-  /// (its completion is not yet detected), or it settled while its caller was
-  /// unreachable and still owes the completion injection (notified false).
-  bool _owesWork(OrbTask task) =>
-      !task.isDone ||
-      (!task.notified &&
-          task.callerSession != null &&
-          task.callerSession!.isNotEmpty);
+  /// Whether the watcher still owes [task] work (issue #212, #260): it is
+  /// running (its completion is not yet detected), or it settled while its
+  /// caller was unreachable and still owes the completion delivery — the
+  /// record's explicit **owed** fact ([OrbTask.deliveryOwed], true only for a
+  /// settled task with a reachable-in-principle caller that has not landed).
+  bool _owesWork(OrbTask task) => !task.isDone || task.deliveryOwed;
 
   /// The tasks the watcher still owes, for the loop's stop condition.
   List<OrbTask> _owed() => _tasks.where(_owesWork).toList();
@@ -864,9 +898,10 @@ class OrbTaskService {
     while (!_closed && _owed().isNotEmpty) {
       for (final task in List.of(_tasks)) {
         if (task.isDone) {
-          // Settled but not yet notified (issue #212): the caller was
+          // Settled but still owed (issue #212, #260): the caller was
           // unreachable when it settled — retry the in-app injection on this
-          // pass (the push already went out once at the settle; never re-sent).
+          // pass through the delivery plan (the once-sent fallback is never
+          // re-sent; the policy owns that, not the retry step).
           if (_owesWork(task)) await _retryDelivery(task);
         } else {
           try {
@@ -1053,19 +1088,22 @@ class OrbTaskService {
     };
   }
 
-  /// The single settle path (issue #169): the status, the summary (or the
-  /// settle's own reason when there is none to report), the PR, persistence,
-  /// and the completion delivery. Guarded: a concurrent pass may have
-  /// settled the task across the event loop.
+  /// The single settle path (issue #169, decomposed by issue #260): the
+  /// terminal fields, a persist, **one named delivery step**, a persist, and
+  /// the re-arm. Guarded: a concurrent pass may have settled the task across
+  /// the event loop.
   ///
   /// The settled state is persisted **before** the delivery (issue #212): a
-  /// process that dies mid-delivery leaves a settled, not-yet-notified record
-  /// that a restart resumes as a retry (never a re-settle — so the push, sent
-  /// once inside the delivery, can never be re-sent), not a re-settle.
+  /// process that dies mid-delivery leaves a settled, still-owed record that
+  /// a restart resumes as a retry (never a re-settle — so the push, sent once
+  /// by the policy inside the delivery, can never be re-sent), not a
+  /// re-settle.
   Future<void> _settle(OrbTask target, String status, String summary) async {
     _idleSince.remove(target.id);
     _missingSince.remove(target.id);
     if (target.isDone) return;
+    // (a) The terminal fields: the status, the summary (or the settle's own
+    // reason when there is none to report), and the PR.
     target.status = status;
     target.summary = summary;
     target.pr = await _prUrl(target);
@@ -1075,13 +1113,31 @@ class OrbTaskService {
     // once — so re-guard on the task still being open.
     if (target.isDone) return;
     target.completed = DateTime.now().millisecondsSinceEpoch;
+    // (b) Persist the settled state **before** the delivery (issue #212): the
+    // delivery is freshly owed (for a task with a caller), so a process that
+    // dies before the delivery resumes the retry on restart (never a
+    // re-settle) — the same "persist not-yet-notified before delivery" the
+    // original relied on. A no-caller task is not owed (nothing to deliver).
+    final caller = target.callerSession;
+    target.applyDeliveryState(
+      owed: caller != null && caller.isNotEmpty,
+      fallbackSent: false,
+    );
     _persist();
-    target.notified = await _deliverCompletion(target);
+    // (c) The named delivery step (issue #260): the in-app injection as the
+    // primary channel and the push as the once-sent fallback, decided by the
+    // delivery-policy module. The record's explicit delivery facts are the
+    // plan's resulting state — the record is the truth, not a return value
+    // of a delivery call.
+    await _deliverCompletion(target);
+    // (d) Persist the delivery facts (owed / fallback-sent): a restart reads
+    // them back and resumes the retry without re-sending the fallback.
     _persist();
-    // The injection did not land: make sure the watcher is alive to retry it
-    // on the next chance the caller is reachable (issue #212). A no-op when
-    // the watcher already runs.
-    if (!target.notified) _startWatching();
+    // (e) Re-arm: the delivery is still owed (the record's explicit fact) —
+    // make sure the watcher is alive to retry the injection on the next
+    // chance the caller is reachable (issue #212). A no-op when the watcher
+    // already runs.
+    if (target.deliveryOwed) _startWatching();
   }
 
   /// The branch's PR URL (the return channel, spec §3.2), read through the
@@ -1099,41 +1155,125 @@ class OrbTaskService {
     return null;
   }
 
-  /// The completion delivery to the caller (issue #212): the in-app
-  /// injection is primary; when the caller cannot be reached, the push is the
-  /// guaranteed out-of-band fallback — dispatched **here, once**, on the
-  /// settle's first failure (the watcher's later retries never re-push).
-  /// Returns the task's [OrbTask.notified] fact: `true` when the completion
-  /// was delivered in-app (or there is no caller to deliver to), `false`
-  /// when it is still owed (not-yet-notified).
-  Future<bool> _deliverCompletion(OrbTask target) async {
-    final caller = target.callerSession;
-    if (caller == null || caller.isEmpty) return true; // nothing to deliver
-    final landed = await _injectInto(caller, target);
-    if (!landed) {
-      await _pushCompletion(target);
-    }
-    return landed;
+  /// The delivery channels of a settle (issue #260): the in-app injection as
+  /// the **primary** (retried until it lands) and the push as the **fallback**
+  /// (sent at most once), in the policy's order (the primary first).
+  List<DeliveryChannel> _deliveryChannels() => [
+    const DeliveryChannel(ChannelRole.primary, name: 'in-app'),
+    const DeliveryChannel(ChannelRole.fallback, name: 'push'),
+  ];
+
+  /// The plan a freshly-settled task is delivered through (issue #260): a
+  /// [DeliveryPlan] built on the settle's first delivery step, when the
+  /// delivery is newly owed. The same channels, the same send, and durable —
+  /// the plan is never itself serialized; the record owns the durable state
+  /// (its [OrbTask.deliveryOwed] / [OrbTask.fallbackSent] facts), and
+  /// [planFor] rebuilds a restarted bridge's plan from them.
+  DeliveryPlan _newPlan(OrbTask target) {
+    final plan = DeliveryPlan(
+      channels: _deliveryChannels(),
+      send: (channel) => _sendOn(channel, target),
+      durable: true,
+    );
+    _plans[target.id] = plan;
+    return plan;
   }
 
-  /// The watcher's retry of a settled task's completion injection (issue
-  /// #212): the caller became reachable (it woke, the host service came up,
-  /// the app reopened) — re-inject. No re-push: the push went out once, on
-  /// the settle's first failure. A notified task is never re-injected.
+  /// The delivery plan of [target] (issue #260): the owner of its **owed** /
+  /// **once-sent** decisions, one per settled task. Returns the in-memory plan
+  /// when one exists (the settle built it), and otherwise **restores** one
+  /// from the record's persisted facts ([OrbTask.deliveryOwed] /
+  /// [OrbTask.fallbackSent]) — the restart path, where a restored plan resumes
+  /// the retry and never re-sends the once-sent fallback (the policy's
+  /// **durable** decision). The record owns the durable state; the plan is
+  /// rebuilt from it.
+  DeliveryPlan planFor(OrbTask target) {
+    final existing = _plans[target.id];
+    if (existing != null) return existing;
+    final plan = DeliveryPlan.restore(
+      channels: _deliveryChannels(),
+      send: (channel) => _sendOn(channel, target),
+      durable: true,
+      state: DeliveryState(
+        owed: target.deliveryOwed,
+        fallbackSent: target.fallbackSent,
+      ),
+    );
+    _plans[target.id] = plan;
+    return plan;
+  }
+
+  /// The one named delivery step (issue #260, acceptance #2): build the
+  /// settled task's plan fresh, then drive the task's delivery while it is the
+  /// only pass allowed to (the settle holds the lock; the watcher's retry skips
+  /// a task the settle is still delivering — see [_delivering]).
+  Future<void> _deliverCompletion(OrbTask target) async {
+    final plan = _newPlan(target);
+    _delivering.add(target.id);
+    try {
+      await plan.attempt();
+    } finally {
+      _delivering.remove(target.id);
+    }
+    target.applyDeliveryState(
+      owed: plan.state.owed,
+      fallbackSent: plan.state.fallbackSent,
+    );
+  }
+
+  /// The watcher's retry of a settled task's delivery (issue #212, #260): the
+  /// caller became reachable (it woke, the host service came up, the app
+  /// reopened) — attempt the plan again. It goes **through the same plan** the
+  /// settle used (or the restored one after a restart), so "push exactly once"
+  /// is the policy's **once-sent** fact (the restored plan never re-sends the
+  /// fallback), not the retry step happening not to call the push. A task
+  /// another pass (the settle) is still delivering is skipped here — its
+  /// delivery is in flight, and the next pass retries it if it is still owed.
   Future<void> _retryDelivery(OrbTask target) async {
-    if (!target.isDone || target.notified) return;
+    if (_delivering.contains(target.id)) return; // the settle is delivering it
+    final plan = planFor(target);
+    if (!plan.isOwed) return; // nothing owed (a landed delivery): no re-send
+    _delivering.add(target.id);
+    try {
+      await plan.attempt();
+    } finally {
+      _delivering.remove(target.id);
+    }
+    target.applyDeliveryState(
+      owed: plan.state.owed,
+      fallbackSent: plan.state.fallbackSent,
+    );
+    if (!plan.isOwed) _persist(); // landed: persist the now-not-owed fact
+  }
+
+  /// The [DeliveryPlan.send] this service hands its plan (issue #260): the
+  /// producer's sender, mapping each channel to its real send and the send's
+  /// real outcome to the policy's [SendOutcome]. The policy never sees a
+  /// throw (a throwing send is a [SendOutcome.failed] to it); the producer's
+  /// own error handling is below. The primary is the in-app injection, the
+  /// fallback the out-of-band push.
+  Future<SendOutcome> _sendOn(DeliveryChannel channel, OrbTask target) async {
     final caller = target.callerSession;
-    if (caller == null || caller.isEmpty) {
-      target.notified = true; // nothing to deliver
-      _persist();
-      return;
+    if (channel.role == ChannelRole.primary) {
+      // The in-app injection is owed on; it lands only when the caller can be
+      // reached. A settled task always has a caller (a no-caller task is not
+      // owed, so its plan never sends the primary).
+      if (caller == null || caller.isEmpty) return SendOutcome.landed;
+      final landed = await _injectInto(caller, target);
+      return landed ? SendOutcome.landed : SendOutcome.failed;
     }
-    final landed = await _injectInto(caller, target);
-    if (landed) {
-      target.notified = true;
-      _persist();
-    }
-    // else: still not-yet-notified — the next pass retries.
+    // The out-of-band push fallback: dispatched exactly once (the policy's
+    // once-sent decision, "never re-sent — not even re-sent after its own
+    // failure"); a no-caller or unconfigured push is a no-op the policy
+    // records as sent (the delivery is owed on the injection, not the push).
+    // The fallback-sent fact is persisted the moment the fallback send is
+    // made (issue #212): a crash between the send and the settle's own
+    // persist can then never re-arm a second push on a restart — the durable
+    // once-sent fact on the record, not a retry step that happens not to push.
+    final dispatched = await _pushCompletion(target);
+    target.fallbackSent = true; // the policy marks it sent after any send
+    _persist();
+    return dispatched ? SendOutcome.landed : SendOutcome.failed;
   }
 
   /// The in-app completion injection (spec §8.3): the message into the
@@ -1159,12 +1299,15 @@ class OrbTaskService {
   /// `orb/<id>`" (the PR link once it exists) through the existing FCM path
   /// (issue #24), deep-linked to the calling session — the same place the
   /// in-app injection targets, where the completion message lands when the
-  /// app reopens. A no-op when push is not configured ([notify] null): the
-  /// in-app retry still owns the delivery then.
-  Future<void> _pushCompletion(OrbTask target) async {
-    final service = notify;
+  /// app reopens. Returns whether a push was actually dispatched, so the
+  /// delivery plan maps the fallback send to a real outcome (issue #260):
+  /// `false` when push is not configured (the closure's [notifyProvider]
+  /// returns `null` — the in-app retry still owns the delivery then) or the
+  /// dispatch throws (a delivery failure never fails the settle).
+  Future<bool> _pushCompletion(OrbTask target) async {
+    final service = notifyProvider();
     final caller = target.callerSession;
-    if (service == null || caller == null || caller.isEmpty) return;
+    if (service == null || caller == null || caller.isEmpty) return false;
     final pr = target.pr;
     final body = pr == null
         ? 'work on branch ${target.branch}'
@@ -1176,9 +1319,11 @@ class OrbTaskService {
         body: body,
         link: DeepLink.sessionUri(caller).toString(),
       );
+      return true;
     } catch (_) {
       // Push is best-effort out-of-band: a delivery failure never fails the
       // settle — the in-app retry keeps owning the delivery.
+      return false;
     }
   }
 

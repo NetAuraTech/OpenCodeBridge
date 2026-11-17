@@ -291,7 +291,10 @@ class BridgeServer {
   /// Firebase service account (the setup step not done) or no shared
   /// opencode service, in which case the device-token endpoint reports
   /// `notify_unconfigured`. Replaced wholesale by [reloadNotify] (the
-  /// service-account file changed under a running bridge).
+  /// service-account file changed under a running bridge). The task service's
+  /// push fallback reads this live field at push time (issue #260), so a
+  /// settle after a [reloadNotify] pushes through the current sender — no
+  /// mutable field on the task service to re-point.
   NotifyService? _notify;
 
   /// The event-hub downstream [reloadNotify] built with [_notify] (the hub
@@ -551,29 +554,6 @@ class BridgeServer {
         senderFactory: notifySenderFactory,
       );
     }
-    // The spawn surface's task service (issue #99): the host default wires
-    // the orb lifecycle service, the composite sessions backend, and —
-    // built first, above — the push service the completion fallback pushes
-    // through (issue #212): the task service starts watching the moment it
-    // is built, so the fallback must be wired before a persisted task can
-    // settle. Both the orbs and the backend are required, and both are only
-    // built by the bridge itself (a test faking either one injects [tasks],
-    // or the spawn endpoints answer 503).
-    final taskService =
-        tasks ??
-        (orbService != null &&
-                backend != null &&
-                orbs == null &&
-                sessions == null
-            ? OrbTaskService(
-                orbs: orbService,
-                sessions: backend,
-                file: File(
-                  '${homeDirectory()}/.config/opencodebridge/tasks.json',
-                ),
-                notify: notifyService,
-              )
-            : null);
     final tunnelSupervisor = tunnel;
     final tunnelSetupService =
         tunnelSetup ??
@@ -593,7 +573,7 @@ class BridgeServer {
       dockerBackend,
       orbBuilder,
       orbService,
-      taskService,
+      null, // The task service; assigned below (issue #260).
       tunnelSupervisor,
       tunnelSetupService,
       dockerLogKeepAlive,
@@ -611,6 +591,33 @@ class BridgeServer {
     // instance (its handler closures capture the bridge's components), so it
     // runs after the bridge exists and before the port is listened on.
     bridge._routes = bridge._buildRoutes();
+    // The spawn surface's task service (issue #99): the host default wires the
+    // orb lifecycle service, the composite sessions backend, and — the
+    // bridge's **live** notify, read at push time — the push service the
+    // completion fallback pushes through (issue #212, #260). The task service
+    // holds no mutable notify field (issue #260, acceptance #3): its fallback
+    // closure reads the bridge's live [_notify], so a settle after a
+    // [reloadNotify] (the Settings service-account save) pushes through the
+    // current sender. It is built after the bridge (the closure names it) and
+    // before the server listens, so the fallback is wired before a persisted
+    // task can settle (the route entries read [_tasks] live per request, so
+    // the table built above picks it up). Both the orbs and the backend are
+    // required, and both are only built by the bridge itself (a test faking
+    // either one injects [tasks], or the spawn endpoints answer 503).
+    OrbTaskService? taskService = tasks;
+    if (taskService == null &&
+        orbService != null &&
+        backend != null &&
+        orbs == null &&
+        sessions == null) {
+      taskService = OrbTaskService(
+        orbs: orbService,
+        sessions: backend,
+        file: File('${homeDirectory()}/.config/opencodebridge/tasks.json'),
+        notifyProvider: () => bridge._notify,
+      );
+    }
+    bridge._tasks = taskService;
     speed?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
     // the single actor of orb automation — bridge down = no automation
@@ -761,10 +768,10 @@ class BridgeServer {
     );
     _notify = service;
     _pushDispatcher = newDispatcher;
-    // Keep the task service's push fallback (issue #212) pointed at the live
-    // service: it reads [notify] at push time, and a completion settling after
-    // this reload must push through the new sender, not the closed one.
-    _tasks?.notify = service;
+    // The task service's push fallback (issue #212, #260) reads [_notify] at
+    // push time through its injected closure, so a completion settling after
+    // this reload pushes through the new sender automatically — the bridge
+    // no longer re-points a mutable field on the task service.
   }
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
@@ -829,9 +836,11 @@ class BridgeServer {
               file: File(
                 '${homeDirectory()}/.config/opencodebridge/tasks.json',
               ),
-              // The push fallback (issue #212): the live notify service as of
-              // the re-arm; [reloadNotify] keeps the running service in sync.
-              notify: _notify,
+              // The push fallback (issue #212, #260): the bridge's live notify
+              // as of push time (the closure reads [_notify]), so a settle
+              // after a [reloadNotify] pushes through the current sender —
+              // the task service holds no mutable notify field to re-point.
+              notifyProvider: () => _notify,
             );
           },
           onError: (Object _) {
