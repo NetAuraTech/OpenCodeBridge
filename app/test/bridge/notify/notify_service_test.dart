@@ -26,7 +26,7 @@ void main() {
     expect(service.enabledKinds('tok_a'), isEmpty);
   });
 
-  test('publish reaches only the devices that have the kind enabled', () async {
+  test('send reaches only the devices that have the kind enabled', () async {
     service.registerDevice('tok_a', {NotifyKind.turnEnded});
     service.registerDevice('tok_b', {
       NotifyKind.permissionAsked,
@@ -34,7 +34,7 @@ void main() {
     });
     service.registerDevice('tok_c', {});
 
-    final sent = await service.publish(
+    final sent = await service.send(
       NotifyKind.turnEnded,
       title: 'Turn finished',
       body: 'one',
@@ -59,7 +59,7 @@ void main() {
     service.registerDevice('tok_c', {NotifyKind.turnEnded});
     sender.failTokens.add('tok_b');
 
-    final sent = await service.publish(
+    final sent = await service.send(
       NotifyKind.turnEnded,
       title: 'Turn finished',
       body: 'one',
@@ -76,7 +76,7 @@ void main() {
     service.registerDevice('tok_b', {NotifyKind.turnEnded});
     sender.failTokens.add('tok_a');
 
-    final sent = await service.publish(
+    final sent = await service.send(
       NotifyKind.turnEnded,
       title: 'Turn finished',
       body: 'one',
@@ -95,14 +95,14 @@ void main() {
   });
 
   test(
-    'a later publish re-delivers to the same device (a fresh plan per event)',
+    'a later send re-delivers to the same device (a fresh plan per event)',
     () async {
       service.registerDevice('tok_a', {NotifyKind.turnEnded});
       service.registerDevice('tok_b', {NotifyKind.turnEnded});
       sender.failTokens.add('tok_a');
 
       // First event: tok_a fails (attempted once, not retried), tok_b lands.
-      var sent = await service.publish(
+      var sent = await service.send(
         NotifyKind.turnEnded,
         title: 'Turn finished',
         body: 'one',
@@ -112,12 +112,12 @@ void main() {
       expect(sender.attempts['tok_a'], 1);
       expect(sender.attempts['tok_b'], 1);
 
-      // tok_a recovers between events, and a later publish re-delivers to it:
+      // tok_a recovers between events, and a later send re-delivers to it:
       // nothing is owed across events (the **owed** decision is per delivery,
       // not per event), so a fresh plan is built for every eligible device on
       // the next event — tok_a is not remembered as failed and quietly skipped.
       sender.failTokens.remove('tok_a');
-      sent = await service.publish(
+      sent = await service.send(
         NotifyKind.turnEnded,
         title: 'Turn finished',
         body: 'two',
@@ -136,7 +136,7 @@ void main() {
 
   test('a kind no one has enabled sends nothing', () async {
     service.registerDevice('tok_a', {NotifyKind.turnEnded});
-    final sent = await service.publish(
+    final sent = await service.send(
       NotifyKind.dockerContainer,
       title: 'Container stopped',
       body: 'postgres',

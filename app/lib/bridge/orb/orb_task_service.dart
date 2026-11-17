@@ -1305,7 +1305,7 @@ class OrbTaskService {
         ? 'work on branch ${target.branch}'
         : 'work on branch ${target.branch} — PR: $pr';
     try {
-      await service.publish(
+      await service.send(
         NotifyKind.turnEnded,
         title: 'Orb ${target.orbName} done',
         body: body,

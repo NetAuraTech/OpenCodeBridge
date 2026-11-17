@@ -3,7 +3,7 @@
 /// device registry.
 ///
 /// Push has two producers with two postures (issue #259's finding S4): the
-/// event-driven fire-and-forget fan-out ([NotifyService.publish]) and the
+/// event-driven fire-and-forget fan-out ([NotifyService.send]) and the
 /// settle-once with a one-shot push fallback ([OrbTaskService]). Today each
 /// posture is the *absence of a call* — "push exactly once" survives only
 /// because the retry step does not call the push, and "fire-and-forget" is the

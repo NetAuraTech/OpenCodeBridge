@@ -11,7 +11,7 @@ import 'notify_service.dart';
 
 /// The bridge's push fan-out (issue #24), attached to the event hub as a
 /// downstream [EventConnection] alongside the SSE connections: it maps the
-/// three push events onto [NotifyService.publish].
+/// three push events onto [NotifyService.send].
 ///
 /// Like an SSE connection it receives every payload the hub fans out
 /// (verbatim `data:` strings) and stays attached for the hub's whole
@@ -86,7 +86,7 @@ class PushDispatcher implements EventConnection {
     final sessionId = event.sessionId;
     if (sessionId == null) return;
     _dedup.cancelled(sessionId);
-    await _service.publish(
+    await _service.send(
       NotifyKind.turnEnded,
       title: 'Turn stopped',
       body: await _label(sessionId),
@@ -112,7 +112,7 @@ class PushDispatcher implements EventConnection {
     final kind = event.type == OpencodeEventType.permissionAsked
         ? NotifyKind.permissionAsked
         : NotifyKind.turnEnded;
-    await _service.publish(
+    await _service.send(
       kind,
       title: title,
       body: await _label(sessionId),
@@ -125,7 +125,7 @@ class PushDispatcher implements EventConnection {
     if (name is! String || name.isEmpty) return;
     final link = DeepLink.containerUri(name).toString();
     if (event.type == BridgeEventType.dockerContainerStopped) {
-      await _service.publish(
+      await _service.send(
         NotifyKind.dockerContainer,
         title: 'Container stopped',
         body: name,
@@ -133,7 +133,7 @@ class PushDispatcher implements EventConnection {
       );
     } else {
       final exitCode = event.data['exitCode'];
-      await _service.publish(
+      await _service.send(
         NotifyKind.dockerContainer,
         title: 'Container crashed',
         body: exitCode is int ? '$name (exit $exitCode)' : name,
