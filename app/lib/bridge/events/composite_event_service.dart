@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../orb/orb_state_machine.dart';
 import '../orb/orb_upstreams.dart';
 import 'opencode_event_service.dart';
 import 'opencode_http_event_service.dart';
@@ -161,7 +162,8 @@ class CompositeOpencodeEventService implements OpencodeEventService {
     final records = await upstreams.records();
     if (records == null) return false; // Docker down: host-only, no retry.
     return records.any(
-      (record) => record.state == 'running' && !live.contains(record.id),
+      (record) =>
+          OrbState.parse(record.state).isRunning && !live.contains(record.id),
     );
   }
 

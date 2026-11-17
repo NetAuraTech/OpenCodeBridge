@@ -52,6 +52,7 @@
 
 import '../../model/orb.dart';
 import 'orb_service.dart';
+import 'orb_state_machine.dart';
 
 /// One reachable orb's descriptor (spec §7.1): the per-orb service URL
 /// with the password its current boot logged.
@@ -89,7 +90,7 @@ class OrbUpstream {
     required String? url,
     required String? password,
   }) {
-    if (state != 'running') return null;
+    if (state == null || !OrbState.parse(state).isRunning) return null;
     if (url == null || url.isEmpty) return null;
     if (password == null || password.isEmpty) return null;
     return OrbUpstream._(id: id, url: url, password: password);

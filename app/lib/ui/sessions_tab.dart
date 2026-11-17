@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
+import '../bridge/orb/orb_state_machine.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/fs_client.dart';
@@ -1404,16 +1405,22 @@ class _ErrorState extends StatelessWidget {
 }
 
 /// The chip's state dot (spec §9.2): green running, amber preparing, red
-/// broken, grey otherwise (stopped, orphaned, unknown).
+/// broken, grey otherwise (stopped, orphaned, unknown) — read from the state
+/// machine's named kind (issue #281, S11c).
 Color _orbDotColor(String state) {
-  switch (state.split(':').first) {
-    case 'running':
+  switch (OrbState.parse(state).kind) {
+    case OrbStateKind.running:
       return Colors.green;
-    case 'preparing':
+    case OrbStateKind.preparing:
       return Colors.orange;
-    case 'broken':
+    case OrbStateKind.brokenWorkspace:
+    case OrbStateKind.brokenState:
+    case OrbStateKind.brokenShell:
       return Colors.red;
-    default:
+    case OrbStateKind.stopped:
+    case OrbStateKind.cleanupPending:
+    case OrbStateKind.orphan:
+    case null:
       return Colors.grey;
   }
 }

@@ -350,7 +350,7 @@ class OrbTaskService {
     // this spawn just created can boot straight into `broken:shell`. The
     // surface's answer is a settled `refused` record — nothing is dispatched
     // onto it, and `orb_wait`/the card carry the boot's own reason.
-    if (record.hasNoShell) {
+    if (OrbState.parse(record.state).isBrokenShell) {
       final refused = OrbTask(
         id: 'task_${_token()}',
         orb: record.id,
@@ -553,7 +553,8 @@ class OrbTaskService {
     final rows = await orbs.list();
     final inProject = [
       for (final row in rows)
-        if (row.project == projectId && row.state != 'orphan') row,
+        if (row.project == projectId && !OrbState.parse(row.state).isOrphan)
+          row,
     ];
     if (orb != null && orb.isNotEmpty) {
       final existing = [
@@ -611,8 +612,8 @@ class OrbTaskService {
     // A shell-less orb is refused before the wake: waking it cannot help
     // (the probe fails on every start — the entrypoint's stage §6.8), and
     // the refusal must carry the boot's own reason (issue #149).
-    if (row.hasNoShell) throw _noShellRefusal(row);
     final s = OrbState.parse(row.state);
+    if (s.isBrokenShell) throw _noShellRefusal(row);
     if (s.isRunning) return row;
     if (s.isWakeable) return orbs.wake(row.id); // == isSpawable, non-running
     throw OrbRefusalError(
@@ -656,7 +657,8 @@ class OrbTaskService {
     if (base == null) {
       final names = [
         for (final row in await orbs.list())
-          if (row.project == projectId && row.state != 'orphan') row.name,
+          if (row.project == projectId && !OrbState.parse(row.state).isOrphan)
+            row.name,
       ];
       throw OrbRefusalError(
         OrbRefusalError.seedNotFound,
@@ -783,7 +785,7 @@ class OrbTaskService {
     final rows = await orbs.list();
     final named = [
       for (final row in rows)
-        if (row.state != 'orphan' &&
+        if (!OrbState.parse(row.state).isOrphan &&
             row.name == ref &&
             (projectId == null || row.project == projectId))
           row,
