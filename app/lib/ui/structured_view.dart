@@ -18,6 +18,7 @@ import '../model/permission.dart';
 import '../model/row_projection.dart';
 import '../model/question.dart';
 import '../model/session_detail.dart';
+import '../model/turn_active.dart';
 import '../model/turn_stats.dart';
 import '../settings/app_settings.dart';
 import 'diff_view.dart';
@@ -734,10 +735,25 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// The permission request whose reply (endpoint 9) is in flight.
   String? _replyBusyId;
 
+  /// The turn's Active decision as a pure derivation (issue #284): the flags
+  /// the timers and the live footer are armed from. The rule is a pure
+  /// function of (the previous decision, the detail, the loaded history) —
+  /// it lives in `model/turn_active.dart` (the stateless core and the
+  /// reconcile, with the gap-case ratchet); the view holds no history-walk
+  /// interpretation of its own, only the timer arming/cancelling that the
+  /// flags drive.
+  TurnActiveFlags _turnFacts = const (
+    active: false,
+    tick: false,
+    poll: false,
+    live: false,
+  );
+
   /// True while the session's turn is running (from
-  /// `session.execution.started` to its end event): the streaming events
-  /// apply to the in-flight message while it is set.
-  bool _turnActive = false;
+  /// `session.execution.started` to its end event): read from the derived
+  /// Active decision, so it can never drift from the flags that arm the
+  /// timers and the live footer.
+  bool get _turnActive => _turnFacts.active;
 
   /// True while the Stop (cancel) POST is in flight (issue #160). While it is
   /// set, the Stop control shows a busy state and ignores further presses and
@@ -1021,7 +1037,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _promptBusy = false;
     _compacting = false;
     _replyBusyId = null;
-    _turnActive = false;
+    _turnFacts = const (active: false, tick: false, poll: false, live: false);
     _stopBusy = false;
     _contextUsed = null;
     _prefill = null;
@@ -1181,7 +1197,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     ),
   );
 
-  /// Re-derives the Active state from a freshly-read state (issues #122/#124).
+  /// Re-derives the turn's Active decision from a freshly-read state (issues
+  /// #122/#124, the pure rule of issue #284). The rule is a pure function of
+  /// (the previous decision, the detail, the loaded history) — it lives in
+  /// `model/turn_active.dart` (the stateless core [turnActive] plus the
+  /// reconcile [settleActive], with the gap-case ratchet); the view applies
+  /// the result and arms its timers, holding no history-walk of its own.
+  ///
   /// While Active, only the authoritative history closes the Turn: the
   /// re-fetch ending on its `idle` marker (the end event may have been
   /// missed across a stream gap — the live footer can never tick on a
@@ -1189,61 +1211,29 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// active list) or a mid-Turn history activates it. A lone prompt after
   /// the newest marker is the queued-vs-just-started ambiguity (issue #129):
   /// only the detail's Active fact can settle it.
-  void _reconcileTurnActive(SessionDetail detail) {
-    if (_turnActive) {
-      // The history ends closed AND the service no longer lists the session
-      // Active: only then does a re-fetch deactivate (a normalize racing
-      // just after the turn started may still see the old closing marker).
-      if (_openedIdle() && !detail.active) _setTurnActive(false);
-      return;
-    }
-    if (detail.active || _openedMidTurn()) _setTurnActive(true);
-  }
+  void _reconcileTurnActive(SessionDetail detail) =>
+      _applyTurnFacts(settleActive(_turnFacts, detail, _messages));
 
-  /// Whether the loaded history ends on the `idle` marker that closed the
-  /// Turn.
-  bool _openedIdle() {
-    for (var i = _messages.length - 1; i >= 0; i--) {
-      if (_messages[i].role == 'compaction') continue;
-      return _messages[i].role == 'idle';
+  /// Installs the derived Active decision (issue #284): arms the timers and
+  /// the live flag from the flags the pure rule produced — the ticking clock
+  /// from [TurnActiveFlags.tick], the retry poll from [TurnActiveFlags.poll].
+  /// The arming is the view's only stateful half; the decision itself is a
+  /// pure derivation. Re-renders when the turn's Active state changed (the
+  /// Stop control and the live footer follow it).
+  void _applyTurnFacts(TurnActiveFlags flags) {
+    final changed = _turnFacts.active != flags.active;
+    _turnFacts = flags;
+    if (flags.tick) {
+      _startTurnTick();
+    } else {
+      _stopTurnTick();
     }
-    return false;
-  }
-
-  /// Whether the freshly-read history shows a Turn mid-flight. An incomplete
-  /// newest assistant step means it is streaming; a newest prompt means the
-  /// Turn is running only when a step already precedes it in the window — a
-  /// steer is delivered into the running execution (issue #123). A prompt
-  /// alone after the newest `idle` marker is the queued-vs-just-started
-  /// ambiguity (issue #129) — shape cannot tell, so the detail's Active fact
-  /// decides. An `idle` marker at the newest end means the Turn has settled.
-  bool _openedMidTurn() {
-    for (var i = _messages.length - 1; i >= 0; i--) {
-      final message = _messages[i];
-      switch (message.role) {
-        case 'assistant':
-          return message.completed == null;
-        case 'user':
-        case 'synthetic':
-          for (var j = i - 1; j >= 0; j--) {
-            switch (_messages[j].role) {
-              case 'assistant':
-                return true; // A steer: the Turn's steps precede it.
-              case 'idle':
-                return false; // A lone prompt: queued or just started.
-              default:
-                continue;
-            }
-          }
-          return false;
-        case 'idle':
-          // The newest marker closes the Turn: the session is settled.
-          return false;
-        default:
-          continue; // `compaction` carries no signal.
-      }
+    if (flags.poll) {
+      _startRetryPoll();
+    } else {
+      _stopRetryPoll();
     }
-    return false;
+    if (mounted && changed) setState(() {});
   }
 
   /// Installs the page of an authoritative turn read (issue #124): the
@@ -1255,19 +1245,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _messages = turn.messages;
     _oldestCursor = turn.nextCursor;
     _oldestLoaded = turn.nextCursor == null;
-  }
-
-  /// Sets the Active state, running the live footer's ticking clock and the
-  /// retry-state poll while the Turn is Active (issues #122/#124, #156).
-  void _setTurnActive(bool active) {
-    if (active) {
-      _startTurnTick();
-      _startRetryPoll();
-    } else {
-      _stopTurnTick();
-      _stopRetryPoll();
-    }
-    if (mounted && _turnActive != active) setState(() => _turnActive = active);
   }
 
   /// Starts the live turn's ticking clock (issue #122), if not already
@@ -1411,7 +1388,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         // started) is visible here without a manual reload. The streamed
         // in-flight content that arrives after this re-fetch keeps growing
         // the message it lands in.
-        _setTurnActive(true);
+        _applyTurnFacts(const (
+          active: true,
+          tick: true,
+          poll: true,
+          live: true,
+        ));
         _normalize();
         break;
       case 'session.execution.succeeded':
@@ -1420,7 +1402,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         // The turn ended: freeze the live footer into its final value (the
         // normalize below replaces the streamed steps with the history, so
         // the frozen stats read the identical window).
-        _setTurnActive(false);
+        _applyTurnFacts(const (
+          active: false,
+          tick: false,
+          poll: false,
+          live: false,
+        ));
         _normalize();
         break;
       // The bridge-native cancel (issue #164): the turn was stopped. Settle
@@ -1429,7 +1416,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       // authoritative. The service's own terminal for the cancelled turn
       // (`interrupted`) settles it too; this lands the instant the cancel does.
       case BridgeEventType.turnCancelled:
-        _setTurnActive(false);
+        _applyTurnFacts(const (
+          active: false,
+          tick: false,
+          poll: false,
+          live: false,
+        ));
         _normalize();
         break;
       case 'session.usage.updated':
