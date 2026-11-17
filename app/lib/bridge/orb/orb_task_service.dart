@@ -124,9 +124,11 @@ class OrbTaskService {
   /// module instead of re-deriving the composite's routing fact itself.
   final OrbUpstreamSource upstreams;
 
-  /// The composite sessions backend: project lookup, the per-orb session
-  /// create, the task prompt, and the completion injection all route through
-  /// it (host and orb sessions alike, spec §7.2).
+  /// The composite sessions backend (host and orb sessions alike, spec
+  /// §7.2): the home-list composition ([SessionsBackend.list], the completion
+  /// check's [SessionsBackend.detailWithActive]) is its; the raw operations
+  /// (the project lookup, the model read/set, the task prompt, the completion
+  /// injection) are read through its [SessionsBackend.service] seam.
   final SessionsBackend sessions;
 
   /// The tasks file (`~/.config/opencodebridge/tasks.json`).
@@ -345,7 +347,7 @@ class OrbTaskService {
     final effective = model ?? await _callerModel(callerSession);
     if (effective != null) {
       try {
-        await sessions.setModel(session.id, effective);
+        await sessions.service.setModel(session.id, effective);
       } catch (_) {
         // A model the orb's service rejects: the session keeps its default.
       }
@@ -371,7 +373,7 @@ class OrbTaskService {
     _persist();
 
     try {
-      await sessions.prompt(session.id, task);
+      await sessions.service.prompt(session.id, task);
     } catch (e) {
       // The dispatch itself failed: the task can never run, so it settles
       // failed right here (and the caller sees the error).
@@ -639,7 +641,7 @@ class OrbTaskService {
   Future<String> _checkoutOf(String projectId) async {
     String? checkout;
     try {
-      for (final project in await sessions.projects()) {
+      for (final project in await sessions.service.projects()) {
         if (project.id == projectId) checkout = project.canonical;
       }
     } on OpencodeServiceError {
@@ -701,7 +703,7 @@ class OrbTaskService {
     final directory = callerDirectory?.trim();
     if (directory != null && directory.isNotEmpty) {
       try {
-        final projects = await sessions.projects();
+        final projects = await sessions.service.projects();
         for (final project in projects) {
           if (project.canonical == directory) return project.id;
         }
@@ -715,7 +717,7 @@ class OrbTaskService {
   Future<ModelRef?> _callerModel(String? callerSession) async {
     if (callerSession == null || callerSession.isEmpty) return null;
     try {
-      return await sessions.currentModel(callerSession);
+      return await sessions.service.currentModel(callerSession);
     } catch (_) {
       return null;
     }
@@ -893,7 +895,7 @@ class OrbTaskService {
     final dir = directory?.trim();
     if (dir != null && dir.isNotEmpty) {
       try {
-        for (final row in await sessions.projects()) {
+        for (final row in await sessions.service.projects()) {
           if (row.canonical == dir) return row.id;
         }
       } on OpencodeServiceError {
@@ -983,7 +985,8 @@ class OrbTaskService {
       // answering later resumes the turn, and settling now would announce a
       // completion that never happened.
       try {
-        if ((await sessions.pendingPermissions(target.session)).isNotEmpty) {
+        if ((await sessions.service.pendingPermissions(target.session))
+            .isNotEmpty) {
           _idleSince.remove(target.id);
           return;
         }
@@ -1005,7 +1008,7 @@ class OrbTaskService {
     if (target.isDone) return;
     String summary = '';
     try {
-      final messages = await sessions.getMessages(target.session);
+      final messages = await sessions.service.getMessages(target.session);
       for (final message in messages.reversed) {
         if (message.role == 'assistant' && (message.text ?? '').isNotEmpty) {
           summary = message.text!;
@@ -1145,7 +1148,7 @@ class OrbTaskService {
     final pr = target.pr;
     if (pr != null) buffer.write('\n\nPR: $pr');
     try {
-      await sessions.prompt(caller, buffer.toString());
+      await sessions.service.prompt(caller, buffer.toString());
       return true;
     } catch (_) {
       return false;
