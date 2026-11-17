@@ -62,6 +62,28 @@ void main() {
     expect(sent.link, 'opencodebridge://session/ses_live');
   });
 
+  test('a session id that arrives only as the form-nested id is resolved by '
+      'the envelope (issue #256, S2c)', () async {
+    // The session id arrives ONLY as `data.form.sessionID`: no durable seq,
+    // no top-level `data.sessionID`. The shared envelope's form-nested branch
+    // must resolve it, so the dispatcher attributes the push to that session
+    // — the decode did not drop the frame.
+    await dispatcher.write(
+      jsonEncode({
+        'id': 'evt_3',
+        'type': 'permission.asked',
+        'data': {
+          'form': {'sessionID': 'ses_form'},
+        },
+      }),
+    );
+    expect(sender.sent, hasLength(1));
+    final sent = sender.sent.single;
+    expect(sent.title, 'Permission requested');
+    expect(sent.body, 'label-ses_form');
+    expect(sent.link, 'opencodebridge://session/ses_form');
+  });
+
   test('each execution outcome pushes turnEnded with its title', () async {
     await dispatcher.write(opencode('session.execution.succeeded'));
     await dispatcher.write(opencode('session.execution.failed'));

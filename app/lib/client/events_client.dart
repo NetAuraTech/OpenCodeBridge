@@ -2,71 +2,18 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:opencodebridge/bridge/events/event_frame.dart'
+    show BridgeEvent, Durable, parseEventFrame;
 import 'package:opencodebridge/client/authenticated_http.dart';
 import 'package:opencodebridge/sse/sse.dart';
 
-/// The durable position of an opencode event within its session aggregate.
-/// [aggregateID] is the session id; [seq] increases by one per event for that
-/// session, so a jump in [seq] means events were missed (a gap).
-class Durable {
-  const Durable({required this.aggregateID, required this.seq});
-
-  /// The session aggregate the event belongs to (`durable.aggregateID`).
-  final String aggregateID;
-
-  /// The per-session sequence number (`durable.seq`).
-  final int seq;
-}
-
-/// One event off the bridge's unified `GET /api/events` stream, decoded.
-///
-/// Both opencode events and bridge-native events ([`session.closed`],
-/// `docker.*`) arrive on the same stream in the same
-/// `data: {id, created, type, data[, durable]}` envelope. Bridge-native events
-/// (and opencode's own non-durable ones, e.g. `server.connected`) carry no
-/// [durable], so they never participate in per-session seq gap detection.
-class BridgeEvent {
-  const BridgeEvent({
-    required this.id,
-    required this.created,
-    required this.type,
-    required this.data,
-    this.durable,
-  });
-
-  final String id;
-  final int created;
-  final String type;
-
-  /// The event's payload (`data`), e.g. the session/step details.
-  final Map<String, Object?> data;
-
-  /// The durable position, or `null` when the event carries no seq.
-  final Durable? durable;
-
-  /// The session this event belongs to, resolved across every shape the
-  /// stream carries: the durable aggregate id (every session-scoped opencode
-  /// event carries one), else `data.sessionID` (the bridge-native events and
-  /// opencode's non-durable ones, e.g. `permission.asked`), else the `form`'s
-  /// nested session id (`form.created` nests its session under `data.form`),
-  /// else `null` (a non-session event, e.g. `server.connected`).
-  ///
-  /// Consumers used to re-derive this by hand (issue #254, S2); this is the
-  /// one accessor that returns it for every current shape.
-  String? get sessionId {
-    final durable = this.durable;
-    if (durable != null) return durable.aggregateID;
-    final data = this.data;
-    final id = data['sessionID'];
-    if (id is String && id.isNotEmpty) return id;
-    final form = data['form'];
-    if (form is Map<String, Object?>) {
-      final nested = form['sessionID'];
-      if (nested is String && nested.isNotEmpty) return nested;
-    }
-    return null;
-  }
-}
+// The event envelope ([BridgeEvent], [Durable], and the one session-identity
+// rule in [BridgeEvent.sessionId]) lives in the bridge layer, because the
+// bridge's own event connections consume it directly and the bridge must not
+// depend on the client (ADR-0001). This file re-exports it so the app-side
+// public surface is unchanged (issue #256, S2c).
+export 'package:opencodebridge/bridge/events/event_frame.dart'
+    show BridgeEvent, Durable;
 
 /// A detected gap in one session's durable seq: events were missed between
 /// [lastSeen] and [received] (typically across a reconnect). The app uses it
@@ -279,36 +226,8 @@ class EventsClient implements EventSource {
 
 /// Decode one `data:` payload into a [BridgeEvent], or `null` when it is not
 /// a well-formed event object.
-BridgeEvent? parseBridgeEvent(String payload) {
-  Object? decoded;
-  try {
-    decoded = jsonDecode(payload);
-  } catch (_) {
-    return null;
-  }
-  if (decoded is! Map<String, Object?>) return null;
-  final id = decoded['id'] is String ? decoded['id'] as String : '';
-  final created = (decoded['created'] as num?)?.toInt() ?? 0;
-  final type = decoded['type'] is String ? decoded['type'] as String : '';
-  final data = decoded['data'] is Map<String, Object?>
-      ? decoded['data'] as Map<String, Object?>
-      : const <String, Object?>{};
-  Durable? durable;
-  final d = decoded['durable'];
-  if (d is Map<String, Object?>) {
-    final aggregateID = d['aggregateID'] is String
-        ? d['aggregateID'] as String
-        : null;
-    final seq = (d['seq'] as num?)?.toInt();
-    if (aggregateID != null && seq != null) {
-      durable = Durable(aggregateID: aggregateID, seq: seq);
-    }
-  }
-  return BridgeEvent(
-    id: id,
-    created: created,
-    type: type,
-    data: data,
-    durable: durable,
-  );
-}
+///
+/// Delegates to the one shared decode in the bridge layer (issue #256, S2c),
+/// so the client and the bridge-side event connections read the stream the
+/// same way.
+BridgeEvent? parseBridgeEvent(String payload) => parseEventFrame(payload);
