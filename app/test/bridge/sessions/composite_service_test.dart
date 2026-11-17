@@ -9,6 +9,8 @@ import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/orb.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 
+import '../orb/orb_upstream_contract.dart';
+
 import 'cancel_contract.dart';
 
 /// A scripted [OpencodeService] for the composite tests: mutable state, call
@@ -478,6 +480,44 @@ void main() {
         throwsA(isA<OpencodeServiceError>()),
       );
     });
+  });
+
+  // The 404-conclusiveness agreement, composite side (issue #277): the
+  // shared contract drives the composite over every verdict scenario, and
+  // the composite's has-upstream answer must equal the module's
+  // derivation for the same verdict — read off the module's live set,
+  // never re-encoded in this class (issue #275 deleted the re-encoding;
+  // this pins it structurally).
+  group('the 404-conclusiveness agreement (issue #277)', () {
+    runUpstreamAgreement(
+      'the sessions composite has-upstream answer (issue #277)',
+      side: AgreementSide.hasUpstream,
+      // The composite's answer to the scenario's question, through its own
+      // read path: built over the scenario's seams (the same
+      // `orbList`/`orbPassword` facts the module reads), refreshed, and
+      // read off its reconciled upstream set — an orb has an upstream here
+      // exactly when the module's gate gave it one (spec §7.2: the
+      // descriptor derivation and the reachability gate live in the module,
+      // read, not re-encoded).
+      answer: (scenario) async {
+        final composite = CompositeOpencodeService(
+          host: FakeService(sessions: [hostSession]),
+          orbList: scenario.orbList,
+          orbPassword: scenario.orbPassword,
+          // The factory serves a scripted upstream for whatever gate the
+          // module passes (the composite asks the module for the set and
+          // only ever builds clients for its members): one fake per
+          // upstream, serving a session the row rebuild stamps with the
+          // upstream's id. The answer below reads the stamp, so the
+          // composite's own routing is what is observed — not a side
+          // channel.
+          upstreamFactory: (baseUrl, password) =>
+              FakeService(sessions: [orbSession]),
+        );
+        final rows = await composite.listSessions();
+        return rows.any((row) => row.orb == scenario.orbId);
+      },
+    );
   });
 
   group('CompositeOpencodeService.activeSessionIds', () {

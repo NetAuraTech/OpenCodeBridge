@@ -37,12 +37,15 @@
 // A degraded read must never claim an upstream exists, nor that a session
 // is gone.
 //
-// No call site reads this module yet — the composites and the task service
-// still carry their own derivations. The contract phases (#275 wires the
-// composites and the lifecycle pass, #276 the task service's 404
-// conclusiveness, #277 pins their agreement structurally, #278 makes the
-// bridge seam the module) switch the call sites over and delete the ad-hoc
-// derivations.
+// The call sites read the module: #275 wired the composites and the
+// lifecycle pass (the sessions and events composites reconcile on
+// [LiveOrbUpstreams.live]), #276 wired the task service (it asks
+// [OrbUpstreamSource.verdict] and reads the answer off
+// [UpstreamVerdictAgreement.missingReadConclusive]) — no ad-hoc
+// derivation remains. #277 pins the agreement structurally (the shared
+// contract `test/bridge/orb/orb_upstream_contract.dart` asserts both
+// consumers' answers equal the module's derivation for every scenario),
+// and #278 makes the bridge seam the module.
 
 import '../../model/orb.dart';
 import 'orb_service.dart';
@@ -135,6 +138,21 @@ class OrbUpstream {
 /// - [unknown]: the list itself cannot be read (docker down): the composite
 ///   degrades host-only and nothing may be concluded — neither "upstream
 ///   exists" nor "session gone". A degraded read must never settle.
+///
+/// The two consumers' answers for a verdict are ONE shared derivation,
+/// owned here ([UpstreamVerdictAgreement]): the sessions composite's
+/// routing answer ("does the composite have a live upstream for the
+/// orb?") and the task service's 404-conclusiveness answer ("is a 404
+/// from the composite conclusive for the orb?"). Both are consequences of
+/// the single [OrbUpstream.reachable] gate this verdict is computed from,
+/// and they are deliberately **not** identical: [gone] is conclusive for
+/// the task (the orb was deleted out from under it — its sessions are
+/// lost with it) even though the composite has no live upstream for it,
+/// and [reachable] is the only verdict with a live upstream. The
+/// structural contract (issue #277, `orb_upstream_contract.dart`)
+/// asserts both consumers' answers equal this derivation for every
+/// scenario, so a change to the gate moves every consumer's answer
+/// together, not independently.
 enum UpstreamVerdict {
   /// The orb passes the reachability gate: an upstream exists, and a 404
   /// for one of its sessions is conclusive.
@@ -152,6 +170,62 @@ enum UpstreamVerdict {
   /// The orb list cannot be read (docker down): no conclusion of any kind
   /// — the degraded host-only answer is inconclusive.
   unknown,
+}
+
+/// The agreement (issue #277): the ONE shared derivation from a
+/// [UpstreamVerdict] to the two consumers' answers — the sessions
+/// composite's routing answer (spec §7.2) and the task service's
+/// 404-conclusiveness answer (issue #211/#276).
+///
+/// Both answers are consequences of the single [OrbUpstream.reachable]
+/// gate the verdict is computed from, never independently re-derived:
+/// each consumer *asks* the module ([OrbUpstreamSource.live] /
+/// [OrbUpstreamSource.verdict]) and reads its answer off this derivation.
+/// A consumer that re-derived either answer from its own comparison would
+/// drift from the other the moment the gate changed — the per-consumer
+/// drift issue #274 deleted. The structural contract
+/// (`test/bridge/orb/orb_upstream_contract.dart`, issue #277) drives both
+/// consumers through every [UpstreamVerdict] scenario and asserts their
+/// answers equal this derivation, so the agreement is pinned, not
+/// assumed.
+///
+/// The two answers are deliberately **not** identical:
+/// [UpstreamVerdict.gone] is conclusive for the task (the orb was deleted
+/// out from under it — its in-orb sessions are lost with it) even though
+/// the composite has no live upstream for it; and
+/// [UpstreamVerdict.reachable] is the only verdict with a live upstream.
+extension UpstreamVerdictAgreement on UpstreamVerdict {
+  /// The sessions composite's routing answer for this verdict (spec §7.2):
+  /// does the composite have a live upstream for the orb? Only
+  /// [UpstreamVerdict.reachable] — the gate's sole in row — has one:
+  /// [UpstreamVerdict.unroutable] (in a readable list, no upstream),
+  /// [UpstreamVerdict.gone] (absent from a readable list), and
+  /// [UpstreamVerdict.unknown] (the list unreadable — a degraded read must
+  /// never claim an upstream exists) all have none.
+  bool get hasLiveUpstream => this == UpstreamVerdict.reachable;
+
+  /// The task service's 404-conclusiveness answer for this verdict
+  /// (issue #211/#276): is a 404 from the composite conclusive for the
+  /// orb — is its missing session actually gone?
+  ///
+  /// - [UpstreamVerdict.reachable] — the composite has an upstream for the
+  ///   orb, so a session it 404s is a gone one: **conclusive**.
+  /// - [UpstreamVerdict.gone] — the orb is absent from a readable list
+  ///   (deleted out from under the reader): its in-orb sessions are lost
+  ///   with it, the 404 is the truth: **conclusive**.
+  /// - [UpstreamVerdict.unroutable] — the orb is in a readable list but
+  ///   has no upstream (still booting, stopped, broken, url-less, no
+  ///   password line yet): the read fell back to a host that cannot know
+  ///   the orb session — the 404 is "not routable yet," not "session
+  ///   gone": **inconclusive**.
+  /// - [UpstreamVerdict.unknown] — the list cannot be read (docker down):
+  ///   the composite degrades host-only and nothing may be concluded:
+  ///   **inconclusive** (one fact, one conclusion — a degraded read must
+  ///   never settle a mid-flight task `failed`).
+  bool get missingReadConclusive => switch (this) {
+    UpstreamVerdict.reachable || UpstreamVerdict.gone => true,
+    UpstreamVerdict.unroutable || UpstreamVerdict.unknown => false,
+  };
 }
 
 /// The live-upstream facts (issue #274: one producer, read by every

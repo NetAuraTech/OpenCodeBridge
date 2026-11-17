@@ -12,6 +12,7 @@ import 'package:opencodebridge/bridge/notify/fcm_sender.dart';
 import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_task_service.dart';
+import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/model/command.dart';
@@ -21,6 +22,8 @@ import 'package:opencodebridge/model/permission.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
 import 'package:opencodebridge/notify/notify_kind.dart';
+
+import 'orb_upstream_contract.dart';
 
 const _project = OpencodeProject(
   id: 'prj_1',
@@ -213,8 +216,10 @@ class _FakeOrbs implements OrbService {
   /// The orb's current `server password` (spec §7.1): non-empty by default so a
   /// running, url-carrying orb passes the live-upstream gate (the missing-settle
   /// tests need a `reachable` orb — issue #276). A test can drop it to `null`
-  /// to make the orb `unroutable`.
+  /// to make the orb `unroutable`. [passwordTable] (set by the #277 contract
+  /// scenarios) answers per-orb instead — an absent id has no password line yet.
   String? passwordResult = 'orb-secret';
+  Map<String, String?>? passwordTable;
 
   /// When set, [list] throws it instead of returning [listResult] (docker down
   /// / a torn label pass): the live-upstream source degrades to
@@ -230,7 +235,8 @@ class _FakeOrbs implements OrbService {
   }
 
   @override
-  Future<String?> lastPassword(String id) async => passwordResult;
+  Future<String?> lastPassword(String id) async =>
+      passwordTable == null ? passwordResult : passwordTable![id];
 
   @override
   Future<OrbRecord> wake(String id) async {
@@ -2176,6 +2182,78 @@ void main() {
         final decoded = jsonDecode(tasksFile.readAsStringSync());
         expect(decoded[0]['status'], 'succeeded');
         expect(decoded[0]['completed'], isNotNull);
+      },
+    );
+  });
+
+  // The 404-conclusiveness agreement, task-service side (issue #277): the
+  // shared contract drives the task service over every verdict scenario,
+  // and its missing-read 404 answer must equal the module's derivation for
+  // the same verdict. The service asks the module ([OrbTaskService
+  // .upstreams] → [OrbUpstreamSource.verdict]) and reads the answer off the
+  // module's [UpstreamVerdictAgreement.missingReadConclusive] — no local
+  // switch remains in this class (issue #276 deleted it; this pins it
+  // structurally, scenario by scenario).
+  group('the 404-conclusiveness agreement (issue #277)', () {
+    test('the source the service asks is the module, built from its orbs '
+        '(not a parallel derivation)', () {
+      // The constructor builds the live-upstream source from the service's
+      // own orb service (the same `list` + `lastPassword` seams the
+      // composites read) — the fact has a single home, and this is the
+      // service's read of it.
+      expect(service.upstreams, isA<LiveOrbUpstreams>());
+    });
+
+    runUpstreamAgreement(
+      'the task service 404-conclusiveness answer (issue #277)',
+      side: AgreementSide.missingReadConclusive,
+      // The service's answer to the scenario's question, through its own
+      // read path: a persisted `running` task on the scenario's orb (the
+      // restart path — the constructor reloads and re-watches it, so no
+      // spawn targeting is involved), the task's session 404ing through
+      // the composite's host fallback, several polls well past the missing
+      // window. Conclusive ⇒ the window settles `failed`; inconclusive ⇒
+      // the task stays `running` (the window restarts once the orb is
+      // routable again). That settle-or-not is the 404 answer.
+      answer: (scenario) async {
+        // The same two facts the module's real [LiveOrbUpstreams] reads:
+        // the service's [upstreams] source is built from [orbs].
+        orbs.listResult = scenario.records;
+        orbs.passwordTable = scenario.passwords;
+        orbs.listError = scenario.listError;
+        // The task's session 404s on every read (the missing read).
+        backend.opencode.detailError = const OpencodeServiceError(
+          404,
+          'no such session',
+        );
+        // The persisted `running` task on the scenario's orb (spec §8.3:
+        // the tasks file survives the restart).
+        tasksFile.writeAsStringSync(
+          jsonEncode([
+            {
+              'id': 'task_contract',
+              'orb': scenario.orbId,
+              'project': 'prj_1',
+              'orbName': 'n-${scenario.orbId}',
+              'branch': 'orb/${scenario.orbId}',
+              'session': 'ses_task',
+              'caller': 'ses_caller',
+              'task': 'do the thing',
+              'created': 1000,
+              'status': 'running',
+              'summary': '',
+              'results': <String>[],
+            },
+          ]),
+        );
+        settleMissingWindow = const Duration(milliseconds: 30);
+        final tasks = newService();
+        // Several polls (the poll interval is 5ms) well past the window: a
+        // conclusive 404 has settled `failed` by now; an inconclusive one
+        // must never count.
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        final task = tasks.task('task_contract')!;
+        return task.isDone && task.status == 'failed';
       },
     );
   });
