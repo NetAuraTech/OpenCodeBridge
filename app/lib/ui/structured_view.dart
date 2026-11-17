@@ -26,6 +26,7 @@ import 'permission_banner.dart';
 import 'prompt_menu.dart';
 import 'question_panel.dart';
 import 'slash_commands.dart';
+import 'tool_card_content.dart';
 
 /// An image read from the clipboard (issue #72): its raw bytes and mime type,
 /// sent to the model as a `files` data-URI attachment.
@@ -178,107 +179,39 @@ String messagePlainText(SessionMessage message) {
 /// The tool card's plain text, line for line in the order the card renders
 /// them (issue #198): the header, then the patch's path and the patch itself
 /// (or the question's lines with their answers, or the input's one-line
-/// summary / raw input), then the error.
+/// summary / raw input), then the error. The lines come from the one
+/// derivation ([ToolCardContent], issue #265): the card renders the same
+/// values, so the copy and the card cannot drift.
 String _toolCardPlainText(ToolCall tool) {
-  final lines = <String>['${tool.name} · ${tool.status}'];
-  final patch = tool.patch ?? ToolCall.writePatch(tool.input);
+  final content = ToolCardContent.derive(tool);
+  final lines = <String>[content.header];
+  final patch = content.patch;
   if (patch != null) {
-    final path = tool.input is Map<String, Object?>
-        ? (tool.input as Map<String, Object?>)['path']
-        : null;
-    if (path is String && path.isNotEmpty) {
+    final path = content.patchPath;
+    if (path != null && path.isNotEmpty) {
       lines.add(path);
     }
     lines.add(patch);
   } else {
-    final questions = _toolCardQuestions(tool);
+    final questions = content.questions;
     if (questions != null) {
       for (final q in questions) {
         lines.add(q.question);
+        final answers = q.answers;
         lines.add(
-          q.answers == null || q.answers!.isEmpty ? '—' : q.answers!.join(', '),
+          answers == null || answers.isEmpty ? '—' : answers.join(', '),
         );
       }
     } else {
-      final input = tool.input;
-      final detail = _toolCardDetail(tool);
-      final inputText = input == null
-          ? ''
-          : input is String
-          ? input
-          : (() {
-              try {
-                return jsonEncode(input);
-              } catch (_) {
-                return '$input';
-              }
-            })();
-      final text = (detail != null && detail.isNotEmpty) ? detail : inputText;
+      final text = content.bodyText;
       if (text.isNotEmpty) lines.add(text);
     }
   }
-  if (tool.error != null) {
-    lines.add(tool.error!);
+  final error = content.error;
+  if (error != null) {
+    lines.add(error);
   }
   return lines.join('\n');
-}
-
-/// The `question` tool's questions with the answers given (issue #198), in
-/// the form order the card renders them; `null` when the input is not the
-/// map the card renders as questions (a still-streaming input is a partial
-/// JSON string, shown raw like any other input).
-List<({String question, List<String>? answers})>? _toolCardQuestions(
-  ToolCall tool,
-) {
-  final input = tool.input;
-  if (input is! Map<String, Object?>) return null;
-  final list = input['questions'];
-  if (list is! List) return null;
-  final answers = tool.answers;
-  final lines = <({String question, List<String>? answers})>[];
-  for (var i = 0; i < list.length; i++) {
-    final item = list[i];
-    final question = item is Map<String, Object?> && item['question'] is String
-        ? item['question'] as String
-        : null;
-    if (question == null) continue;
-    lines.add((
-      question: question,
-      answers: answers != null && i < answers.length ? answers[i] : null,
-    ));
-  }
-  return lines.isEmpty ? null : lines;
-}
-
-/// A one-line, human-readable summary of the tool's input, the same one the
-/// card shows (issue #198): `shell` its command, `read` its path, `grep` its
-/// pattern, `execute` its code. `null` when the input carries none of the
-/// fields the tool is known for — then the card shows the raw input.
-String? _toolCardDetail(ToolCall tool) {
-  final input = tool.input;
-  if (input is! Map<String, Object?>) return null;
-  String? str(Object? value) =>
-      value is String && value.isNotEmpty ? value : null;
-  switch (tool.name) {
-    case 'shell':
-      return str(input['command']);
-    case 'execute':
-      return str(input['code']);
-    case 'read':
-      final path = str(input['path']);
-      if (path == null) return null;
-      final extra = [
-        if (input['offset'] is int) 'offset ${input['offset']}',
-        if (input['limit'] is int) 'limit ${input['limit']}',
-      ].join(', ');
-      return extra.isEmpty ? path : '$path ($extra)';
-    case 'grep':
-      final pattern = str(input['pattern']);
-      if (pattern == null) return null;
-      final path = str(input['path']);
-      return path == null ? pattern : '$pattern in $path';
-  }
-  return null;
 }
 
 /// The rendered plain text of a markdown body (issue #198): the text the
@@ -4758,102 +4691,25 @@ class _TurnStoppedLine extends StatelessWidget {
 }
 
 /// One tool call card (endpoint 6): the tool name, its state, its input, and
-/// its error when it failed.
+/// its error when it failed. The card's content — the header, the patch
+/// (path + diff), the question lines, the one-line input summary (or the raw
+/// input), the error — is the one derivation ([ToolCardContent], issue
+/// #265): the copy path renders the same values, so the two cannot drift.
+/// The card keeps its own two gates over those values: the diff renders
+/// while `tool.patch != null` (a hand-composed write without a state patch
+/// shows its raw input here, while the copy shows the synthesized diff), and
+/// the patch's path line needs no `isNotEmpty` check.
 class _ToolCard extends StatelessWidget {
   const _ToolCard({required this.tool});
 
   final ToolCall tool;
 
-  String get _inputText {
-    final input = tool.input;
-    if (input == null) return '';
-    if (input is String) return input;
-    try {
-      return jsonEncode(input);
-    } catch (_) {
-      return '$input';
-    }
-  }
-
-  /// The file the edit changed (the tool's `input.path`), `null` when the
-  /// input carries none.
-  String? get _path {
-    final input = tool.input;
-    if (input is Map<String, Object?> && input['path'] is String) {
-      return input['path'] as String;
-    }
-    return null;
-  }
-
-  /// The agent's `question` tool (issue #50), rendered TUI-style instead of
-  /// as raw JSON: each question's text, with the answer the user gave below
-  /// it (the tool state's `metadata.answers`, in form order). `null` while
-  /// the input is still streaming (a partial JSON string, shown raw like any
-  /// other input).
-  List<({String question, List<String>? answers})>? get _questions {
-    final input = tool.input;
-    if (input is! Map<String, Object?>) return null;
-    final list = input['questions'];
-    if (list is! List) return null;
-    final answers = tool.answers;
-    final lines = <({String question, List<String>? answers})>[];
-    for (var i = 0; i < list.length; i++) {
-      final item = list[i];
-      final question =
-          item is Map<String, Object?> && item['question'] is String
-          ? item['question'] as String
-          : null;
-      if (question == null) continue;
-      lines.add((
-        question: question,
-        answers: answers != null && i < answers.length ? answers[i] : null,
-      ));
-    }
-    return lines.isEmpty ? null : lines;
-  }
-
-  /// A one-line, human-readable summary of the tool's input, for the tools
-  /// whose raw JSON input is mostly noise for what the user wants to glance
-  /// at: `shell` shows its command, `read` its path (with `offset` / `limit`
-  /// when given), `grep` its pattern (and path), `execute` its code. `null`
-  /// when the input is not the map expected for the tool (a still-streaming
-  /// input is a partial JSON string) or carries none of the fields the tool
-  /// is known for — then the card falls back to the raw input, unchanged.
-  String? get _detail {
-    final input = tool.input;
-    if (input is! Map<String, Object?>) return null;
-    switch (tool.name) {
-      case 'shell':
-        return _string(input['command']);
-      case 'execute':
-        return _string(input['code']);
-      case 'read':
-        final path = _string(input['path']);
-        if (path == null) return null;
-        final extra = [
-          if (input['offset'] is int) 'offset ${input['offset']}',
-          if (input['limit'] is int) 'limit ${input['limit']}',
-        ].join(', ');
-        return extra.isEmpty ? path : '$path ($extra)';
-      case 'grep':
-        final pattern = _string(input['pattern']);
-        if (pattern == null) return null;
-        final path = _string(input['path']);
-        return path == null ? pattern : '$pattern in $path';
-    }
-    return null;
-  }
-
-  /// A non-empty string field of the input, or `null` when the field is
-  /// absent or not a non-empty string.
-  static String? _string(Object? value) =>
-      value is String && value.isNotEmpty ? value : null;
-
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final questions = _questions;
-    final detail = _detail;
+    final content = ToolCardContent.derive(tool);
+    final questions = content.questions;
+    final body = content.bodyText;
     final (icon, iconColor) = switch (tool.status) {
       'streaming' || 'running' => (Icons.pending, Colors.orange),
       'completed' => (Icons.check_circle, Colors.green),
@@ -4877,7 +4733,7 @@ class _ToolCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '${tool.name} · ${tool.status}',
+                  content.header,
                   style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
@@ -4887,11 +4743,11 @@ class _ToolCard extends StatelessWidget {
             ],
           ),
           if (tool.patch != null) ...[
-            if (_path != null)
+            if (content.patchPath != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4, left: 24),
                 child: Text(
-                  _path!,
+                  content.patchPath!,
                   style: TextStyle(
                     fontSize: 12,
                     fontFamily: 'monospace',
@@ -4903,7 +4759,7 @@ class _ToolCard extends StatelessWidget {
             // lines, and the context, in the TUI's diff colors.
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 24),
-              child: DiffView(patch: tool.patch!),
+              child: DiffView(patch: content.patch!),
             ),
           ] else if (questions != null)
             Padding(
@@ -4935,11 +4791,11 @@ class _ToolCard extends StatelessWidget {
                 ],
               ),
             )
-          else if (detail != null || _inputText.isNotEmpty)
+          else if (body.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 4, left: 24),
               child: Text(
-                detail ?? _inputText,
+                body,
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
