@@ -4,6 +4,7 @@ import '../../model/orb.dart';
 import '../../model/permission.dart';
 import '../../model/question.dart';
 import '../../model/session_detail.dart';
+import '../orb/orb_upstreams.dart';
 import 'opencode_http_service.dart';
 import 'opencode_service.dart';
 
@@ -22,9 +23,11 @@ import 'opencode_service.dart';
 /// - The per-orb descriptor has no file (spec §7.1): the URL is the running
 ///   orb record's ephemeral URL and the password is the last `server
 ///   password` line of the orb's container log, both re-derived at every
-///   refresh. When either is gone (the orb is not running, or its log has no
-///   password yet), the orb gets no upstream and its sessions are invisible
-///   to the composite for that pass.
+///   refresh. The derivation and the reachability gate live in one place —
+///   the live-orb-upstreams module ([LiveOrbUpstreams] over this
+///   composite's own [orbList]/[orbPassword] seams) — and the composite
+///   reads its live set from there: a started orb that passes the gate gets
+///   an upstream, everything else gets none.
 ///
 /// Degradation: a host failure propagates (the host is primary); a per-orb
 /// failure is swallowed (that orb's rows/routing degrade for this pass and
@@ -58,6 +61,16 @@ class CompositeOpencodeService implements OpencodeService {
   /// Builds the per-orb client from its ephemeral URL + derived password
   /// (injectable for tests; the default is the same HTTP client as the host).
   final OpencodeService Function(Uri baseUrl, String password) upstreamFactory;
+
+  /// The live upstream facts over this composite's own seams (issue #275:
+  /// the descriptor derivation and the reachability gate are read from the
+  /// one module, not re-encoded here). The docker-down degradation is
+  /// owned by the source: [LiveOrbUpstreams.live] yields an empty set
+  /// (host-only) and never throws.
+  late final OrbUpstreamSource _liveUpstreams = LiveOrbUpstreams.fromSeams(
+    orbList: orbList,
+    orbPassword: orbPassword,
+  );
 
   /// The live per-orb services, keyed by orb id.
   final Map<String, _OrbUpstream> _upstreams = {};
@@ -376,29 +389,28 @@ class CompositeOpencodeService implements OpencodeService {
     await _registerOwners();
   });
 
-  /// Re-derives the live per-orb upstream set from the labels + the container
-  /// log (a respawned orb has a new port/password, so the `(url, password)`
-  /// key changes): a started orb gets an upstream, a stopped one's is dropped
-  /// (and its table entries cleared), a changed key's is replaced.
+  /// Reconciles the live per-orb upstream set with the module's live set
+  /// (a respawned orb has a new port/password, so its `(url, password)`
+  /// key changes): a started orb that passes the gate gets an upstream, a
+  /// stopped or gate-less one's is dropped (and its table entries
+  /// cleared), a changed key's is replaced. The descriptor derivation and
+  /// the reachability gate are the module's ([LiveOrbUpstreams.live] →
+  /// [OrbUpstream.reachable]) — read here, not re-encoded.
   Future<void> _reconcileUpstreams() async {
-    final records = <OrbRecord>[];
-    try {
-      records.addAll(await orbList());
-    } catch (_) {
-      // Docker is down (or the labels unreadable): degrade to host-only.
-    }
+    final liveUpstreams = await _liveUpstreams.live();
     final live = <String>{};
-    for (final record in records) {
-      final url = record.url;
-      if (record.state != 'running' || url == null) continue;
-      final password = await orbPassword(record.id);
-      if (password == null) continue; // Still booting (no log line yet).
-      live.add(record.id);
-      final key = '$url|$password';
-      final existing = _upstreams[record.id];
-      if (existing != null && existing.key == key) continue;
-      final service = upstreamFactory(Uri.parse(url), password);
-      _upstreams[record.id] = _OrbUpstream(key: key, service: service);
+    for (final upstream in liveUpstreams) {
+      live.add(upstream.id);
+      final existing = _upstreams[upstream.id];
+      if (existing != null && existing.key == upstream.key) continue;
+      final service = upstreamFactory(
+        Uri.parse(upstream.url),
+        upstream.password,
+      );
+      _upstreams[upstream.id] = _OrbUpstream(
+        key: upstream.key,
+        service: service,
+      );
     }
     for (final gone
         in _upstreams.keys.where((id) => !live.contains(id)).toList()) {

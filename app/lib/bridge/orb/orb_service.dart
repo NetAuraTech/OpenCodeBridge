@@ -13,6 +13,7 @@ import '../sessions/opencode_service.dart';
 import '../sessions/session_row.dart';
 import '../../model/command.dart';
 import 'orb_image_builder.dart';
+import 'orb_upstreams.dart';
 
 /// The result of one short git CLI invocation.
 class GitCliResult {
@@ -2638,15 +2639,31 @@ class OrbService {
   }
 
   /// Whether the orb's service is busy, or `null` when it cannot be read
-  /// (a degraded orb, an unreadable password, a service error): the caller
-  /// treats both as "keep the orb alive" — the pass never stops an orb it
-  /// cannot prove idle.
+  /// (a degraded orb, an unroutable descriptor, a service error): the
+  /// caller treats both as "keep the orb alive" — the pass never stops an
+  /// orb it cannot prove idle.
+  ///
+  /// The descriptor's reachability is the module's single gate
+  /// ([OrbUpstream.reachable], issue #275 — read here, not re-encoded): an
+  /// unroutable orb (not running, url-less, no `server password` line yet)
+  /// has no descriptor and its busy state is unreadable → `null` (keep
+  /// alive). The url keeps [_orbUrl]'s `_hostPort` fallback, so an orb the
+  /// list cannot give a url for still gets a descriptor when it is running
+  /// with a password — "busy unreadable" = keep alive, as before.
   Future<bool?> _orbIsBusy(OrbRecord record) async {
     try {
       final password = await lastPassword(record.id);
-      if (password == null) return null;
       final url = await _orbUrl(record.id, record);
-      return await _hasBusySessions(_orbService(url, password));
+      final upstream = OrbUpstream.reachable(
+        id: record.id,
+        state: record.state,
+        url: url,
+        password: password,
+      );
+      if (upstream == null) return null;
+      return await _hasBusySessions(
+        _orbService(upstream.url, upstream.password),
+      );
     } catch (_) {
       return null;
     }
