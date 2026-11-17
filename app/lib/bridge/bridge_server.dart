@@ -46,6 +46,7 @@ import 'orb/orb_agent_tools.dart';
 import 'orb/orb_image_builder.dart';
 import 'orb/orb_service.dart';
 import 'orb/orb_task_service.dart';
+import 'router.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
 /// single API the app consumes, in every mode and on every machine.
@@ -319,6 +320,24 @@ class BridgeServer {
   /// emit) and the sessions backend's list read (sort + pinned + prune).
   final SessionOrderStore _sessionOrder;
 
+  /// The route dispatch table (issue #253, C3): the ordered method→path→
+  /// closure the HTTP server listens on. Built by [_buildRoutes] once at start
+  /// (the composition root's route wiring), before the port is listened on.
+  /// The entries' handlers read the live components ([_notify], [_tasks])
+  /// through [_buildRoutes]'s closures, so [reloadNotify] and the task-service
+  /// re-arm are visible to the running table without a re-build. The request
+  /// path is [_route] → [RouteTable.dispatch]: it reads no wiring, only the
+  /// table the root built, so a wiring change re-builds the table without
+  /// churning the request path.
+  late final RouteTable _routes;
+
+  /// The route dispatch table the bridge is serving (the request path): the
+  /// ordered method→path→closure the HTTP server listens on (issue #253, C3).
+  /// Exposed so the dispatch can be inspected (its shape and order); it is
+  /// built once by [start] through [_buildRoutes] and is not rebuilt by a
+  /// wiring change that leaves the routes' shape intact.
+  RouteTable get routes => _routes;
+
   /// Starts the bridge on [host] and [port].
   ///
   /// Pass [port] as 0 to let the OS assign a free port (tests).
@@ -574,6 +593,14 @@ class BridgeServer {
       bootstrapOpencode,
       sessionOrder,
     );
+    // The route dispatch table (issue #253, C3): the composition root's route
+    // wiring. It is built here — at start, not in the request path — so a
+    // wiring change (a new component, a re-tied closure) re-builds the table
+    // without the request path churning, and the request path (the table +
+    // [_route]) never references the wiring. It is built from the live
+    // instance (its handler closures capture the bridge's components), so it
+    // runs after the bridge exists and before the port is listened on.
+    bridge._routes = bridge._buildRoutes();
     speed?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
     // the single actor of orb automation — bridge down = no automation
@@ -622,29 +649,13 @@ class BridgeServer {
     return bridge;
   }
 
-  /// The per-request routing (the closure the HTTP server listens on). It
-  /// reads the live [_notify] per request, so [reloadNotify] can swap it
-  /// under a running bridge without rebinding the port (issue #24, the
-  /// Settings save).
-  Future<void> _route(HttpRequest request) async {
-    await BridgeServer._handle(
-      request,
-      _health,
-      _sessions,
-      _fs,
-      _events,
-      _lifecycle,
-      _docker,
-      _orb,
-      _orbs,
-      _tasks,
-      _tunnel,
-      _tunnelSetupService,
-      _dockerLogKeepAlive,
-      _notify,
-      _sessionOrder,
-    );
-  }
+  /// The per-request routing (the closure the HTTP server listens on): a
+  /// single dispatch through the [RouteTable] the composition root built
+  /// (issue #253, C3). The table's handler closures read the live components
+  /// ([_notify], [_tasks]) per request, so [reloadNotify] and the task-service
+  /// re-arm are visible to a running bridge without rebinding the port or
+  /// re-building the table (issue #24, the Settings save; issue #211).
+  Future<void> _route(HttpRequest request) => _routes.dispatch(request);
 
   /// The host-IP listener (spec §8.5): the bridge additionally listens on
   /// the host's docker-bridge address (the `docker0` interface's address)
@@ -1222,448 +1233,440 @@ class BridgeServer {
     }
   }
 
-  static Future<void> _handle(
-    HttpRequest request,
-    HealthReport Function() report,
-    SessionsBackend? sessions,
-    FsService fs,
-    EventHub? events,
-    SessionLifecycle? lifecycle,
-    DockerBackend? docker,
-    OrbImageBuilder? orb,
-    OrbService? orbs,
-    OrbTaskService? tasks,
-    TunnelSupervisor? tunnel,
-    TunnelSetup Function(TunnelSupervisor) tunnelSetup,
-    Duration dockerLogKeepAlive,
-    NotifyService? notify,
-    SessionOrderStore? sessionOrder,
-  ) async {
-    final response = request.response;
-    response.headers.contentType = ContentType.json;
-    try {
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.eventsPath) {
-        await BridgeServer._handleEvents(request, events);
-        return;
-      }
-      // The push registration (issue #24), checked before the session
-      // matchers (a bare list path would otherwise read as a session id
-      // to them).
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.deviceTokenPath) {
-        await BridgeServer._deviceToken(request, notify);
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.healthPath) {
+  /// The route dispatch table (issue #253, C3 of the turn-outcome series):
+  /// the composition root's route wiring. It flattens the previous
+  /// ~440-line sequential if-chain over method+path into the thin, ordered
+  /// method→path→closure table the request path dispatches through
+  /// ([_route] → [RouteTable.dispatch]).
+  ///
+  /// **The table mirrors the if-chain's order exactly** — a fixed path is
+  /// matched before the parameterised matchers that would otherwise read its
+  /// bare path as an id — so behaviour is unchanged. Each entry names the
+  /// route and captures the bridge's live components in its handler closure
+  /// (the mutable ones — [_notify], [_tasks] — are read per request, so a
+  /// [reloadNotify] or a task-service re-arm is visible to the running table
+  /// without a re-build). Adding or renaming a route is one entry here plus
+  /// its one handler — not a chain.
+  RouteTable _buildRoutes() {
+    // The live components the entries read. Only [_notify] and [_tasks] are
+    // mutable under a running bridge (the Settings-save reload and the
+    // task-service re-arm); they are referenced as fields in the closures
+    // below, so the running table always sees the current value. The rest are
+    // final, so a local read at build time is the value for the bridge's life.
+    final health = _health;
+    final sessions = _sessions;
+    final fs = _fs;
+    final events = _events;
+    final lifecycle = _lifecycle;
+    final docker = _docker;
+    final orb = _orb;
+    final orbs = _orbs;
+    final tunnel = _tunnel;
+    final tunnelSetup = _tunnelSetupService;
+    final dockerLogKeepAlive = _dockerLogKeepAlive;
+    final sessionOrder = _sessionOrder;
+    return RouteTable([
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.eventsPath,
+        (request) => BridgeServer._handleEvents(request, events),
+      ),
+      // The push registration (issue #24), before the session matchers (a
+      // bare list path would otherwise read as a session id to them). The
+      // live [_notify] is read per request (the Settings-save reload).
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.deviceTokenPath,
+        (request) => BridgeServer._deviceToken(request, _notify),
+      ),
+      RouteEntry.fixed('GET', BridgeServer.healthPath, (request) async {
+        final response = request.response;
         response.statusCode = HttpStatus.ok;
-        response.write(jsonEncode(report().toJson()));
+        response.write(jsonEncode(health().toJson()));
         await response.close();
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.sessionsPath) {
-        await BridgeServer._listSessions(request, sessions);
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.projectsPath) {
-        await BridgeServer._listProjects(request, sessions);
-        return;
-      }
-      // The "New project" file-picker's fs endpoints (issue #54), checked
-      // before the session matchers (a bare path would otherwise read as a
-      // session id to them).
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.fsDrivesPath) {
-        await BridgeServer._fsDrives(request, fs);
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.fsDirectoriesPath) {
-        await BridgeServer._fsDirectories(request, fs);
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.fsDirectoriesPath) {
-        await BridgeServer._fsCreateDirectory(request, fs);
-        return;
-      }
-      // The docker endpoints (issue #21), checked before the session matchers
-      // (a bare list path would otherwise read as a session id to them).
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.dockerContainersPath) {
-        await BridgeServer._listDockerContainers(request, docker);
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.dockerComposePath) {
-        await BridgeServer._listComposeProjects(request, sessions, docker);
-        return;
-      }
-      if (request.method == 'GET') {
-        final logs = BridgeServer._dockerLogsIn(request.uri);
-        if (logs != null) {
-          await BridgeServer._handleDockerLogs(
+      }),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.sessionsPath,
+        (request) => BridgeServer._listSessions(request, sessions),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.projectsPath,
+        (request) => BridgeServer._listProjects(request, sessions),
+      ),
+      // The "New project" file-picker's fs endpoints (issue #54), before the
+      // session matchers (a bare path would otherwise read as a session id to
+      // them).
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.fsDrivesPath,
+        (request) => BridgeServer._fsDrives(request, fs),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.fsDirectoriesPath,
+        (request) => BridgeServer._fsDirectories(request, fs),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.fsDirectoriesPath,
+        (request) => BridgeServer._fsCreateDirectory(request, fs),
+      ),
+      // The docker endpoints (issue #21), before the session matchers (a bare
+      // list path would otherwise read as a session id to them).
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.dockerContainersPath,
+        (request) => BridgeServer._listDockerContainers(request, docker),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.dockerComposePath,
+        (request) =>
+            BridgeServer._listComposeProjects(request, sessions, docker),
+      ),
+      // The container's log stream (`/api/docker/containers/{name}/logs`).
+      RouteEntry(
+        methods: {'GET'},
+        match: (uri) => BridgeServer._dockerLogsIn(uri),
+        handler: (request, params) {
+          final (name, follow) = params! as (String, bool);
+          return BridgeServer._handleDockerLogs(
             request,
-            logs.$1,
-            logs.$2,
+            name,
+            follow,
             docker,
             dockerLogKeepAlive,
           );
-          return;
-        }
-      }
-      if (request.method == 'POST') {
-        final name = BridgeServer._dockerActionIn(request.uri.path);
-        if (name != null) {
-          await BridgeServer._handleDockerAction(request, name, docker);
-          return;
-        }
-      }
-      if (request.method == 'POST') {
-        final dir = BridgeServer._composeActionIn(request.uri.path);
-        if (dir != null) {
-          await BridgeServer._handleComposeAction(request, dir, docker);
-          return;
-        }
-      }
-      // The orb shared-base-image rebuild (issue #92), checked before the
-      // session matchers (a bare path would otherwise read as a session id
-      // to them).
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbImageRebuildPath) {
-        await BridgeServer._handleOrbImageRebuild(request, orb);
-        return;
-      }
-      // The orbs (issue #93): `POST` creates, `GET` composes the list,
-      // `DELETE /api/orbs/<id>` is the protected deletion (issue #98 — the
-      // guard, the optional `force` body, the orphan cleanup for orphan
-      // records). Checked before the session matchers (a bare list path
-      // would otherwise read as a session id to them).
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbsPath) {
-        await BridgeServer._handleOrbCreate(request, sessions, orbs);
-        return;
-      }
-      // The spawn surface (issue #99, spec §8.2/§8.3): the global
-      // `orb_spawn`/`orb_wait` tools' endpoints, checked before the session
-      // matchers like the other bare paths.
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbSpawnPath) {
-        await BridgeServer._handleOrbSpawn(request, tasks);
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbWaitPath) {
-        await BridgeServer._handleOrbWait(request, tasks);
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbTasksPath) {
-        await BridgeServer._handleOrbTasks(request, tasks);
-        return;
-      }
-      // The spawn surface's agent-facing orb controls (issue #100, spec
-      // §8.4): the same lifecycle operations as the human's `/api/orbs/…`
-      // routes, scoped to the caller's spawn tree.
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbStopPath) {
-        await BridgeServer._handleOrbControl(request, tasks, orbs, 'stop');
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbDeletePath) {
-        await BridgeServer._handleOrbControl(request, tasks, orbs, 'delete');
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.orbExportPath) {
-        await BridgeServer._handleOrbControl(request, tasks, orbs, 'export');
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.orbsPath) {
-        await BridgeServer._handleOrbList(request, orbs);
-        return;
-      }
-      if (request.method == 'DELETE') {
-        final orbId = BridgeServer._orbIdIn(request.uri.path);
-        if (orbId != null) {
-          await BridgeServer._handleOrbDelete(request, orbId, orbs);
-          return;
-        }
-      }
-      // The orb lifecycle actions (issue #97, #98, #102): `POST
-      // /api/orbs/<id>/stop` (the single trigger for every orb death path —
-      // the sessions moved to the host, the container stopped last, the
-      // `ocb.stopped` marker set), `POST /api/orbs/<id>/wake` (the full
-      // start path re-run, the marker off), `POST /api/orbs/<id>/sessions`
-      // (a new session in the orb workspace), `POST /api/orbs/<id>/update`
-      // (the per-orb image update, spec §2.8), `POST /api/orbs/<id>/export`
-      // (the `docker cp` tar.gz export, spec §3.4), `POST
-      // /api/orbs/<id>/fresh-state` (the broken orb's wake over a recreated
-      // state dir, issue #102). Checked before the
-      // session matchers (a bare path would otherwise read as a session id
-      // to them).
-      if (request.method == 'POST') {
-        final orbAction = BridgeServer._orbActionIn(request.uri.path);
-        if (orbAction != null) {
-          await BridgeServer._handleOrbAction(
-            request,
-            orbAction.$1,
-            orbAction.$2,
-            orbs,
-          );
-          return;
-        }
-      }
-      // The tunnel endpoints (issue #22), checked before the session matchers
-      // (a bare list path would otherwise read as a session id to them).
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.tunnelPath) {
-        await BridgeServer._tunnelStatus(request, tunnel);
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.tunnelCheckPath) {
-        await BridgeServer._tunnelAction(
+        },
+      ),
+      // The container action (`/api/docker/containers/{name}/action`).
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._dockerActionIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._handleDockerAction(request, params as String, docker),
+      ),
+      // The compose action (`/api/docker/compose/{dir}/action`).
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._composeActionIn(uri.path),
+        handler: (request, params) => BridgeServer._handleComposeAction(
           request,
-          tunnel,
-          (supervisor) => supervisor.check(),
-        );
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.tunnelStartPath) {
-        await BridgeServer._tunnelAction(
-          request,
-          tunnel,
-          (supervisor) => supervisor.restart(),
-        );
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.tunnelSetupPath) {
-        await BridgeServer._tunnelSetup(request, tunnel, tunnelSetup);
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.tunnelLoginPath) {
-        await BridgeServer._tunnelLogin(request, tunnel, tunnelSetup);
-        return;
-      }
-      // The structured view's `/` command menu, global commands (issue
-      // #46), checked before the session matchers (a bare list path would
-      // otherwise read as a session id to them).
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.usagePath) {
-        await BridgeServer._commandPayload(request, sessions, (s) => s.usage());
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.mcpsPath) {
-        await BridgeServer._commandPayload(request, sessions, (s) => s.mcps());
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.integrationsPath) {
-        await BridgeServer._commandPayload(
+          params as String,
+          docker,
+        ),
+      ),
+      // The orb shared-base-image rebuild (issue #92), before the session
+      // matchers (a bare list path would otherwise read as a session id to
+      // them).
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbImageRebuildPath,
+        (request) => BridgeServer._handleOrbImageRebuild(request, orb),
+      ),
+      // The orbs (issue #93): `POST` creates, `GET` composes the list.
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbsPath,
+        (request) => BridgeServer._handleOrbCreate(request, sessions, orbs),
+      ),
+      // The spawn surface (issue #99, spec §8.2/§8.3), before the session
+      // matchers like the other bare paths. The live [_tasks] is read per
+      // request (the task-service re-arm, issue #211).
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbSpawnPath,
+        (request) => BridgeServer._handleOrbSpawn(request, _tasks),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbWaitPath,
+        (request) => BridgeServer._handleOrbWait(request, _tasks),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbTasksPath,
+        (request) => BridgeServer._handleOrbTasks(request, _tasks),
+      ),
+      // The spawn surface's agent-facing orb controls (issue #100, spec §8.4):
+      // the same lifecycle operations as the human's `/api/orbs/…` routes,
+      // scoped to the caller's spawn tree.
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbStopPath,
+        (request) =>
+            BridgeServer._handleOrbControl(request, _tasks, orbs, 'stop'),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbDeletePath,
+        (request) =>
+            BridgeServer._handleOrbControl(request, _tasks, orbs, 'delete'),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.orbExportPath,
+        (request) =>
+            BridgeServer._handleOrbControl(request, _tasks, orbs, 'export'),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.orbsPath,
+        (request) => BridgeServer._handleOrbList(request, orbs),
+      ),
+      // The protected deletion (`DELETE /api/orbs/{id}`, issue #98).
+      RouteEntry(
+        methods: {'DELETE'},
+        match: (uri) => BridgeServer._orbIdIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._handleOrbDelete(request, params as String, orbs),
+      ),
+      // The orb lifecycle actions (`/api/orbs/{id}/{action}`, issues #97, #98,
+      // #102), before the session matchers (a bare path would otherwise read
+      // as a session id to them).
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._orbActionIn(uri.path),
+        handler: (request, params) {
+          final (id, action) = params! as (String, String);
+          return BridgeServer._handleOrbAction(request, id, action, orbs);
+        },
+      ),
+      // The tunnel endpoints (issue #22), before the session matchers (a bare
+      // list path would otherwise read as a session id to them).
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.tunnelPath,
+        (request) => BridgeServer._tunnelStatus(request, tunnel),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.tunnelCheckPath,
+        (request) =>
+            BridgeServer._tunnelAction(request, tunnel, (s) => s.check()),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.tunnelStartPath,
+        (request) =>
+            BridgeServer._tunnelAction(request, tunnel, (s) => s.restart()),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.tunnelSetupPath,
+        (request) => BridgeServer._tunnelSetup(request, tunnel, tunnelSetup),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.tunnelLoginPath,
+        (request) => BridgeServer._tunnelLogin(request, tunnel, tunnelSetup),
+      ),
+      // The structured view's `/` command menu, global commands (issue #46),
+      // before the session matchers (a bare list path would otherwise read as
+      // a session id to them).
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.usagePath,
+        (request) =>
+            BridgeServer._commandPayload(request, sessions, (s) => s.usage()),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.mcpsPath,
+        (request) =>
+            BridgeServer._commandPayload(request, sessions, (s) => s.mcps()),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.integrationsPath,
+        (request) => BridgeServer._commandPayload(
           request,
           sessions,
           (s) => s.integrations(),
-        );
-        return;
-      }
-      if (request.method == 'POST') {
-        final connect = BridgeServer._integrationConnectIn(request.uri.path);
-        if (connect != null) {
-          await BridgeServer._commandConnect(request, connect, sessions);
-          return;
-        }
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.statusPath) {
-        await BridgeServer._commandPayload(
+        ),
+      ),
+      // The integration's OAuth connect (`/api/integrations/{id}/connect`).
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._integrationConnectIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._commandConnect(request, params as String, sessions),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.statusPath,
+        (request) =>
+            BridgeServer._commandPayload(request, sessions, (s) => s.status()),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.pairPath,
+        (request) =>
+            BridgeServer._commandPayload(request, sessions, (s) => s.pair()),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.reloadPath,
+        (request) => BridgeServer._commandReload(request, sessions),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.worktreesPath,
+        (request) => BridgeServer._commandWorktrees(request, sessions),
+      ),
+      RouteEntry.fixed(
+        'GET',
+        BridgeServer.pluginsPath,
+        (request) =>
+            BridgeServer._commandPayload(request, sessions, (s) => s.plugins()),
+      ),
+      RouteEntry.fixed(
+        'POST',
+        BridgeServer.sessionsPath,
+        (request) => BridgeServer._createSession(request, sessions),
+      ),
+      // The structured-view reads (spec section 5, endpoint 5): the session's
+      // detail (`GET /api/sessions/{id}`).
+      RouteEntry(
+        methods: {'GET'},
+        match: (uri) => BridgeServer._sessionIdIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._detail(request, params as String, sessions),
+      ),
+      // The paged history read (issue #124), before the plain `/messages`
+      // read (the two paths are distinct, but the page path must not fall
+      // through to it).
+      RouteEntry(
+        methods: {'GET'},
+        match: (uri) => BridgeServer._messagesPageSessionIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._messagesPage(request, params as String, sessions),
+      ),
+      // The messages read/write pair (`/api/sessions/{id}/messages`): GET
+      // reads, POST prompts.
+      RouteEntry(
+        methods: {'GET', 'POST'},
+        match: (uri) => BridgeServer._messagesSessionIn(uri.path),
+        handler: (request, params) {
+          final id = params as String;
+          return request.method == 'GET'
+              ? BridgeServer._messages(request, id, sessions)
+              : BridgeServer._prompt(request, id, sessions);
+        },
+      ),
+      // The session's pending permission requests
+      // (`GET /api/sessions/{id}/permissions`).
+      RouteEntry(
+        methods: {'GET'},
+        match: (uri) => BridgeServer._permissionsSessionIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._permissions(request, params as String, sessions),
+      ),
+      // Endpoint 9: the permission reply
+      // (`POST /api/sessions/{id}/permissions/{requestID}/reply`).
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._permissionReplyIn(uri.path),
+        handler: (request, params) {
+          final (id, requestID) = params! as (String, String);
+          return BridgeServer._permissionReply(
+            request,
+            id,
+            requestID,
+            sessions,
+          );
+        },
+      ),
+      // The structured-view question forms (issue #50), before the command
+      // menu's fallthrough so the subpath wins.
+      RouteEntry(
+        methods: {'GET'},
+        match: (uri) => BridgeServer._questionsSessionIn(uri.path),
+        handler: (request, params) =>
+            BridgeServer._questions(request, params as String, sessions),
+      ),
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._questionAnswerIn(uri.path),
+        handler: (request, params) {
+          final (id, questionID) = params! as (String, String);
+          return BridgeServer._questionAnswer(
+            request,
+            id,
+            questionID,
+            sessions,
+          );
+        },
+      ),
+      RouteEntry(
+        methods: {'DELETE'},
+        match: (uri) => BridgeServer._questionDismissIn(uri.path),
+        handler: (request, params) {
+          final (id, questionID) = params! as (String, String);
+          return BridgeServer._questionDismiss(
+            request,
+            id,
+            questionID,
+            sessions,
+          );
+        },
+      ),
+      // Endpoint 4: the session deletion (`DELETE /api/sessions/{id}`).
+      RouteEntry(
+        methods: {'DELETE'},
+        match: (uri) => BridgeServer._sessionIdIn(uri.path),
+        handler: (request, params) => BridgeServer._deleteSession(
           request,
+          params as String,
           sessions,
-          (s) => s.status(),
-        );
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.pairPath) {
-        await BridgeServer._commandPayload(request, sessions, (s) => s.pair());
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.reloadPath) {
-        await BridgeServer._commandReload(request, sessions);
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.worktreesPath) {
-        await BridgeServer._commandWorktrees(request, sessions);
-        return;
-      }
-      if (request.method == 'GET' &&
-          request.uri.path == BridgeServer.pluginsPath) {
-        await BridgeServer._commandPayload(
+          events,
+        ),
+      ),
+      // The host→orb session move (issue #97), before the command-menu
+      // fallthrough (its subpath would otherwise read as a `/` command to it).
+      RouteEntry(
+        methods: {'POST'},
+        match: (uri) => BridgeServer._moveToOrbIn(uri.path),
+        handler: (request, params) => BridgeServer._handleMoveToOrb(
           request,
+          params as String,
           sessions,
-          (s) => s.plugins(),
-        );
-        return;
-      }
-      if (request.method == 'POST' &&
-          request.uri.path == BridgeServer.sessionsPath) {
-        await BridgeServer._createSession(request, sessions);
-        return;
-      }
-      // The structured-view reads (spec section 5, endpoints 5–8).
-      if (request.method == 'GET') {
-        final id = BridgeServer._sessionIdIn(request.uri.path);
-        if (id != null) {
-          await BridgeServer._detail(request, id, sessions);
-          return;
-        }
-      }
-      // The paged history read (issue #124): `GET /api/sessions/{id}/messages/page`.
-      // Checked before the plain `/messages` read (the two paths are distinct,
-      // but the page path must not fall through to it).
-      if (request.method == 'GET') {
-        final id = BridgeServer._messagesPageSessionIn(request.uri.path);
-        if (id != null) {
-          await BridgeServer._messagesPage(request, id, sessions);
-          return;
-        }
-      }
-      if (request.method == 'GET' || request.method == 'POST') {
-        final id = BridgeServer._messagesSessionIn(request.uri.path);
-        if (id != null) {
-          if (request.method == 'GET') {
-            await BridgeServer._messages(request, id, sessions);
-          } else {
-            await BridgeServer._prompt(request, id, sessions);
-          }
-          return;
-        }
-      }
-      if (request.method == 'GET') {
-        final id = BridgeServer._permissionsSessionIn(request.uri.path);
-        if (id != null) {
-          await BridgeServer._permissions(request, id, sessions);
-          return;
-        }
-      }
-      // Endpoint 9: the permission reply.
-      if (request.method == 'POST') {
-        final reply = BridgeServer._permissionReplyIn(request.uri.path);
-        if (reply != null) {
-          await BridgeServer._permissionReply(
-            request,
-            reply.$1,
-            reply.$2,
-            sessions,
-          );
-          return;
-        }
-      }
-      // The structured-view question forms (issue #50): the agent's
-      // `question` tool, surfaced and answered from the structured view.
-      // Checked before the `/` command menu's fallthrough so the
-      // subpath wins.
-      if (request.method == 'GET') {
-        final id = BridgeServer._questionsSessionIn(request.uri.path);
-        if (id != null) {
-          await BridgeServer._questions(request, id, sessions);
-          return;
-        }
-      }
-      if (request.method == 'POST') {
-        final answer = BridgeServer._questionAnswerIn(request.uri.path);
-        if (answer != null) {
-          await BridgeServer._questionAnswer(
-            request,
-            answer.$1,
-            answer.$2,
-            sessions,
-          );
-          return;
-        }
-      }
-      if (request.method == 'DELETE') {
-        final dismiss = BridgeServer._questionDismissIn(request.uri.path);
-        if (dismiss != null) {
-          await BridgeServer._questionDismiss(
-            request,
-            dismiss.$1,
-            dismiss.$2,
-            sessions,
-          );
-          return;
-        }
-      }
-      if (request.method == 'DELETE') {
-        final id = BridgeServer._sessionIdIn(request.uri.path);
-        if (id != null) {
-          await BridgeServer._deleteSession(request, id, sessions, events);
-          return;
-        }
-      }
-      // The host→orb session move (issue #97): one action, entirely through
-      // the bridge — the target orb is woken (or created) before the move.
-      // Checked before the command-menu fallthrough (its subpath would
-      // otherwise read as a `/` command to it).
-      if (request.method == 'POST') {
-        final moveId = BridgeServer._moveToOrbIn(request.uri.path);
-        if (moveId != null) {
-          await BridgeServer._handleMoveToOrb(request, moveId, sessions, orbs);
-          return;
-        }
-      }
-      // The session order (issue #237): the bridge's own app-owned
-      // `sessionID -> position` map, written by the app to re-order the home
-      // list's pinned block. Checked before the command-menu fallthrough (its
-      // subpath would otherwise read as a `/` command to it).
-      if (request.method == 'PATCH') {
-        final order = BridgeServer._sessionOrderIn(request.uri.path);
-        if (order != null) {
-          await BridgeServer._handleSessionOrder(
-            request,
-            order,
-            sessions,
-            events,
-            sessionOrder,
-          );
-          return;
-        }
-      }
+          orbs,
+        ),
+      ),
+      // The session order (issue #237), before the command-menu fallthrough.
+      RouteEntry(
+        methods: {'PATCH'},
+        match: (uri) => BridgeServer._sessionOrderIn(uri.path),
+        handler: (request, params) => BridgeServer._handleSessionOrder(
+          request,
+          params as String,
+          sessions,
+          events,
+          sessionOrder,
+        ),
+      ),
       // The structured view's `/` command menu, per-session commands (issue
-      // #46), checked after the endpoint 5–9 matchers (which own
-      // messages/permissions) and the single-segment detail/delete matcher,
-      // so their subpaths win.
-      final command = BridgeServer._sessionCommandIn(request.uri.path);
-      if (command != null) {
-        await BridgeServer._handleCommand(
-          request,
-          command.$1,
-          command.$2,
-          sessions,
-          lifecycle,
-        );
-        return;
-      }
-      response.statusCode = HttpStatus.notFound;
-      response.write(jsonEncode({'error': 'not_found'}));
-      await response.close();
-    } catch (_) {
-      // The client went away or the socket broke; the response is unusable.
-      try {
-        response.close();
-      } catch (_) {}
-    }
+      // #46), after the endpoint 5–9 matchers (which own messages/permissions)
+      // and the single-segment detail/delete matcher, so their subpaths win.
+      // It answers every method (no [RouteEntry.methods]): the subpath is the
+      // command and the handler decides the verb from the method.
+      RouteEntry(
+        match: (uri) => BridgeServer._sessionCommandIn(uri.path),
+        handler: (request, params) {
+          final (id, sub) = params! as (String, String);
+          return BridgeServer._handleCommand(
+            request,
+            id,
+            sub,
+            sessions,
+            lifecycle,
+          );
+        },
+      ),
+    ]);
   }
 
   /// Endpoint 14: the unified event stream (SSE). Attaches the request as a
