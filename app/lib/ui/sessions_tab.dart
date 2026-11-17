@@ -183,15 +183,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// its own subscription for the turn's content.
   StreamSubscription<BridgeEvent>? _eventsSub;
 
-  /// True while a [_refreshFromEvents]-triggered list load is in flight, so a
-  /// burst (a spawn's create, rename and first turn) collapses into one load.
-  bool _refreshInFlight = false;
-
-  /// True when a session event arrived while [_refreshInFlight] was true:
-  /// the list reloads once more when the in-flight one lands, so the last
-  /// word is never dropped.
-  bool _refreshAgain = false;
-
   /// The home list's merged state (issue #266): the fetched rows, the pin
   /// positions the in-place reorder keys off, the unread marks, and the
   /// selected row — owned by the [HomeListState] module, which this widget
@@ -199,7 +190,10 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// [_onBridgeEvent]) and renders exactly as before the extraction. The
   /// load's lifecycle (in-flight, quiet, the last error) and the deep link
   /// stay here: they are the widget's client transaction and navigation
-  /// intent, not row facts.
+  /// intent, not row facts. The reload coalescing's *state and decision* now
+  /// live in the module too (issue #268: [HomeListState.requestReload] /
+  /// [HomeListState.drainReload] / [HomeListState.endReload]); only the load
+  /// itself (the `list()` fetch) stays here.
   final HomeListState _list = HomeListState();
 
   /// The last load failure, if any.
@@ -461,23 +455,22 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
-  /// Reloads the list after a session event, coalescing bursts: while a load
-  /// is in flight the request is remembered and one more load runs when it
-  /// lands (a spawn's create, rename and first turn arrive together).
+  /// Reloads the list after a session event, coalescing bursts (issue #268):
+  /// the *decision* of the coalescing lives in the module — [requestReload]
+  /// answers whether this caller starts the loop or is queued behind an
+  /// in-flight one, [drainReload] after each landed load answers whether a
+  /// queued wave should run as one more load, and [endReload] clears both when
+  /// the loop ends. A burst (a spawn's create, rename and first turn arrive
+  /// together) collapses to one load while one is in flight, then one extra
+  /// load for the queued wave.
   Future<void> _refreshFromEvents() async {
-    if (_refreshInFlight) {
-      _refreshAgain = true;
-      return;
-    }
-    _refreshInFlight = true;
+    if (!_list.requestReload()) return; // Queued behind an in-flight reload.
     try {
-      _refreshAgain = true;
-      while (_refreshAgain && mounted) {
-        _refreshAgain = false;
+      do {
         await _load(quiet: true);
-      }
+      } while (mounted && _list.drainReload());
     } finally {
-      _refreshInFlight = false;
+      _list.endReload();
     }
   }
 

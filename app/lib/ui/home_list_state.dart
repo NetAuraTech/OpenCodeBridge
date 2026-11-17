@@ -15,9 +15,15 @@ import '../model/session.dart';
 ///
 /// What the module deliberately does **not** own: the load's lifecycle
 /// (in-flight, quiet, the last error) — that is the widget's client
-/// transaction, applied here only through [applyRead]; the coalescing of a
-/// burst of reloads (the widget's `while (_refreshAgain)` loop); and the
-/// deep link (a navigation intent, not a row fact). The bridge-native
+/// transaction, applied here only through [applyRead]; and the deep link (a
+/// navigation intent, not a row fact). The *decision* of a burst of reloads
+/// **does** live here (issue #268): [requestReload] / [drainReload] /
+/// [endReload] are the synchronous half of the widget's reload coalescing —
+/// the widget's loop asks whether to start a load, whether a queued one should
+/// run after the one in flight lands, and when to clear both. The *I/O* of
+/// the load (the `list()` call itself, with its `quiet` posture and its
+/// failure handling) stays in the widget: the module has no `Future`, and a
+/// row must never be fetched from here. The bridge-native
 /// `session.order.changed` is the module's own event (the row's pin fact),
 /// while the permission and question events re-derive their fact *outside*
 /// the module (the [applyEvent] caller issues the service lookups and hands
@@ -331,6 +337,79 @@ class HomeListState {
     _unread.remove(session?.id ?? '');
   }
 
+  // ── Reload coalescing (issue #268) ────────────────────────────────────────
+  //
+  // The synchronous half of the home list's reload coalescing. Before this
+  // move the widget owned two bools and the `while (_refreshAgain)` loop; the
+  // *decision* now lives here (the widget's `_refreshFromEvents` became a thin
+  // driver) while the *I/O* — the actual `list()` fetch, its quiet posture,
+  // its error handling — stays the widget's (this module is synchronous: no
+  // `Future`, no `await`, and a row is never fetched from here).
+  //
+  // A reload's verdict (`session.created`, an unknown-session event, a missed
+  // create) means "fetch the rows again". A burst of such verdicts (a spawn's
+  // create, rename and first turn arrive together) must collapse into loads,
+  // not one fetch per event: while a load is in flight a request is merely
+  // queued, and exactly ONE extra load runs when the in-flight one lands —
+  // each "wave" of queued requests costs one more load, so the last word is
+  // never dropped and a burst of N events never triggers N fetches.
+
+  /// Requests a reload of the list (issue #268): the event verdict that says
+  /// "fetch the rows again" calls this instead of fetching.
+  ///
+  /// Answers whether **this** caller should start the load now. `true` means
+  /// no reload was in flight — the caller runs its load loop (a `_load`, then
+  /// [drainReload] after each one lands, then [endReload] when the loop
+  /// ends). `false` means a reload was already in flight: this request was
+  /// merely queued behind it, and it runs as ONE extra load when that
+  /// in-flight one lands — no second loop is started, so the burst collapses
+  /// instead of racing two fetches.
+  ///
+  /// This is the module's memory of the burst: the two bools the widget used
+  /// to keep (`_refreshInFlight`, `_refreshAgain`) are now the module's own
+  /// `_inFlight` and `_again` fields, and the driver's `while (_refreshAgain)`
+  /// became [drainReload] with [endReload] as its exit. The driver's loop is
+  /// unchanged in behaviour (a single request → one load; a burst during a
+  /// load → one more load), so the move is of the state and decision, not of
+  /// the behaviour.
+  bool requestReload() {
+    if (_inFlight) {
+      _again = true;
+      return false;
+    }
+    _inFlight = true;
+    _again = false;
+    return true;
+  }
+
+  /// Asks whether the reload just landed should be followed by the queued
+  /// reload (issue #268). Called by the driver after each `_load` it ran.
+  ///
+  /// `true` means a reload was requested while that load was in flight (a
+  /// "wave" of queued events): it is consumed here (so the next wave does not
+  /// re-trigger it) and the driver runs exactly one more load, which will
+  /// pick up the fresh state. `false` means nothing was queued: the driver's
+  /// loop ends and it clears both halves through [endReload].
+  ///
+  /// A burst that arrives while a load is in flight is remembered as a single
+  /// [again], so one burst costs exactly one extra load regardless of how many
+  /// events were in it — the collapse the old loop provided.
+  bool drainReload() {
+    final runAgain = _again;
+    _again = false;
+    return runAgain;
+  }
+
+  /// Clears the coalescing state entirely (issue #268). Called by the driver
+  /// when its loop ends — a clean exit **and** an aborted one (the widget
+  /// unmounted mid-load, its `mounted` guard breaking the loop). The state is
+  /// always reset, so a later, fresh reload starts clean rather than inheriting
+  /// a stale "in flight" or "queued" flag.
+  void endReload() {
+    _inFlight = false;
+    _again = false;
+  }
+
   /// The session an event names: the durable aggregate id (every
   /// session-scoped opencode event carries one), else `data.sessionID` (the
   /// bridge-native events), else the `form`'s nested session id, else `null`.
@@ -375,57 +454,102 @@ class HomeListState {
     patchRow(id, active: active);
   }
 
-  /// The in-place re-sort of the cached home list: the pinned rows first —
-  /// known positions ascending (a tie, or a position the list has not seen,
-  /// keeps the row's current place: the read already placed the pinned block
-  /// position-ascending, so a cold start's `pinned` field renders in place)
-  /// — then the unpinned rows newest-created. Stable: rows that compare equal
-  /// keep their current order, so a re-sort never scrambles the block.
+  /// The in-place re-sort of the cached home list (issue #268): the rows are
+  /// ordered by [homeListOrder], keyed on this module's pin positions
+  /// ([_positions]) and the rows' current indices, then written back. A thin
+  /// driver over the pure comparator — the comparator is the testable
+  /// artifact, the (row, index) pairing and the write-back are the
+  /// module-internal glue that keeps it applied to *these* rows.
   ///
-  /// [List.sort] is not stable, so the rows are ordered by a (key, index)
-  /// pair: the key first, the original index as the tie-breaker. The index is
-  /// the row's current position, which for a cold start is exactly the
-  /// bridge's order — the app never has to re-derive it.
-  ///
-  /// Unlike the bridge's `SessionsBackend.homeListOrder` (which treats an
-  /// unknown position as *unpinned* — correct for the store's own read), the
-  /// app treats a *pinned* row with an unknown position as *keeping its
-  /// place*: the cached list has no position for a cold-start row, and
-  /// un-pinning-then-sorting would drag it out of the block.
+  /// [List.sort] is not stable, so the rows are ordered by a (row, index)
+  /// pair: the comparator first, the original index as the stable
+  /// tie-breaker. The index is the row's current position, which for a cold
+  /// start is exactly the bridge's order — the app never has to re-derive it.
   void _resort() {
     final rows = _rows;
     if (rows == null) return;
     final indexed = [
       for (var i = 0; i < rows.length; i++) (row: rows[i], index: i),
     ];
-    indexed.sort((a, b) {
-      final aPinned = a.row.pinned;
-      final bPinned = b.row.pinned;
-      // Pinned rows sort before unpinned rows.
-      if (aPinned != bPinned) return aPinned ? -1 : 1;
-      if (!aPinned) {
-        // Both unpinned: newest-created first (the read's plain order).
-        final byCreated = b.row.created.compareTo(a.row.created);
-        if (byCreated != 0) return byCreated;
-        return a.index.compareTo(b.index); // Tie: current order.
-      }
-      // Both pinned: known positions ascending (a tie breaks by created,
-      // like the bridge); a position the list has not seen keeps the row's
-      // current place (the index tie-breaker below).
-      final posA = _positions[a.row.id];
-      final posB = _positions[b.row.id];
-      if (posA != null && posB != null) {
-        final byPosition = posA.compareTo(posB);
-        if (byPosition != 0) return byPosition;
-        final byCreated = b.row.created.compareTo(a.row.created);
-        if (byCreated != 0) return byCreated;
-      }
-      // Unknown position(s), a created tie, or a position tie: current order.
-      return a.index.compareTo(b.index);
-    });
+    indexed.sort(
+      (a, b) =>
+          homeListOrder(a.row, a.index, b.row, b.index, (id) => _positions[id]),
+    );
     for (var i = 0; i < indexed.length; i++) {
       rows[i] = indexed[i].row;
     }
+  }
+
+  /// The home list's sort comparator (issue #268): the order the Sessions
+  /// tab renders its rows in, as a **pure** function — given two rows, their
+  /// two current indices (the stable tie-breaker), and a [positionOf] lookup
+  /// for a row's pin position, it answers which comes first. No module state,
+  /// no widget: it is the app's cached-list analogue of the bridge's
+  /// `SessionsBackend.homeListOrder` (pinned-first, position ascending for
+  /// the pinned block, newest-created for the rest), modelled on it and
+  /// deliberately **different** where the app's cache needs to stay stable
+  /// across an in-place re-sort. [positionOf] is injected (the bridge injects
+  /// its store's map lookup the same way) so the comparator is unit-testable
+  /// on its own, keyed on any position the test holds. The indices, too, are
+  /// parameters: unlike the bridge (which sorts the store's fresh read once),
+  /// the app re-sorts a cache in place, so the comparator must take the
+  /// rows' current order and use it as the tie-breaker to stay stable.
+  ///
+  /// Ordering, for two rows with their CURRENT index (the stable tie-breaker):
+  ///
+  /// 1. Pinned rows sort before unpinned rows.
+  /// 2. Both UNPINNED: newest-created first ([b.created] vs [a.created];
+  ///    [Session.created] is epoch-millis, higher = newer). On a created tie
+  ///    → current order (index).
+  /// 3. Both PINNED:
+  ///    - If BOTH rows have a KNOWN pin position: position ascending; on a
+  ///      position tie → newest-created first; on that tie → current order
+  ///      (index).
+  ///    - If EITHER row's position is UNKNOWN (a cold-start row the read
+  ///      placed in place, so the list holds no pin position for it): the
+  ///      rows keep their CURRENT relative order (index tie-breaker).
+  ///
+  /// That last rule is the app-specific one. Unlike the bridge's
+  /// `SessionsBackend.homeListOrder` — which treats an unknown position as
+  /// *unpinned* (correct for the store's own read, where a missing position
+  /// *is* "not pinned") — the app treats a *pinned* row with an unknown
+  /// position as *keeping its place*: the cached list has no position for a
+  /// cold-start row, and un-pinning-then-sorting would drag it out of the
+  /// pinned block. The index tie-breaker keeps it where the read put it.
+  ///
+  /// Stable: rows that compare equal return their index difference, so a
+  /// re-sort never scrambles the block the read (or a prior re-sort) already
+  /// arranged.
+  static int homeListOrder(
+    Session a,
+    int indexA,
+    Session b,
+    int indexB,
+    num? Function(String id) positionOf,
+  ) {
+    final aPinned = a.pinned;
+    final bPinned = b.pinned;
+    // Pinned rows sort before unpinned rows.
+    if (aPinned != bPinned) return aPinned ? -1 : 1;
+    if (!aPinned) {
+      // Both unpinned: newest-created first (the read's plain order).
+      final byCreated = b.created.compareTo(a.created);
+      if (byCreated != 0) return byCreated;
+      return indexA.compareTo(indexB); // Tie: current order.
+    }
+    // Both pinned: known positions ascending (a tie breaks by created, like
+    // the bridge); a position the list has not seen keeps the row's current
+    // place (the index tie-breaker below).
+    final posA = positionOf(a.id);
+    final posB = positionOf(b.id);
+    if (posA != null && posB != null) {
+      final byPosition = posA.compareTo(posB);
+      if (byPosition != 0) return byPosition;
+      final byCreated = b.created.compareTo(a.created);
+      if (byCreated != 0) return byCreated;
+    }
+    // Unknown position(s), a created tie, or a position tie: current order.
+    return indexA.compareTo(indexB);
   }
 
   /// Keeps the detail pane's selection in sync with the freshly loaded rows:
@@ -449,6 +573,18 @@ class HomeListState {
   }
 
   List<Session>? _rows;
+
+  /// True while a [_refreshFromEvents]-triggered reload is in flight (the
+  /// driver's loop is running its loads), so a burst of reload-verdict events
+  /// collapses into one extra load rather than one fetch per event. Set by
+  /// [requestReload] when it starts the loop, cleared by [endReload]. (The
+  /// widget's old `_refreshInFlight`.)
+  bool _inFlight = false;
+
+  /// True when a reload was requested while [_inFlight] was true: the queued
+  /// wave runs as one extra load when the in-flight one lands (consumed by
+  /// [drainReload]). (The widget's old `_refreshAgain`.)
+  bool _again = false;
 
   /// The cached list's pin positions, keyed by session id: the row's pin
   /// position, or `null`/absent when the row is un-pinned. A cold start

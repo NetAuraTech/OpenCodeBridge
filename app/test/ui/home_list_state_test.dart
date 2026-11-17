@@ -41,6 +41,32 @@ BridgeEvent _ev(String type, {String? session, Map<String, Object?>? data}) =>
       durable: session == null ? null : Durable(aggregateID: session, seq: 1),
     );
 
+/// Runs the module's pure sort comparator (issue #268) over [rows] exactly
+/// the way the module re-sorts: a (row, index) pair, the position looked up
+/// from [positions] (a row absent from the map is *unknown* — the cold-start
+/// case), and the current index as the stable tie-breaker. Returns the
+/// resulting id order. [List.sort] is not stable, but the comparator returns
+/// the index difference when everything else ties, so it is a total order and
+/// the result is deterministic regardless of [List.sort]'s stability.
+List<String> _orderOf(
+  List<Session> rows, [
+  Map<String, num> positions = const {},
+]) {
+  final indexed = [
+    for (var i = 0; i < rows.length; i++) (row: rows[i], index: i),
+  ];
+  indexed.sort(
+    (a, b) => HomeListState.homeListOrder(
+      a.row,
+      a.index,
+      b.row,
+      b.index,
+      (id) => positions[id],
+    ),
+  );
+  return [for (final entry in indexed) entry.row.id];
+}
+
 void main() {
   late HomeListState list;
 
@@ -520,6 +546,238 @@ void main() {
         list.patchRow('ses_2', drop: true);
         expect(list.selected, isNull);
         expect(list.rows?.map((s) => s.id).toList(), ['ses_1']);
+      },
+    );
+  });
+
+  group('the sort comparator (issue #268, the pure comparator)', () {
+    test('pinned rows sort before unpinned rows', () {
+      final pinned = _row('ses_pin', created: 50, pinned: true);
+      final unpinned = _row('ses_unpin', created: 300);
+      // Even the much-older pinned row goes first (created is 300 vs 50).
+      expect(_orderOf([unpinned, pinned], {'ses_pin': 1}), [
+        'ses_pin',
+        'ses_unpin',
+      ]);
+      expect(_orderOf([pinned, unpinned], {'ses_pin': 1}), [
+        'ses_pin',
+        'ses_unpin',
+      ]);
+    });
+
+    test('both unpinned: newest-created first', () {
+      expect(_orderOf([_row('a', created: 100), _row('b', created: 300)]), [
+        'b',
+        'a',
+      ]);
+      expect(_orderOf([_row('b', created: 300), _row('a', created: 100)]), [
+        'b',
+        'a',
+      ]);
+    });
+
+    test('both unpinned: a created tie keeps the current order', () {
+      expect(_orderOf([_row('a', created: 100), _row('b', created: 100)]), [
+        'a',
+        'b',
+      ]);
+      // The index is the tie-breaker, so the input order is preserved.
+      expect(_orderOf([_row('b', created: 100), _row('a', created: 100)]), [
+        'b',
+        'a',
+      ]);
+    });
+
+    test('both pinned with known positions: position ascending', () {
+      final positions = {'a': 1, 'b': 2};
+      expect(
+        _orderOf([
+          _row('a', created: 100, pinned: true),
+          _row('b', created: 300, pinned: true),
+        ], positions),
+        ['a', 'b'],
+      );
+      // Position order wins over created order.
+      expect(
+        _orderOf([
+          _row('b', created: 300, pinned: true),
+          _row('a', created: 100, pinned: true),
+        ], positions),
+        ['a', 'b'],
+      );
+    });
+
+    test('both pinned with known positions: a position tie breaks by newest-created', () {
+      final positions = {'a': 1, 'b': 1};
+      expect(
+        _orderOf([
+          _row('a', created: 100, pinned: true),
+          _row('b', created: 300, pinned: true),
+        ], positions),
+        ['b', 'a'],
+      );
+      expect(
+        _orderOf([
+          _row('b', created: 300, pinned: true),
+          _row('a', created: 100, pinned: true),
+        ], positions),
+        ['b', 'a'],
+      );
+    });
+
+    test('both pinned with known positions: a position AND created tie keeps the current order', () {
+      final positions = {'a': 1, 'b': 1};
+      expect(
+        _orderOf([
+          _row('a', created: 100, pinned: true),
+          _row('b', created: 100, pinned: true),
+        ], positions),
+        ['a', 'b'],
+      );
+      expect(
+        _orderOf([
+          _row('b', created: 100, pinned: true),
+          _row('a', created: 100, pinned: true),
+        ], positions),
+        ['b', 'a'],
+      );
+    });
+
+    test('a cold-start pinned row with an unknown position keeps its place '
+        '(not dragged out of the block or re-sorted by created)', () {
+      // ses_pin is pinned but the list holds no position for it (a cold start
+      // the read placed in place); ses_a is pinned with a KNOWN position 1.
+      // The pair keeps its CURRENT relative order (the index tie-breaker) —
+      // ses_pin is not demoted to unpinned (it stays in the pinned block,
+      // ahead of the known row here) nor re-sorted by created (300 vs 50
+      // would put ses_a first). It simply holds the place the read gave it.
+      final positions = {'ses_a': 1};
+      expect(
+        _orderOf([
+          _row('ses_pin', created: 50, pinned: true), // unknown position, idx 0
+          _row('ses_a', created: 300, pinned: true), // known position 1, idx 1
+        ], positions),
+        ['ses_pin', 'ses_a'],
+      );
+      // Reversed input: the pair again keeps its CURRENT order — now ses_a
+      // is first, so it stays first. The unknown row keeps *its* place
+      // (index 1), it is not jumped to the front.
+      expect(
+        _orderOf([
+          _row('ses_a', created: 300, pinned: true), // known position 1, idx 0
+          _row('ses_pin', created: 50, pinned: true), // unknown position, idx 1
+        ], positions),
+        ['ses_a', 'ses_pin'],
+      );
+    });
+
+    test('one known position + one unknown: the pair keeps its current order '
+        '(the app-specific rule, not the bridge\'s)', () {
+      // The app-specific rule: when EITHER row's position is unknown, the
+      // rows keep their CURRENT relative order (the index tie-breaker). This
+      // is the difference from the bridge's `SessionsBackend.homeListOrder`,
+      // which treats an unknown position as *unpinned* and would sort the
+      // known-position row first (here, created 100 < 300, so the bridge
+      // would put ses_known first in *both* directions). The app does not:
+      // the unknown row holds the place the read gave it.
+      final positions = {'ses_known': 5};
+      // Currently: unknown first, known second → that order is kept.
+      expect(
+        _orderOf([
+          _row('ses_unknown', created: 300, pinned: true),
+          _row('ses_known', created: 100, pinned: true),
+        ], positions),
+        ['ses_unknown', 'ses_known'],
+      );
+      // Currently: known first, unknown second → that order is kept too (the
+      // index, not the position, decides — position 5 never gets to rank).
+      expect(
+        _orderOf([
+          _row('ses_known', created: 100, pinned: true),
+          _row('ses_unknown', created: 300, pinned: true),
+        ], positions),
+        ['ses_known', 'ses_unknown'],
+      );
+    });
+
+    test('a pinned row with a known position sorts before an unpinned row', () {
+      final positions = {'ses_pin': 1};
+      expect(
+        _orderOf([
+          _row('ses_unpin', created: 900),
+          _row('ses_pin', created: 50, pinned: true),
+        ], positions),
+        ['ses_pin', 'ses_unpin'],
+      );
+    });
+  });
+
+  group('the reload coalescing state machine (issue #268)', () {
+    test('a single request starts exactly one load', () {
+      // requestReload → true (start the loop). The driver runs one load.
+      expect(list.requestReload(), isTrue);
+      // No events arrived during the load: drainReload → false, the loop ends.
+      expect(list.drainReload(), isFalse);
+      list.endReload();
+      // The state is cleared: a later request starts fresh (not queued).
+      expect(list.requestReload(), isTrue);
+      list.endReload();
+    });
+
+    test(
+      'a burst during an in-flight load collapses into exactly one extra load',
+      () {
+        // First request starts the loop.
+        expect(list.requestReload(), isTrue);
+        // A burst of reload-verdict events arrives while the load is in flight.
+        expect(list.requestReload(), isFalse); // queued
+        expect(list.requestReload(), isFalse); // queued (same wave)
+        expect(list.requestReload(), isFalse); // queued (same wave)
+        // The in-flight load lands: drainReload → true, exactly ONE extra load.
+        expect(list.drainReload(), isTrue);
+        // That extra load runs; nothing else was queued: drainReload → false.
+        expect(list.drainReload(), isFalse);
+        list.endReload();
+        // Two loads total, not four.
+      },
+    );
+
+    test('a burst during that extra load queues one more (wave by wave)', () {
+      expect(list.requestReload(), isTrue); // load 1
+      list.requestReload(); // burst → queued (load 2)
+      expect(list.drainReload(), isTrue); // load 2 runs
+      // A second burst arrives while load 2 is in flight → load 3.
+      expect(list.requestReload(), isFalse); // queued
+      expect(list.drainReload(), isTrue); // load 3 runs
+      // Nothing else: the loop ends.
+      expect(list.drainReload(), isFalse);
+      list.endReload();
+    });
+
+    test('endReload clears both in-flight and pending (a clean exit)', () {
+      expect(list.requestReload(), isTrue);
+      expect(list.requestReload(), isFalse); // queued behind the in-flight one
+      // The loop ends (the widget unmounted, say): endReload clears everything.
+      list.endReload();
+      // A later request starts fresh — it must NOT be queued behind the stale
+      // in-flight flag, and the stale pending flag must not fire an extra load.
+      expect(list.requestReload(), isTrue);
+      expect(list.drainReload(), isFalse);
+      list.endReload();
+    });
+
+    test(
+      'an aborted loop still clears the state (the unmount mid-load race)',
+      () {
+        // Request starts a load; a burst is queued; the widget unmounts before the
+        // load lands (its `mounted` guard breaks the loop). The driver's `finally`
+        // still runs endReload.
+        expect(list.requestReload(), isTrue);
+        expect(list.requestReload(), isFalse); // queued
+        list.endReload(); // aborted: the finally runs
+        // The state is clean: no stale flag survives to the next session.
+        expect(list.requestReload(), isTrue);
+        list.endReload();
       },
     );
   });
