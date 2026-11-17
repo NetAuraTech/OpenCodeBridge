@@ -1,7 +1,9 @@
 // The orb lifecycle's state machine (issue #279, spec §2.1/§2.2/§2.7/§2.10/
 // §9.4): the named states, the raw-facts composition, and the per-action
 // predicates, each tested against the full state set — including the
-// `broken:` and `cleanup_pending:` variants.
+// `broken:` and `cleanup_pending:` variants — plus the S11c contract
+// (issue #281) that the module is the one home: the state string produced
+// and read only here, the marker files only through the seam.
 
 import 'dart:io';
 
@@ -434,6 +436,155 @@ void main() {
       expect(state.isWakeable, isTrue);
       expect(state.isUpdatable, isTrue);
       expect(state.isForceDeletable, isTrue);
+    });
+  });
+
+  group('the contract (issue #281, S11c) — the module is the one home', () {
+    // The host-side marker basenames: the ONE set the module reads and
+    // writes, and the only place in lib/ that spells them.
+    const markerNames = [
+      'stopped',
+      'cleanup-pending',
+      'push-failed',
+      'no-shell',
+      'gh-auth-failed',
+    ];
+
+    // The ad-hoc idioms the contract forbids outside the module (issue
+    // #281): a record's state string compared to / base-split off a literal,
+    // or produced from a literal instead of the module's wire string.
+    final stateRead = RegExp(
+      r"\.state[ \t]*(==|!=)[ \t]*'(running|stopped|preparing|orphan|broken|cleanup_pending)",
+    );
+    final stateBaseDetail = RegExp(r"\.state\.(startsWith|split)\(");
+    final stateProduction = RegExp(
+      r"state:[ \t]*'(running|stopped|preparing|orphan|broken:|cleanup_pending)",
+    );
+    final replacedStateLiteral = RegExp(
+      r"_replacedState\([^,]+,[ \t]*'(running|stopped|preparing|orphan|broken:|cleanup_pending)",
+    );
+    // A marker path built off the state root (the marker I/O the service must
+    // route through [OrbMarkerStore], not hand-roll).
+    final markerPath = RegExp(
+      r"stateRoot[^'\n]*/(stopped|cleanup-pending|push-failed|no-shell|gh-auth-failed)",
+    );
+
+    late String libDir;
+    setUp(() {
+      libDir = '${Directory.current.path}/lib';
+      expect(
+        Directory(libDir).existsSync(),
+        isTrue,
+        reason: 'the contract reads lib/ from the package root',
+      );
+    });
+
+    List<File> dartFiles() {
+      final out = <File>[];
+      for (final e in Directory(libDir).listSync(recursive: true)) {
+        if (e is File && e.path.endsWith('.dart')) out.add(e);
+      }
+      return out;
+    }
+
+    // Positive controls: the idioms the pin forbids are the ones it catches,
+    // so a typo'd (over-escaped) regex cannot make the pin pass vacuously.
+    test('the pin is live (positive controls)', () {
+      expect(
+        stateRead.hasMatch("if (record.state == 'orphan') continue;"),
+        isTrue,
+      );
+      expect(stateRead.hasMatch("if (row.state != 'running') return;"), isTrue);
+      expect(stateBaseDetail.hasMatch("record.state.split(':')"), isTrue);
+      expect(
+        stateBaseDetail.hasMatch("record.state.startsWith('broken:')"),
+        isTrue,
+      );
+      expect(stateProduction.hasMatch("OrbRecord(state: 'stopped')"), isTrue);
+      expect(
+        replacedStateLiteral.hasMatch("_replacedState(row, 'broken:shell')"),
+        isTrue,
+      );
+      expect(
+        markerPath.hasMatch("File('\${stateRoot.path}/\$id/stopped')"),
+        isTrue,
+      );
+    });
+
+    test(
+      'the orb state string is read in one place (no ad-hoc comparison)',
+      () {
+        for (final file in dartFiles()) {
+          final text = file.readAsStringSync();
+          expect(
+            stateRead.hasMatch(text),
+            isFalse,
+            reason: '${file.path} compares the orb state string ad-hoc',
+          );
+          expect(
+            stateBaseDetail.hasMatch(text),
+            isFalse,
+            reason: '${file.path} re-derives the orb state base/detail ad-hoc',
+          );
+        }
+      },
+    );
+
+    test(
+      'the orb state string is produced in one place (no literal state)',
+      () {
+        for (final file in dartFiles()) {
+          final text = file.readAsStringSync();
+          expect(
+            stateProduction.hasMatch(text),
+            isFalse,
+            reason: '${file.path} produces the orb state from a literal',
+          );
+          expect(
+            replacedStateLiteral.hasMatch(text),
+            isFalse,
+            reason: '${file.path} produces the orb state from a literal',
+          );
+        }
+      },
+    );
+
+    test('the marker files are read/written behind the seam only (no path '
+        'hand-rolled outside the module)', () {
+      for (final file in dartFiles()) {
+        final text = file.readAsStringSync();
+        expect(
+          markerPath.hasMatch(text),
+          isFalse,
+          reason: '${file.path} builds a marker path off the state root',
+        );
+      }
+      // ... and the basenames are centralized in the module.
+      final module = File('$libDir/bridge/orb/orb_state_machine.dart')
+          .readAsStringSync();
+      for (final name in markerNames) {
+        expect(
+          module.contains("'$name'"),
+          isTrue,
+          reason: 'the module owns the $name marker',
+        );
+      }
+    });
+
+    test('a new orb state is a one-module change (the deleted comparison '
+        'shapes are gone, the marker store is the service\'s seam)', () {
+      // The model's private comparison shapes (hasNoShell, isStoppedLike) are
+      // deleted: the record carries the string, the module derives it.
+      final model = File('$libDir/model/orb.dart').readAsStringSync();
+      expect(model.contains('hasNoShell'), isFalse);
+      expect(model.contains('isStoppedLike'), isFalse);
+
+      // The composer reads the markers through the injected seam, not its
+      // own file template.
+      final service = File('$libDir/bridge/orb/orb_service.dart')
+          .readAsStringSync();
+      expect(service.contains('final OrbMarkerStore markers'), isTrue);
+      expect(service.contains('FileOrbMarkerStore(stateRoot)'), isTrue);
     });
   });
 }

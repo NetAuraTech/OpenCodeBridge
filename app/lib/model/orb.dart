@@ -84,19 +84,6 @@ class OrbRecord {
   /// boot never logged a reason (a missing volume/dir says itself).
   final String? bootReason;
 
-  /// Whether the orb's boot failed at the shell probe (issue #149, spec
-  /// §6.8): its agent cannot run a command, so no code task can land — it is
-  /// never surfaced as `running`/`ready`, and the spawn surface refuses it
-  /// with the [bootReason].
-  bool get hasNoShell => state == 'broken:shell';
-
-  /// Whether this is a stopped orb under the badge: plain `stopped`, or
-  /// `cleanup_pending:<reason>` — the same container state, the lifecycle
-  /// pass's marker composing a surfaced variant of it. The Wake/Update/
-  /// Force-delete actions treat the two alike.
-  bool get isStoppedLike =>
-      state == 'stopped' || state.startsWith('cleanup_pending');
-
   /// The creation timestamp, ISO 8601 (label `ocb.created`).
   final String created;
 

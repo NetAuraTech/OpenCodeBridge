@@ -409,7 +409,8 @@ class OrbService {
     this.hostCredentials,
     this.bootTimeout = const Duration(minutes: 10),
     this.pollInterval = const Duration(milliseconds: 500),
-  });
+    OrbMarkerStore? markers,
+  }) : markers = markers ?? FileOrbMarkerStore(stateRoot);
 
   /// The in-container port opencode serves on (spec §2.9): the single
   /// constant shared by the entrypoint and the `-p` mapping. The host port
@@ -444,6 +445,13 @@ class OrbService {
 
   /// The orb state dirs' root (`<stateRoot>/<id>/` per orb, spec §2.7).
   final Directory stateRoot;
+
+  /// The orb's host-side marker files, read and written behind the state
+  /// machine's seam (issue #281, S11c): the `stopped` gate, the
+  /// `cleanup-pending` badge, `push-failed`, `no-shell`, and
+  /// `gh-auth-failed` are no longer read or written by this service
+  /// directly — the marker files live behind [OrbMarkerStore] alone.
+  final OrbMarkerStore markers;
 
   /// The bridge's host port: the `bridgeUrl` written into the container-
   /// local config (`http://host.docker.internal:<port>`, spec §6.2/§8.5).
@@ -646,7 +654,7 @@ class OrbService {
         name: name,
         project: project,
         branch: branch,
-        state: 'running',
+        state: OrbState.runningWire,
         created: created,
         url: url,
         base: base,
@@ -672,7 +680,9 @@ class OrbService {
   }) async {
     OrbRecord? seedOrb;
     for (final row in await list()) {
-      if (row.project == project && row.state != 'orphan' && row.name == seed) {
+      if (row.project == project &&
+          !OrbState.parse(row.state).isOrphan &&
+          row.name == seed) {
         seedOrb = row;
         break;
       }
@@ -809,9 +819,9 @@ class OrbService {
     // container state carrying its reason.
     for (var i = 0; i < rows.length; i++) {
       final row = rows[i];
-      if (row.state != 'stopped') continue;
+      if (!OrbState.parse(row.state).isStopped) continue;
       final checked = _withBrokenState(row, volumeNames);
-      if (checked.state != 'stopped') {
+      if (!OrbState.parse(checked.state).isStopped) {
         rows[i] = checked;
         continue;
       }
@@ -820,16 +830,19 @@ class OrbService {
       // serving opencode — the agent cannot run a command. That is not a
       // clean `stopped` orb: it is never surfaced as ready for a code task.
       // The entrypoint leaves the reason as a `no-shell` marker on the state
-      // mount (a cheap host-side read, never a container probe: the list is
-      // the composite services' hot path, spec §2.2).
-      final marker = _noShellMarker(row.id);
+      // mount (a cheap host-side read behind the seam, never a container
+      // probe: the list is the composite services' hot path, spec §2.2).
+      final marker = markers.shellFailedReason(row.id);
       if (marker != null) {
-        rows[i] = _withBootReason(_replacedState(row, 'broken:shell'), marker);
+        rows[i] = _withBootReason(
+          _replacedState(row, OrbState.brokenShellWire),
+          marker,
+        );
         continue;
       }
-      final reason = _cleanupReason(row.id);
+      final reason = markers.cleanupPendingReason(row.id);
       if (reason != null) {
-        rows[i] = _replacedState(row, 'cleanup_pending:$reason');
+        rows[i] = _replacedState(row, '${OrbState.cleanupPendingWire}:$reason');
       }
     }
 
@@ -843,10 +856,11 @@ class OrbService {
     // orphan's marker is stale by construction (no container to push).
     for (var i = 0; i < rows.length; i++) {
       final row = rows[i];
-      if (row.state == 'orphan' || row.state.startsWith('broken')) {
+      final s = OrbState.parse(row.state);
+      if (s.isOrphan || s.isBroken) {
         continue;
       }
-      if (File('${stateRoot.path}/${row.id}/push-failed').existsSync()) {
+      if (markers.pushFailed(row.id)) {
         rows[i] = _withPushFailing(row);
       }
     }
@@ -859,10 +873,11 @@ class OrbService {
     // the orb: `_stageGhConfig` clears it on the next passing stage.
     for (var i = 0; i < rows.length; i++) {
       final row = rows[i];
-      if (row.state == 'orphan' || row.state.startsWith('broken')) {
+      final s = OrbState.parse(row.state);
+      if (s.isOrphan || s.isBroken) {
         continue;
       }
-      final reason = _ghAuthFailedMarker(row.id);
+      final reason = markers.ghAuthFailedReason(row.id);
       if (reason != null) rows[i] = _withGhAuthFailure(row, reason);
     }
 
@@ -877,7 +892,7 @@ class OrbService {
           name: labels['ocb.name'] as String? ?? '',
           project: labels['ocb.project'] as String? ?? '',
           branch: labels['ocb.branch'] as String? ?? '',
-          state: 'orphan',
+          state: OrbState.orphanWire,
           created: labels['ocb.created'] as String? ?? '',
           base: labels['ocb.base'] as String?,
         ),
@@ -918,7 +933,9 @@ class OrbService {
     final stage = lastStage(log);
     return _replacedState(
       record,
-      stage == null ? 'preparing' : 'preparing:$stage',
+      stage == null
+          ? OrbState.preparingWire
+          : '${OrbState.preparingWire}:$stage',
     );
   }
 
@@ -1012,23 +1029,6 @@ class OrbService {
     bootReason: record.bootReason,
   );
 
-  /// The cause in orb [id]'s `gh-auth-failed` marker (issue #145), or `null`
-  /// when the bridge has no such marker - the credentials staged fine, or
-  /// the host has no gh. A host-side read only (like [_noShellMarker] and the
-  /// push marker): cleared by the next passing stage.
-  String? _ghAuthFailedMarker(String id) {
-    final file = File('${stateRoot.path}/$id/gh-auth-failed');
-    if (!file.existsSync()) return null;
-    try {
-      final reason = file.readAsStringSync().trim();
-      return reason.isEmpty ? 'gh could not authenticate' : reason;
-    } on FileSystemException {
-      // Unreadable for a moment (a boot rewriting it): no verdict beats a
-      // wrong one, and the next list reads it again.
-      return null;
-    }
-  }
-
   /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
   /// never auto-deleted; issue #96): removes the orphan's labeled volumes
   /// (`orb-<id>-workspace`, `orb-<id>-data` — either or both) and its state
@@ -1074,64 +1074,6 @@ class OrbService {
   // ------------------------------------------------------------------------
   // The orb lifecycle: stop (move to host), wake, session moves
   // (issue #97, spec §2.4/§2.5).
-
-  /// Whether [id] has the `ocb.stopped` marker (a stopped orb, issue #97):
-  /// the card's state gate (Stop while running, Wake while stopped).
-  /// Container labels are immutable at runtime, so the marker is a file in
-  /// the per-orb state dir (`<stateRoot>/<id>/stopped`): created at the end
-  /// of a successful stop, removed at the end of a successful wake.
-  bool isStopped(String id) => _stoppedMarker(id).existsSync();
-
-  File _stoppedMarker(String id) => File('${stateRoot.path}/$id/stopped');
-
-  Future<void> _setStoppedMarker(String id) async {
-    final marker = _stoppedMarker(id);
-    await marker.parent.create(recursive: true);
-    await marker.writeAsString(DateTime.now().toUtc().toIso8601String());
-  }
-
-  Future<void> _removeStoppedMarker(String id) async {
-    final marker = _stoppedMarker(id);
-    if (marker.existsSync()) {
-      await marker.delete();
-    }
-  }
-
-  /// The `cleanup-pending` marker of the per-orb state dir (issue #101,
-  /// spec §2.10.2): written by the automated lifecycle pass when a stopped
-  /// auto-delete candidate is guard-blocked, carrying the reason (`uncommitted
-  /// work` / `unpushed work` / …) that the card surfaces as the
-  /// "cleanup pending" state (spec §9.4). State, like the stop marker — the
-  /// pass re-evaluates the guard on every pass and the wake clears the badge.
-  File _cleanupMarker(String id) =>
-      File('${stateRoot.path}/$id/cleanup-pending');
-
-  /// Surfaces [id] as cleanup-pending with the guard's [reason] (the
-  /// lifecycle pass only — the badge is the automated path's surfacing of a
-  /// guard-blocked candidate, never a manual state).
-  Future<void> _markCleanupPending(String id, String reason) async {
-    final marker = _cleanupMarker(id);
-    await marker.parent.create(recursive: true);
-    await marker.writeAsString(reason);
-  }
-
-  Future<void> _removeCleanupMarker(String id) async {
-    final marker = _cleanupMarker(id);
-    if (marker.existsSync()) {
-      await marker.delete();
-    }
-  }
-
-  String? _cleanupReason(String id) {
-    final marker = _cleanupMarker(id);
-    if (!marker.existsSync()) return null;
-    try {
-      final reason = marker.readAsStringSync().trim();
-      return reason.isEmpty ? null : reason;
-    } on FileSystemException {
-      return null;
-    }
-  }
 
   /// The record of the orb [id] (from the label-composed list), or `null`
   /// when the id has no labeled container.
@@ -1447,8 +1389,8 @@ class OrbService {
       // `docker stop` last — only after every session has moved to the
       // host.
       await _runOrThrow(['stop', 'orb-$id']);
-      // The wake's gate (issue #97, spec §2.4).
-      await _setStoppedMarker(id);
+      // The wake's gate (issue #97, spec §2.4), behind the marker seam.
+      await markers.setStopped(id);
     } finally {
       for (final file in files.values) {
         if (file.existsSync()) await file.delete();
@@ -1638,8 +1580,8 @@ class OrbService {
   /// Then the startup reconciliation ([_reconcileSessions]).
   Future<void> recover() async {
     for (final record in await list()) {
-      if (record.state != 'stopped') continue;
-      if (isStopped(record.id)) continue;
+      if (!OrbState.parse(record.state).isStopped) continue;
+      if (markers.stopped(record.id)) continue;
       try {
         await wake(record.id);
       } catch (_) {
@@ -1673,7 +1615,7 @@ class OrbService {
     if (hostIds.isEmpty) return;
     for (final record in await list()) {
       final url = record.url;
-      if (record.state != 'running' || url == null) continue;
+      if (!OrbState.parse(record.state).isRunning || url == null) continue;
       final password = await lastPassword(record.id);
       if (password == null) continue; // Still booting: nothing to reconcile.
       final service = _orbService(url, password);
@@ -1789,14 +1731,15 @@ class OrbService {
       // `gh-auth-failed` cause for the list and the boot report.
       await verifyGhAuth(id, container);
       await _syncHostCredentials(id, url, password);
-      await _removeStoppedMarker(id);
-      await _removeCleanupMarker(id);
+      // The wake's last steps, behind the marker seam (issue #281, S11c).
+      await markers.clearStopped(id);
+      await markers.clearCleanupPending(id);
       return OrbRecord(
         id: id,
         name: record.name,
         project: record.project,
         branch: record.branch,
-        state: 'running',
+        state: OrbState.runningWire,
         created: record.created,
         url: url,
         base: record.base,
@@ -1913,9 +1856,9 @@ class OrbService {
         name: orbName,
         checkout: checkoutPath,
       );
-    } else if (orb.isStoppedLike) {
+    } else if (OrbState.parse(orb.state).isStoppedLike) {
       orb = await wake(orb.id);
-    } else if (orb.state != 'running') {
+    } else if (!OrbState.parse(orb.state).isRunning) {
       throw const OrbRefusalError(
         OrbRefusalError.notWakeable,
         'the orb is not running and cannot be woken',
@@ -1953,7 +1896,7 @@ class OrbService {
   Future<Session> createSessionOnOrb(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    if (record.state != 'running') {
+    if (!OrbState.parse(record.state).isRunning) {
       throw const OrbRefusalError(
         OrbRefusalError.notRunning,
         'only a running orb can create a session',
@@ -2042,7 +1985,7 @@ class OrbService {
   Future<OrbDeletionGuard> deleteGuard(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    if (record.state == 'orphan') {
+    if (OrbState.parse(record.state).isOrphan) {
       return const OrbDeletionGuard(evaluable: false);
     }
     final container = 'orb-$id';
@@ -2136,7 +2079,7 @@ class OrbService {
   Future<void> delete(String id, {bool force = false}) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    if (record.state == 'orphan') {
+    if (OrbState.parse(record.state).isOrphan) {
       await deleteOrphan(id);
       return;
     }
@@ -2327,7 +2270,7 @@ class OrbService {
     if (!running) {
       // A stopped orb stays stopped: the container is recreated (created,
       // not started) and the marker is untouched.
-      return _replacedState(record, 'stopped');
+      return _replacedState(record, OrbState.stoppedWire);
     }
     // A fresh container holds a fresh log: no stale password lines to
     // skip.
@@ -2348,7 +2291,7 @@ class OrbService {
         name: record.name,
         project: record.project,
         branch: record.branch,
-        state: 'running',
+        state: OrbState.runningWire,
         created: record.created,
         url: url,
         base: record.base,
@@ -2587,14 +2530,13 @@ class OrbService {
   /// every failure swallows to the next pass, like the rest of the per-orb
   /// step (the pass never throws).
   Future<void> _lifecycleGhRestage(OrbRecord record, DateTime now) async {
-    final marker = File('${stateRoot.path}/${record.id}/push-failed');
-    if (!marker.existsSync()) {
+    final generation = markers.pushFailedGeneration(record.id);
+    if (generation == null) {
       // No failed push: the boot-time staging stands (or the hook's last
       // push cleared the marker — a new failure is a new generation).
       _ghRestage.remove(record.id);
       return;
     }
-    final generation = marker.lastModifiedSync();
     final gate = _ghRestage[record.id];
     if (gate != null &&
         gate.$1 == generation &&
@@ -2624,7 +2566,7 @@ class OrbService {
       if (exit == null || now.difference(exit) < stoppedAutoDeleteAfter) {
         // Not yet a candidate: no badge before candidacy (§9.4 — the badge
         // marks guard-blocked *candidates*).
-        await _removeCleanupMarker(record.id);
+        await markers.clearCleanupPending(record.id);
         return;
       }
     }
@@ -2634,7 +2576,7 @@ class OrbService {
       // kept.
       await delete(record.id);
     } on OrbDeletionRefusedError catch (e) {
-      await _markCleanupPending(record.id, _autoCleanupReason(e.guard));
+      await markers.markCleanupPending(record.id, _autoCleanupReason(e.guard));
     }
   }
 
@@ -2736,7 +2678,7 @@ class OrbService {
       DateTime.now().toUtc(),
     );
     final target = '$targetDir/$fileName';
-    if (record.state != 'orphan') {
+    if (!OrbState.parse(record.state).isOrphan) {
       final state = await _inspectState('orb-$id');
       if (state == 'running') {
         await _runOrThrow([
@@ -2759,7 +2701,7 @@ class OrbService {
     // container over the workspace volume, writing into the bind-mounted
     // out dir.
     await _requireWorkspaceVolume(id);
-    final image = record.state == 'orphan'
+    final image = OrbState.parse(record.state).isOrphan
         ? await imageBuilder.ensureImage()
         : await _containerImage(id);
     if (image == null) {
@@ -3302,7 +3244,7 @@ class OrbService {
       failure = 'the host gh token read back is not a token';
     }
     if (failure != null) {
-      _markGhAuthFailed(id, failure);
+      await _markGhAuthFailed(id, failure);
       return false;
     }
     final dir = Directory('${stateRoot.path}/$id/gh')
@@ -3316,20 +3258,17 @@ class OrbService {
       '            oauth_token: $token\n'
       '    user: $login\n',
     );
-    _clearGhAuthFailure(id);
+    await markers.clearGhAuthFailed(id);
     try {
       Process.runSync('chmod', ['600', hostsFile.path]);
     } on ProcessException {
       // No chmod on the PATH: the file is written, permissions are best-
       // effort (same fallback as the Firebase service-account file).
     }
-    final marker = File('${stateRoot.path}/$id/push-failed');
-    try {
-      if (marker.existsSync()) marker.deleteSync();
-    } on FileSystemException {
-      // A lingering marker only over-surfaces, never hides; the state
-      // dir's own removal (the deletion) takes it with it.
-    }
+    // A passing stage clears the stale `push-failed` verdict too (the marker
+    // says "the push is broken"; the refreshed credentials make that
+    // unknown — the next push re-marks it if it still fails).
+    await markers.clearPushFailed(id);
     return true;
   }
 
@@ -3352,18 +3291,14 @@ class OrbService {
 
   /// Record that the orb's gh credentials could not be staged (issue #145):
   /// the cause on the state mount, host-side readable like `push-failed`
-  /// (#120) so the list composes the row's `ghAuthFailed` flag — before the
-  /// boot, so the boot report says so. Written even when the boot fails: the
-  /// marker describes the credentials, not the boot.
-  void _markGhAuthFailed(String id, String reason) {
-    final marker = File('${stateRoot.path}/$id/gh-auth-failed');
-    try {
-      marker.parent.createSync(recursive: true);
-      marker.writeAsStringSync(reason);
-    } on FileSystemException {
-      // No writable state dir: the create's own failures surface first.
-      return;
-    }
+  /// Record that the orb's gh credentials could not be staged (issue #145):
+  /// the cause on the state mount (behind the marker seam, S11c), host-side
+  /// readable like `push-failed` (#120) so the list composes the row's
+  /// `ghAuthFailed` flag — before the boot, so the boot report says so.
+  /// Written even when the boot fails: the marker describes the credentials,
+  /// not the boot.
+  Future<void> _markGhAuthFailed(String id, String reason) async {
+    await markers.markGhAuthFailed(id, reason);
     final emitter = emit;
     if (emitter != null) {
       emitter(
@@ -3372,17 +3307,6 @@ class OrbService {
           data: {'id': id, 'line': '[orb] gh auth: $reason'},
         ),
       );
-    }
-  }
-
-  /// Clear [id]'s `gh-auth-failed` marker after a successful stage (issue
-  /// #145): the #120/#149 rule — a marker describes the start that wrote it.
-  void _clearGhAuthFailure(String id) {
-    try {
-      final marker = File('${stateRoot.path}/$id/gh-auth-failed');
-      if (marker.existsSync()) marker.deleteSync();
-    } on FileSystemException {
-      // A lingering marker only over-surfaces, never hides.
     }
   }
 
@@ -3432,7 +3356,7 @@ class OrbService {
       result = DockerCliResult(exitCode: -1, stdout: '', stderr: '$error');
     }
     if (result.exitCode == 0 && result.stdout.trim().isNotEmpty) {
-      _clearGhAuthFailure(id);
+      await markers.clearGhAuthFailed(id);
       return (ok: true, cause: null);
     }
     final cause = _ghFailureLine((
@@ -3440,7 +3364,7 @@ class OrbService {
       result.stdout,
       result.stderr,
     ), 'gh api user');
-    _markGhAuthFailed(id, cause);
+    await _markGhAuthFailed(id, cause);
     return (ok: false, cause: cause);
   }
 
@@ -3832,36 +3756,19 @@ class OrbService {
       name: decoded['ocb.name'] as String? ?? '',
       project: decoded['ocb.project'] as String? ?? '',
       branch: decoded['ocb.branch'] as String? ?? '',
-      state: state == 'running' ? 'running' : 'stopped',
+      state: state == 'running' ? OrbState.runningWire : OrbState.stoppedWire,
       created: decoded['ocb.created'] as String? ?? '',
       url: url,
       base: decoded['ocb.base'] as String?,
     );
   }
 
-  /// The shell-probe failure reason of orb [id], read from the state mount's
-  /// `no-shell` marker the entrypoint writes (spec §6.8, issue #149), or `null`
-  /// when that boot passed the probe. A host-side read only — the marker is
-  /// cleared by the next passing boot, exactly like `push-failed` (#120).
-  String? _noShellMarker(String id) {
-    final file = File('${stateRoot.path}/$id/no-shell');
-    if (!file.existsSync()) return null;
-    try {
-      final reason = file.readAsStringSync().trim();
-      return reason.isEmpty ? 'no usable shell' : reason;
-    } on FileSystemException {
-      // Unreadable for a moment (a boot rewriting it): no verdict beats a
-      // wrong one, and the next list reads it again.
-      return null;
-    }
-  }
-
   OrbRecord _withBrokenState(OrbRecord record, List<String> volumeNames) {
     if (!volumeNames.contains('orb-${record.id}-workspace')) {
-      return _replacedState(record, 'broken:workspace');
+      return _replacedState(record, OrbState.brokenWorkspaceWire);
     }
     if (!Directory('${stateRoot.path}/${record.id}').existsSync()) {
-      return _replacedState(record, 'broken:state');
+      return _replacedState(record, OrbState.brokenStateWire);
     }
     return record;
   }

@@ -2442,20 +2442,5 @@ void main() {
         );
       });
     });
-
-    // ----------------------------------------------------------------------
-    // isStopped
-
-    group('isStopped (the ocb.stopped marker)', () {
-      test('reflects the marker file', () async {
-        stateDir();
-        final s = service();
-        expect(s.isStopped(orbId), isFalse);
-        setMarker();
-        expect(s.isStopped(orbId), isTrue);
-        File('${stateRoot.path}/$orbId/stopped').deleteSync();
-        expect(s.isStopped(orbId), isFalse);
-      });
-    });
   });
 }

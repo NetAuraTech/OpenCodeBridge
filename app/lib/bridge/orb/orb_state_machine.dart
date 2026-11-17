@@ -7,11 +7,14 @@
 //
 // The [OrbRecord.state] string stays the app-facing wire shape: [OrbState]
 // wraps it (and [OrbState.compose] reproduces it), and every predicate
-// answers for the composed string. The contract phases (#280, #281)
-// switch the call sites over and delete the ad-hoc comparisons: #280
-// (S11b) routes the named lifecycle actions and the orbs-tab gates
-// through these predicates; #281 (S11c) takes the remaining
-// composition/identity comparisons.
+// answers for the composed string. The contract phases are complete: #280
+// (S11b) routed the named lifecycle actions and the orbs-tab gates through
+// these predicates, and #281 (S11c) deleted the remaining ad-hoc
+// comparisons — the state string is now produced and read only here (the
+// wire-string consts + [kind]/[detail]), and the marker files only through
+// the [OrbMarkerStore] seam. The state set is still growing: a new state
+// is a change in this module, found by [kind]'s exhaustive switch and this
+// file's tests — not a grep across the call sites.
 //
 // The marker files ([OrbMarkerStore]) live in the per-orb state dir
 // (`<stateRoot>/<id>/`), written by the bridge (the stop's `stopped` gate,
@@ -74,6 +77,23 @@ enum OrbStateKind {
 /// facts with [OrbState.compose]. Equality is on the wire string alone.
 class OrbState {
   const OrbState(this.wire);
+
+  /// The base states' wire strings, in their exact on-wire spelling (spec
+  /// §2.1/§2.2). The ONE place the state string is produced from: every
+  /// producer — the raw-facts composition ([compose]), the list's
+  /// container/orphan rows, and the call sites that name a state — reads
+  /// these, so a new or renamed state is a change in this module only
+  /// (issue #281, S11c). The sub-state detail rides on the wire after a `:`
+  /// ([preparingWire] / [cleanupPendingWire] + the stage word / reason) and
+  /// is not a const of its own.
+  static const String runningWire = 'running';
+  static const String stoppedWire = 'stopped';
+  static const String preparingWire = 'preparing';
+  static const String brokenWorkspaceWire = 'broken:workspace';
+  static const String brokenStateWire = 'broken:state';
+  static const String brokenShellWire = 'broken:shell';
+  static const String orphanWire = 'orphan';
+  static const String cleanupPendingWire = 'cleanup_pending';
 
   /// The wire string on the record (`state` of [OrbRecord]): the base name
   /// for the base states, `<base>:<detail>` for preparing and
@@ -176,8 +196,8 @@ class OrbState {
   // ------------------------------------------------------------------------
   // The per-action predicates (spec §2.4/§2.5/§2.7/§2.8/§9.4/§9.5): the
   // admissible-state set of each action, owned here. The named lifecycle
-  // actions and the orbs-tab gates read these directly (issue #280, S11b);
-  // the remaining ad-hoc comparisons fall to #281 (S11c).
+  // actions and the orbs-tab gates read these directly (issue #280, S11b),
+  // and no call site compares the state string ad-hoc anymore (#281, S11c).
 
   /// The stop (spec §2.5) is a lossless move to the host — only a `running`
   /// orb stops; a re-issue in any other state is a safe no-op (the caller
@@ -260,7 +280,7 @@ class OrbState {
     String? shellFailedReason,
     String? cleanupReason,
   }) {
-    if (dockerStatus == null) return OrbState('orphan');
+    if (dockerStatus == null) return OrbState(orphanWire);
     // Booting: a `created` container (no log yet) or a `running` one whose
     // log does not carry this boot's password line (spec §9.3). No broken,
     // shell, or cleanup check runs on a booting container.
@@ -268,21 +288,23 @@ class OrbState {
         (dockerStatus == 'running' && bootPasswordSeen != true)) {
       final stage = bootStage;
       return OrbState(
-        stage == null || stage.isEmpty ? 'preparing' : 'preparing:$stage',
+        stage == null || stage.isEmpty
+            ? preparingWire
+            : '$preparingWire:$stage',
       );
     }
-    if (dockerStatus == 'running') return OrbState('running');
+    if (dockerStatus == 'running') return OrbState(runningWire);
     // Stopped (any exited/dead/other status): the broken checks first, then
     // the shell badge (issue #149), then the lifecycle pass's badge
     // (issue #101), then the plain stop.
-    if (!workspaceVolumePresent) return OrbState('broken:workspace');
-    if (!stateDirPresent) return OrbState('broken:state');
-    if (shellFailedReason != null) return OrbState('broken:shell');
+    if (!workspaceVolumePresent) return OrbState(brokenWorkspaceWire);
+    if (!stateDirPresent) return OrbState(brokenStateWire);
+    if (shellFailedReason != null) return OrbState(brokenShellWire);
     final reason = cleanupReason;
     if (reason != null && reason.isNotEmpty) {
-      return OrbState('cleanup_pending:$reason');
+      return OrbState('$cleanupPendingWire:$reason');
     }
-    return OrbState('stopped');
+    return OrbState(stoppedWire);
   }
 
   @override

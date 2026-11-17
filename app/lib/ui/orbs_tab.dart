@@ -859,22 +859,26 @@ const double _gridPadding = 12;
 const double _cardWidth = 280;
 const double _cardHeight = 204;
 
-/// The orb's state word on the card (spec §9.4).
+/// The orb's state word on the card (spec §9.4): read from the state
+/// machine's named kind, so a new orb state is a module change the switch
+/// is forced to answer (issue #281, S11c).
 String _stateWord(String state) {
-  switch (state.split(':').first) {
-    case 'running':
+  switch (OrbState.parse(state).kind) {
+    case OrbStateKind.running:
       return 'running';
-    case 'stopped':
+    case OrbStateKind.stopped:
       return 'stopped';
-    case 'preparing':
+    case OrbStateKind.preparing:
       return 'preparing';
-    case 'cleanup_pending':
+    case OrbStateKind.cleanupPending:
       return 'cleanup pending';
-    case 'broken':
+    case OrbStateKind.brokenWorkspace:
+    case OrbStateKind.brokenState:
+    case OrbStateKind.brokenShell:
       return 'broken';
-    case 'orphan':
+    case OrbStateKind.orphan:
       return 'orphaned';
-    default:
+    case null:
       return state;
   }
 }
@@ -890,23 +894,31 @@ String? _stateDetail(
   String? ghAuthFailed,
   String? bootReason,
 }) {
-  if (state.startsWith('preparing:')) {
-    return 'stage: ${state.substring(state.indexOf(':') + 1)}';
+  final s = OrbState.parse(state);
+  final detail = s.detail;
+  if (s.isPreparing && detail != null) {
+    return 'stage: $detail';
   }
-  switch (state) {
-    case 'broken:workspace':
+  switch (s.kind) {
+    case OrbStateKind.brokenWorkspace:
       return 'workspace volume missing';
-    case 'broken:state':
+    case OrbStateKind.brokenState:
       return 'state directory missing';
-    case 'broken:shell':
+    case OrbStateKind.brokenShell:
       // The boot's own reason, verbatim (issue #149): the card says what the
       // refusal says — an orb whose agent cannot run a command (spec §6.8).
       return bootReason ?? 'the agent cannot run a command';
-    case 'orphan':
+    case OrbStateKind.orphan:
       return 'volumes without a container';
+    case OrbStateKind.preparing:
+    case null:
+    case OrbStateKind.running:
+    case OrbStateKind.stopped:
+    case OrbStateKind.cleanupPending:
+      break;
   }
-  if (state.startsWith('cleanup_pending:')) {
-    return state.substring('cleanup_pending:'.length);
+  if (s.kind == OrbStateKind.cleanupPending && detail != null) {
+    return detail;
   }
   // The dead gh (issue #145) is the STRONGER signal: it also breaks the
   // push, so "push is failing" would be the symptom of this cause, not a
@@ -922,15 +934,19 @@ String? _stateDetail(
 /// green running, red broken (the shell-less orb included — it boots, but its
 /// agent cannot execute, issue #149), grey stopped / orphan.
 Color _stateColor(String state) {
-  switch (state.split(':').first) {
-    case 'running':
+  switch (OrbState.parse(state).kind) {
+    case OrbStateKind.running:
       return Colors.green;
-    case 'preparing':
-    case 'cleanup_pending':
+    case OrbStateKind.preparing:
+    case OrbStateKind.cleanupPending:
       return Colors.orange;
-    case 'broken':
+    case OrbStateKind.brokenWorkspace:
+    case OrbStateKind.brokenState:
+    case OrbStateKind.brokenShell:
       return Colors.red;
-    default:
+    case OrbStateKind.stopped:
+    case OrbStateKind.orphan:
+    case null:
       return Colors.grey;
   }
 }
