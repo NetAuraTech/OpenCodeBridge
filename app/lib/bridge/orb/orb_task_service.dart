@@ -1061,34 +1061,19 @@ class OrbTaskService {
   /// Whether [target]'s missing-session 404 is conclusive (issue #211/#276):
   /// whether the session is actually gone, or merely unreadable for now.
   ///
-  /// The task service does **not** re-derive the routing fact — it *asks* the
-  /// live-upstream module (issue #274) for the per-orb verdict and maps it:
-  /// the same single reachability predicate (`OrbUpstream.reachable`) the
-  /// composites read, so a change to it moves every consumer's answer
-  /// together, not independently.
-  ///
-  /// - [UpstreamVerdict.reachable] — the orb passes the gate, so the composite
-  ///   has an upstream for it and a session it 404s is a gone one →
-  ///   **conclusive**.
-  /// - [UpstreamVerdict.gone] — the orb is absent from a readable list
-  ///   (deleted out from under the task): its in-orb sessions are lost with
-  ///   it → **conclusive**.
-  /// - [UpstreamVerdict.unroutable] — the orb's record exists but has no
-  ///   upstream (still booting, stopped, broken, url-less, no password line
-  ///   yet): the read fell back to a host that cannot know the orb session —
-  ///   the 404 is "not routable yet," not "session gone" → **inconclusive**
-  ///   (the window restarts once the orb is routable again).
-  /// - [UpstreamVerdict.unknown] — the list cannot be read (docker down): the
-  ///   composite degrades host-only and nothing may be concluded →
-  ///   **inconclusive** (one fact, one conclusion — the 404 is the host
-  ///   fallback, not proof of a lost session).
-  Future<bool> _missingReadConclusive(OrbTask target) async {
-    final verdict = await upstreams.verdict(target.orb);
-    return switch (verdict) {
-      UpstreamVerdict.reachable || UpstreamVerdict.gone => true,
-      UpstreamVerdict.unroutable || UpstreamVerdict.unknown => false,
-    };
-  }
+  /// The task service does **not** re-derive anything — it *asks* the
+  /// live-upstream module (issue #274) for the per-orb verdict and reads the
+  /// answer off the module's own derivation,
+  /// [UpstreamVerdictAgreement.missingReadConclusive] (issue #277): the same
+  /// single reachability predicate (`OrbUpstream.reachable`) the composites
+  /// read, so a change to it moves every consumer's answer together, not
+  /// independently, and the structural contract
+  /// (`test/bridge/orb/orb_upstream_contract.dart`) pins that this service
+  /// reads it. The per-verdict semantics (which verdicts settle, which hold
+  /// the window open) are documented with the derivation itself — this
+  /// method is the read, nothing else.
+  Future<bool> _missingReadConclusive(OrbTask target) async =>
+      (await upstreams.verdict(target.orb)).missingReadConclusive;
 
   /// The single settle path (issue #169, decomposed by issue #260): the
   /// terminal fields, a persist, **one named delivery step**, a persist, and
