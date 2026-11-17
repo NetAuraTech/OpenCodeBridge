@@ -193,7 +193,10 @@ void main() {
         names: {'p1': 'proj-one', 'p2': 'proj-two'},
         active: {'ses_3'},
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -221,7 +224,10 @@ void main() {
         names: {'p1': 'proj-one'},
         active: const {},
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -239,7 +245,10 @@ void main() {
         names: const {}, // no name for p1 -> falls back to the id
         active: const {},
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final row = (await backend.list()).single;
       expect(row.project, const SessionProject(id: 'p1', name: 'p1'));
@@ -261,7 +270,10 @@ void main() {
           'ses_1': [permission],
         },
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -289,7 +301,10 @@ void main() {
           'ses_2': [form],
         },
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -299,7 +314,10 @@ void main() {
 
     test('waiting false when nothing is pending', () async {
       final service = FakeOpencodeService(sessions: [s1, s2]);
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -322,7 +340,10 @@ void main() {
           'ses_3': const [],
         },
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -349,7 +370,10 @@ void main() {
           'ses_3': [permission],
         },
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final rows = await backend.list();
 
@@ -508,6 +532,31 @@ void main() {
       },
     );
 
+    test('the backend writes through the store it was constructed with '
+        '(issue #271: one write path)', () async {
+      // The store the backend is constructed with is the one it writes
+      // through — the set/clear land on it, and a second backend over a
+      // different store sees none of the writes.
+      final store = SessionOrderStore(file: file);
+      final other = SessionOrderStore(file: File('${dir.path}/other.json'));
+      final backend = SessionsBackend(
+        service: FakeOpencodeService(sessions: [s1, s2]),
+        orderStore: store,
+      );
+
+      await backend.setOrder('ses_1', 2);
+      expect(store.load(), {'ses_1': 2});
+      expect(other.load(), isEmpty);
+      final rows = await backend.list();
+      expect(rows.byId('ses_1').pinned, isTrue);
+
+      await backend.clearOrder('ses_1');
+      expect(store.load(), isEmpty);
+      expect(other.load(), isEmpty);
+      final rowsCleared = await backend.list();
+      expect(rowsCleared.byId('ses_1').pinned, isFalse);
+    });
+
     test('the comparator: pinned first (position ascending), then '
         'created descending', () {
       // The scripted positions: e and b tie at 0 (created descending breaks
@@ -615,7 +664,10 @@ void main() {
         names: {'p1': 'proj-one'},
         createdSession: created,
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final row = await backend.create('p1');
 
@@ -677,7 +729,10 @@ void main() {
             ),
           },
         );
-        final backend = SessionsBackend(service: service);
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        );
 
         await backend.create('p1');
 
@@ -730,7 +785,10 @@ void main() {
             ),
           },
         );
-        final backend = SessionsBackend(service: service);
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        );
 
         await backend.create('p1');
 
@@ -783,7 +841,10 @@ void main() {
           ),
         },
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       await backend.create('p1');
 
@@ -816,7 +877,10 @@ void main() {
         names: const {}, // no name for p_dir -> falls back to the id
         createdInDirectory: created,
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final row = await backend.createInDirectory(dir.path);
 
@@ -844,7 +908,10 @@ void main() {
           location: '/never',
         ),
       );
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       await expectLater(
         backend.createInDirectory('/definitely/not/a/real/path-oc-be-x'),
@@ -903,7 +970,10 @@ void main() {
             ),
           },
         );
-        final backend = SessionsBackend(service: service);
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        );
 
         await backend.createInDirectory(dir.path);
 
@@ -918,7 +988,10 @@ void main() {
   group('SessionsBackend.exists', () {
     test('true while the service has the session, false once gone', () async {
       final service = FakeOpencodeService(sessions: [s1]);
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       expect(await backend.exists('ses_1'), isTrue);
       expect(await backend.exists('ses_gone'), isFalse);
@@ -929,7 +1002,10 @@ void main() {
       '(issue #234: the seam is faithful — archived rows are still listed)',
       () async {
         final service = FakeOpencodeService(sessions: [s1, sArchived]);
-        final backend = SessionsBackend(service: service);
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        );
 
         expect(await backend.exists('ses_archived'), isTrue);
       },
@@ -954,7 +1030,10 @@ void main() {
 
     test('folds the live Active fact onto the detail', () async {
       final service = FakeOpencodeService(detail: detail, active: {'ses_1'});
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final folded = await backend.detailWithActive('ses_1');
 
@@ -967,7 +1046,10 @@ void main() {
 
     test('an idle session folds active false', () async {
       final service = FakeOpencodeService(detail: detail, active: const {});
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       final folded = await backend.detailWithActive('ses_1');
 
@@ -977,7 +1059,10 @@ void main() {
 
     test('the detail error passes through', () async {
       final service = FakeOpencodeService();
-      final backend = SessionsBackend(service: service);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
 
       await expectLater(
         backend.detailWithActive('ses_1'),
@@ -1006,4 +1091,28 @@ class _ThrowingOrderStore implements SessionOrderStore {
 
   @override
   Future<void> clear(String id) async {}
+}
+
+/// An in-memory [SessionOrderStore] for tests that construct a
+/// [SessionsBackend] but never touch the order store (issue #271: the store
+/// is required at construction). It keeps the positions in memory, never the
+/// app-owned file, so a test's store does not leak onto the host.
+class _InMemoryOrderStore implements SessionOrderStore {
+  final Map<String, num> _positions = {};
+
+  @override
+  File get file => throw StateError('in-memory store has no file');
+
+  @override
+  Map<String, num> load() => Map<String, num>.from(_positions);
+
+  @override
+  Future<void> set(String id, num position) async {
+    _positions[id] = position;
+  }
+
+  @override
+  Future<void> clear(String id) async {
+    _positions.remove(id);
+  }
 }

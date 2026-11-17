@@ -24,9 +24,11 @@ import 'session_row.dart';
 ///   Active fact.
 /// - [setOrder] / [clearOrder] move the session's position in the bridge's
 ///   app-owned order store (issue #237, the home list's user-controlled
-///   display order).
+///   display order). They are the order store's one write path: the order
+///   route (issue #237) writes through them — never through the store it
+///   holds — so "how a pin is persisted" has one home (issue #271).
 class SessionsBackend {
-  SessionsBackend({required this.service, this.orderStore})
+  SessionsBackend({required this.service, required this.orderStore})
     : composer = SessionRowComposer.composerFor(service);
 
   final OpencodeService service;
@@ -39,11 +41,11 @@ class SessionsBackend {
   final SessionRowComposer composer;
 
   /// The bridge's order store (issue #237): the persisted `sessionID ->
-  /// position` map behind the home list's pinned-first sort. `null` when the
-  /// bridge has no order store wired (the list falls back to the plain
-  /// newest-created order). Mutable: the bridge's start wires it into a
-  /// caller-provided backend after construction.
-  SessionOrderStore? orderStore;
+  /// position` map behind the home list's pinned-first sort. Injected at
+  /// construction (issue #271) — the backend is complete at construction,
+  /// and the bridge's start no longer re-points a field on it. The list read
+  /// falls back to the plain newest-created order only on a store failure.
+  final SessionOrderStore orderStore;
 
   /// Create a session (spec §5 fill-in †): the service `POST /api/session`
   /// in [projectId]'s project. The bridge applies the current/default model
@@ -163,14 +165,11 @@ class SessionsBackend {
     // The bridge-owned order map (issue #237), kept in full (issue #292: the
     // read no longer prunes the positions of sessions it does not see); a
     // store failure degrades the list to the unpinned order.
-    final orderStore = this.orderStore;
     Map<String, num> positions = const {};
-    if (orderStore != null) {
-      try {
-        positions = orderStore.load();
-      } catch (_) {
-        positions = const {};
-      }
+    try {
+      positions = orderStore.load();
+    } catch (_) {
+      positions = const {};
     }
 
     final rows = [
@@ -211,13 +210,16 @@ class SessionsBackend {
   }
 
   /// Set [id]'s position in the order store (issue #237): the session joins
-  /// the home list's pinned block.
+  /// the home list's pinned block. The store's one write path (issue #271) —
+  /// the order route calls this, never the store it holds.
   Future<void> setOrder(String id, num position) =>
-      orderStore!.set(id, position);
+      orderStore.set(id, position);
 
   /// Clear [id]'s position in the order store (issue #237): the session
-  /// returns to the unpinned newest-created order.
-  Future<void> clearOrder(String id) => orderStore!.clear(id);
+  /// returns to the unpinned newest-created order. The store's one write
+  /// path (issue #271) — the order route calls this, never the store it
+  /// holds.
+  Future<void> clearOrder(String id) => orderStore.clear(id);
 
   /// The detail endpoint's read (issue #124): the session's detail plus its
   /// live Active fact (the service's active list), which the structured

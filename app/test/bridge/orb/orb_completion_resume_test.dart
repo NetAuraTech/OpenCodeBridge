@@ -58,6 +58,7 @@ import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/composite_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/order_store.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/orb.dart';
@@ -266,7 +267,12 @@ void main() {
               throw StateError('no scripted upstream for $url|$password');
             },
           );
-          final backend = SessionsBackend(service: composite);
+          final backend = SessionsBackend(
+            service: composite,
+            orderStore: SessionOrderStore(
+              file: File('${temp.path}/session-order.json'),
+            ),
+          );
           final orbs = _FakeOrbs();
           // The task service consults the orb list for the task's orb state
           // (a missing-session 404 is conclusive only for a running orb):

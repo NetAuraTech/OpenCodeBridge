@@ -9,6 +9,7 @@ import 'package:opencodebridge/bridge/orb/orb_image_builder.dart';
 import 'package:opencodebridge/bridge/orb/orb_service.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/order_store.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/model/orb.dart';
 import 'package:opencodebridge/model/session.dart';
@@ -300,7 +301,10 @@ void main() {
       orbs = _FakeOrbs();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         orbs: orbs,
       );
       base = server.baseUri;
@@ -486,7 +490,10 @@ void main() {
       if (_hostHasDockerCli()) return;
       final bare = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       try {
         final (status, body) = await _postRaw(
@@ -513,7 +520,10 @@ void main() {
       orbs = _FakeOrbs();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         orbs: orbs,
       );
       base = server.baseUri;
@@ -613,7 +623,10 @@ void main() {
       if (_hostHasDockerCli()) return;
       final bare = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       try {
         final (status, body) = await _get(bare.baseUri, 'api/orbs');
@@ -639,7 +652,10 @@ void main() {
       orbs = _FakeOrbs();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         orbs: orbs,
       );
       base = server.baseUri;
@@ -738,7 +754,10 @@ void main() {
       if (_hostHasDockerCli()) return;
       final bare = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       try {
         final (status, body) = await _deleteRaw(
@@ -825,7 +844,10 @@ void main() {
       orbs = _FakeOrbs();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         orbs: orbs,
       );
       base = server.baseUri;
@@ -1084,7 +1106,10 @@ void main() {
       if (_hostHasDockerCli()) return;
       final bare = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       try {
         final (status, body) = await _postRaw(
@@ -1119,7 +1144,10 @@ void main() {
       orbs = _FakeOrbs();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         orbs: orbs,
       );
       base = server.baseUri;
@@ -1287,7 +1315,10 @@ void main() {
       if (_hostHasDockerCli()) return;
       final bare = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       try {
         final (status, body) = await _postRaw(
@@ -1355,7 +1386,10 @@ void main() {
       orbs = _FakeOrbs();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         orbs: orbs,
       );
       base = server.baseUri;
@@ -1443,4 +1477,28 @@ void main() {
       }
     });
   });
+}
+
+/// An in-memory [SessionOrderStore] for tests that construct a
+/// [SessionsBackend] but never touch the order store (issue #271: the store
+/// is required at construction). It keeps the positions in memory, never the
+/// app-owned file, so a test's store does not leak onto the host.
+class _InMemoryOrderStore implements SessionOrderStore {
+  final Map<String, num> _positions = {};
+
+  @override
+  File get file => throw StateError('in-memory store has no file');
+
+  @override
+  Map<String, num> load() => Map<String, num>.from(_positions);
+
+  @override
+  Future<void> set(String id, num position) async {
+    _positions[id] = position;
+  }
+
+  @override
+  Future<void> clear(String id) async {
+    _positions.remove(id);
+  }
 }
