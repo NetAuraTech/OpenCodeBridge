@@ -291,14 +291,16 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
     OrbService? orbService,
     Future<List<OrbRecord>> Function()? orbList,
     Future<String?> Function(String)? orbPassword,
-  })  : orbList = orbList ??
-            (orbService == null
-                ? () async => const <OrbRecord>[]
-                : orbService.list),
-        orbPassword = orbPassword ??
-            (orbService == null
-                ? (String _) async => null
-                : orbService.lastPassword);
+  }) : orbList =
+           orbList ??
+           (orbService == null
+               ? () async => const <OrbRecord>[]
+               : orbService.list),
+       orbPassword =
+           orbPassword ??
+           (orbService == null
+               ? (String _) async => null
+               : orbService.lastPassword);
 
   /// The running orb list (labels; `url` only for a running orb). May
   /// throw when docker is down (the source degrades: empty [live],

@@ -308,10 +308,7 @@ void main() {
         passwords: {'a': _pw},
       );
       final records = await source.records();
-      expect(
-        [for (final r in records!) r.id],
-        equals(const ['a', 'b', 'c']),
-      );
+      expect([for (final r in records!) r.id], equals(const ['a', 'b', 'c']));
       // The raw records are the list's own values (labels; `url` only for a
       // running orb) — the module adds nothing and filters nothing: the
       // boot-retry check reads the list itself, not the gate's answer.
@@ -319,16 +316,18 @@ void main() {
       expect(records.last.url, isNull);
     });
 
-    test('an unreadable list is null (docker down) — a value, not a throw',
-        () async {
-      final source = fakeSource(
-        tmp: tmp,
-        records: [record('a', 'running', url: _url)],
-        passwords: {'a': _pw},
-        listError: const DockerUnavailableError('docker is down'),
-      );
-      expect(await source.records(), isNull);
-    });
+    test(
+      'an unreadable list is null (docker down) — a value, not a throw',
+      () async {
+        final source = fakeSource(
+          tmp: tmp,
+          records: [record('a', 'running', url: _url)],
+          passwords: {'a': _pw},
+          listError: const DockerUnavailableError('docker is down'),
+        );
+        expect(await source.records(), isNull);
+      },
+    );
   });
 
   group('degradation — docker down (the list cannot be read)', () {

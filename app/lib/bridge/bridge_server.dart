@@ -489,8 +489,7 @@ class BridgeServer {
     }
     orbBackend = backend;
     final fsService = fs ?? const LinuxFsService();
-    final eventHub =
-        events ?? await BridgeServer._defaultEvents(orbUpstreams);
+    final eventHub = events ?? await BridgeServer._defaultEvents(orbUpstreams);
     orbEmit = eventHub?.emit;
     // The opencode service boot log (issue #153): the boot ran before the hub
     // existed, so its lines are buffered in the booter. Flush them onto the
@@ -873,10 +872,7 @@ class BridgeServer {
     try {
       final host = await OpencodeHttpService.fromHost();
       return SessionsBackend(
-        service: CompositeOpencodeService(
-          host: host,
-          upstreams: upstreams,
-        ),
+        service: CompositeOpencodeService(host: host, upstreams: upstreams),
       );
     } catch (_) {
       return null;
