@@ -5,15 +5,8 @@
 //
 // The descriptor has no file to read (spec §7.1: a directly-invoked
 // `opencode serve` writes no `service.json`): it is re-derived at every
-// refresh from the running orb list and the container log. Today the
-// derivation has no home — the orb service derives it for its own reads,
-// the sessions composite re-derives the descriptor and re-encodes the
-// reachability gate to build its upstreams (spec §7.2), the events
-// composite carries the identical gate for the events stream (spec §7.3),
-// and the task service guesses at it for 404-conclusiveness (issue #211,
-// re-derived as a raw `state == 'running'` compare). The orb↔composite
-// seam is two bare closures (the list plus the password) that carry no
-// shared fact. This module owns both facts:
+// refresh from the running orb list and the container log. The module owns
+// both facts:
 //
 // - the **live upstream set with credentials** ([OrbUpstreamSource.live]):
 //   every running orb that passes the reachability gate, with its url and
@@ -21,7 +14,10 @@
 // - the **per-orb reachability verdict** ([OrbUpstreamSource.verdict] →
 //   [UpstreamVerdict]): "is a 404 from the composite meaningful for orb X
 //   right now?" — the same gate, answered per orb, distinguishing the
-//   reachable / unroutable / gone / unknown cases.
+//   reachable / unroutable / gone / unknown cases;
+// - the **raw running-orb list** ([OrbUpstreamSource.records]): the
+//   un-gated fact, for a consumer that needs the list itself (the events
+//   composite's boot-retry check, issue #278).
 //
 // The gate is ONE predicate, owned here: [OrbUpstream.reachable] — a
 // running orb whose record carries a non-empty ephemeral url and whose
@@ -32,20 +28,27 @@
 // drift, issue #274's reason for the module).
 //
 // Degradation is owned here, the way the composites own it today: a list
-// the source cannot read (docker down) yields an empty live set and an
-// [UpstreamVerdict.unknown] per orb — the host-only, inconclusive answer.
-// A degraded read must never claim an upstream exists, nor that a session
-// is gone.
+// the source cannot read (docker down) yields an empty live set, an
+// [UpstreamVerdict.unknown] per orb, and a `null` raw list — the host-only,
+// inconclusive answer. A degraded read must never claim an upstream exists,
+// nor that a session is gone.
 //
-// The call sites read the module: #275 wired the composites and the
-// lifecycle pass (the sessions and events composites reconcile on
-// [LiveOrbUpstreams.live]), #276 wired the task service (it asks
-// [OrbUpstreamSource.verdict] and reads the answer off
-// [UpstreamVerdictAgreement.missingReadConclusive]) — no ad-hoc
-// derivation remains. #277 pins the agreement structurally (the shared
-// contract `test/bridge/orb/orb_upstream_contract.dart` asserts both
-// consumers' answers equal the module's derivation for every scenario),
-// and #278 makes the bridge seam the module.
+// The module is the bridge's orb↔composite seam (issue #278): the
+// composition root wires ONE [LiveOrbUpstreams] (over the bridge's orb
+// service, degrading to empty list / null password when this machine has no
+// orbs service) and every consumer takes it — the sessions composite, the
+// events composite, the task service, and the backend-resolution re-arm. A
+// new consumer reads the module without a new bridge closure, and the
+// reachability gate exists once, in this module. The call sites read the
+// module: #275 wired the composites and the lifecycle pass (the sessions
+// and events composites reconcile on [LiveOrbUpstreams.live]), #276 wired
+// the task service (it asks [OrbUpstreamSource.verdict] and reads the
+// answer off [UpstreamVerdictAgreement.missingReadConclusive]), #277 pins
+// the agreement structurally (the shared contract
+// `test/bridge/orb/orb_upstream_contract.dart` asserts both consumers'
+// answers equal the module's derivation for every scenario), and #278
+// (this change) makes the bridge seam the module — no ad-hoc derivation
+// remains.
 
 import '../../model/orb.dart';
 import 'orb_service.dart';
@@ -237,12 +240,15 @@ extension UpstreamVerdictAgreement on UpstreamVerdict {
 /// - [verdict] — the per-orb conclusiveness fact: "is a 404 from the
 ///   composite meaningful for [orbId] right now?" / "do you have an
 ///   upstream for it right now?", answered by the same gate.
+/// - [records] — the raw running-orb list, un-gated: for a consumer that
+///   needs the list itself (the events composite's boot-retry check,
+///   issue #278), not the gate's answer for it.
 ///
 /// The list read may throw when docker is down (the composites' own
 /// degradation contract, spec §7.2): this module translates that into an
-/// empty [live] set and [UpstreamVerdict.unknown] — the failure never
-/// escapes a read through this module, and a degraded read never claims
-/// an upstream exists or a session is gone.
+/// empty [live] set, [UpstreamVerdict.unknown], and a `null` [records] —
+/// the failure never escapes a read through this module, and a degraded
+/// read never claims an upstream exists or a session is gone.
 abstract class OrbUpstreamSource {
   /// Every reachable orb right now, with its descriptor (url + password).
   /// Empty — never throwing — when the list cannot be read.
@@ -252,6 +258,11 @@ abstract class OrbUpstreamSource {
   /// [UpstreamVerdict.unknown] — never a throw — when the list cannot be
   /// read.
   Future<UpstreamVerdict> verdict(String orbId);
+
+  /// The raw running-orb list (labels; `url` only for a running orb),
+  /// un-gated — `null` when it cannot be read (docker down). The
+  /// degradation is a value here, not an escape.
+  Future<List<OrbRecord>?> records();
 }
 
 /// The source over the real host (issue #274's concrete implementation):
@@ -268,33 +279,30 @@ abstract class OrbUpstreamSource {
 /// read), never an error.
 ///
 /// The list and password are injectable seams — the same two facts the
-/// composites read through their `orbList`/`orbPassword` closures — so the
-/// module is unit-testable without docker (mirroring the marker-store seam
-/// of the state-machine module: one abstract fact source, one concrete
-/// host implementation). The default constructor derives both seams from
-/// [orbService]; [LiveOrbUpstreams.fromSeams] (issue #275) takes the
-/// composite's own injected seams directly.
+/// host derives from [orbService] — so the module is unit-testable without
+/// docker (mirroring the marker-store seam of the state-machine module: one
+/// abstract fact source, one concrete host implementation). When not
+/// injected, the seams resolve from [orbService] ([OrbService.list] /
+/// [OrbService.lastPassword]); when [orbService] is `null` (a machine with
+/// no orbs service) they default to an empty list and a `null` password —
+/// the host-only degradation the bridge used for those machines.
 class LiveOrbUpstreams implements OrbUpstreamSource {
   LiveOrbUpstreams({
-    required OrbService orbService,
+    OrbService? orbService,
     Future<List<OrbRecord>> Function()? orbList,
     Future<String?> Function(String)? orbPassword,
-  }) : orbList = orbList ?? orbService.list,
-       orbPassword = orbPassword ?? orbService.lastPassword;
-
-  /// The source over the composite's own seams (issue #275's contract
-  /// phase): the composites hold their injected `orbList`/`orbPassword`
-  /// closures — the same two facts — not an [OrbService], so this builds
-  /// the source directly over them. The derivation, the gate, and the
-  /// degradation are the same `live()`/[OrbUpstream.reachable] either way.
-  LiveOrbUpstreams.fromSeams({
-    required this.orbList,
-    required this.orbPassword,
-  });
+  })  : orbList = orbList ??
+            (orbService == null
+                ? () async => const <OrbRecord>[]
+                : orbService.list),
+        orbPassword = orbPassword ??
+            (orbService == null
+                ? (String _) async => null
+                : orbService.lastPassword);
 
   /// The running orb list (labels; `url` only for a running orb). May
   /// throw when docker is down (the source degrades: empty [live],
-  /// [UpstreamVerdict.unknown]).
+  /// [UpstreamVerdict.unknown], [records] `null`).
   final Future<List<OrbRecord>> Function() orbList;
 
   /// The orb's current `server password` (the last log line wins on a
@@ -303,10 +311,10 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
 
   @override
   Future<List<OrbUpstream>> live() async {
-    final records = await _records();
-    if (records == null) return const []; // Docker down: host-only, empty.
+    final list = await records();
+    if (list == null) return const []; // Docker down: host-only, empty.
     final live = <OrbUpstream>[];
-    for (final record in records) {
+    for (final record in list) {
       final upstream = OrbUpstream.reachable(
         id: record.id,
         state: record.state,
@@ -322,9 +330,9 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
 
   @override
   Future<UpstreamVerdict> verdict(String orbId) async {
-    final records = await _records();
-    if (records == null) return UpstreamVerdict.unknown;
-    for (final record in records) {
+    final list = await records();
+    if (list == null) return UpstreamVerdict.unknown;
+    for (final record in list) {
       if (record.id != orbId) continue;
       final reachable =
           OrbUpstream.reachable(
@@ -339,13 +347,13 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
     return UpstreamVerdict.gone;
   }
 
-  /// The running orb list, or `null` when it cannot be read (docker down
-  /// or a torn label pass): the degradation is a value here, not an
-  /// escape.
-  Future<List<OrbRecord>?> _records() async {
+  @override
+  Future<List<OrbRecord>?> records() async {
     try {
       return await orbList();
     } catch (_) {
+      // Docker down (or a torn label pass): the degradation is a value here,
+      // not an escape.
       return null;
     }
   }

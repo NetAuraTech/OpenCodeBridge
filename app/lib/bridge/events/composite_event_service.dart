@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import '../../model/orb.dart';
 import '../orb/orb_upstreams.dart';
 import 'opencode_event_service.dart';
 import 'opencode_http_event_service.dart';
@@ -16,19 +15,18 @@ import 'opencode_http_event_service.dart';
 /// events drive push notifications like host events.
 ///
 /// The per-orb upstreams are reconciled on a periodic interval from the
-/// module's live set — the same [LiveOrbUpstreams] over this composite's
-/// own [orbList]/[orbPassword] seams (issue #275: the descriptor
-/// derivation and the reachability gate are read from the one module, not
-/// re-encoded here): a started orb that passes the gate gets an upstream,
-/// a stopped orb's upstream is closed, and a respawn (a new `(url,
-/// password)` key) replaces it. Each upstream is itself self-healing (it
-/// re-subscribes across the orb service's own restarts), so a transient
-/// orb-service drop does not wait for the next reconcile.
+/// module's live set — the same [OrbUpstreamSource] the sessions composite
+/// and the task service take, wired once by the composition root (issue
+/// #278: the descriptor derivation and the reachability gate are read from
+/// the one module, not re-encoded here): a started orb that passes the gate
+/// gets an upstream, a stopped orb's upstream is closed, and a respawn (a
+/// new `(url, password)` key) replaces it. Each upstream is itself
+/// self-healing (it re-subscribes across the orb service's own restarts),
+/// so a transient orb-service drop does not wait for the next reconcile.
 class CompositeOpencodeEventService implements OpencodeEventService {
   CompositeOpencodeEventService({
     required this.host,
-    required this.orbList,
-    required this.orbPassword,
+    required this.upstreams,
     this.upstreamFactory = _defaultUpstreamFactory,
     this.refreshInterval = const Duration(seconds: 15),
     this.bootRetryInterval = const Duration(seconds: 2),
@@ -48,13 +46,13 @@ class CompositeOpencodeEventService implements OpencodeEventService {
 
   final OpencodeEventService host;
 
-  /// The running orb list (labels; `url` only for a running orb). May throw
-  /// when docker is down (the composite degrades to host-only).
-  final Future<List<OrbRecord>> Function() orbList;
-
-  /// The orb's current `server password` (the last log line wins on a
-  /// respawn), or `null` when it cannot be derived.
-  final Future<String?> Function(String orbId) orbPassword;
+  /// The live upstream facts (issue #274, owned by the live-orb-upstreams
+  /// module, issue #278: wired once by the composition root, read here —
+  /// the descriptor derivation and the reachability gate are not re-encoded
+  /// in the composite). The docker-down degradation is owned by the source:
+  /// [OrbUpstreamSource.live] yields an empty set (host-only) and never
+  /// throws; [OrbUpstreamSource.records] is `null` on a degraded read.
+  final OrbUpstreamSource upstreams;
 
   /// Builds the per-orb upstream from its ephemeral URL + derived password
   /// (injectable for tests; the default is the same HTTP event client as the
@@ -73,16 +71,6 @@ class CompositeOpencodeEventService implements OpencodeEventService {
   /// and its `session.created` / first turn could be invisible to the app for
   /// that whole window.
   final Duration bootRetryInterval;
-
-  /// The live upstream facts over this composite's own seams (issue #275:
-  /// the descriptor derivation and the reachability gate are read from the
-  /// one module, not re-encoded here). The docker-down degradation is
-  /// owned by the source: [LiveOrbUpstreams.live] yields an empty set
-  /// (host-only) and never throws.
-  late final OrbUpstreamSource _liveUpstreams = LiveOrbUpstreams.fromSeams(
-    orbList: orbList,
-    orbPassword: orbPassword,
-  );
 
   late final StreamController<OpencodeEvent> _controller;
   final Map<String, _OrbUpstream> _upstreams = {};
@@ -125,12 +113,12 @@ class CompositeOpencodeEventService implements OpencodeEventService {
   }
 
   Future<void> _doReconcile() async {
-    // The live set and the gate are the module's ([LiveOrbUpstreams.live]
+    // The live set and the gate are the module's ([OrbUpstreamSource.live]
     // → [OrbUpstream.reachable]) — read here, not re-encoded. A running
     // orb that is in the readable raw list yet absent from that live set
     // is still booting (its `server password` line has not landed):
     // schedule the short retry for it below.
-    final liveUpstreams = await _liveUpstreams.live();
+    final liveUpstreams = await upstreams.live();
     final live = <String>{};
     for (final descriptor in liveUpstreams) {
       live.add(descriptor.id);
@@ -164,16 +152,14 @@ class CompositeOpencodeEventService implements OpencodeEventService {
   /// failed the gate, i.e. still booting (its `server password` line is
   /// not in the log yet). Its sessions start streaming the instant that
   /// line lands, so the caller retries soon instead of waiting for the
-  /// next full pass. A list that cannot be read (docker down) degrades
-  /// to host-only: no running fact, no retry — exactly the old
-  /// catch-and-continue behavior.
+  /// next full pass. A list that cannot be read (docker down — the
+  /// module's [OrbUpstreamSource.records] is `null`) degrades to host-only:
+  /// no running fact, no retry — exactly the old catch-and-continue
+  /// behavior. The retry policy is the composite's; the raw list is the
+  /// module's.
   Future<bool> _bootingOrbPresent(Set<String> live) async {
-    final records = <OrbRecord>[];
-    try {
-      records.addAll(await orbList());
-    } catch (_) {
-      // Docker is down (or the labels unreadable): degrade to host-only.
-    }
+    final records = await upstreams.records();
+    if (records == null) return false; // Docker down: host-only, no retry.
     return records.any(
       (record) => record.state == 'running' && !live.contains(record.id),
     );

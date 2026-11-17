@@ -106,14 +106,16 @@ class OrbTaskService {
     this.settleIdleWindow = defaultSettleIdleWindow,
     this.settleMissingWindow = defaultSettleMissingWindow,
     this.notifyProvider = _noNotify,
+    OrbUpstreamSource? upstreams,
     Random? random,
   }) : _random = random ?? Random(),
        // The task service does not re-derive the composite's routing fact:
-       // it builds the live-upstream source from its own orb service (the
-       // same list + password seams the composites read) and *asks* it for
-       // the per-orb verdict (issue #276). Built here — not injected — so the
-       // bridge wiring is unchanged and the fact has a single home.
-       upstreams = LiveOrbUpstreams(orbService: orbs) {
+       // it takes the live-upstream source and *asks* it for the per-orb
+       // verdict (issue #276). The bridge passes its shared module instance
+       // (wired once by the composition root, issue #278); a library consumer
+       // that does not inject one builds it from the orb service here — the
+       // same list + password seams the composites read.
+       upstreams = upstreams ?? LiveOrbUpstreams(orbService: orbs) {
     _load();
     unawaited(_resume());
   }
@@ -124,9 +126,12 @@ class OrbTaskService {
 
   /// The live-upstream facts (issue #274, owned by [orb_upstreams]): the
   /// per-orb reachability verdict this service consults for a missing-read's
-  /// conclusiveness (issue #211/#276). Built from [orbs] — the same list and
-  /// password seams the composites read — so the task service *asks* the
-  /// module instead of re-deriving the composite's routing fact itself.
+  /// conclusiveness (issue #211/#276). The bridge injects its shared module
+  /// instance (wired once by the composition root, issue #278); a library
+  /// consumer that does not pass one gets a source built from [orbs] — the
+  /// same list and password seams the composites read — so the task service
+  /// *asks* the module instead of re-deriving the composite's routing fact
+  /// itself.
   final OrbUpstreamSource upstreams;
 
   /// The composite sessions backend (host and orb sessions alike, spec

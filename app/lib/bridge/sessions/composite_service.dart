@@ -1,6 +1,5 @@
 import '../../model/command.dart';
 import '../../model/message.dart';
-import '../../model/orb.dart';
 import '../../model/permission.dart';
 import '../../model/question.dart';
 import '../../model/session_detail.dart';
@@ -24,10 +23,10 @@ import 'opencode_service.dart';
 ///   orb record's ephemeral URL and the password is the last `server
 ///   password` line of the orb's container log, both re-derived at every
 ///   refresh. The derivation and the reachability gate live in one place —
-///   the live-orb-upstreams module ([LiveOrbUpstreams] over this
-///   composite's own [orbList]/[orbPassword] seams) — and the composite
-///   reads its live set from there: a started orb that passes the gate gets
-///   an upstream, everything else gets none.
+///   the live-orb-upstreams module ([OrbUpstreamSource], wired once by the
+///   composition root, issue #278) — and the composite reads its live set
+///   from there: a started orb that passes the gate gets an upstream,
+///   everything else gets none.
 ///
 /// Degradation: a host failure propagates (the host is primary); a per-orb
 /// failure is swallowed (that orb's rows/routing degrade for this pass and
@@ -35,8 +34,7 @@ import 'opencode_service.dart';
 class CompositeOpencodeService implements OpencodeService {
   CompositeOpencodeService({
     required this.host,
-    required this.orbList,
-    required this.orbPassword,
+    required this.upstreams,
     this.upstreamFactory = _defaultUpstreamFactory,
   });
 
@@ -50,27 +48,17 @@ class CompositeOpencodeService implements OpencodeService {
 
   final OpencodeService host;
 
-  /// The running orb list (labels; `url` only for a running orb). May throw
-  /// when docker is down (the composite degrades to host-only).
-  final Future<List<OrbRecord>> Function() orbList;
-
-  /// The orb's current `server password` (the last log line wins on a
-  /// respawn), or `null` when it cannot be derived.
-  final Future<String?> Function(String orbId) orbPassword;
+  /// The live upstream facts (issue #274, owned by the live-orb-upstreams
+  /// module, issue #278: wired once by the composition root, read here —
+  /// the descriptor derivation and the reachability gate are not re-encoded
+  /// in the composite). The docker-down degradation is owned by the source:
+  /// [OrbUpstreamSource.live] yields an empty set (host-only) and never
+  /// throws.
+  final OrbUpstreamSource upstreams;
 
   /// Builds the per-orb client from its ephemeral URL + derived password
   /// (injectable for tests; the default is the same HTTP client as the host).
   final OpencodeService Function(Uri baseUrl, String password) upstreamFactory;
-
-  /// The live upstream facts over this composite's own seams (issue #275:
-  /// the descriptor derivation and the reachability gate are read from the
-  /// one module, not re-encoded here). The docker-down degradation is
-  /// owned by the source: [LiveOrbUpstreams.live] yields an empty set
-  /// (host-only) and never throws.
-  late final OrbUpstreamSource _liveUpstreams = LiveOrbUpstreams.fromSeams(
-    orbList: orbList,
-    orbPassword: orbPassword,
-  );
 
   /// The live per-orb services, keyed by orb id.
   final Map<String, _OrbUpstream> _upstreams = {};
@@ -394,10 +382,10 @@ class CompositeOpencodeService implements OpencodeService {
   /// key changes): a started orb that passes the gate gets an upstream, a
   /// stopped or gate-less one's is dropped (and its table entries
   /// cleared), a changed key's is replaced. The descriptor derivation and
-  /// the reachability gate are the module's ([LiveOrbUpstreams.live] →
+  /// the reachability gate are the module's ([OrbUpstreamSource.live] →
   /// [OrbUpstream.reachable]) — read here, not re-encoded.
   Future<void> _reconcileUpstreams() async {
-    final liveUpstreams = await _liveUpstreams.live();
+    final liveUpstreams = await upstreams.live();
     final live = <String>{};
     for (final upstream in liveUpstreams) {
       live.add(upstream.id);

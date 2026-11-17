@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/events/event_hub.dart';
 import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
+import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/composite_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
@@ -38,20 +39,23 @@ void main() {
     orb = _ScriptedService(session: _orbSession, active: true);
     final composite = CompositeOpencodeService(
       host: host,
-      // One running orb ("orb-1") so the composite reconciles an upstream for
-      // it and routes its session to [orb] (not the host).
-      orbList: () async => [
-        OrbRecord(
-          id: 'orb-1',
-          name: 'demo',
-          project: 'proj',
-          branch: 'orb/orb-1',
-          state: 'running',
-          created: '2026-01-01T00:00:00Z',
-          url: 'http://127.0.0.1:41234',
-        ),
-      ],
-      orbPassword: (_) async => 'orb-secret',
+      // The live-upstream module (issue #278) over the scripted seams: one
+      // running orb ("orb-1") so the composite reconciles an upstream for it
+      // and routes its session to [orb] (not the host).
+      upstreams: LiveOrbUpstreams(
+        orbList: () async => [
+          OrbRecord(
+            id: 'orb-1',
+            name: 'demo',
+            project: 'proj',
+            branch: 'orb/orb-1',
+            state: 'running',
+            created: '2026-01-01T00:00:00Z',
+            url: 'http://127.0.0.1:41234',
+          ),
+        ],
+        orbPassword: (_) async => 'orb-secret',
+      ),
       // The orb's upstream is the scripted [orb] service, keyed by the
       // (url|password) the reconciliation derives.
       upstreamFactory: (url, password) {

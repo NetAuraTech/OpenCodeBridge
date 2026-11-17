@@ -115,7 +115,7 @@ class UpstreamScenario {
   /// The real source over the scenario's seams (the module's concrete
   /// implementation — no fake of it anywhere in this contract).
   OrbUpstreamSource source() =>
-      LiveOrbUpstreams.fromSeams(orbList: orbList, orbPassword: orbPassword);
+      LiveOrbUpstreams(orbList: orbList, orbPassword: orbPassword);
 
   /// The module's single fact for the scenario: the per-orb verdict
   /// ([OrbUpstreamSource.verdict] — the same gate, answered per orb).
