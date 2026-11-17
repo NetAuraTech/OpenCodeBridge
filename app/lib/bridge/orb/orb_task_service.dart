@@ -15,6 +15,7 @@ import '../sessions/backend.dart';
 import '../sessions/opencode_service.dart';
 import 'orb_service.dart';
 import 'orb_task.dart';
+import 'orb_upstreams.dart';
 
 /// The caller could not be resolved to a known session or project directory,
 /// so the task's project is unknown (`orb_spawn` takes no project — the
@@ -101,7 +102,13 @@ class OrbTaskService {
     this.settleMissingWindow = defaultSettleMissingWindow,
     this.notify,
     Random? random,
-  }) : _random = random ?? Random() {
+  }) : _random = random ?? Random(),
+       // The task service does not re-derive the composite's routing fact:
+       // it builds the live-upstream source from its own orb service (the
+       // same list + password seams the composites read) and *asks* it for
+       // the per-orb verdict (issue #276). Built here — not injected — so the
+       // bridge wiring is unchanged and the fact has a single home.
+       upstreams = LiveOrbUpstreams(orbService: orbs) {
     _load();
     unawaited(_resume());
   }
@@ -109,6 +116,13 @@ class OrbTaskService {
   /// The orb lifecycle service (wake-or-create, the PR read through the
   /// orb list).
   final OrbService orbs;
+
+  /// The live-upstream facts (issue #274, owned by [orb_upstreams]): the
+  /// per-orb reachability verdict this service consults for a missing-read's
+  /// conclusiveness (issue #211/#276). Built from [orbs] — the same list and
+  /// password seams the composites read — so the task service *asks* the
+  /// module instead of re-deriving the composite's routing fact itself.
+  final OrbUpstreamSource upstreams;
 
   /// The composite sessions backend: project lookup, the per-orb session
   /// create, the task prompt, and the completion injection all route through
@@ -911,16 +925,21 @@ class OrbTaskService {
   /// error is transient (a transport failure, a degraded orb pass) and
   /// counts for nothing — the next pass retries.
   ///
-  /// The 404 is conclusive only when the task's orb is actually `running`
-  /// (issue #211): the composite routes the read to the orb's upstream, so a
-  /// missing session is a gone one. While the orb is still booting (the
-  /// auto-wake after a restart, not yet `running`), the composite has no
-  /// upstream for it and the read falls back to the host, which does not
-  /// know the orb session — the 404 is "not routable yet," not "session
-  /// gone." Counting it would settle a mid-flight task `failed` while the
-  /// work still runs: the task stays `running` until the orb is back
-  /// `running` and the turn ends for real (or the session is genuinely
-  /// lost, which the running-orb window then settles).
+  /// The 404 is conclusive only when the task's orb is actually **routable**
+  /// (issue #211/#276). The task service does not decide that itself — it
+  /// *asks* the live-upstream module (issue #274) for the per-orb verdict,
+  /// and settles `failed` only on [UpstreamVerdict.reachable] (the composite
+  /// has an upstream, so a session it 404s is a gone one) or
+  /// [UpstreamVerdict.gone] (the orb was deleted out from under the task).
+  /// On [UpstreamVerdict.unroutable] (the orb is in a readable list but has
+  /// no upstream — still booting, stopped, broken) or [UpstreamVerdict.unknown]
+  /// (docker down — the list cannot be read, and the composite degrades
+  /// host-only), the 404 is the host fallback, not proof the session is gone,
+  /// so it is inconclusive and the window restarts once the orb is routable
+  /// again. Counting it would settle a mid-flight task `failed` while the
+  /// work still runs: the task stays `running` until the orb is routable and
+  /// the turn ends for real (or the session is genuinely lost, which the
+  /// routable-orb window then settles).
   Future<void> _check(OrbTask target) async {
     if (target.isDone) return;
     final now = DateTime.now();
@@ -999,37 +1018,36 @@ class OrbTaskService {
     await _settle(target, outcome, summary);
   }
 
-  /// Whether [target]'s missing-session 404 is conclusive (issue #211):
+  /// Whether [target]'s missing-session 404 is conclusive (issue #211/#276):
   /// whether the session is actually gone, or merely unreadable for now.
-  /// Conclusive when the orb is `running` (the composite has an upstream for
-  /// it, so a session it 404s is a gone one), when the orb is gone from the
-  /// list altogether (deleted out from under the task — its in-orb sessions
-  /// are lost with it), and when the orb list cannot be read (docker down —
-  /// a degraded read must not mask a genuinely lost session forever).
-  /// Inconclusive only while the orb's record exists but is not `running` —
-  /// the auto-wake's boot (`preparing`), a stop, a broken boot: the
-  /// composite has no upstream for it, the read falls back to the host, and
-  /// the host does not know the orb session — the 404 is "not routable
-  /// yet," not "session gone." Counting it would settle a mid-flight task
-  /// `failed` while the work still runs; the window restarts once the orb is
-  /// `running` again.
+  ///
+  /// The task service does **not** re-derive the routing fact — it *asks* the
+  /// live-upstream module (issue #274) for the per-orb verdict and maps it:
+  /// the same single reachability predicate (`OrbUpstream.reachable`) the
+  /// composites read, so a change to it moves every consumer's answer
+  /// together, not independently.
+  ///
+  /// - [UpstreamVerdict.reachable] — the orb passes the gate, so the composite
+  ///   has an upstream for it and a session it 404s is a gone one →
+  ///   **conclusive**.
+  /// - [UpstreamVerdict.gone] — the orb is absent from a readable list
+  ///   (deleted out from under the task): its in-orb sessions are lost with
+  ///   it → **conclusive**.
+  /// - [UpstreamVerdict.unroutable] — the orb's record exists but has no
+  ///   upstream (still booting, stopped, broken, url-less, no password line
+  ///   yet): the read fell back to a host that cannot know the orb session —
+  ///   the 404 is "not routable yet," not "session gone" → **inconclusive**
+  ///   (the window restarts once the orb is routable again).
+  /// - [UpstreamVerdict.unknown] — the list cannot be read (docker down): the
+  ///   composite degrades host-only and nothing may be concluded →
+  ///   **inconclusive** (one fact, one conclusion — the 404 is the host
+  ///   fallback, not proof of a lost session).
   Future<bool> _missingReadConclusive(OrbTask target) async {
-    try {
-      for (final row in await orbs.list()) {
-        if (row.id != target.orb) continue;
-        // The orb exists: conclusive only when it can host the session.
-        return row.state == 'running';
-      }
-    } catch (_) {
-      // The orb list cannot be read (docker down, a torn label pass): we
-      // cannot tell a booting orb from a lost one, so fall back to the
-      // original behavior — the missing window may settle. A degraded read
-      // must not mask a genuinely lost session forever (a stuck task).
-      return true;
-    }
-    // The orb is not in the list at all (deleted out from under the task):
-    // its in-orb sessions are lost with it — the 404 is the truth.
-    return true;
+    final verdict = await upstreams.verdict(target.orb);
+    return switch (verdict) {
+      UpstreamVerdict.reachable || UpstreamVerdict.gone => true,
+      UpstreamVerdict.unroutable || UpstreamVerdict.unknown => false,
+    };
   }
 
   /// The single settle path (issue #169): the status, the summary (or the
