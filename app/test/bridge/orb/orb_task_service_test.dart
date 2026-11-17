@@ -316,6 +316,15 @@ class _Push {
   final String link;
 }
 
+/// The settle path's push-fallback holder (issue #260's closure seam): the
+/// task service holds no mutable notify field, so its fallback closure reads
+/// this box's live [NotifyService] at push time. `null` (the default) = push
+/// not configured (the in-app retry stands alone); set by [wirePush].
+class _NotifyHolder {
+  NotifyService? service;
+  NotifyService? provider() => service;
+}
+
 void main() {
   late Directory temp;
   late File tasksFile;
@@ -331,9 +340,15 @@ void main() {
   /// torn down with the temp dir, so no writer outlives it.
   final services = <OrbTaskService>[];
 
+  /// The settle path's push fallback reads its live [NotifyService] through an
+  /// injected closure (issue #260's closure seam — the task service holds no
+  /// mutable notify field). This per-service box is what that closure reads:
+  /// `null` (the default) = push not configured (the in-app retry stands
+  /// alone), set by [wirePush] otherwise.
+  final Map<OrbTaskService, _NotifyHolder> notifyHolders = {};
+
   /// A [NotifyService] backed by [pushSender] with [token] registered for the
-  /// push events the completion fallback uses (issue #212's push seam). Tests
-  /// wire it onto a service with `service.notify = pushNotify()`.
+  /// push events the completion fallback uses (issue #212's push seam).
   NotifyService pushNotify({
     String token = 'tok',
     Set<NotifyKind> kinds = const {NotifyKind.turnEnded},
@@ -343,7 +358,15 @@ void main() {
     return created;
   }
 
+  /// Wire a push fallback onto [service] (issue #212's push seam, through the
+  /// closure the service was built with): the settle path's fallback now reads
+  /// this holder's live [NotifyService] at push time.
+  void wirePush(OrbTaskService service) {
+    notifyHolders[service]!.service = pushNotify();
+  }
+
   OrbTaskService newService() {
+    final holder = _NotifyHolder();
     final created = OrbTaskService(
       orbs: orbs,
       sessions: backend,
@@ -352,7 +375,9 @@ void main() {
       waitGrace: waitGrace,
       settleIdleWindow: settleIdleWindow,
       settleMissingWindow: settleMissingWindow,
+      notifyProvider: holder.provider,
     );
+    notifyHolders[created] = holder;
     services.add(created);
     return created;
   }
@@ -378,6 +403,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
     services.clear();
+    notifyHolders.clear();
     try {
       await temp.delete(recursive: true);
     } on FileSystemException {
@@ -413,6 +439,46 @@ void main() {
     while (!condition()) {
       if (DateTime.now().isAfter(deadline)) {
         fail('condition not met before the deadline');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+  }
+
+  /// The persisted delivery facts of the task with [id] in tasks.json, or
+  /// `null` when the record is not (yet) present: the explicit **owed** /
+  /// **fallback-sent** facts (issue #260, acceptance #1) read straight off the
+  /// file, not off the live record — `(owed, fallbackSent)`.
+  (bool, bool)? readFacts(String id) {
+    final rows = jsonDecode(tasksFile.readAsStringSync()) as List;
+    for (final row in rows.cast<Map<String, Object?>>()) {
+      if (row['id'] == id) {
+        return (
+          row['deliveryOwed'] as bool? ?? false,
+          row['fallbackSent'] as bool? ?? false,
+        );
+      }
+    }
+    return null;
+  }
+
+  /// Polls [readFacts] until it reports [owed]/[sent] (or the deadline),
+  /// returning the record's **fallback-sent** fact — the test's wait for the
+  /// settle's delivery facts to be persisted (the record is the truth).
+  Future<bool> untilFacts(
+    String id, {
+    required bool owed,
+    required bool sent,
+  }) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (true) {
+      final facts = readFacts(id);
+      if (facts != null && facts.$1 == owed && facts.$2 == sent) {
+        return facts.$2;
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        fail(
+          'delivery facts ($owed / $sent) not persisted before the deadline',
+        );
       }
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
@@ -1308,7 +1374,7 @@ void main() {
         // The caller is unreachable when the completion lands (the app was
         // closed at the moment the orb finished): the injection fails.
         backend.opencode.failingPrompts.add('ses_caller');
-        service.notify = pushNotify();
+        wirePush(service);
 
         final task = await service.spawn(
           task: 'do the thing',
@@ -1317,9 +1383,9 @@ void main() {
         );
         await until(() => task.isDone);
 
-        // Settled, but the delivery is owed: persisted not-yet-notified …
+        // Settled, but the delivery is still owed: persisted not-yet-notified …
         final settledDecoded = jsonDecode(tasksFile.readAsStringSync());
-        expect(settledDecoded[0]['notified'], isFalse);
+        expect(settledDecoded[0]['deliveryOwed'], isTrue);
         // … and the push went out once as the out-of-band fallback.
         expect(pushSender.sent, hasLength(1));
 
@@ -1349,7 +1415,7 @@ void main() {
       // The caller is unreachable when the completion lands and stays so
       // (it never becomes reachable in-app): the push is the fallback.
       backend.opencode.failingPrompts.add('ses_caller');
-      service.notify = pushNotify();
+      wirePush(service);
 
       final task = await service.spawn(
         task: 'do the thing',
@@ -1379,7 +1445,7 @@ void main() {
       () async {
         scriptCompletedTask();
         backend.opencode.failingPrompts.add('ses_caller');
-        service.notify = pushNotify();
+        wirePush(service);
 
         final task = await service.spawn(
           task: 'do the thing',
@@ -1399,7 +1465,7 @@ void main() {
         // is reachable now (the host service came up). The retry re-injects …
         backend.opencode.failingPrompts.remove('ses_caller');
         final restarted = newService();
-        restarted.notify = pushNotify();
+        wirePush(restarted);
         await until(() => restarted.task(task.id)!.notified);
 
         // … exactly one in-app injection (no duplicate), the task is marked
@@ -1417,7 +1483,7 @@ void main() {
     test('a reachable caller at settle is injected (no push); the existing '
         'behavior is unchanged', () async {
       scriptCompletedTask();
-      service.notify = pushNotify();
+      wirePush(service);
 
       final task = await service.spawn(
         task: 'do the thing',
@@ -1431,6 +1497,49 @@ void main() {
       expect(service.task(task.id)!.notified, isTrue);
       expect(backend.opencode.landed.any((p) => p.$1 == 'ses_caller'), isTrue);
       expect(pushSender.sent, isEmpty);
+    });
+
+    test('push exactly once is an explicit fact on the record (issue #260, '
+        'acceptance #1): a failed settle persists still-owed + fallback-sent, '
+        'and a restart that lands the re-injection leaves the fallback sent — '
+        'no second push', () async {
+      scriptCompletedTask();
+      // The caller is unreachable at the settle: the injection fails, so the
+      // push fires once as the out-of-band fallback.
+      backend.opencode.failingPrompts.add('ses_caller');
+      wirePush(service);
+
+      final task = await service.spawn(
+        task: 'do the thing',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      await until(() => task.isDone);
+      // Wait for the one push to have gone out at the settle.
+      await until(() => pushSender.sent.length == 1);
+
+      // The guarantee is an explicit fact on the persisted record, asserted
+      // by reading tasks.json back — not pinned only by the retry step
+      // happening not to call the push: the delivery is still owed (the
+      // injection never landed) AND the fallback is marked sent (push
+      // exactly once). Wait for the settle's delivery facts to be persisted.
+      await untilFacts(task.id, owed: true, sent: true);
+
+      // The bridge dies and reopens; the caller is reachable now. The retry
+      // resumes from the record's facts — a re-injection that lands …
+      service.close();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      backend.opencode.failingPrompts.remove('ses_caller');
+      final restarted = newService();
+      wirePush(restarted);
+      await until(() => restarted.task(task.id)!.notified);
+
+      // … leaves the fallback already-sent (the restored plan never re-sends
+      // it), so there is no second push, and the record now reads
+      // not-owed (landed) with the fallback still marked sent.
+      expect(pushSender.sent, hasLength(1));
+      final delivered = await untilFacts(task.id, owed: false, sent: true);
+      expect(delivered, isTrue);
     });
   });
 
