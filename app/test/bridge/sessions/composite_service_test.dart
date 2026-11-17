@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
+import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/composite_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
 import 'package:opencodebridge/model/command.dart';
@@ -337,8 +338,12 @@ CompositeOpencodeService makeComposite({
   final upstreamMap = upstreams ?? const {};
   return CompositeOpencodeService(
     host: host,
-    orbList: orbs ?? () async => const [],
-    orbPassword: passwords ?? ((_) async => null),
+    // The live-upstream module (issue #278) over the scripted seams: the
+    // same list + password facts the composite used to take bare.
+    upstreams: LiveOrbUpstreams(
+      orbList: orbs ?? () async => const [],
+      orbPassword: passwords ?? ((_) async => null),
+    ),
     upstreamFactory: (baseUrl, password) {
       final fake = upstreamMap['$baseUrl|$password'];
       if (fake == null) {
@@ -502,8 +507,12 @@ void main() {
       answer: (scenario) async {
         final composite = CompositeOpencodeService(
           host: FakeService(sessions: [hostSession]),
-          orbList: scenario.orbList,
-          orbPassword: scenario.orbPassword,
+          // The live-upstream module (issue #278) over the scenario's seams
+          // (the same `orbList`/`orbPassword` facts the module reads).
+          upstreams: LiveOrbUpstreams(
+            orbList: scenario.orbList,
+            orbPassword: scenario.orbPassword,
+          ),
           // The factory serves a scripted upstream for whatever gate the
           // module passes (the composite asks the module for the set and
           // only ever builds clients for its members): one fake per

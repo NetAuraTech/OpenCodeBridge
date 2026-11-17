@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/events/composite_event_service.dart';
 import 'package:opencodebridge/bridge/events/opencode_event_service.dart';
+import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/model/orb.dart';
 
 /// A scripted [OpencodeEventService]: an emittable broadcast stream plus a
@@ -63,8 +64,12 @@ CompositeOpencodeEventService makeComposite({
   final upstreamMap = upstreams ?? const {};
   return CompositeOpencodeEventService(
     host: host,
-    orbList: orbs ?? () async => const [],
-    orbPassword: passwords ?? ((_) async => null),
+    // The live-upstream module (issue #278) over the scripted seams: the
+    // same list + password facts the composite used to take bare.
+    upstreams: LiveOrbUpstreams(
+      orbList: orbs ?? () async => const [],
+      orbPassword: passwords ?? ((_) async => null),
+    ),
     upstreamFactory: (baseUrl, password) {
       final fake = upstreamMap['$baseUrl|$password'];
       if (fake == null) {
@@ -235,8 +240,10 @@ void main() {
         final password = <String?>[null]; // Running, no `server password` yet.
         final composite = CompositeOpencodeEventService(
           host: host,
-          orbList: () async => [runningOrb('orb1')],
-          orbPassword: (_) async => password.single,
+          upstreams: LiveOrbUpstreams(
+            orbList: () async => [runningOrb('orb1')],
+            orbPassword: (_) async => password.single,
+          ),
           upstreamFactory: (baseUrl, _) => orb1,
           // A full pass so rare the boot retry is the only thing that can
           // attach the orb within this
@@ -337,8 +344,12 @@ void main() {
 
         final composite = CompositeOpencodeEventService(
           host: FakeEventService(),
-          orbList: () async => [runningOrb('orb1', url: base.toString())],
-          orbPassword: (_) async => password,
+          // The live-upstream module (issue #278) over the scripted running
+          // orb.
+          upstreams: LiveOrbUpstreams(
+            orbList: () async => [runningOrb('orb1', url: base.toString())],
+            orbPassword: (_) async => password,
+          ),
           refreshInterval: const Duration(milliseconds: 5),
         );
         final seen = <OpencodeEvent>[];

@@ -5,7 +5,6 @@ import 'dart:io';
 import '../model/command.dart';
 import '../model/compose_project.dart';
 import '../model/container.dart';
-import '../model/orb.dart';
 import '../model/permission.dart';
 import '../model/question.dart';
 import '../model/tunnel_report.dart';
@@ -47,6 +46,7 @@ import 'orb/orb_agent_tools.dart';
 import 'orb/orb_image_builder.dart';
 import 'orb/orb_service.dart';
 import 'orb/orb_task_service.dart';
+import 'orb/orb_upstreams.dart';
 import 'router.dart';
 
 /// The embedded bridge (ADR-0001): a localhost-only HTTP server that is the
@@ -436,8 +436,9 @@ class BridgeServer {
     }
     // The orbs are built before the backend and the event hub: the
     // composite sessions/event services (issue #95) reach the orb service
-    // through these closures, and the orb defaults need only the image
-    // builder and the host CLIs. The orb service's boot-log [emit] is
+    // through the live-orb-upstreams module, which wraps it (issue #278),
+    // and the orb defaults need only the image builder and the host CLIs.
+    // The orb service's boot-log [emit] is
     // deferred: the event hub does not exist yet, so it forwards to
     // [orbEmit] once the hub is built (any orb creation happens on the HTTP
     // surface, after [start] returns).
@@ -464,14 +465,18 @@ class BridgeServer {
         await BridgeServer._defaultOrbs(orbBuilder, (line) {
           orbEmit?.call(line);
         }, () => orbBackend ?? sessions);
-    Future<List<OrbRecord>> orbList() =>
-        orbService?.list() ?? Future.value(const []);
-    Future<String?> orbPassword(String id) =>
-        orbService?.lastPassword(id) ?? Future.value(null);
+    // The live-orb-upstreams module (issue #274, wired once here — the
+    // bridge's orb↔composite seam, issue #278): every consumer takes this
+    // one instance — the sessions backend, the event hub, the task service,
+    // and the backend-resolution re-arm. With no orbs service (a machine
+    // without orbs) the module degrades to an empty list and a `null`
+    // password — the host-only answer, exactly what the per-consumer
+    // closures did.
+    final orbUpstreams = LiveOrbUpstreams(orbService: orbService);
     // The backend: the caller's, or the bridge's own default (the aggregate
     // composite over the host service and the running orbs).
     final backend =
-        sessions ?? await BridgeServer._defaultSessions(orbList, orbPassword);
+        sessions ?? await BridgeServer._defaultSessions(orbUpstreams);
     // The session order store (issue #237): the app-owned
     // `sessionID -> position` map. Built once, shared by the order route
     // (write + emit), the backend's list read (sort + pinned fact), and the
@@ -484,8 +489,7 @@ class BridgeServer {
     }
     orbBackend = backend;
     final fsService = fs ?? const LinuxFsService();
-    final eventHub =
-        events ?? await BridgeServer._defaultEvents(orbList, orbPassword);
+    final eventHub = events ?? await BridgeServer._defaultEvents(orbUpstreams);
     orbEmit = eventHub?.emit;
     // The opencode service boot log (issue #153): the boot ran before the hub
     // existed, so its lines are buffered in the booter. Flush them onto the
@@ -615,6 +619,7 @@ class BridgeServer {
         sessions: backend,
         file: File('${homeDirectory()}/.config/opencodebridge/tasks.json'),
         notifyProvider: () => bridge._notify,
+        upstreams: orbUpstreams,
       );
     }
     bridge._tasks = taskService;
@@ -661,7 +666,7 @@ class BridgeServer {
         backend == null &&
         orbs == null &&
         sessions == null) {
-      bridge._armTasksWhenBackendResolves(orbList, orbPassword);
+      bridge._armTasksWhenBackendResolves(orbUpstreams);
     }
     return bridge;
   }
@@ -813,15 +818,12 @@ class BridgeServer {
   /// completion watcher — the moment it resolves; until then the spawn
   /// surface answers `opencode_unavailable` (the 503 window the
   /// reproduction locks).
-  void _armTasksWhenBackendResolves(
-    Future<List<OrbRecord>> Function() orbList,
-    Future<String?> Function(String) orbPassword,
-  ) {
+  void _armTasksWhenBackendResolves(OrbUpstreamSource upstreams) {
     const pace = Duration(seconds: 2);
     void probe() {
       if (_closed || _tasks != null) return;
       unawaited(
-        BridgeServer._defaultSessions(orbList, orbPassword).then(
+        BridgeServer._defaultSessions(upstreams).then(
           (resolved) {
             if (_closed || _tasks != null) return;
             if (resolved == null) {
@@ -841,6 +843,9 @@ class BridgeServer {
               // after a [reloadNotify] pushes through the current sender —
               // the task service holds no mutable notify field to re-point.
               notifyProvider: () => _notify,
+              // The shared live-upstream module (issue #278): the re-arm's
+              // task service asks the same module the composites read.
+              upstreams: upstreams,
             );
           },
           onError: (Object _) {
@@ -857,22 +862,17 @@ class BridgeServer {
 
   /// The default sessions backend: the aggregate [CompositeOpencodeService]
   /// (issue #95, spec §7.2) over the real shared opencode service and every
-  /// running orb (reached through [orbList]/[orbPassword]). Returns `null`
-  /// when this machine has no shared opencode service (no service
-  /// descriptor — the orbs cannot replace the host), in which case the
-  /// sessions endpoints report `opencode_unavailable`.
+  /// running orb (reached through the live-orb-upstreams module, issue
+  /// #278). Returns `null` when this machine has no shared opencode service
+  /// (no service descriptor — the orbs cannot replace the host), in which
+  /// case the sessions endpoints report `opencode_unavailable`.
   static Future<SessionsBackend?> _defaultSessions(
-    Future<List<OrbRecord>> Function() orbList,
-    Future<String?> Function(String) orbPassword,
+    OrbUpstreamSource upstreams,
   ) async {
     try {
       final host = await OpencodeHttpService.fromHost();
       return SessionsBackend(
-        service: CompositeOpencodeService(
-          host: host,
-          orbList: orbList,
-          orbPassword: orbPassword,
-        ),
+        service: CompositeOpencodeService(host: host, upstreams: upstreams),
       );
     } catch (_) {
       return null;
@@ -882,21 +882,17 @@ class BridgeServer {
   /// The default event hub (endpoint 14): the aggregate
   /// [CompositeOpencodeEventService] (issue #95, spec §7.3) — one
   /// self-healing upstream `GET /api/event` per live service (the host plus
-  /// every running orb, reached through [orbList]/[orbPassword]) — fanned
-  /// out to the app SSE connections. Returns `null` when this machine has no
-  /// shared opencode service (no descriptor), in which case endpoint 14
-  /// reports `opencode_unavailable`.
-  static Future<EventHub?> _defaultEvents(
-    Future<List<OrbRecord>> Function() orbList,
-    Future<String?> Function(String) orbPassword,
-  ) async {
+  /// every running orb, reached through the live-orb-upstreams module, issue
+  /// #278) — fanned out to the app SSE connections. Returns `null` when this
+  /// machine has no shared opencode service (no descriptor), in which case
+  /// endpoint 14 reports `opencode_unavailable`.
+  static Future<EventHub?> _defaultEvents(OrbUpstreamSource upstreams) async {
     try {
       final host = await OpencodeHttpEventService.fromHost();
       return EventHub(
         service: CompositeOpencodeEventService(
           host: host,
-          orbList: orbList,
-          orbPassword: orbPassword,
+          upstreams: upstreams,
         ),
       );
     } catch (_) {

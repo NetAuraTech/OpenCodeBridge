@@ -296,6 +296,40 @@ void main() {
     });
   });
 
+  group('records() — the raw running-orb list, un-gated', () {
+    test('the readable list, exactly as given (gated or not)', () async {
+      final source = fakeSource(
+        tmp: tmp,
+        records: [
+          record('a', 'running', url: _url), // Reachable.
+          record('b', 'running', url: _url), // Unroutable: still booting.
+          record('c', 'stopped'), // Unroutable: stopped.
+        ],
+        passwords: {'a': _pw},
+      );
+      final records = await source.records();
+      expect([for (final r in records!) r.id], equals(const ['a', 'b', 'c']));
+      // The raw records are the list's own values (labels; `url` only for a
+      // running orb) — the module adds nothing and filters nothing: the
+      // boot-retry check reads the list itself, not the gate's answer.
+      expect(records.first.url, _url);
+      expect(records.last.url, isNull);
+    });
+
+    test(
+      'an unreadable list is null (docker down) — a value, not a throw',
+      () async {
+        final source = fakeSource(
+          tmp: tmp,
+          records: [record('a', 'running', url: _url)],
+          passwords: {'a': _pw},
+          listError: const DockerUnavailableError('docker is down'),
+        );
+        expect(await source.records(), isNull);
+      },
+    );
+  });
+
   group('degradation — docker down (the list cannot be read)', () {
     test('live() is empty (host-only) — no throw escapes', () async {
       final source = fakeSource(
@@ -422,6 +456,14 @@ void main() {
       expect(await source.live(), isEmpty);
       expect(await source.verdict('a'), UpstreamVerdict.unknown);
       expect(await source.verdict('deleted'), UpstreamVerdict.unknown);
+    });
+
+    test('no orb service at all: the host-only degradation (the bridge '
+        'wires the module on a machine without orbs)', () async {
+      final source = LiveOrbUpstreams();
+      expect(await source.records(), isEmpty);
+      expect(await source.live(), isEmpty);
+      expect(await source.verdict('a'), UpstreamVerdict.gone);
     });
   });
 }

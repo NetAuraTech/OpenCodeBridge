@@ -54,6 +54,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/orb/orb_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_task_service.dart';
+import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/composite_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
@@ -250,8 +251,12 @@ void main() {
 
           final composite = CompositeOpencodeService(
             host: host,
-            orbList: () async => [orbState],
-            orbPassword: (_) async => 'orb-secret',
+            // The live-upstream module (issue #278) over the scripted
+            // seams: the composite reads the orb state from the module.
+            upstreams: LiveOrbUpstreams(
+              orbList: () async => [orbState],
+              orbPassword: (_) async => 'orb-secret',
+            ),
             upstreamFactory: (url, password) {
               // The composite builds the per-orb client from the running
               // record's (url | derived password); the scripted [orb] is it.
