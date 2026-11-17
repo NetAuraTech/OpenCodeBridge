@@ -7,9 +7,11 @@
 //
 // The [OrbRecord.state] string stays the app-facing wire shape: [OrbState]
 // wraps it (and [OrbState.compose] reproduces it), and every predicate
-// answers for the composed string. No call site reads this module yet — the
-// actions still carry their own comparisons; the contract phases (#280,
-// #281) switch the call sites over and delete the ad-hoc comparisons.
+// answers for the composed string. The contract phases (#280, #281)
+// switch the call sites over and delete the ad-hoc comparisons: #280
+// (S11b) routes the named lifecycle actions and the orbs-tab gates
+// through these predicates; #281 (S11c) takes the remaining
+// composition/identity comparisons.
 //
 // The marker files ([OrbMarkerStore]) live in the per-orb state dir
 // (`<stateRoot>/<id>/`), written by the bridge (the stop's `stopped` gate,
@@ -173,9 +175,9 @@ class OrbState {
 
   // ------------------------------------------------------------------------
   // The per-action predicates (spec §2.4/§2.5/§2.7/§2.8/§9.4/§9.5): the
-  // admissible-state set of each action, owned here. Each call site today
-  // re-encodes one of these with raw string comparisons (issue #279's
-  // contract phases #280/#281 replace them with these calls).
+  // admissible-state set of each action, owned here. The named lifecycle
+  // actions and the orbs-tab gates read these directly (issue #280, S11b);
+  // the remaining ad-hoc comparisons fall to #281 (S11c).
 
   /// The stop (spec §2.5) is a lossless move to the host — only a `running`
   /// orb stops; a re-issue in any other state is a safe no-op (the caller

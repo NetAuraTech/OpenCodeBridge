@@ -13,6 +13,7 @@ import '../sessions/opencode_service.dart';
 import '../sessions/session_row.dart';
 import '../../model/command.dart';
 import 'orb_image_builder.dart';
+import 'orb_state_machine.dart';
 import 'orb_upstreams.dart';
 
 /// The result of one short git CLI invocation.
@@ -1343,7 +1344,8 @@ class OrbService {
   Future<void> stop(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    if (record.state != 'running') return;
+    // A re-issue in any other state is a safe no-op, not a refusal.
+    if (!OrbState.parse(record.state).isStopable) return;
     final cli = opencodeCli;
     final host = hostSessions;
     final resolve = checkoutFor;
@@ -1697,7 +1699,7 @@ class OrbService {
   Future<OrbRecord> startWithFreshState(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    if (record.state != 'broken:state') {
+    if (!OrbState.parse(record.state).isFreshStateStartable) {
       throw const OrbRefusalError(
         OrbRefusalError.notWakeable,
         'only a broken orb whose state dir is missing can start with fresh '
@@ -1724,8 +1726,9 @@ class OrbService {
   Future<OrbRecord> wake(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    if (record.state == 'running') return record;
-    if (!record.isStoppedLike) {
+    final s = OrbState.parse(record.state);
+    if (s.isRunning) return record; // safe no-op
+    if (!s.isWakeable) {
       throw const OrbRefusalError(
         OrbRefusalError.notWakeable,
         'only a stopped orb can be woken',
@@ -2222,8 +2225,9 @@ class OrbService {
   Future<OrbRecord> update(String id) async {
     final record = await _record(id);
     if (record == null) throw OrbNotFoundError(id);
-    final running = record.state == 'running';
-    if (!running && !record.isStoppedLike) {
+    final s = OrbState.parse(record.state);
+    final running = s.isRunning;
+    if (!s.isUpdatable) {
       throw const OrbRefusalError(
         OrbRefusalError.notUpdatable,
         'only a running or a stopped orb can be updated',
@@ -2526,42 +2530,38 @@ class OrbService {
 
   /// The pass's per-orb step (see [runLifecyclePass]).
   Future<void> _lifecycleOrb(OrbRecord record, DateTime now) async {
-    switch (record.state) {
-      case 'running':
-        var autoStopped = false;
-        final busy = await _orbIsBusy(record);
-        if (busy == null || busy) {
-          // Busy — or its busy state could not be read (degraded service,
-          // unreadable password): never stop an orb you cannot prove idle.
+    final s = OrbState.parse(record.state);
+    if (s.isRunning) {
+      var autoStopped = false;
+      final busy = await _orbIsBusy(record);
+      if (busy == null || busy) {
+        // Busy — or its busy state could not be read (degraded service,
+        // unreadable password): never stop an orb you cannot prove idle.
+        _idleSince.remove(record.id);
+      } else {
+        final idle = _idleSince.putIfAbsent(record.id, () => now);
+        if (now.difference(idle) >= idleStopAfter) {
+          // Auto-stop is exactly the shared stop path (§2.10.1). A failed
+          // stop leaves the clock set: the next pass retries.
+          await stop(record.id);
           _idleSince.remove(record.id);
-        } else {
-          final idle = _idleSince.putIfAbsent(record.id, () => now);
-          if (now.difference(idle) >= idleStopAfter) {
-            // Auto-stop is exactly the shared stop path (§2.10.1). A failed
-            // stop leaves the clock set: the next pass retries.
-            await stop(record.id);
-            _idleSince.remove(record.id);
-            autoStopped = true;
-          }
+          autoStopped = true;
         }
-        if (!autoStopped) {
-          // The mid-run gh re-stage (issue #167, spec §4): only a
-          // still-running orb — an orb this pass is stopping gets its
-          // re-stage + re-probe on the wake's shared start path instead.
-          await _lifecycleGhRestage(record, now);
-        }
-        return;
-      case 'stopped':
-        await _lifecycleStopped(record, now);
-        return;
-      default:
-        // cleanup_pending:<reason> is the same container stopped with the
-        // pass's own badge (the list already composed it): re-run the
-        // candidate rule. Anything else (preparing, broken:*, orphan) is
-        // left alone.
-        if (record.isStoppedLike) {
-          await _lifecycleStopped(record, now);
-        }
+      }
+      if (!autoStopped) {
+        // The mid-run gh re-stage (issue #167, spec §4): only a
+        // still-running orb — an orb this pass is stopping gets its
+        // re-stage + re-probe on the wake's shared start path instead.
+        await _lifecycleGhRestage(record, now);
+      }
+      return;
+    }
+    // A plain `stopped` or `cleanup_pending:<reason>` orb is the same
+    // container stopped with the pass's own badge (the list already
+    // composed it): re-run the candidate rule. Anything else
+    // (preparing, broken:*, orphan) is left alone.
+    if (s.isStoppedLike) {
+      await _lifecycleStopped(record, now);
     }
   }
 

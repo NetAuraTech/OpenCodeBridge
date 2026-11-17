@@ -15,6 +15,7 @@ import '../notify/notify_service.dart';
 import '../sessions/backend.dart';
 import '../sessions/opencode_service.dart';
 import 'orb_service.dart';
+import 'orb_state_machine.dart';
 import 'orb_task.dart';
 import 'orb_upstreams.dart';
 
@@ -606,8 +607,9 @@ class OrbTaskService {
     // (the probe fails on every start — the entrypoint's stage §6.8), and
     // the refusal must carry the boot's own reason (issue #149).
     if (row.hasNoShell) throw _noShellRefusal(row);
-    if (row.state == 'running') return row;
-    if (row.isStoppedLike) return orbs.wake(row.id);
+    final s = OrbState.parse(row.state);
+    if (s.isRunning) return row;
+    if (s.isWakeable) return orbs.wake(row.id); // == isSpawable, non-running
     throw OrbRefusalError(
       OrbRefusalError.notRunning,
       'the project orb ${row.name} is ${row.state} — spawn refused',
