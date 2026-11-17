@@ -325,7 +325,10 @@ void main() {
       service = _FakeService();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       base = server.baseUri;
     });
@@ -456,7 +459,10 @@ void main() {
       );
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       base = server.baseUri;
     });
@@ -875,7 +881,10 @@ void main() {
       service = _FakeService(detail: detail, questions: questions);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       base = server.baseUri;
     });
@@ -1076,7 +1085,10 @@ void main() {
       service = _FakeService(detail: detail);
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
       );
       base = server.baseUri;
     });
@@ -1331,7 +1343,10 @@ void main() {
       final hub = EventHub(service: upstream);
       final server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         events: hub,
       );
       final tap = await _SseTap.open(server.baseUri);
@@ -1804,7 +1819,6 @@ void main() {
           orderStore: SessionOrderStore(file: file),
         ),
         events: hub,
-        sessionOrderFile: file,
       );
       base = server.baseUri;
     });
@@ -2027,7 +2041,6 @@ void main() {
             orderStore: SessionOrderStore(file: file),
           ),
           events: hub,
-          sessionOrderFile: file,
         );
         try {
           final (status, body) = await _get(restarted.baseUri, 'api/sessions');
@@ -2103,7 +2116,6 @@ void main() {
           orderStore: SessionOrderStore(file: file),
         ),
         events: hub,
-        sessionOrderFile: file,
       );
       try {
         // The first read after the restart lands in the wake window: the
@@ -2210,45 +2222,47 @@ void main() {
       );
     });
 
-    test(
-      'the default bridge wires the app-owned order file (issue #237)',
-      () async {
-        // The route is served by the bridge itself (no injection): the default
-        // path is `~/.config/opencodebridge/session-order.json`.
-        final marker =
-            '${Platform.environment['HOME'] ?? '/'}'
-            '/.config/opencodebridge/session-order.json';
-        final markerFile = File(marker);
-        final saved = markerFile.existsSync()
-            ? markerFile.readAsStringSync()
-            : null;
-        // The test sessions: the default sessions backend is fake here only
-        // because the bridge is started without one — the route answers 503,
-        // but the store the route would use is the app-owned file's.
-        final bare = await BridgeServer.start(
-          port: 0,
-          sessions: SessionsBackend(service: service),
-          events: hub,
+    test('the route writes through the store the backend was constructed with '
+        '(issue #271: one write path, the app-owned file)', () async {
+      // The route is served by the bridge (no separate store injection): the
+      // store the route writes through is the one the backend was
+      // constructed with (issue #271). Construct the backend with a store
+      // on the app-owned file — the default path — and assert the route's
+      // pin lands in that file, proving the write stays with the store the
+      // backend owns.
+      final markerFile = File(
+        '${Platform.environment['HOME'] ?? '/'}'
+        '/.config/opencodebridge/session-order.json',
+      );
+      final saved = markerFile.existsSync()
+          ? markerFile.readAsStringSync()
+          : null;
+      final bare = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: SessionOrderStore(file: markerFile),
+        ),
+        events: hub,
+      );
+      try {
+        final (status, _) = await _patchRaw(
+          bare.baseUri,
+          'api/sessions/ses_one/order',
+          jsonEncode({'position': 0}),
         );
-        try {
-          final (status, _) = await _patchRaw(
-            bare.baseUri,
-            'api/sessions/ses_one/order',
-            jsonEncode({'position': 0}),
-          );
-          expect(status, 204);
-          expect(markerFile.existsSync(), isTrue);
-          expect(jsonDecode(markerFile.readAsStringSync()), {'ses_one': 0});
-        } finally {
-          await bare.stop();
-          if (saved == null) {
-            await markerFile.delete();
-          } else {
-            markerFile.writeAsStringSync(saved);
-          }
+        expect(status, 204);
+        expect(markerFile.existsSync(), isTrue);
+        expect(jsonDecode(markerFile.readAsStringSync()), {'ses_one': 0});
+      } finally {
+        await bare.stop();
+        if (saved == null) {
+          await markerFile.delete();
+        } else {
+          markerFile.writeAsStringSync(saved);
         }
-      },
-    );
+      }
+    });
 
     test(
       'a body-less PATCH is 400 (the body is checked before the session)',
@@ -2277,7 +2291,10 @@ void main() {
       service = _FakeService();
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: service),
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        ),
         events: hub,
       );
       base = server.baseUri;
@@ -2442,7 +2459,10 @@ void main() {
 
     setUp(() async {
       service = _FakeService();
-      backend = SessionsBackend(service: service);
+      backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
       hub = EventHub(service: _FakeEventUpstream());
       server = await BridgeServer.start(
         port: 0,
@@ -2548,7 +2568,10 @@ void main() {
 
     setUp(() async {
       service = _FakeService();
-      backend = SessionsBackend(service: service);
+      backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
       hub = EventHub(service: _FakeEventUpstream());
       dir = await Directory.systemTemp.createTemp('oc-create-in');
       server = await BridgeServer.start(
@@ -3090,6 +3113,7 @@ void main() {
               OpencodeProject(id: 'p2', name: 'proj-two', canonical: bare.path),
             ],
           ),
+          orderStore: _InMemoryOrderStore(),
         ),
         docker: fake.backend,
       );
@@ -3181,6 +3205,7 @@ void main() {
           port: 0,
           sessions: SessionsBackend(
             service: _FakeService(overrideProjects: const []),
+            orderStore: _InMemoryOrderStore(),
           ),
         );
         try {
@@ -3203,6 +3228,7 @@ void main() {
           port: 0,
           sessions: SessionsBackend(
             service: _FakeService(overrideProjects: const []),
+            orderStore: _InMemoryOrderStore(),
           ),
           docker: fake.backend,
         );
@@ -3305,7 +3331,10 @@ void main() {
       notify = NotifyService(sender: _NotifyFakeSender());
       server = await BridgeServer.start(
         port: 0,
-        sessions: SessionsBackend(service: _FakeService()),
+        sessions: SessionsBackend(
+          service: _FakeService(),
+          orderStore: _InMemoryOrderStore(),
+        ),
         notify: notify,
       );
       base = server.baseUri;
@@ -3386,7 +3415,10 @@ void main() {
         // its own).
         final unconfigured = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(service: _FakeService()),
+          sessions: SessionsBackend(
+            service: _FakeService(),
+            orderStore: _InMemoryOrderStore(),
+          ),
           notifyCredential: '${dir.path}/no-such-account.json',
         );
         try {
@@ -3471,7 +3503,10 @@ void main() {
       () async {
         final server = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(service: _FakeService()),
+          sessions: SessionsBackend(
+            service: _FakeService(),
+            orderStore: _InMemoryOrderStore(),
+          ),
           notifyCredential: accountPath,
           notifySenderFactory: fakeSender,
         );
@@ -3508,7 +3543,10 @@ void main() {
         FirebaseServiceAccount.install(kAccountJson, path: accountPath);
         final server = await BridgeServer.start(
           port: 0,
-          sessions: SessionsBackend(service: _FakeService()),
+          sessions: SessionsBackend(
+            service: _FakeService(),
+            orderStore: _InMemoryOrderStore(),
+          ),
           notifyCredential: accountPath,
           notifySenderFactory: fakeSender,
         );
@@ -3539,6 +3577,30 @@ void main() {
       },
     );
   });
+}
+
+/// An in-memory [SessionOrderStore] for tests that construct a
+/// [SessionsBackend] but never touch the order store (issue #271: the store
+/// is required at construction). It keeps the positions in memory, never the
+/// app-owned file, so a test's store does not leak onto the host.
+class _InMemoryOrderStore implements SessionOrderStore {
+  final Map<String, num> _positions = {};
+
+  @override
+  File get file => throw StateError('in-memory store has no file');
+
+  @override
+  Map<String, num> load() => Map<String, num>.from(_positions);
+
+  @override
+  Future<void> set(String id, num position) async {
+    _positions[id] = position;
+  }
+
+  @override
+  Future<void> clear(String id) async {
+    _positions.remove(id);
+  }
 }
 
 /// A scripted service for the sessions-endpoint tests.

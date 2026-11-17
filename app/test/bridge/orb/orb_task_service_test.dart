@@ -15,6 +15,7 @@ import 'package:opencodebridge/bridge/orb/orb_task_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/order_store.dart';
 import 'package:opencodebridge/model/command.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/orb.dart';
@@ -170,7 +171,8 @@ class _FakeOpencode extends OpencodeService {
 /// The scripted [SessionsBackend]: the home-list rows and everything the fake
 /// opencode service scripts.
 class _FakeBackend extends SessionsBackend {
-  _FakeBackend(this.opencode) : super(service: opencode);
+  _FakeBackend(this.opencode)
+    : super(service: opencode, orderStore: _InMemoryOrderStore());
 
   final _FakeOpencode opencode;
   List<Session> rows = [_callerRow];
@@ -2257,4 +2259,28 @@ void main() {
       },
     );
   });
+}
+
+/// An in-memory [SessionOrderStore] for the scripted [SessionsBackend]
+/// (issue #271: the store is required at construction). It keeps the
+/// positions in memory, never the app-owned file, so a test's store does not
+/// leak onto the host.
+class _InMemoryOrderStore implements SessionOrderStore {
+  final Map<String, num> _positions = {};
+
+  @override
+  File get file => throw StateError('in-memory store has no file');
+
+  @override
+  Map<String, num> load() => Map<String, num>.from(_positions);
+
+  @override
+  Future<void> set(String id, num position) async {
+    _positions[id] = position;
+  }
+
+  @override
+  Future<void> clear(String id) async {
+    _positions.remove(id);
+  }
 }

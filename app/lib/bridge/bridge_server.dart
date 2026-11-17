@@ -74,7 +74,6 @@ class BridgeServer {
     this._pushDispatcher,
     this._lifecycle,
     this._opencodeBoot,
-    this._sessionOrder,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -317,14 +316,6 @@ class BridgeServer {
   /// `not_configured`.
   final OpencodeServiceBooter? _opencodeBoot;
 
-  /// The session order store (issue #237): the app-owned
-  /// `sessionID -> position` map behind the home list's pinned-first sort.
-  /// Built once at start (the app-owned file, the same pattern as the tunnel
-  /// config and the task service) and shared by the order route (write +
-  /// emit), the sessions backend's list read (sort + pinned), and the
-  /// order-cleanup listener (the observed-deletion `clear`, issue #292).
-  final SessionOrderStore _sessionOrder;
-
   /// The route dispatch table (issue #253, C3): the ordered method→path→
   /// closure the HTTP server listens on. Built by [_buildRoutes] once at start
   /// (the composition root's route wiring), before the port is listened on.
@@ -420,7 +411,6 @@ class BridgeServer {
     bool autoLifecyclePass = false,
     Duration? lifecyclePassInterval,
     OpencodeServiceBooter? bootstrapOpencode,
-    File? sessionOrderFile,
   }) async {
     final server = await HttpServer.bind(host, port);
     // The host opencode service boot (issue #153, ADR-0002/ADR-0008): it runs
@@ -473,20 +463,18 @@ class BridgeServer {
     // password — the host-only answer, exactly what the per-consumer
     // closures did.
     final orbUpstreams = LiveOrbUpstreams(orbService: orbService);
+    // The session order store (issue #237): the app-owned
+    // `sessionID -> position` map. Built first, before the backend, because
+    // the backend the bridge builds itself is constructed with it (issue
+    // #271: the store is injected at construction, never re-pointed after).
+    // A caller-provided backend keeps the store it already carries (a
+    // test's injected store).
+    final sessionOrder = SessionOrderStore();
     // The backend: the caller's, or the bridge's own default (the aggregate
     // composite over the host service and the running orbs).
     final backend =
-        sessions ?? await BridgeServer._defaultSessions(orbUpstreams);
-    // The session order store (issue #237): the app-owned
-    // `sessionID -> position` map. Built once, shared by the order route
-    // (write + emit), the backend's list read (sort + pinned fact), and the
-    // order-cleanup listener (the observed-deletion `clear`, issue #292).
-    // The file is injectable for tests. The caller's backend keeps
-    // the store it already carries (a test's injected store).
-    final sessionOrder = SessionOrderStore(file: sessionOrderFile);
-    if (backend != null && backend.orderStore == null) {
-      backend.orderStore = sessionOrder;
-    }
+        sessions ??
+        await BridgeServer._defaultSessions(orbUpstreams, sessionOrder);
     orbBackend = backend;
     final fsService = fs ?? const LinuxFsService();
     final eventHub = events ?? await BridgeServer._defaultEvents(orbUpstreams);
@@ -532,9 +520,10 @@ class BridgeServer {
       // The order store's cleanup listener (issue #292): the read no longer
       // prunes the order map, so the entry of a session the bridge observes
       // being deleted or closed is removed from the store on the event
-      // (tapping the same unified stream the turn tracker does).
-      if (eventHub != null && backend.orderStore != null) {
-        eventHub.add(OrderStoreCleanup(store: backend.orderStore!));
+      // (tapping the same unified stream the turn tracker does). The store
+      // is the backend's own (issue #271: one home for the store).
+      if (eventHub != null) {
+        eventHub.add(OrderStoreCleanup(store: backend.orderStore));
       }
       lifecycle = SessionLifecycle(
         serviceCancel: (id) => backend.service.cancelTurn(id),
@@ -585,7 +574,6 @@ class BridgeServer {
       pushDispatcher,
       lifecycle,
       bootstrapOpencode,
-      sessionOrder,
     );
     // The route dispatch table (issue #253, C3): the composition root's route
     // wiring. It is built here — at start, not in the request path — so a
@@ -822,8 +810,14 @@ class BridgeServer {
     const pace = Duration(seconds: 2);
     void probe() {
       if (_closed || _tasks != null) return;
+      // The re-armed backend is the bridge's own default (the caller did not
+      // provide one, or it would not have re-armed), so it gets the app-owned
+      // store at construction (issue #271: the backend is complete at
+      // construction, never re-pointed after). A fresh [SessionOrderStore] is
+      // the same app-owned file the default builds, so the read/write home is
+      // unchanged.
       unawaited(
-        BridgeServer._defaultSessions(upstreams).then(
+        BridgeServer._defaultSessions(upstreams, SessionOrderStore()).then(
           (resolved) {
             if (_closed || _tasks != null) return;
             if (resolved == null) {
@@ -865,14 +859,18 @@ class BridgeServer {
   /// running orb (reached through the live-orb-upstreams module, issue
   /// #278). Returns `null` when this machine has no shared opencode service
   /// (no service descriptor — the orbs cannot replace the host), in which
-  /// case the sessions endpoints report `opencode_unavailable`.
+  /// case the sessions endpoints report `opencode_unavailable`. The
+  /// [orderStore] is injected at construction (issue #271): the default
+  /// backend is complete at construction, the store never re-pointed after.
   static Future<SessionsBackend?> _defaultSessions(
     OrbUpstreamSource upstreams,
+    SessionOrderStore orderStore,
   ) async {
     try {
       final host = await OpencodeHttpService.fromHost();
       return SessionsBackend(
         service: CompositeOpencodeService(host: host, upstreams: upstreams),
+        orderStore: orderStore,
       );
     } catch (_) {
       return null;
@@ -1279,7 +1277,6 @@ class BridgeServer {
     final tunnel = _tunnel;
     final tunnelSetup = _tunnelSetupService;
     final dockerLogKeepAlive = _dockerLogKeepAlive;
-    final sessionOrder = _sessionOrder;
     return RouteTable([
       RouteEntry.fixed(
         'GET',
@@ -1675,7 +1672,6 @@ class BridgeServer {
           params as String,
           sessions,
           events,
-          sessionOrder,
         ),
       ),
       // The structured view's `/` command menu, per-session commands (issue
@@ -2841,10 +2837,9 @@ class BridgeServer {
     String id,
     SessionsBackend? sessions,
     EventHub? events,
-    SessionOrderStore? orderStore,
   ) async {
     final response = request.response;
-    if (sessions == null || orderStore == null) {
+    if (sessions == null) {
       BridgeServer._unavailable(response);
       return;
     }
@@ -2854,14 +2849,7 @@ class BridgeServer {
       return;
     }
     try {
-      await BridgeServer._orderWrite(
-        response,
-        sessions,
-        events,
-        orderStore,
-        id,
-        position,
-      );
+      await BridgeServer._orderWrite(response, sessions, events, id, position);
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
       await response.close();
@@ -2881,13 +2869,14 @@ class BridgeServer {
     return (true, position as num?);
   }
 
-  /// The order write: set or clear the store, emit
+  /// The order write: set or clear the session's position in the backend's
+  /// order store (the store's one write path, issue #271 — the route writes
+  /// through the backend, never the store it holds), emit
   /// `session.order.changed`, answer 204.
   static Future<void> _orderWrite(
     HttpResponse response,
     SessionsBackend sessions,
     EventHub? events,
-    SessionOrderStore orderStore,
     String id,
     num? position,
   ) async {
@@ -2898,9 +2887,9 @@ class BridgeServer {
       return;
     }
     if (position == null) {
-      await orderStore.clear(id);
+      await sessions.clearOrder(id);
     } else {
-      await orderStore.set(id, position);
+      await sessions.setOrder(id, position);
     }
     // Bridge-native `session.order.changed` (issue #237): every connected
     // app re-sorts the row on the event, without a refetch. `position` is

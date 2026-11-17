@@ -10,6 +10,7 @@ import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/bridge/sessions/composite_service.dart';
 import 'package:opencodebridge/bridge/sessions/opencode_service.dart';
+import 'package:opencodebridge/bridge/sessions/order_store.dart';
 import 'package:opencodebridge/bridge/sessions/paths.dart';
 import 'package:opencodebridge/client/events_client.dart';
 import 'package:opencodebridge/client/sessions_client.dart';
@@ -72,7 +73,10 @@ void main() {
     hub = EventHub(service: events);
     server = await BridgeServer.start(
       port: 0,
-      sessions: SessionsBackend(service: composite),
+      sessions: SessionsBackend(
+        service: composite,
+        orderStore: _InMemoryOrderStore(),
+      ),
       events: hub,
     );
     base = server.baseUri;
@@ -458,5 +462,29 @@ Future<void> _until(
       fail('timed out waiting for $message');
     }
     await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
+/// An in-memory [SessionOrderStore] for tests that construct a
+/// [SessionsBackend] but never touch the order store (issue #271: the store
+/// is required at construction). It keeps the positions in memory, never the
+/// app-owned file, so a test's store does not leak onto the host.
+class _InMemoryOrderStore implements SessionOrderStore {
+  final Map<String, num> _positions = {};
+
+  @override
+  File get file => throw StateError('in-memory store has no file');
+
+  @override
+  Map<String, num> load() => Map<String, num>.from(_positions);
+
+  @override
+  Future<void> set(String id, num position) async {
+    _positions[id] = position;
+  }
+
+  @override
+  Future<void> clear(String id) async {
+    _positions.remove(id);
   }
 }
