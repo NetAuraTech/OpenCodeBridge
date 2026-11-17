@@ -177,9 +177,9 @@ class BridgeServer {
   static const String orbExportPath = '/api/orb/export';
 
   // The structured view's `/` command menu, global commands (issue #46).
-  // Each is a thin pass-through of a shared-service endpoint; the service is
-  // the single source of truth, so the effect is reflected live in any
-  // attached TUI.
+  // Each reads the shared service directly through the sessions backend's
+  // seam (the [SessionsBackend.service]); the service is the single source
+  // of truth, so the effect is reflected live in any attached TUI.
 
   /// The account's usage limits (the service's
   /// `GET /api/experimental/usage/limits`).
@@ -530,7 +530,7 @@ class BridgeServer {
         eventHub.add(OrderStoreCleanup(store: backend.orderStore!));
       }
       lifecycle = SessionLifecycle(
-        serviceCancel: (id) => backend.cancel(id),
+        serviceCancel: (id) => backend.service.cancelTurn(id),
         turnTracker: turnTracker,
         emit: emit,
       );
@@ -1006,7 +1006,7 @@ class BridgeServer {
               final backend = projectBackend();
               if (backend == null) return null;
               try {
-                final projects = await backend.projects();
+                final projects = await backend.service.projects();
                 for (final candidate in projects) {
                   if (candidate.id == projectId) {
                     return candidate.canonical;
@@ -1027,7 +1027,7 @@ class BridgeServer {
               if (backend == null) return null;
               OpencodeProject? project;
               try {
-                final projects = await backend.projects();
+                final projects = await backend.service.projects();
                 for (final candidate in projects) {
                   if (candidate.id == projectId) {
                     project = candidate;
@@ -1479,14 +1479,20 @@ class BridgeServer {
       RouteEntry.fixed(
         'GET',
         BridgeServer.usagePath,
-        (request) =>
-            BridgeServer._commandPayload(request, sessions, (s) => s.usage()),
+        (request) => BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.service.usage(),
+        ),
       ),
       RouteEntry.fixed(
         'GET',
         BridgeServer.mcpsPath,
-        (request) =>
-            BridgeServer._commandPayload(request, sessions, (s) => s.mcps()),
+        (request) => BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.service.mcps(),
+        ),
       ),
       RouteEntry.fixed(
         'GET',
@@ -1494,7 +1500,7 @@ class BridgeServer {
         (request) => BridgeServer._commandPayload(
           request,
           sessions,
-          (s) => s.integrations(),
+          (s) => s.service.integrations(),
         ),
       ),
       // The integration's OAuth connect (`/api/integrations/{id}/connect`).
@@ -1507,14 +1513,20 @@ class BridgeServer {
       RouteEntry.fixed(
         'GET',
         BridgeServer.statusPath,
-        (request) =>
-            BridgeServer._commandPayload(request, sessions, (s) => s.status()),
+        (request) => BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.service.status(),
+        ),
       ),
       RouteEntry.fixed(
         'POST',
         BridgeServer.pairPath,
-        (request) =>
-            BridgeServer._commandPayload(request, sessions, (s) => s.pair()),
+        (request) => BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.service.pair(),
+        ),
       ),
       RouteEntry.fixed(
         'POST',
@@ -1529,8 +1541,11 @@ class BridgeServer {
       RouteEntry.fixed(
         'GET',
         BridgeServer.pluginsPath,
-        (request) =>
-            BridgeServer._commandPayload(request, sessions, (s) => s.plugins()),
+        (request) => BridgeServer._commandPayload(
+          request,
+          sessions,
+          (s) => s.service.plugins(),
+        ),
       ),
       RouteEntry.fixed(
         'POST',
@@ -1885,7 +1900,9 @@ class BridgeServer {
   }
 
   /// The project list (spec section 5, fill-in †): the picker's rows,
-  /// id + display name + canonical directory.
+  /// id + display name + canonical directory. Read directly on the seam
+  /// (the backend's [SessionsBackend.service]) — the backend keeps only its
+  /// deep core.
   static Future<void> _listProjects(
     HttpRequest request,
     SessionsBackend? sessions,
@@ -1896,7 +1913,7 @@ class BridgeServer {
       return;
     }
     try {
-      final projects = await sessions.projects();
+      final projects = await sessions.service.projects();
       response.statusCode = HttpStatus.ok;
       response.write(
         jsonEncode([
@@ -1949,7 +1966,7 @@ class BridgeServer {
       return;
     }
     try {
-      final messages = await sessions.getMessages(id);
+      final messages = await sessions.service.getMessages(id);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode([for (final m in messages) m.toJson()]));
     } on OpencodeServiceError catch (e) {
@@ -1977,7 +1994,7 @@ class BridgeServer {
       final query = request.uri.queryParameters;
       final limit = int.tryParse(query['limit'] ?? '') ?? 50;
       final cursor = query['cursor'];
-      final page = await sessions.getMessagesPage(
+      final page = await sessions.service.getMessagesPage(
         id,
         limit: limit,
         cursor: cursor,
@@ -2031,7 +2048,7 @@ class BridgeServer {
       return;
     }
     try {
-      await sessions.prompt(id, text, files: files, skills: skills);
+      await sessions.service.prompt(id, text, files: files, skills: skills);
       response.statusCode = HttpStatus.accepted;
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
@@ -2062,7 +2079,7 @@ class BridgeServer {
       return;
     }
     try {
-      final requests = await sessions.pendingPermissions(id);
+      final requests = await sessions.service.pendingPermissions(id);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode([for (final r in requests) r.toJson()]));
     } on OpencodeServiceError catch (e) {
@@ -2103,7 +2120,7 @@ class BridgeServer {
       return;
     }
     try {
-      await sessions.replyPermission(id, requestID, reply);
+      await sessions.service.replyPermission(id, requestID, reply);
       response.statusCode = HttpStatus.noContent;
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
@@ -2125,7 +2142,7 @@ class BridgeServer {
       return;
     }
     try {
-      final forms = await sessions.pendingQuestions(id);
+      final forms = await sessions.service.pendingQuestions(id);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode([for (final f in forms) f.toJson()]));
     } on OpencodeServiceError catch (e) {
@@ -2157,7 +2174,7 @@ class BridgeServer {
       return;
     }
     try {
-      await sessions.answerQuestion(id, questionID, answers);
+      await sessions.service.answerQuestion(id, questionID, answers);
       response.statusCode = HttpStatus.noContent;
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
@@ -2180,7 +2197,7 @@ class BridgeServer {
       return;
     }
     try {
-      await sessions.dismissQuestion(id, questionID);
+      await sessions.service.dismissQuestion(id, questionID);
       response.statusCode = HttpStatus.noContent;
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
@@ -2261,7 +2278,7 @@ class BridgeServer {
       return;
     }
     try {
-      await sessions.reload();
+      await sessions.service.reload();
       response.statusCode = HttpStatus.noContent;
     } on OpencodeServiceError catch (e) {
       BridgeServer._serviceError(response, e);
@@ -2306,7 +2323,10 @@ class BridgeServer {
       return;
     }
     try {
-      final data = await sessions.connectIntegration(integrationId, methodId);
+      final data = await sessions.service.connectIntegration(
+        integrationId,
+        methodId,
+      );
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode(data));
     } on OpencodeServiceError catch (e) {
@@ -2335,7 +2355,7 @@ class BridgeServer {
       return;
     }
     try {
-      final data = await sessions.worktrees(sessionId);
+      final data = await sessions.service.worktrees(sessionId);
       response.statusCode = HttpStatus.ok;
       response.write(jsonEncode(data));
     } on OpencodeServiceError catch (e) {
@@ -2371,10 +2391,11 @@ class BridgeServer {
   }
 
   /// The structured view's `/` command menu, per-session commands (issue
-  /// #46): thin pass-throughs of the shared-service command endpoints. The
-  /// service is the single source of truth, so the effect is reflected live
-  /// in any attached TUI. Unknown session is a 404; a service failure is a
-  /// 502 (the [_serviceError] mapping).
+  /// #46): each reads the shared-service command endpoint directly through
+  /// the backend's seam (the [SessionsBackend.service]). The service is the
+  /// single source of truth, so the effect is reflected live in any attached
+  /// TUI. Unknown session is a 404; a service failure is a 502 (the
+  /// [_serviceError] mapping).
   static Future<void> _handleCommand(
     HttpRequest request,
     String id,
@@ -2396,14 +2417,14 @@ class BridgeServer {
     try {
       switch ((method, parts)) {
         case ('GET', ['commands']):
-          final commands = await sessions.listCommands();
+          final commands = await sessions.service.listCommands();
           await BridgeServer._jsonOk(
             response,
             jsonEncode([for (final c in commands) c.toJson()]),
           );
           return;
         case ('POST', ['commands', final name]):
-          await sessions.runCommand(
+          await sessions.service.runCommand(
             id,
             name,
             BridgeServer._stringField(body, 'text') ?? '',
@@ -2411,14 +2432,14 @@ class BridgeServer {
           await BridgeServer._jsonAccepted(response);
           return;
         case ('GET', ['models']):
-          final models = await sessions.listModels();
+          final models = await sessions.service.listModels();
           await BridgeServer._jsonOk(
             response,
             jsonEncode([for (final m in models) m.toJson()]),
           );
           return;
         case ('GET', ['model']):
-          final model = await sessions.currentModel(id);
+          final model = await sessions.service.currentModel(id);
           await BridgeServer._jsonOk(
             response,
             jsonEncode({'model': model?.toJson()}),
@@ -2430,11 +2451,11 @@ class BridgeServer {
             await BridgeServer._invalidBody(response);
             return;
           }
-          await sessions.setModel(id, model);
+          await sessions.service.setModel(id, model);
           await BridgeServer._noContent(response);
           return;
         case ('GET', ['agents']):
-          final agents = await sessions.listAgents();
+          final agents = await sessions.service.listAgents();
           await BridgeServer._jsonOk(
             response,
             jsonEncode([for (final a in agents) a.toJson()]),
@@ -2446,11 +2467,11 @@ class BridgeServer {
             await BridgeServer._invalidBody(response);
             return;
           }
-          await sessions.setAgent(id, agent);
+          await sessions.service.setAgent(id, agent);
           await BridgeServer._noContent(response);
           return;
         case ('GET', ['skills']):
-          final skills = await sessions.listSkills();
+          final skills = await sessions.service.listSkills();
           await BridgeServer._jsonOk(
             response,
             jsonEncode([for (final s in skills) s.toJson()]),
@@ -2461,19 +2482,19 @@ class BridgeServer {
           // file search re-queried per typed token. The token is the
           // `query` param (the TUI re-queries on every keystroke).
           final query = request.uri.queryParameters['query'] ?? '';
-          final files = await sessions.findFiles(id, query);
+          final files = await sessions.service.findFiles(id, query);
           await BridgeServer._jsonOk(response, jsonEncode(files));
           return;
         case ('POST', ['skills', final skillId]):
-          await sessions.activateSkill(id, skillId);
+          await sessions.service.activateSkill(id, skillId);
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['compact']):
-          await sessions.compact(id);
+          await sessions.service.compact(id);
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['undo']):
-          await sessions.undo(id);
+          await sessions.service.undo(id);
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['cancel']):
@@ -2487,11 +2508,11 @@ class BridgeServer {
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['redo']):
-          await sessions.redo(id);
+          await sessions.service.redo(id);
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['fork']):
-          final forked = await sessions.fork(id);
+          final forked = await sessions.service.fork(id);
           await BridgeServer._jsonOk(response, jsonEncode({'id': forked}));
           return;
         case ('POST', ['rename']):
@@ -2500,11 +2521,11 @@ class BridgeServer {
             await BridgeServer._invalidBody(response);
             return;
           }
-          await sessions.rename(id, title);
+          await sessions.service.rename(id, title);
           await BridgeServer._noContent(response);
           return;
         case ('GET', ['export']):
-          final data = await sessions.exportSession(id);
+          final data = await sessions.service.exportSession(id);
           await BridgeServer._jsonOk(response, jsonEncode(data));
           return;
         case ('POST', ['move']):
@@ -2513,7 +2534,7 @@ class BridgeServer {
             await BridgeServer._invalidBody(response);
             return;
           }
-          await sessions.move(id, directory);
+          await sessions.service.move(id, directory);
           await BridgeServer._noContent(response);
           return;
         case ('POST', ['btw']):
@@ -2522,30 +2543,30 @@ class BridgeServer {
             await BridgeServer._invalidBody(response);
             return;
           }
-          final answer = await sessions.generate(id, prompt);
+          final answer = await sessions.service.generate(id, prompt);
           await BridgeServer._jsonOk(response, jsonEncode({'text': answer}));
           return;
         case ('POST', ['archive']):
-          // Archive / unarchive (issue #234): the single-verb pass-through
-          // beside the other per-session commands. The service's `{"archived":
-          // bool}` body maps 1:1 from the bridge's command body; the service
-          // `PATCH` answers 204. A missing or non-bool `archived` is a 400;
-          // an unknown session is the service's 404 (the _serviceError
-          // mapping below).
+          // Archive / unarchive (issue #234): the service's single-verb
+          // `PATCH`, read directly through the seam like the other
+          // per-session commands. The service's `{"archived": bool}` body
+          // maps 1:1 from the bridge's command body and answers 204. A
+          // missing or non-bool `archived` is a 400; an unknown session is
+          // the service's 404 (the _serviceError mapping below).
           final archived = BridgeServer._boolField(body, 'archived');
           if (archived == null) {
             await BridgeServer._invalidBody(response);
             return;
           }
-          await sessions.archive(id, archived);
+          await sessions.service.archive(id, archived);
           await BridgeServer._noContent(response);
           return;
         case ('GET', ['diff']):
-          final data = await sessions.diff(id);
+          final data = await sessions.service.diff(id);
           await BridgeServer._jsonOk(response, jsonEncode(data));
           return;
         case ('GET', ['stats']):
-          final data = await sessions.stats(id);
+          final data = await sessions.service.stats(id);
           await BridgeServer._jsonOk(response, jsonEncode(data));
           return;
         default:
@@ -2777,8 +2798,9 @@ class BridgeServer {
     }
     try {
       // The service deletion and the persistence-record removal in one
-      // action (spec section 5, endpoint 4).
-      await sessions.delete(id);
+      // action (spec section 5, endpoint 4): the service read straight off
+      // the seam (the backend's [SessionsBackend.service]).
+      await sessions.service.deleteSession(id);
       // Bridge-native `session.closed` (spec §8): every connected app drops the
       // session from its list. Emitted after the delete succeeds.
       events?.emit(
@@ -2982,7 +3004,7 @@ class BridgeServer {
     try {
       var projects = const <ComposeProject>[];
       if (sessions != null) {
-        final projectList = await sessions.projects();
+        final projectList = await sessions.service.projects();
         final dirs = [for (final p in projectList) p.canonical];
         projects = await docker.composeProjects(dirs);
       }
@@ -3116,7 +3138,7 @@ class BridgeServer {
     }
     OpencodeProject? project;
     try {
-      final projects = await sessions.projects();
+      final projects = await sessions.service.projects();
       for (final candidate in projects) {
         if (candidate.id == projectId) {
           project = candidate;

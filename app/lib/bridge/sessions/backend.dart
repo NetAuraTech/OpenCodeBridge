@@ -1,9 +1,6 @@
 import 'dart:io';
 
 import '../../model/command.dart';
-import '../../model/message.dart';
-import '../../model/permission.dart';
-import '../../model/question.dart';
 import '../../model/session.dart';
 import '../../model/session_detail.dart';
 import 'opencode_service.dart';
@@ -13,11 +10,18 @@ import 'session_row.dart';
 /// The bridge's sessions backend (spec §5 endpoints 1 & 4, §6): it owns the
 /// [OpencodeService] seam and composes it into the home-list rows.
 ///
+/// Its interface is its deep core only — every method composes. The raw
+/// operations of the seam (the detail read, the messages, the prompt, the
+/// command menu, …) are not re-exposed here: the HTTP routes and the orb task
+/// service read them directly through the backend's [service].
+///
 /// - [list] merges the service session list and the service's active list,
 ///   pinned-first (issue #237: the pinned block position ascending, then the
 ///   unpinned newest-created).
-/// - [create] creates the session on the service (spec §5 fill-in †).
-/// - [delete] performs the service `DELETE`.
+/// - [create] / [createInDirectory] create the session on the service
+///   (spec §5 fill-in †), applying the current/default model.
+/// - [detailWithActive] folds the detail read with the service's live
+///   Active fact.
 /// - [setOrder] / [clearOrder] move the session's position in the bridge's
 ///   app-owned order store (issue #237, the home list's user-controlled
 ///   display order).
@@ -40,10 +44,6 @@ class SessionsBackend {
   /// newest-created order). Mutable: the bridge's start wires it into a
   /// caller-provided backend after construction.
   SessionOrderStore? orderStore;
-
-  /// The service's project list (spec §5 fill-in †): what the app's project
-  /// picker offers and what [create] takes as its only parameter.
-  Future<List<OpencodeProject>> projects() => service.projects();
 
   /// Create a session (spec §5 fill-in †): the service `POST /api/session`
   /// in [projectId]'s project. The bridge applies the current/default model
@@ -126,7 +126,9 @@ class SessionsBackend {
     }
   }
 
-  /// Whether the service still has [id] (the reopen guard).
+  /// Whether the service still has [id] (the reopen guard): a composition of
+  /// the service's session list (the read that already degrades per-session,
+  /// not an identity probe the seam does not have).
   Future<bool> exists(String id) async {
     final sessions = await service.listSessions();
     for (final session in sessions) {
@@ -217,29 +219,12 @@ class SessionsBackend {
   /// returns to the unpinned newest-created order.
   Future<void> clearOrder(String id) => orderStore!.clear(id);
 
-  /// Delete (spec §5 endpoint 4): the service `DELETE`.
-  Future<void> delete(String id) => service.deleteSession(id);
-
-  /// Archive or unarchive (issue #234): a pass-through beside [delete], the
-  /// service's single-verb `PATCH` (`{"archived": bool}`, one call each way,
-  /// `204`). The seam stays faithful — [list] keeps returning the archived
-  /// rows, each carrying its [Session.archived] fact; the app hides them on
-  /// its own surface (issue #235).
-  Future<void> archive(String id, bool archived) =>
-      service.archive(id, archived);
-
-  // The structured-view reads/writes (spec §5, endpoints 5–9) are pure
-  // pass-throughs to the service seam, so they are exposed directly.
-  Future<SessionDetail> getDetail(String id) => service.getDetail(id);
-
   /// The detail endpoint's read (issue #124): the session's detail plus its
   /// live Active fact (the service's active list), which the structured
   /// view's live turn footer needs when the persisted history alone is
-  /// ambiguous. Kept off [getDetail] proper: the structured view's plain
-  /// detail read stays a single round-trip. The orb task watcher reads this
-  /// one (issue #169): settling an outcome-less session needs the Active
-  /// fact — a session idle and outcome-less has ended its turn, an active
-  /// one is merely between steps.
+  /// ambiguous. The orb task watcher reads this one (issue #169): settling
+  /// an outcome-less session needs the Active fact — a session idle and
+  /// outcome-less has ended its turn, an active one is merely between steps.
   ///
   /// The active and canCancel facts are composed through the row composer
   /// (W7b, issue #289): [SessionRowComposer.detailWithActive] is the one place
@@ -249,115 +234,4 @@ class SessionsBackend {
     final detail = await service.getDetail(id);
     return composer.detailWithActive(detail, id);
   }
-
-  Future<List<SessionMessage>> getMessages(String id) =>
-      service.getMessages(id);
-
-  Future<MessagePage> getMessagesPage(
-    String id, {
-    int limit = 50,
-    String? cursor,
-  }) => service.getMessagesPage(id, limit: limit, cursor: cursor);
-
-  Future<void> prompt(
-    String id,
-    String text, {
-    List<Map<String, Object?>>? files,
-    List<Map<String, Object?>>? skills,
-  }) => service.prompt(id, text, files: files, skills: skills);
-
-  Future<List<PermissionRequest>> pendingPermissions(String id) =>
-      service.pendingPermissions(id);
-
-  Future<void> replyPermission(
-    String id,
-    String requestID,
-    PermissionReply reply,
-  ) => service.replyPermission(id, requestID, reply);
-
-  // The structured view's question forms (issue #50): pure pass-throughs to
-  // the service seam, like endpoints 5–9.
-  Future<List<QuestionForm>> pendingQuestions(String id) =>
-      service.pendingQuestions(id);
-
-  Future<void> answerQuestion(
-    String id,
-    String formID,
-    List<List<String>> answers,
-  ) => service.answerQuestion(id, formID, answers);
-
-  Future<void> dismissQuestion(String id, String formID) =>
-      service.dismissQuestion(id, formID);
-
-  // The structured view's `/` command menu (issue #46): the service-backed
-  // commands, pure pass-throughs to the service seam (like endpoints 5–9).
-
-  Future<List<OpencodeCommand>> listCommands() => service.listCommands();
-
-  Future<void> runCommand(String id, String name, String text) =>
-      service.runCommand(id, name, text);
-
-  Future<List<ModelOption>> listModels() => service.listModels();
-
-  Future<ModelRef?> currentModel(String id) => service.currentModel(id);
-
-  Future<void> setModel(String id, ModelRef model) =>
-      service.setModel(id, model);
-
-  Future<List<AgentOption>> listAgents() => service.listAgents();
-
-  Future<void> setAgent(String id, String agentId) =>
-      service.setAgent(id, agentId);
-
-  Future<List<SkillOption>> listSkills() => service.listSkills();
-
-  Future<void> activateSkill(String id, String skillId) =>
-      service.activateSkill(id, skillId);
-
-  Future<void> compact(String id) => service.compact(id);
-
-  /// Cancel the session's running turn (issue #158): a pass-through to the
-  /// service's interrupt.
-  Future<void> cancel(String id) => service.cancelTurn(id);
-
-  Future<void> undo(String id) => service.undo(id);
-
-  Future<void> redo(String id) => service.redo(id);
-
-  Future<String> fork(String id) => service.fork(id);
-
-  Future<void> rename(String id, String title) => service.rename(id, title);
-
-  Future<String> exportSession(String id) => service.exportSession(id);
-
-  Future<void> move(String id, String directory) => service.move(id, directory);
-
-  Future<String> generate(String id, String prompt) =>
-      service.generate(id, prompt);
-
-  Future<String> diff(String id) => service.diff(id);
-
-  Future<String> stats(String id) => service.stats(id);
-
-  Future<String> worktrees(String sessionId) => service.worktrees(sessionId);
-
-  Future<List<String>> findFiles(String id, String query) =>
-      service.findFiles(id, query);
-
-  Future<String> usage() => service.usage();
-
-  Future<String> mcps() => service.mcps();
-
-  Future<String> integrations() => service.integrations();
-
-  Future<String> connectIntegration(String integrationId, String methodId) =>
-      service.connectIntegration(integrationId, methodId);
-
-  Future<String> status() => service.status();
-
-  Future<String> pair() => service.pair();
-
-  Future<void> reload() => service.reload();
-
-  Future<String> plugins() => service.plugins();
 }
