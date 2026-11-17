@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../access/access_session.dart';
 import '../bridge/events/bridge_event.dart';
+import '../bridge/orb/orb_state_machine.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
 import '../client/orbs_client.dart';
@@ -1121,7 +1122,8 @@ class _OrbCard extends StatelessWidget {
     // A cleanup-pending orb (`cleanup_pending:<reason>`) is a stopped orb
     // under the badge (issue #101): the same actions, including the human's
     // force-delete — the documented exit for a leaked variant (§2.10.4).
-    if (orb.isStoppedLike) {
+    final s = OrbState.parse(orb.state);
+    if (s.isStoppedLike) {
       return [
         _CardAction(
           label: waking ? 'Waking…' : 'Wake',
@@ -1132,42 +1134,42 @@ class _OrbCard extends StatelessWidget {
         forceDelete,
       ];
     }
-    switch (orb.state) {
-      case 'running':
-        return [
-          _CardAction(
-            label: stopping ? 'Stopping…' : 'Stop',
-            enabled: true,
-            onPressed: () => onStop(orb),
-          ),
-          _CardAction(
-            label: creatingSession ? 'Creating…' : 'New session',
-            enabled: true,
-            onPressed: () => onNewSession(orb),
-          ),
-          update,
-          forceDelete,
-        ];
-      case 'broken:workspace':
-        return [forceDelete];
-      case 'broken:state':
-        return [forceDelete, freshState];
-      case 'broken:shell':
-        // The boot proved the agent cannot execute (issue #149, §6.8): the
-        // volumes and state dir are intact, so there is nothing to freshen —
-        // force-delete is the exit, and the human re-creates on a fixed image.
-        return [forceDelete];
-      case 'orphan':
-        return [
-          _CardAction(
-            label: 'Clean up',
-            enabled: true,
-            onPressed: () => onCleanOrphan(orb),
-          ),
-        ];
-      default:
-        return const []; // preparing
+    if (s.isRunning) {
+      return [
+        _CardAction(
+          label: stopping ? 'Stopping…' : 'Stop',
+          enabled: true,
+          onPressed: () => onStop(orb),
+        ),
+        _CardAction(
+          label: creatingSession ? 'Creating…' : 'New session',
+          enabled: true,
+          onPressed: () => onNewSession(orb),
+        ),
+        update,
+        forceDelete,
+      ];
     }
+    if (s.isBrokenState) {
+      return [forceDelete, freshState];
+    }
+    if (s.isBroken) {
+      // broken:workspace and broken:shell (issue #149, §6.8): the
+      // broken:shell orb's volumes and state dir are intact, so there is
+      // nothing to freshen — force-delete is the exit for both, and the
+      // human re-creates on a fixed image.
+      return [forceDelete];
+    }
+    if (s.isOrphan) {
+      return [
+        _CardAction(
+          label: 'Clean up',
+          enabled: true,
+          onPressed: () => onCleanOrphan(orb),
+        ),
+      ];
+    }
+    return const []; // preparing and anything else: no actions
   }
 }
 
