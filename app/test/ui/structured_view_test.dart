@@ -7831,6 +7831,11 @@ void main() {
           clipboard.first.indexOf('I ran flutter test'),
           lessThan(clipboard.first.indexOf('shell · completed')),
         );
+        // The copy doubles as the card's content test (issue #265): every
+        // line the copy produced is what the visible card shows, from the
+        // same derivation.
+        expect(find.text('shell · completed'), findsOneWidget);
+        expect(find.text('ls -la'), findsOneWidget);
         expect(find.text('Copied the message.'), findsOneWidget);
         await events.close();
       },
@@ -7961,5 +7966,185 @@ void main() {
         await events.close();
       },
     );
+
+    // One table-driven widget test over the known tools (issue #265): the
+    // copy and the card are the ONE derivation — for each tool, the clipboard
+    // carries the card's content and every line the visible card shows is a
+    // line the copy produced. A new known tool is a one-place change (a case
+    // in the derivation's detail switch) plus a new row here.
+    //
+    // [copyText] is the clipboard's text, line for line; [cardLines] the
+    // exact strings the visible card renders as Text. The two agree, save
+    // the corners the card's rendering keeps its own rule for: for the patch
+    // tools the card shows the [DiffView] rendering, whose visible lines are
+    // the hunk's added/removed/context lines (the sign in its own Text, the
+    // file headers skipped) — so the write row lists the hunk's line texts,
+    // not the patch string; and an unanswered question's answer line is
+    // absent from the card (the '—' the copy adds is the copy's own
+    // placeholder, not a card line).
+    final toolCardCopyCases = <(String, ToolCall, String, List<String>)>[
+      (
+        'shell',
+        ToolCall(
+          name: 'shell',
+          status: 'completed',
+          input: {'command': 'ls -la'},
+        ),
+        'shell · completed\nls -la',
+        ['shell · completed', 'ls -la'],
+      ),
+      (
+        'execute',
+        ToolCall(
+          name: 'execute',
+          status: 'completed',
+          input: {'code': 'print(1)'},
+        ),
+        'execute · completed\nprint(1)',
+        ['execute · completed', 'print(1)'],
+      ),
+      (
+        'read with offset and limit',
+        ToolCall(
+          name: 'read',
+          status: 'completed',
+          input: {'path': 'src/main.dart', 'offset': 5, 'limit': 20},
+        ),
+        'read · completed\nsrc/main.dart (offset 5, limit 20)',
+        ['read · completed', 'src/main.dart (offset 5, limit 20)'],
+      ),
+      (
+        'grep with a path',
+        ToolCall(
+          name: 'grep',
+          status: 'completed',
+          input: {'pattern': 'todo', 'path': 'src'},
+        ),
+        'grep · completed\ntodo in src',
+        ['grep · completed', 'todo in src'],
+      ),
+      (
+        'a question answered',
+        ToolCall(
+          name: 'question',
+          status: 'completed',
+          input: {
+            'questions': [
+              {
+                'question': 'Which theme?',
+                'header': 'Theme',
+                'options': [
+                  {'label': 'Light', 'description': 'the light one'},
+                ],
+              },
+            ],
+          },
+          answers: [
+            ['light'],
+          ],
+        ),
+        'question · completed\nWhich theme?\nlight',
+        ['question · completed', 'Which theme?', 'light'],
+      ),
+      (
+        'a question unanswered',
+        ToolCall(
+          name: 'question',
+          status: 'running',
+          input: {
+            'questions': [
+              {
+                'question': 'Which theme?',
+                'header': 'Theme',
+                'options': [
+                  {'label': 'Light', 'description': 'the light one'},
+                ],
+              },
+            ],
+          },
+        ),
+        // The copy's '—' placeholder: the card shows no answer line for an
+        // open question, so the card's lines stop at the question.
+        'question · running\nWhich theme?\n—',
+        ['question · running', 'Which theme?'],
+      ),
+      (
+        'a write with its state patch',
+        ToolCall(
+          name: 'write',
+          status: 'completed',
+          input: {'path': '/tmp/a.txt', 'content': 'hello\nworld\n'},
+          patch: ToolCall.writePatch(const {
+            'path': '/tmp/a.txt',
+            'content': 'hello\nworld\n',
+          }),
+        ),
+        // The copy carries the patch string as-is (path, then the diff).
+        'write · completed\n'
+            '/tmp/a.txt\n'
+            'Index: /tmp/a.txt\n'
+            '===================================================================\n'
+            '--- /dev/null\n'
+            '+++ /tmp/a.txt\n'
+            '@@ -0,0 +1,2 @@\n'
+            '+hello\n'
+            '+world\n',
+        // The card shows the [DiffView] rendering: the path line, then the
+        // hunk's lines (the sign in its own Text, the headers skipped).
+        ['write · completed', '/tmp/a.txt', 'hello', 'world'],
+      ),
+      (
+        'a raw-string input (still streaming)',
+        ToolCall(name: 'shell', status: 'streaming', input: '{"comm'),
+        'shell · streaming\n{"comm',
+        ['shell · streaming', '{"comm'],
+      ),
+      (
+        'an unknown tool with a map input (the raw JSON)',
+        ToolCall(name: 'patch', status: 'completed', input: {'foo': 'bar'}),
+        'patch · completed\n{"foo":"bar"}',
+        ['patch · completed', '{"foo":"bar"}'],
+      ),
+      (
+        'a failed tool carries its error line',
+        ToolCall(
+          name: 'shell',
+          status: 'error',
+          input: {'command': 'ls'},
+          error: 'no match',
+        ),
+        'shell · error\nls\nno match',
+        ['shell · error', 'ls', 'no match'],
+      ),
+    ];
+
+    for (final (label, tool, copyText, cardLines) in toolCardCopyCases) {
+      testWidgets('the copy and the visible card agree: $label', (
+        tester,
+      ) async {
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: [
+            SessionMessage(role: 'assistant', tools: [tool], created: 1000),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        final clipboard = _watchClipboard(tester);
+        await tester.tap(find.byKey(const ValueKey('copy-message-0')));
+        await tester.pump();
+
+        // (a) The clipboard carries the card's content, line for line.
+        expect(clipboard, hasLength(1));
+        expect(clipboard.first, copyText);
+
+        // (b) Every line the visible card shows is the same value the copy
+        // produced — the one derivation (issue #265).
+        for (final line in cardLines) {
+          expect(find.text(line), findsWidgets, reason: line);
+        }
+        await events.close();
+      });
+    }
   });
 }
