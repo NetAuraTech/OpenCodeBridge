@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/notify/fcm_sender.dart';
 import 'package:opencodebridge/bridge/notify/notify_service.dart';
 import 'package:opencodebridge/bridge/orb/orb_service.dart';
@@ -209,11 +210,27 @@ class _FakeOrbs implements OrbService {
   String? createSessionOrbId;
   int createSessionCalls = 0;
 
+  /// The orb's current `server password` (spec §7.1): non-empty by default so a
+  /// running, url-carrying orb passes the live-upstream gate (the missing-settle
+  /// tests need a `reachable` orb — issue #276). A test can drop it to `null`
+  /// to make the orb `unroutable`.
+  String? passwordResult = 'orb-secret';
+
+  /// When set, [list] throws it instead of returning [listResult] (docker down
+  /// / a torn label pass): the live-upstream source degrades to
+  /// `UpstreamVerdict.unknown` for every orb (issue #276's non-conclusive 404).
+  Object? listError;
+
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
     lastListIncludePr = includePr;
+    final error = listError;
+    if (error != null) throw error;
     return listResult;
   }
+
+  @override
+  Future<String?> lastPassword(String id) async => passwordResult;
 
   @override
   Future<OrbRecord> wake(String id) async {
@@ -1959,6 +1976,50 @@ void main() {
         expect(task.summary, contains('no longer exists'));
       },
     );
+
+    test('docker down (list unreadable) keeps a 404 non-conclusive: the task '
+        'stays running, never settles failed (issue #276)', () async {
+      orbs.listResult = [_runningOrb()];
+      scriptDispatch();
+      settleMissingWindow = const Duration(milliseconds: 30);
+
+      final tasks = newService();
+      final task = await tasks.spawn(
+        task: 'docker-down work',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+      // The session read 404s (in flight), and docker is down: the orb list
+      // cannot be read, so the live-upstream source yields `unknown` — one
+      // fact, one conclusion. The 404 is the host fallback, not proof the
+      // session is gone.
+      backend.opencode.detailError = const OpencodeServiceError(
+        404,
+        'no such session',
+      );
+      orbs.listError = const DockerUnavailableError('docker daemon down');
+      // Several polls well past the missing window: a conclusive 404 would
+      // have settled `failed` by now; `unknown` must never count.
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(
+        task.isDone,
+        isFalse,
+        reason:
+            'a docker-down (unknown) 404 settled the task `failed` while '
+            'the work still ran (issue #276)',
+      );
+      expect(task.status, 'running');
+
+      // Docker recovers and the turn ends for real: the task settles on its
+      // genuine outcome, proving the window was paused — not lost — while
+      // the list was unreadable.
+      orbs.listError = null;
+      backend.opencode.detailError = null;
+      backend.opencode.detailOf = (id) => _detail(id, outcome: 'succeeded');
+      await until(() => task.isDone);
+      expect(task.status, 'succeeded');
+    });
 
     test('a transient service error never settles the task', () async {
       orbs.listResult = [_runningOrb()];
