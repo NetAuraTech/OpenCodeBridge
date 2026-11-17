@@ -197,7 +197,9 @@ abstract class OrbUpstreamSource {
 /// composites read through their `orbList`/`orbPassword` closures — so the
 /// module is unit-testable without docker (mirroring the marker-store seam
 /// of the state-machine module: one abstract fact source, one concrete
-/// host implementation).
+/// host implementation). The default constructor derives both seams from
+/// [orbService]; [LiveOrbUpstreams.fromSeams] (issue #275) takes the
+/// composite's own injected seams directly.
 class LiveOrbUpstreams implements OrbUpstreamSource {
   LiveOrbUpstreams({
     required OrbService orbService,
@@ -205,6 +207,16 @@ class LiveOrbUpstreams implements OrbUpstreamSource {
     Future<String?> Function(String)? orbPassword,
   }) : orbList = orbList ?? orbService.list,
        orbPassword = orbPassword ?? orbService.lastPassword;
+
+  /// The source over the composite's own seams (issue #275's contract
+  /// phase): the composites hold their injected `orbList`/`orbPassword`
+  /// closures — the same two facts — not an [OrbService], so this builds
+  /// the source directly over them. The derivation, the gate, and the
+  /// degradation are the same `live()`/[OrbUpstream.reachable] either way.
+  LiveOrbUpstreams.fromSeams({
+    required this.orbList,
+    required this.orbPassword,
+  });
 
   /// The running orb list (labels; `url` only for a running orb). May
   /// throw when docker is down (the source degrades: empty [live],
