@@ -240,15 +240,6 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// screens); it resets to closed whenever the narrow layout (re)builds.
   bool _drawerOpen = false;
 
-  /// The home list's surface (issue #235): `null` shows **Active** (the
-  /// default — the rows that are not archived, matching the TUI's own
-  /// default, the research's Q1), `true` shows **Archived** (the rows that
-  /// are). A render filter over the same fetched rows — the list keeps
-  /// fetching every row (the seam is faithful, issue #234) and the two
-  /// surfaces are the same flag read two ways (Q7's lower-effort shape).
-  /// Transient, like the drawer: not persisted.
-  bool? _showingArchived;
-
   /// The id whose archive/unarchive (issue #235) is in flight: its row's
   /// menu is gone for the call. The tap does not re-fetch: the
   /// `session.archived` / `session.unarchived` event the route emits flips
@@ -672,15 +663,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// The rows of the home list's current surface (issue #235): the default
-  /// **Active** surface is `!archived` (matching the TUI's own default, the
-  /// research's Q1), the **Archived** surface is `archived`. A render filter
-  /// over the module's rows — the list keeps fetching every row (the seam is
-  /// faithful, issue #234); no bridge behaviour change.
-  List<Session> get _surfaceRows => [
-    for (final session in _list.rows ?? const <Session>[])
-      if (session.archived == (_showingArchived ?? false)) session,
-  ];
+  /// The rows of the home list's current surface (issue #235): a render
+  /// filter over the module's rows — the **Active** surface is `!archived`
+  /// (matching the TUI's own default, the research's Q1), the **Archived**
+  /// surface is `archived`. The filter is the module's ([HomeListState.
+  /// surfaceRows]); the list keeps fetching every row (the seam is faithful,
+  /// issue #234); no bridge behaviour change.
+  List<Session> get _surfaceRows => _list.surfaceRows;
 
   /// The rows of the current surface, grouped by project, newest first (the
   /// rows arrive pre-sorted, so grouping preserves the order).
@@ -864,7 +853,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   Widget _buildListPane() {
-    final showingArchived = _showingArchived ?? false;
+    final showingArchived = _list.showingArchived;
     final rows = _surfaceRows;
     return RefreshIndicator(
       onRefresh: _load,
@@ -907,7 +896,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     archiving: _archivingId == s.id,
                     moving: _movingId == s.id,
                     exporting: _exportingId == s.id,
-                    unread: _list.isUnread(s.id),
+                    dot: _list.dotFor(s),
                     onTap: _rowTap(s),
                     onDelete: _confirmDelete,
                     onArchive: _client == null
@@ -1038,12 +1027,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   }
 
   /// Flips the home list's surface (issue #235) between **Active** (the
-  /// default, `null`) and **Archived** (the archived rows). A render filter
-  /// over the same fetched rows — no bridge call, no re-fetch; the rows that
-  /// the filter shows or hides are the same ones, carrying the same flag.
+  /// default) and **Archived** (the archived rows). A render filter over the
+  /// same fetched rows — no bridge call, no re-fetch; the rows that the
+  /// filter shows or hides are the same ones, carrying the same flag. The
+  /// filter is the module's ([HomeListState.toggleSurface]).
   void _toggleArchivedSurface() {
     if (!mounted) return;
-    setState(() => _showingArchived = _showingArchived != true);
+    setState(() => _list.toggleSurface());
   }
 
   /// The row's Archive / Unarchive (issue #235): the non-destructive exit
@@ -1437,7 +1427,7 @@ class _SessionRow extends StatelessWidget {
     required this.exporting,
     required this.onDelete,
     required this.orb,
-    this.unread = false,
+    required this.dot,
     this.onTap,
     this.onArchive,
     this.onUnarchive,
@@ -1452,12 +1442,12 @@ class _SessionRow extends StatelessWidget {
 
   final Session session;
 
-  /// The row's unread mark (issue #207): true when the session's turn ended
-  /// while it was not shown in the detail pane. The status dot (before the
-  /// title) wears it as a violet dot — one spot with mutually exclusive
-  /// states, orange (waiting, issue #209) > green (active) > violet
-  /// (unread).
-  final bool unread;
+  /// The row's status dot (issue #209), as the module derives it
+  /// ([HomeListState.dotFor]): one spot with mutually exclusive states,
+  /// orange (waiting) > green (active) > violet (unread); [RowDot.none]
+  /// shows no dot. The precedence is the module's — the widget only maps the
+  /// kind to its colour and key.
+  final RowDot dot;
 
   /// The orb the session lives on (spec §9.2): the chip's name and state
   /// dot. `null` when the orb is absent from the list (deleted in the
@@ -1531,22 +1521,14 @@ class _SessionRow extends StatelessWidget {
   /// busy spinner and ignores further presses (one request per tap).
   final bool pinning;
 
-  /// The status dot's state (issue #209), in precedence order: `waiting`
-  /// (the row's `waiting` fact) beats `active` (the `active` fact) beats
-  /// `unread` (the tab-local mark); none otherwise (no dot).
-  String get _dotKind => session.waiting
-      ? 'waiting'
-      : session.active
-      ? 'active'
-      : 'unread';
-
   /// The status dot's color for its current state (issue #209): orange while
   /// waiting, green while active, violet while unread.
-  Color get _dotColor => session.waiting
-      ? Colors.orange
-      : session.active
-      ? Colors.green
-      : Colors.deepPurple;
+  Color get _dotColor => switch (dot) {
+    RowDot.waiting => Colors.orange,
+    RowDot.active => Colors.green,
+    RowDot.unread => Colors.deepPurple,
+    RowDot.none => Colors.transparent,
+  };
 
   /// The chip (an orb session) or the muted "host" label (a host session).
   Widget _orbIdentity(BuildContext context) {
@@ -1613,17 +1595,18 @@ class _SessionRow extends StatelessWidget {
                       children: [
                         // The row's status dot (before the title), one spot
                         // with three mutually exclusive states, in precedence
-                        // order: orange while the session is waiting on a
-                        // permission or question (the row's `waiting` fact,
-                        // issue #209 — it beats the green active dot, so a
+                        // order (issue #209): orange while the session is
+                        // waiting on a permission or question (the row's
+                        // `waiting` fact — it beats the green active dot, so a
                         // session still marked active during the block reads
                         // orange), green while its turn is active (the
-                        // existing `active` fact), or violet while its turn
-                        // ended unviewed (the tab-local unread mark, issue
-                        // #207). An inactive, non-waiting row shows none.
-                        if (session.waiting || session.active || unread) ...[
+                        // `active` fact), or violet while its turn ended
+                        // unviewed (the module's unread mark, issue #207).
+                        // The precedence is the module's (dotFor); an
+                        // inactive, non-waiting, non-unread row shows none.
+                        if (dot != RowDot.none) ...[
                           Container(
-                            key: ValueKey('$_dotKind-${session.id}'),
+                            key: ValueKey('${dot.name}-${session.id}'),
                             width: 8,
                             height: 8,
                             decoration: BoxDecoration(
