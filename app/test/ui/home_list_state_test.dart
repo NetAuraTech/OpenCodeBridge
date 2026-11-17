@@ -550,6 +550,156 @@ void main() {
     );
   });
 
+  group('the row\'s status dot (issue #209, the precedence the module owns)', () {
+    test('idle and not waiting and not unread: no dot', () {
+      readFresh();
+      expect(
+        list.dotFor(list.rows!.where((s) => s.id == 'ses_1').first),
+        RowDot.none,
+      );
+    });
+
+    test('waiting (orange) beats active (green) beats unread (violet)', () {
+      readFresh();
+      final row = list.rows!.where((s) => s.id == 'ses_1').first;
+      // Not waiting, not active, not unread.
+      expect(list.dotFor(row), RowDot.none);
+      // The turn is live: green.
+      expect(list.dotFor(row.copyWith(active: true)), RowDot.active);
+      // Unread (the mark) with no live turn: violet.
+      list.endUnread('ses_1');
+      expect(list.dotFor(row), RowDot.unread);
+      // Waiting (a pending permission) beats both: a waiting row that is also
+      // active reads orange, and a waiting row that is also unread reads
+      // orange too.
+      expect(list.dotFor(row.copyWith(waiting: true)), RowDot.waiting);
+      expect(
+        list.dotFor(row.copyWith(waiting: true, active: true)),
+        RowDot.waiting,
+      );
+    });
+
+    test('a terminal on an unshown row lights the violet dot; on the shown row '
+        'it does not; a new turn clears it', () {
+      readFresh();
+      list.select(list.rows!.first); // ses_2 shown; ses_1 is not.
+      final one = list.rows!.where((s) => s.id == 'ses_1').first;
+      // A turn ends on the unshown row: violet.
+      expect(
+        list.applyEvent(_ev('session.execution.succeeded', session: 'ses_1')),
+        ListStateVerdict.none,
+      );
+      expect(list.dotFor(one), RowDot.unread);
+      // A turn ends on the shown row: no mark (watched live), no violet.
+      expect(
+        list.applyEvent(_ev('session.execution.succeeded', session: 'ses_2')),
+        ListStateVerdict.none,
+      );
+      expect(
+        list.dotFor(list.rows!.where((s) => s.id == 'ses_2').first),
+        RowDot.none,
+      );
+      // A new turn starts on the unread row: the "finished" fact is stale, the
+      // dot goes to green.
+      expect(
+        list.applyEvent(_ev('session.execution.started', session: 'ses_1')),
+        ListStateVerdict.none,
+      );
+      expect(
+        list.dotFor(list.rows!.where((s) => s.id == 'ses_1').first),
+        RowDot.active,
+      );
+    });
+
+    test('opening a row clears its dot with the selection; the read keeps the '
+        'surviving marks', () {
+      readFresh();
+      list.endUnread('ses_1');
+      expect(
+        list.dotFor(list.rows!.where((s) => s.id == 'ses_1').first),
+        RowDot.unread,
+      );
+      // Opening the row in the detail pane clears the mark atomically.
+      list.select(list.rows!.where((s) => s.id == 'ses_1').first);
+      expect(
+        list.dotFor(list.rows!.where((s) => s.id == 'ses_1').first),
+        RowDot.none,
+      );
+      // A re-read keeps a mark whose row survives.
+      list.endUnread('ses_2');
+      list.applyRead([
+        _row('ses_2', created: 300),
+        _row('ses_1', created: 100),
+      ]);
+      expect(
+        list.dotFor(list.rows!.where((s) => s.id == 'ses_2').first),
+        RowDot.unread,
+      );
+    });
+  });
+
+  group('the surface filter (issue #235, the module\'s render filter)', () {
+    test(
+      'defaults to Active: the non-archived rows, and the toggle flips it',
+      () {
+        // The read is pre-sorted (newest-created first among the unpinned).
+        list.applyRead([
+          _row('ses_1', created: 300),
+          _row('ses_arch', created: 100, archived: true),
+        ]);
+        // Active by default: the archived row is filtered out.
+        expect(list.showingArchived, isFalse);
+        expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_1']);
+        // The toggle flips to Archived (the archived rows only), no refetch.
+        list.toggleSurface();
+        expect(list.showingArchived, isTrue);
+        expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_arch']);
+        // Back to Active: the archived row is hidden again.
+        list.toggleSurface();
+        expect(list.showingArchived, isFalse);
+        expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_1']);
+      },
+    );
+
+    test('an all-archived read shows an empty Active surface and the Archived '
+        'surface shows them; an empty read says so on both', () {
+      list.applyRead([
+        _row('ses_arch_b', created: 300, archived: true),
+        _row('ses_arch_a', created: 100, archived: true),
+      ]);
+      expect(list.surfaceRows, isEmpty); // Active: nothing.
+      list.toggleSurface();
+      expect(list.surfaceRows.map((s) => s.id).toList(), [
+        'ses_arch_b',
+        'ses_arch_a',
+      ]);
+      // A fresh, empty read: both surfaces are empty.
+      list.applyRead(const []);
+      expect(list.surfaceRows, isEmpty);
+      list.toggleSurface();
+      expect(list.surfaceRows, isEmpty);
+    });
+
+    test('a row archived in place (no refetch) leaves the Active surface and '
+        'joins the Archived one', () {
+      list.applyRead([
+        _row('ses_2', created: 300),
+        _row('ses_1', created: 100),
+      ]);
+      expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_2', 'ses_1']);
+      // The archive event flips the row in place (no refetch): it leaves the
+      // Active surface.
+      list.applyEvent(_ev('session.archived', data: {'sessionID': 'ses_1'}));
+      expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_2']);
+      // The Archived surface shows it; unarchive brings it back.
+      list.toggleSurface();
+      expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_1']);
+      list.toggleSurface();
+      list.applyEvent(_ev('session.unarchived', data: {'sessionID': 'ses_1'}));
+      expect(list.surfaceRows.map((s) => s.id).toList(), ['ses_2', 'ses_1']);
+    });
+  });
+
   group('the sort comparator (issue #268, the pure comparator)', () {
     test('pinned rows sort before unpinned rows', () {
       final pinned = _row('ses_pin', created: 50, pinned: true);

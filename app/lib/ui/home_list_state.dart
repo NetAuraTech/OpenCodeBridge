@@ -5,13 +5,17 @@ import '../model/session.dart';
 /// The home list's merged state (issue #266, the S7 expand): one module owns
 /// everything the Sessions tab's list is about to show — the fetched rows,
 /// the pin positions the in-place reorder keys off, the violet unread marks,
-/// and the selected row — with a small interface: a fresh read in
-/// ([applyRead]), a decoded event in ([applyEvent]), the state out (the
-/// getters). No widget, no `setState`, no [BuildContext]: the module is
-/// unit-testable flat (apply a read, apply an event, assert the state), and
-/// the widget renders it exactly as before this extraction — the widget's
-/// event switch just became [applyEvent], and its state fields the getters
-/// below.
+/// the selected row, the Active / Archived surface, and each row's status
+/// dot — with a small interface: a fresh read in ([applyRead]), a decoded
+/// event in ([applyEvent]), the state out (the getters). No widget, no
+/// `setState`, no [BuildContext]: the module is unit-testable flat (apply a
+/// read, apply an event, assert the state), and the widget renders it
+/// exactly as before this extraction — the widget's event switch just became
+/// [applyEvent], and its state fields the getters below. The widget keeps no
+/// list state of its own (issue #269, the S7 contract): the surface
+/// ([showingArchived] / [toggleSurface] / [surfaceRows]) and the row's status
+/// dot ([dotFor]) are the module's, so the widget renders the list purely
+/// from this module.
 ///
 /// What the module deliberately does **not** own: the load's lifecycle
 /// (in-flight, quiet, the last error) — that is the widget's client
@@ -52,6 +56,45 @@ class HomeListState {
   /// True while a turn ended on [id] while it was not shown in the detail
   /// pane (the row wears the violet unread dot).
   bool isUnread(String id) => _unread.contains(id);
+
+  /// The row's status dot (issue #209), as the module derives it: one spot
+  /// with three mutually exclusive states, in precedence order — [RowDot.waiting]
+  /// (orange, the row's `waiting` fact) beats [RowDot.active] (green, the
+  /// `active` fact) beats [RowDot.unread] (violet, the module's unread mark
+  /// for [row.id]); [RowDot.none] when none holds. The widget renders the
+  /// dot purely from this — the precedence is the module's, so the dot
+  /// states are unit-testable flat (apply the facts, assert the dot), not
+  /// only through scripted widget events.
+  RowDot dotFor(Session row) {
+    if (row.waiting) return RowDot.waiting;
+    if (row.active) return RowDot.active;
+    if (_unread.contains(row.id)) return RowDot.unread;
+    return RowDot.none;
+  }
+
+  /// The home list's surface (issue #235): `false` shows **Active** (the
+  /// default — the rows that are not archived, matching the TUI's own
+  /// default, the research's Q1), `true` shows **Archived** (the rows that
+  /// are). A render filter over the same fetched rows — the list keeps
+  /// fetching every row (the seam is faithful, issue #234) and the two
+  /// surfaces are the same rows read two ways (Q7's lower-effort shape).
+  /// Transient, like the module's selection and unread marks: not persisted.
+  bool get showingArchived => _showingArchived;
+
+  /// The rows of the current surface ([showingArchived]): the module's rows
+  /// filtered to the surface's `archived` flag. The widget renders these
+  /// (grouped, with its layout); the filter itself is the module's, so the
+  /// surface is unit-testable flat (toggle the surface, assert the rows).
+  List<Session> get surfaceRows => [
+    for (final session in _rows ?? const <Session>[])
+      if (session.archived == _showingArchived) session,
+  ];
+
+  /// Flips the surface between **Active** and **Archived** (issue #235): a
+  /// render filter over the same rows — no fetch, no bridge call.
+  void toggleSurface() {
+    _showingArchived = !_showingArchived;
+  }
 
   /// A fresh read (a successful `list()` fetch): replaces the rows, clears
   /// the in-place pin positions (the read is authoritative and pre-sorted —
@@ -597,6 +640,11 @@ class HomeListState {
 
   Session? _selected;
 
+  /// The home list's surface (issue #235): `true` shows the Archived surface,
+  /// `false` (the default) the Active one. A transient render filter over the
+  /// rows, not persisted.
+  bool _showingArchived = false;
+
   /// The ids whose turn ended while they were not shown in the detail pane
   /// (the violet unread dots): in memory only, per running app instance —
   /// not persisted and not part of the sessions API contract. Driven by the
@@ -613,3 +661,11 @@ class HomeListState {
 /// their failure posture stay in the widget, which hands the result back in
 /// through [HomeListState.patchRow]).
 enum ListStateVerdict { none, reload, reDeriveWaiting }
+
+/// The home list row's status dot (issue #209): one spot with three mutually
+/// exclusive states, in precedence order — [waiting] (orange, the row's
+/// `waiting` fact, a pending permission or question) beats [active] (green,
+/// the turn is live) beats [unread] (violet, the turn ended unviewed);
+/// [none] otherwise. The widget maps the kind to its colour and key; the
+/// precedence itself is the module's (see [HomeListState.dotFor]).
+enum RowDot { none, waiting, active, unread }
