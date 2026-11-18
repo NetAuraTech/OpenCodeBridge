@@ -2,7 +2,7 @@
 
 ## pre-commit — the Dart format check
 
-The committed hook `scripts/git-hooks/pre-commit` refuses Dart commits that do not pass the formatter, before a PR is opened. It runs the same check CI runs (`dart format --set-exit-if-changed --output=none lib test` from `app/`) on the **staged** Dart files only — a clean commit has no friction, and a commit with no staged Dart file is a no-op.
+The committed hook `scripts/git-hooks/pre-commit` refuses Dart commits that do not pass the formatter, before a PR is opened. It runs the same `dart format` flags CI uses (`dart format --set-exit-if-changed --output=none`), from `app/`, on the **staged** app/ Dart files (`lib` and `test`) only — a clean commit has no friction, and a commit with no staged Dart file is a no-op.
 
 Scope: formatting only. The hook is fast and needs no network; the analyzer (`flutter analyze`) deliberately stays at CI.
 

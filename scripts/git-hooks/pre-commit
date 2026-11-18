@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Pre-commit hook: refuse Dart commits that do not pass the formatter.
 #
-# Runs the repo's format check (the one CI runs:
-# `dart format --set-exit-if-changed --output=none lib test` from app/) on
-# the staged Dart files only. A clean commit passes with no friction; if no
-# Dart file is staged, the hook is a no-op. The analyzer deliberately stays
-# at CI — this hook is formatting only, so it stays fast and needs no
-# network.
+# Runs the same `dart format` flags CI uses
+# (`dart format --set-exit-if-changed --output=none`), from app/, on the
+# staged app/ Dart files (lib and test) only. A clean commit passes with
+# no friction; if no Dart file is staged, the hook is a no-op. The analyzer
+# deliberately stays at CI — this hook is formatting only, so it stays fast
+# and needs no network.
 #
 # Activate it (one line, from the repo root):
 #
@@ -23,15 +23,16 @@ fi
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
-# Staged Dart files only (additions and modifications); untracked and
-# deleted files do not need a format check.
-staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.dart')
+# Staged Dart files only (additions, modifications, and renames);
+# untracked and deleted files do not need a format check.
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.dart')
 if [ -z "$staged" ]; then
   exit 0
 fi
 
-# Nothing staged under app/ -> nothing for this repo's formatter to check.
-if ! printf '%s\n' "$staged" | grep -q '^app/'; then
+# Nothing staged under app/ (lib or test) -> nothing for this repo's
+# formatter to check.
+if ! printf '%s\n' "$staged" | grep -Eq '^app/(lib|test)/'; then
   exit 0
 fi
 
@@ -41,10 +42,16 @@ if ! command -v dart >/dev/null 2>&1; then
   exit 1
 fi
 
+# dart format's language-version / package-config resolution is
+# cwd-sensitive, so run it from app/ on app/-relative paths — the same way
+# CI runs it.
+cd app || exit 1
+
 bad=$(
   while IFS= read -r f; do
-    [ -f "$f" ] || continue # the file may not exist on disk yet
-    if ! dart format --set-exit-if-changed --output=none -- "$f" >/dev/null 2>&1; then
+    rel=${f#app/}
+    [ -f "$rel" ] || continue # the file may not exist on disk yet
+    if ! dart format --set-exit-if-changed --output=none -- "$rel" >/dev/null 2>&1; then
       printf '%s\n' "$f"
     fi
   done <<< "$staged"
@@ -55,7 +62,9 @@ if [ -n "$bad" ]; then
     echo "commit refused: the staged Dart files are not formatted."
     echo
     echo "Files to format:"
-    printf '  %s\n' $bad
+    while IFS= read -r f; do
+      printf '  %s\n' "$f"
+    done <<< "$bad"
     echo
     echo "  (run: dart format <file> from app/, then re-stage the formatted files)"
     echo
