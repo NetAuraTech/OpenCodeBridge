@@ -10,6 +10,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
+- **Close from a PR**: GitHub closes an issue on merge only when the PR body carries a closing keyword — `Fixes #<n>`, `Closes #<n>` or `Resolves #<n>` (several: `Fixes #<n>, #<m>`). `Implements`, `Part of` and `Related to` do **not** close. The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) starts with the `Fixes #` line; when a merged PR missed it, close manually with the `Close` command.
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
