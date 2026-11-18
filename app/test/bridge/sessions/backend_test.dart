@@ -13,8 +13,9 @@ import 'package:opencodebridge/model/session_detail.dart';
 
 /// A scripted [OpencodeService] for the backend tests: only the operations
 /// the backend's deep core calls (the row composition, the create
-/// composition, the detail fold, and [SessionsBackend.exists]' list
-/// composition). The raw operations are the seam's own — their endpoint
+/// composition, the detail fold, and [SessionsBackend.exists]' light probe,
+/// issue #272 — recorded in [probedIds] / [listSessionsCalls] for the cost
+/// assertions). The raw operations are the seam's own — their endpoint
 /// behavior is covered by the bridge's route tests
 /// (test/bridge/bridge_server_test.dart).
 class FakeOpencodeService implements OpencodeService {
@@ -29,6 +30,7 @@ class FakeOpencodeService implements OpencodeService {
     this.permissions = const [],
     this.permissionsBySession = const {},
     this.questionsBySession = const {},
+    this.probeError,
   });
 
   final List<OpencodeSession> sessions;
@@ -63,8 +65,35 @@ class FakeOpencodeService implements OpencodeService {
 
   final List<(String, ModelRef)> modelsSet = [];
 
+  /// The ids [probe] was asked about (the pin write's existence check,
+  /// issue #272): the cost assertion reads this — the probe is one
+  /// identity read, and [listSessionsCalls] stays 0 on that path.
+  final List<String> probedIds = [];
+
+  /// When set, [probe] throws it (the degraded-probe route: a non-404
+  /// failure the backend's `exists` propagates).
+  Object? probeError;
+
+  /// The [listSessions] calls (the cost the old existence check's paginated
+  /// walk spent; the probe's path never walks the list, issue #272).
+  var listSessionsCalls = 0;
+
   @override
-  Future<List<OpencodeSession>> listSessions() async => sessions;
+  Future<List<OpencodeSession>> listSessions() async {
+    listSessionsCalls++;
+    return sessions;
+  }
+
+  @override
+  Future<OpencodeSession> probe(String id) async {
+    probedIds.add(id);
+    final error = probeError;
+    if (error != null) throw error;
+    for (final session in sessions) {
+      if (session.id == id) return session;
+    }
+    throw const OpencodeServiceError(404, 'no such session');
+  }
 
   @override
   Future<Map<String, String>> projectNames() async => names;
@@ -532,6 +561,29 @@ void main() {
       },
     );
 
+    test(
+      'a write failure cannot touch the read (issue #272): the load '
+      'succeeds, every write fails, the rows stay intact and pinned',
+      () async {
+        final service = FakeOpencodeService(
+          sessions: [s1, s2],
+          names: const {},
+        );
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _ReadThenFailOrderStore(positions: {'ses_1': 0}),
+        );
+
+        final rows = await backend.list();
+
+        // The loaded map's pins stand on their own: the rows are intact and
+        // sorted pinned-first — a store that cannot write still reads.
+        expect(rows.map((r) => r.id).toList(), ['ses_1', 'ses_2']);
+        expect(rows.byId('ses_1').pinned, isTrue);
+        expect(rows.byId('ses_2').pinned, isFalse);
+      },
+    );
+
     test('the backend writes through the store it was constructed with '
         '(issue #271: one write path)', () async {
       // The store the backend is constructed with is the one it writes
@@ -985,8 +1037,9 @@ void main() {
     );
   });
 
-  group('SessionsBackend.exists', () {
-    test('true while the service has the session, false once gone', () async {
+  group('SessionsBackend.exists (issue #272: the light probe)', () {
+    test('true while the service has the session, false once gone — and the '
+        'probe, not the paginated list, is the check', () async {
       final service = FakeOpencodeService(sessions: [s1]);
       final backend = SessionsBackend(
         service: service,
@@ -995,6 +1048,11 @@ void main() {
 
       expect(await backend.exists('ses_1'), isTrue);
       expect(await backend.exists('ses_gone'), isFalse);
+
+      // The cost: each check is one identity probe, and the paginated list
+      // walk (up to a thousand pages) is never spent on the check.
+      expect(service.probedIds, ['ses_1', 'ses_gone']);
+      expect(service.listSessionsCalls, 0);
     });
 
     test(
@@ -1008,6 +1066,31 @@ void main() {
         );
 
         expect(await backend.exists('ses_archived'), isTrue);
+      },
+    );
+
+    test(
+      'a non-404 probe failure propagates (the route maps it, as before)',
+      () async {
+        final service = FakeOpencodeService(
+          sessions: [s1],
+          probeError: const OpencodeServiceError(0, 'service down'),
+        );
+        final backend = SessionsBackend(
+          service: service,
+          orderStore: _InMemoryOrderStore(),
+        );
+
+        await expectLater(
+          backend.exists('ses_1'),
+          throwsA(
+            isA<OpencodeServiceError>().having(
+              (e) => e.statusCode,
+              'statusCode',
+              0,
+            ),
+          ),
+        );
       },
     );
   });
@@ -1115,4 +1198,29 @@ class _InMemoryOrderStore implements SessionOrderStore {
   Future<void> clear(String id) async {
     _positions.remove(id);
   }
+}
+
+/// An order store whose read succeeds (serving [positions]) and whose writes
+/// fail (issue #272's separated degrade): the read path is 100 % read-only
+/// on the store (the #292 separation), so the failing writes are unreachable
+/// from `list()` — the read returns the loaded map's rows intact, pins and
+/// all; only the write paths (the pin/un-pin, the event-driven cleanup) hit
+/// the failure.
+class _ReadThenFailOrderStore implements SessionOrderStore {
+  _ReadThenFailOrderStore({this.positions = const {}});
+
+  final Map<String, num> positions;
+
+  @override
+  File get file => throw StateError('write-down store has no file');
+
+  @override
+  Map<String, num> load() => Map<String, num>.from(positions);
+
+  @override
+  Future<void> set(String id, num position) async =>
+      throw StateError('write down');
+
+  @override
+  Future<void> clear(String id) async => throw StateError('write down');
 }

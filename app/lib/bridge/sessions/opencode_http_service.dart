@@ -223,6 +223,25 @@ class OpencodeHttpService implements OpencodeService {
     );
   }
 
+  /// The light identity read (issue #272): the same `GET /api/session/{id}`
+  /// the detail answers from, without composing the detail — the costs, the
+  /// token usage, and the model registry's context limit are not fetched.
+  /// One request: the pin write's existence check (the [OpencodeService.probe]
+  /// the backend's `exists` composes) no longer walks the paginated session
+  /// list. An unknown id answers the service's 404, like [getDetail].
+  @override
+  Future<OpencodeSession> probe(String id) async {
+    final map = await _sessionData(id);
+    return OpencodeSession(
+      id: map['id'] is String ? map['id'] as String : id,
+      title: map['title'] is String ? map['title'] as String : '',
+      projectId: map['projectID'] is String ? map['projectID'] as String : '',
+      created: _nestedInt(map, 'time', 'created'),
+      location: _nestedString(map, 'location', 'directory'),
+      archived: _archivedFrom(map),
+    );
+  }
+
   /// The model registry's context limits, keyed by model id (and by
   /// `providerID/modelID` when the registry carries a provider), cached for
   /// the life of this service: the registry is static for a running service,

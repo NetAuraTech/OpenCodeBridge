@@ -158,6 +158,29 @@ abstract class OpencodeService {
   /// endpoint 5).
   Future<SessionDetail> getDetail(String id);
 
+  /// Whether the service still has [id] — the light identity read (issue
+  /// #272): the same identity the detail read answers, without composing
+  /// the detail (the costs, the token usage, the model's context limit).
+  /// One request (O(1), a single `GET /api/session/{id}`) — the pin write's
+  /// existence check no longer walks the paginated session list. An id
+  /// absent from the service answers [OpencodeServiceError](404), like
+  /// [getDetail]; every other status propagates.
+  ///
+  /// The default answers from [getDetail] and exposes only the identity the
+  /// detail carries (an implementation without a lighter read may inherit
+  /// it; one with a lighter read overrides — the [OpencodeHttpService]
+  /// reads the session's data without composing the detail).
+  Future<OpencodeSession> probe(String id) async {
+    final detail = await getDetail(id);
+    return OpencodeSession(
+      id: detail.id,
+      title: detail.title,
+      projectId: '',
+      created: 0,
+      location: detail.location,
+    );
+  }
+
   /// The session's history as structured-view messages, with the tools in
   /// flight (spec §5, endpoint 6). User and assistant turns only.
   Future<List<SessionMessage>> getMessages(String id);

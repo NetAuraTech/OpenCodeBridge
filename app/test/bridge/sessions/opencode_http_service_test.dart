@@ -922,6 +922,40 @@ void main() {
       );
     });
 
+    // The light identity read (issue #272): one `GET /api/session/{id}` —
+    // no paginated list, no model registry — and the same 404 the detail
+    // answers for an unknown id.
+    test(
+      'probe answers the identity from one session read (issue #272)',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        final session = await service.probe('ses_1');
+        expect(session.id, 'ses_1');
+        expect(session.title, 'one');
+        expect(session.projectId, 'p1');
+        expect(session.created, 100);
+        expect(session.location, '/one');
+        expect(session.archived, isFalse);
+      },
+    );
+
+    test(
+      'probe of an unknown session is a 404, like the detail (issue #272)',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        await expectLater(
+          service.probe('ses_missing'),
+          throwsA(
+            isA<OpencodeServiceError>().having(
+              (e) => e.statusCode,
+              'statusCode',
+              404,
+            ),
+          ),
+        );
+      },
+    );
+
     test('getMessages walks the paginated history and maps the turns', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);
       final messages = await service.getMessages('ses_1');
