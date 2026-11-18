@@ -13,6 +13,7 @@ import '../sessions/opencode_service.dart';
 import '../sessions/session_row.dart';
 import '../../model/command.dart';
 import 'orb_image_builder.dart';
+import 'orb_record_composition.dart';
 import 'orb_state_machine.dart';
 import 'orb_upstreams.dart';
 
@@ -730,54 +731,9 @@ class OrbService {
     }
     final containerNames = _lines(ps.stdout);
 
-    final rows = <OrbRecord>[];
-    final ids = <String>{};
-    if (containerNames.isNotEmpty) {
-      final labels = await run([
-        'inspect',
-        ...containerNames,
-        '--format',
-        '{{json .Config.Labels}}',
-      ]);
-      if (labels.exitCode != 0) {
-        throw DockerUnavailableError(labels.stderr.trim());
-      }
-      final statuses = await run([
-        'inspect',
-        ...containerNames,
-        '--format',
-        '{{.State.Status}}',
-      ]);
-      if (statuses.exitCode != 0) {
-        throw DockerUnavailableError(statuses.stderr.trim());
-      }
-      final ports = await run([
-        'inspect',
-        ...containerNames,
-        '--format',
-        '{{json .NetworkSettings.Ports}}',
-      ]);
-      if (ports.exitCode != 0) {
-        throw DockerUnavailableError(ports.stderr.trim());
-      }
-      final labelLines = _lines(labels.stdout);
-      final statusLines = _lines(statuses.stdout);
-      final portLines = _lines(ports.stdout);
-      for (var i = 0; i < containerNames.length; i++) {
-        final status = statusLines[i].trim();
-        final record = _containerRecord(
-          labelLines[i],
-          status,
-          i < portLines.length ? portLines[i] : '',
-        );
-        if (record == null) continue;
-        rows.add(await _withPreparingState(containerNames[i], status, record));
-        ids.add(record.id);
-      }
-    }
-
-    // The labeled volumes: orphans (no container) and the broken checks'
-    // workspace side.
+    // The labeled volumes (read before the per-row composition, whose broken
+    // check reads the workspace volume's presence off this list): the
+    // orphans (no container) and the broken checks' workspace side.
     final volumes = await run([
       'volume',
       'ls',
@@ -813,90 +769,80 @@ class OrbService {
       }
     }
 
-    // Re-check the broken containers against what the volumes say, and
-    // compose the cleanup-pending badge the lifecycle pass marked (issue
-    // #101, spec §2.10.2/§9.4): a stopped orb the pass surfaced is the same
-    // container state carrying its reason.
-    for (var i = 0; i < rows.length; i++) {
-      final row = rows[i];
-      if (!OrbState.parse(row.state).isStopped) continue;
-      final checked = _withBrokenState(row, volumeNames);
-      if (!OrbState.parse(checked.state).isStopped) {
-        rows[i] = checked;
-        continue;
+    final rows = <OrbRecord>[];
+    final ids = <String>{};
+    if (containerNames.isNotEmpty) {
+      final labels = await run([
+        'inspect',
+        ...containerNames,
+        '--format',
+        '{{json .Config.Labels}}',
+      ]);
+      if (labels.exitCode != 0) {
+        throw DockerUnavailableError(labels.stderr.trim());
       }
-      // The boot failed at the shell probe (issue #149, spec §6.8): the
-      // container's volumes are all there, but its last boot died before
-      // serving opencode — the agent cannot run a command. That is not a
-      // clean `stopped` orb: it is never surfaced as ready for a code task.
-      // The entrypoint leaves the reason as a `no-shell` marker on the state
-      // mount (a cheap host-side read behind the seam, never a container
-      // probe: the list is the composite services' hot path, spec §2.2).
-      final marker = markers.shellFailedReason(row.id);
-      if (marker != null) {
-        rows[i] = _withBootReason(
-          _replacedState(row, OrbState.brokenShellWire),
-          marker,
+      final statuses = await run([
+        'inspect',
+        ...containerNames,
+        '--format',
+        '{{.State.Status}}',
+      ]);
+      if (statuses.exitCode != 0) {
+        throw DockerUnavailableError(statuses.stderr.trim());
+      }
+      final ports = await run([
+        'inspect',
+        ...containerNames,
+        '--format',
+        '{{json .NetworkSettings.Ports}}',
+      ]);
+      if (ports.exitCode != 0) {
+        throw DockerUnavailableError(ports.stderr.trim());
+      }
+      final labelLines = _lines(labels.stdout);
+      final statusLines = _lines(statuses.stdout);
+      final portLines = _lines(ports.stdout);
+      for (var i = 0; i < containerNames.length; i++) {
+        final status = statusLines[i].trim();
+        // The preparing facts (spec §9.3) are the container log's stage word
+        // and password line — read only for the state that consults them
+        // (a `created` container's log has no stage to carry yet).
+        var log = '';
+        if (status == 'running') log = await _fullLog(containerNames[i]);
+        final decoded = jsonDecode(labelLines[i]);
+        if (decoded is! Map<String, Object?>) continue;
+        final id = decoded['ocb.id'];
+        if (id is! String || id.isEmpty) continue;
+        // The per-row composition (the state-composition concern, issue
+        // #291): the same home the per-orb read (record) composes through.
+        final record = composeOrbRow(
+          labels: decoded,
+          dockerStatus: status,
+          portsJson: i < portLines.length ? portLines[i] : '',
+          bootStage: lastStage(log),
+          bootPasswordSeen: lastServerPassword(log) != null,
+          workspaceVolumePresent: volumeNames.contains('orb-$id-workspace'),
+          stateDirPresent: Directory('${stateRoot.path}/$id').existsSync(),
+          markers: markers,
+          inContainerPort: inContainerPort,
         );
-        continue;
-      }
-      final reason = markers.cleanupPendingReason(row.id);
-      if (reason != null) {
-        rows[i] = _replacedState(row, '${OrbState.cleanupPendingWire}:$reason');
+        if (record == null) continue;
+        rows.add(record);
+        ids.add(record.id);
       }
     }
 
-    // The push-failure surfacing (issue #120): the orb's post-commit hook
-    // writes a `push-failed` marker on the state mount when its push to
-    // the remote fails; the row carries it (the return channel — seed,
-    // the PR flow, the guard's pushed side — silently rides on that push,
-    // spec §3, so a failed push must not leave the orb looking healthy).
-    // A cheap host-side file read, never a container probe; the broken
-    // rows' detail (the missing volume/dir) is the louder signal, and an
-    // orphan's marker is stale by construction (no container to push).
-    for (var i = 0; i < rows.length; i++) {
-      final row = rows[i];
-      final s = OrbState.parse(row.state);
-      if (s.isOrphan || s.isBroken) {
-        continue;
-      }
-      if (markers.pushFailed(row.id)) {
-        rows[i] = _withPushFailing(row);
-      }
-    }
-
-    // The gh-auth surfacing (issue #145): the bridge could not stage usable
-    // gh credentials at the last create/wake/update, so the agent's gh is as
-    // good as dead and every API call answers 401 mid-task. Same host-side
-    // read as push-failed (#120) - never a container probe, the list is the
-    // services' hot path (spec 2.2). The marker describes the start, not
-    // the orb: `_stageGhConfig` clears it on the next passing stage.
-    for (var i = 0; i < rows.length; i++) {
-      final row = rows[i];
-      final s = OrbState.parse(row.state);
-      if (s.isOrphan || s.isBroken) {
-        continue;
-      }
-      final reason = markers.ghAuthFailedReason(row.id);
-      if (reason != null) rows[i] = _withGhAuthFailure(row, reason);
-    }
-
+    // The labeled volumes without a container (orphans, spec §2.2 —
+    // surfaced for explicit cleanup, never auto-deleted). The per-row
+    // composition above already composed the broken / shell /
+    // cleanup-pending / push-failed / gh-auth facts off the same volume
+    // list and the marker seam.
     for (final volumeName in volumeNames) {
-      final id = _volumeOrbId(volumeName);
+      final id = orbVolumeId(volumeName);
       if (id == null || ids.contains(id)) continue;
       final labels = volumeLabels[volumeName];
       if (labels == null) continue;
-      rows.add(
-        OrbRecord(
-          id: id,
-          name: labels['ocb.name'] as String? ?? '',
-          project: labels['ocb.project'] as String? ?? '',
-          branch: labels['ocb.branch'] as String? ?? '',
-          state: OrbState.orphanWire,
-          created: labels['ocb.created'] as String? ?? '',
-          base: labels['ocb.base'] as String?,
-        ),
-      );
+      rows.add(orphanOrbRow(id, labels));
       ids.add(id);
     }
 
@@ -911,32 +857,6 @@ class OrbService {
       ]);
     }
     return rows;
-  }
-
-  /// The preparing derivation (issue #96, spec §9.3): a container that has
-  /// not finished booting yet — docker status `created` (the first start has
-  /// not begun) or `running` whose log carries no `server password` line yet
-  /// — is `preparing`, with the last `[orb] stage: <word>` line of its log as
-  /// sub-state. The full log is read (a `--tail` window is unsafe: the
-  /// password line sinks as opencode logs grow); the list is a cold path.
-  Future<OrbRecord> _withPreparingState(
-    String container,
-    String status,
-    OrbRecord record,
-  ) async {
-    if (status != 'created' && status != 'running') return record;
-    var log = '';
-    if (status == 'running') {
-      log = await _fullLog(container);
-      if (lastServerPassword(log) != null) return record;
-    }
-    final stage = lastStage(log);
-    return _replacedState(
-      record,
-      stage == null
-          ? OrbState.preparingWire
-          : '${OrbState.preparingWire}:$stage',
-    );
   }
 
   /// The PR of [record]'s branch (issue #96): `gh pr view` for the head ref
@@ -997,38 +917,6 @@ class OrbService {
     bootReason: record.bootReason,
   );
 
-  OrbRecord _withPushFailing(OrbRecord record) => OrbRecord(
-    id: record.id,
-    name: record.name,
-    project: record.project,
-    branch: record.branch,
-    state: record.state,
-    created: record.created,
-    url: record.url,
-    pr: record.pr,
-    base: record.base,
-    pushFailing: true,
-    ghAuthFailed: record.ghAuthFailed,
-    bootReason: record.bootReason,
-  );
-
-  /// [record] carrying its gh-auth failure cause (issue #145) - every other
-  /// field a copy, like [_withPushFailing].
-  OrbRecord _withGhAuthFailure(OrbRecord record, String reason) => OrbRecord(
-    id: record.id,
-    name: record.name,
-    project: record.project,
-    branch: record.branch,
-    state: record.state,
-    created: record.created,
-    url: record.url,
-    pr: record.pr,
-    base: record.base,
-    pushFailing: record.pushFailing,
-    ghAuthFailed: reason,
-    bootReason: record.bootReason,
-  );
-
   /// The explicit orphan cleanup (spec §2.2 — surfaced in the Orbs tab,
   /// never auto-deleted; issue #96): removes the orphan's labeled volumes
   /// (`orb-<id>-workspace`, `orb-<id>-data` — either or both) and its state
@@ -1075,11 +963,137 @@ class OrbService {
   // The orb lifecycle: stop (move to host), wake, session moves
   // (issue #97, spec §2.4/§2.5).
 
-  /// The record of the orb [id] (from the label-composed list), or `null`
-  /// when the id has no labeled container.
+  /// The record of the orb [id], composed from that ONE container's facts
+  /// (issue #291) — the per-orb read. A single-orb operation (stop, wake,
+  /// export, update, delete, the guard, a session move) needs one row, not
+  /// the whole fleet: it used to loop the label-composed [list], paying the
+  /// full-fleet enumeration (the `ps`, the batched `inspect`, the fleet
+  /// `volume ls`) to find one row. The per-orb read pays for the one row —
+  /// the one container's labels/status/ports, its log (the preparing facts,
+  /// spec §9.3), the one workspace volume's presence (spec §2.2/§9.4), the
+  /// marker reads — composed by the same [composeOrbRow] the [list] composes
+  /// a row through, so the record is the list's matching row.
+  ///
+  /// `null` when the id has no labeled container and no labeled volumes (an
+  /// unknown orb). The orphan's row (labeled volumes, no container) is
+  /// returned, as the [list] composes it (spec §2.2).
   Future<OrbRecord?> _record(String id) async {
-    for (final record in await list()) {
-      if (record.id == id) return record;
+    final container = 'orb-$id';
+    // The container's presence (the orphan's discriminator): `docker inspect
+    // --format {{.Id}}` exits 1 for a missing container; anything else is a
+    // daemon failure (not a "no such container").
+    final present = await run(['inspect', container, '--format', '{{.Id}}']);
+    if (present.exitCode != 0) {
+      if (present.exitCode == 1) return _orphanRecord(id);
+      throw DockerUnavailableError(present.stderr.trim());
+    }
+    final labels = await run([
+      'inspect',
+      container,
+      '--format',
+      '{{json .Config.Labels}}',
+    ]);
+    if (labels.exitCode != 0) {
+      throw DockerUnavailableError(labels.stderr.trim());
+    }
+    final statuses = await run([
+      'inspect',
+      container,
+      '--format',
+      '{{.State.Status}}',
+    ]);
+    if (statuses.exitCode != 0) {
+      throw DockerUnavailableError(statuses.stderr.trim());
+    }
+    final ports = await run([
+      'inspect',
+      container,
+      '--format',
+      '{{json .NetworkSettings.Ports}}',
+    ]);
+    if (ports.exitCode != 0) {
+      throw DockerUnavailableError(ports.stderr.trim());
+    }
+    final decoded = jsonDecode(labels.stdout);
+    if (decoded is! Map<String, Object?>) return null;
+    final rowId = decoded['ocb.id'];
+    if (rowId is! String || rowId.isEmpty) return null;
+    final status = _lines(statuses.stdout).first;
+    // The preparing facts (spec §9.3): the log's stage word and password
+    // line, read only for the state that consults them (a `created`
+    // container's log has no stage to carry yet) — the same read the list
+    // makes for a running row.
+    var log = '';
+    if (status == 'running') log = await _fullLog(container);
+    // The one workspace volume's presence (spec §2.2/§9.4): the broken
+    // checks' workspace side, the one named volume — not the fleet list.
+    final volumes = await run([
+      'volume',
+      'ls',
+      '--filter',
+      'name=orb-$id-workspace',
+      '--format',
+      '{{.Name}}',
+    ]);
+    if (volumes.exitCode != 0) {
+      throw DockerUnavailableError(volumes.stderr.trim());
+    }
+    final portLines = _lines(ports.stdout);
+    return composeOrbRow(
+      labels: decoded,
+      dockerStatus: status,
+      portsJson: portLines.isEmpty ? '' : portLines.first,
+      bootStage: lastStage(log),
+      bootPasswordSeen: lastServerPassword(log) != null,
+      workspaceVolumePresent: _lines(volumes.stdout)
+          .contains('orb-$id-workspace'),
+      stateDirPresent: Directory('${stateRoot.path}/$id').existsSync(),
+      markers: markers,
+      inContainerPort: inContainerPort,
+    );
+  }
+
+  /// The orphan's row (spec §2.2 — labeled volumes without a container,
+  /// surfaced for explicit cleanup): read off the ONE id's labeled volumes
+  /// (`orb-<id>-workspace` / `orb-<id>-data`), not the fleet list, and
+  /// composed by the same [orphanOrbRow] the [list] composes an orphan
+  /// through. `null` when neither labeled volume exists for the id (an
+  /// unknown orb, not an orphan).
+  Future<OrbRecord?> _orphanRecord(String id) async {
+    final volumes = await run([
+      'volume',
+      'ls',
+      '--filter',
+      'name=orb-$id-',
+      '--format',
+      '{{.Name}}',
+    ]);
+    if (volumes.exitCode != 0) {
+      throw DockerUnavailableError(volumes.stderr.trim());
+    }
+    final present = [
+      for (final name in _lines(volumes.stdout))
+        if (name == 'orb-$id-workspace' || name == 'orb-$id-data') name,
+    ];
+    if (present.isEmpty) return null;
+    final result = await run([
+      'volume',
+      'inspect',
+      ...present,
+      '--format',
+      '{{json .Labels}}',
+    ]);
+    if (result.exitCode != 0) {
+      throw DockerUnavailableError(result.stderr.trim());
+    }
+    for (final line in _lines(result.stdout)) {
+      final decoded = jsonDecode(line);
+      if (decoded is Map<String, Object?>) {
+        final orphanId = decoded['ocb.id'];
+        if (orphanId is String && orphanId == id) {
+          return orphanOrbRow(id, decoded);
+        }
+      }
     }
     return null;
   }
@@ -3725,54 +3739,9 @@ class OrbService {
   // ------------------------------------------------------------------------
   // The list composition.
 
-  OrbRecord? _containerRecord(
-    String labelsJson,
-    String state,
-    String portsJson,
-  ) {
-    final decoded = jsonDecode(labelsJson);
-    if (decoded is! Map<String, Object?>) return null;
-    final id = decoded['ocb.id'] as String?;
-    if (id == null || id.isEmpty) return null;
-    String? url;
-    if (state == 'running') {
-      final parsed = jsonDecode(portsJson);
-      final ports = parsed is Map<String, Object?> ? parsed : const {};
-      final bindings = ports['$inContainerPort/tcp'];
-      if (bindings is List) {
-        for (final entry in bindings) {
-          if (entry is Map<String, Object?>) {
-            final hostPort = entry['HostPort'];
-            if (hostPort is String && hostPort.isNotEmpty) {
-              url = 'http://127.0.0.1:$hostPort';
-              break;
-            }
-          }
-        }
-      }
-    }
-    return OrbRecord(
-      id: id,
-      name: decoded['ocb.name'] as String? ?? '',
-      project: decoded['ocb.project'] as String? ?? '',
-      branch: decoded['ocb.branch'] as String? ?? '',
-      state: state == 'running' ? OrbState.runningWire : OrbState.stoppedWire,
-      created: decoded['ocb.created'] as String? ?? '',
-      url: url,
-      base: decoded['ocb.base'] as String?,
-    );
-  }
-
-  OrbRecord _withBrokenState(OrbRecord record, List<String> volumeNames) {
-    if (!volumeNames.contains('orb-${record.id}-workspace')) {
-      return _replacedState(record, OrbState.brokenWorkspaceWire);
-    }
-    if (!Directory('${stateRoot.path}/${record.id}').existsSync()) {
-      return _replacedState(record, OrbState.brokenStateWire);
-    }
-    return record;
-  }
-
+  /// [record] with its [state] (the wire string), its url cleared — every
+  /// other field a copy. The record's state string is replaced wholesale
+  /// (the update's stopped recreation, the stop's result).
   OrbRecord _replacedState(OrbRecord record, String state) => OrbRecord(
     id: record.id,
     name: record.name,
@@ -3787,30 +3756,6 @@ class OrbService {
     ghAuthFailed: record.ghAuthFailed,
     bootReason: record.bootReason,
   );
-
-  /// [record] with its boot-failure reason set (issue #149: the shell probe's
-  /// `FATAL` line, read back from the container log).
-  OrbRecord _withBootReason(OrbRecord record, String reason) => OrbRecord(
-    id: record.id,
-    name: record.name,
-    project: record.project,
-    branch: record.branch,
-    state: record.state,
-    created: record.created,
-    url: record.url,
-    pr: record.pr,
-    base: record.base,
-    pushFailing: record.pushFailing,
-    ghAuthFailed: record.ghAuthFailed,
-    bootReason: reason,
-  );
-
-  /// The orb id a labeled volume name encodes (`orb-<id>-workspace` /
-  /// `orb-<id>-data`), or `null` for an unrelated volume name.
-  static String? _volumeOrbId(String volumeName) {
-    final match = RegExp(r'^orb-(.+)-(workspace|data)$').firstMatch(volumeName);
-    return match?.group(1);
-  }
 
   List<String> _lines(String output) => [
     for (final line in const LineSplitter().convert(output))
