@@ -3487,36 +3487,6 @@ void main() {
   });
 
   group('BridgeServer push reload (issue #24)', () {
-    const String kPrivateKey =
-        "-----BEGIN PRIVATE KEY-----\n"
-        "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC8eiyvZu7imXnx\n"
-        "ydajqaGBuR5yVYDtWpqvJJHWeWREipAJXTS/00Rf9nR2/tRC0ttrb95U2q2dCPPj\n"
-        "kzoyH6O7XMjEm8zjBFYrHQEcbLH53m/5+RaAa7FOXaozM5IILu157Sc6cuB3dhiH\n"
-        "otlUTZpoaM76jD7nEFckw/z9B1f7qBW2KqGWYrIdF2+RyGVMEEYOkQrQrmmW5BUu\n"
-        "pXfe7TzbAnmmC0l8IQ3+UUSSiLTEsu0PlOhh298577P0HezEjYddzj4gY0OgFSHQ\n"
-        "hfRvkC5PXyXVBUfsdo/5D+vuSkNrjxz+iszP8NHRFTx5H7nz4baXcx5VFtfn5iFU\n"
-        "qstmMBEpAgMBAAECggEAAkQOPjgUsl7xuTtJ1CsdhNGYyPtX6tKSZj1gbvWD4/KN\n"
-        "/3zSPeWgbm5oMUeIPfrqtiCQydCcsnT5eKCMHC7m8SFRDRMJ7CdA0XEecqzoWVaI\n"
-        "HldVIstYpPZpjcbGkEhfJL56AKEBq5H9AsFtjy7FJtDuvxKZTX4T7B5aj+CrGTyD\n"
-        "aKR/I1IUmtzzX4j9WpbOBMG6OlinhxKzt4/7FDJzxx37X0KjDVvUh0issWt35HO+\n"
-        "0F0ea0xltv9cAsZRBh5bheQMY3bQOcUb/zQO7bCzL4fRvkiFylQxFjt/MKgMRbjP\n"
-        "apEWYRZM0d9Hfp4IgoMj8joMn1DPXL33Y8R5L+YhoQKBgQDiT+k+kOzIfYq9dsNS\n"
-        "IPtIQml6WHR62P5IQvWT0hRf4O6LTWtKd6oU4HMBDnf5xwGzA8UeigU8Mj+/763n\n"
-        "XPjHbOCkE1Ckz8O5iVPx2hHlhx8Ythqpj5iqkrzqEXN6WdFRAda0AIvI4LNv9Tzm\n"
-        "H0femnWbCf7h0tiUuyH+w7q0yQKBgQDVM63ccKfFp/rEtkwQ/XWz5dMrjnszwUZ+\n"
-        "PltS6d3yw8/xrd/IbngQ1vf7G7ZMyUDg+zjE39FvCSAXEMzaQFglW9iDQvw4Wqrr\n"
-        "KWf8aS47D30B6wuTFErlI9mXhZnDatM80Qphx73FA67PBr2KqsI6pWJJ3bziSRi3\n"
-        "X4oIVyKJYQKBgG1Ih2pmE2FRdlC9a95Z/N3M7CBfXIgCBvCgHPRvytTtymNMVFYW\n"
-        "aPRB2mcVNIxSNBjc5jA0GAkUfsJRnBmQRLYQdn3ksdmUVoBet0Gfu2qqEDMfpMpi\n"
-        "hCdCSqWBHdFkU/aZO7OaW+X508xpkSnSyyLMVaQzdHhaF6nin6zlmWA5AoGAFqYA\n"
-        "yDQnfnXTy+XZusxSHqRBhJUEPYFArdSN+wbhDxMCGhhwd2hU1OUhPsm42ftfKwdF\n"
-        "BpUIOJVtlUWxnVXMh1t0aq1JAeuP0J97bnL1+Ewy6WtAtYUoV6MxUElfBkVo30MN\n"
-        "qUmAvVcg0NlUdVCihXxgLpyhniBJweEiVrR69MECgYA07ebbgc3GBvHCIrcBMsrO\n"
-        "bdFMCyh1yOTizML7qtoQKInrj0Y0yM0TX/Q4vdZFtepy89BTCA4RfOYg5xUB65Yw\n"
-        "LMso5I/CHT5MsSAAlO7GyGWCDWRnZbg9Q5AuQLDrWjy8shiRvFyTncgzYeGXExSr\n"
-        "PpRSVDvtElyBUiljh0ZkkQ==\n"
-        "-----END PRIVATE KEY-----";
-
     late Directory dir;
     late String accountPath;
 
@@ -3526,18 +3496,6 @@ void main() {
     /// servers) and off the network.
     Future<FcmSender> fakeSender(FirebaseServiceAccount account) async =>
         _NotifyFakeSender();
-
-    /// A fake project's service account: the key is a real RSA PEM (the
-    /// default sender parses it at construction), but no delivery happens
-    /// in these tests.
-    final String kAccountJson = jsonEncode({
-      'type': 'service_account',
-      'project_id': 'opencodebridge-reload-test',
-      'private_key': kPrivateKey,
-      'client_email': 'firebase-adminsdk-test@opencodebridge-reload-test.iam.gserviceaccount.com',
-      'client_id': '1234567890',
-      'token_uri': 'https://oauth2.googleapis.com/token',
-    });
 
     setUp(() async {
       dir = await Directory.systemTemp.createTemp('opencodebridge-srv-reload');
@@ -3626,6 +3584,95 @@ void main() {
         }
       },
     );
+  });
+
+  group('BridgeServer push label (issue #288)', () {
+    late BridgeServer server;
+    late Uri base;
+    late _FakeService service;
+    late _FakeEventUpstream upstream;
+    late EventHub hub;
+    late _NotifyFakeSender sender;
+    late Directory dir;
+
+    /// The push-label tests drive the **real** bridge wiring: the bridge
+    /// builds its own [NotifyService] and [PushDispatcher] through
+    /// [_defaultNotify] (whose default label closure is under test) and
+    /// attaches the dispatcher to the injected [hub]; we tap that hub to
+    /// emit. The device registers through the public endpoint (the
+    /// dispatcher's [NotifyService] is internal), and a no-op sender keeps
+    /// the tests off the Admin-SDK singleton and off the network.
+    Future<FcmSender> fakeSender(FirebaseServiceAccount account) async =>
+        sender;
+
+    /// Emits a `session.turn.cancelled` push for [sessionID] through the
+    /// bridge's hub and waits for the recording sender to receive it.
+    Future<void> emitPush(String sessionID) async {
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.turnCancelled,
+          data: {'sessionID': sessionID},
+        ),
+      );
+      await _until(
+        () => sender.bodies.isNotEmpty,
+        message: 'the push to arrive',
+      );
+    }
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('opencodebridge-push-label');
+      final accountPath = '${dir.path}/service-account.json';
+      FirebaseServiceAccount.install(kAccountJson, path: accountPath);
+      service = _FakeService();
+      upstream = _FakeEventUpstream();
+      hub = EventHub(service: upstream);
+      sender = _NotifyFakeSender();
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: SessionOrderStore(
+            file: File('${dir.path}/session-order.json'),
+          ),
+        ),
+        events: hub,
+        notifyCredential: accountPath,
+        notifySenderFactory: fakeSender,
+      );
+      base = server.baseUri;
+      // The dispatcher's [NotifyService] is built by the bridge (not exposed),
+      // so the device registers through the public endpoint.
+      final (status, _) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["turnEnded"]}',
+      );
+      expect(status, 200);
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('the push label is the probed title, not a home-list read', () async {
+      await emitPush('ses_one');
+      // The body is the title the single-session identity read returned.
+      expect(sender.bodies.single, 'one');
+      // The targeted read was used ...
+      expect(service.probedIds, contains('ses_one'));
+      // ... and no home-list read ran (no per-session waiting lookups).
+      expect(service.listSessionsCalls, 0);
+    });
+
+    test('a missing session degrades the push label to the id (no crash, no '
+        'empty push)', () async {
+      // The probe 404s: the id is the body fallback, and the push still
+      // goes out (the labeler only ever returns a non-empty string).
+      await emitPush('ses_gone');
+      expect(sender.bodies.single, 'ses_gone');
+    });
   });
 
   group('HttpEventConnection (the shared SSE writer)', () {
@@ -3829,6 +3876,50 @@ class _FakeHeaders implements HttpHeaders {
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+/// The service account the push tests install (issue #24, #288): the key is
+/// a real RSA PEM (the default sender parses it at construction), but no
+/// delivery ever leaves the process (the recording sender stands in for it).
+const String kPrivateKey =
+    "-----BEGIN PRIVATE KEY-----\n"
+    "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC8eiyvZu7imXnx\n"
+    "ydajqaGBuR5yVYDtWpqvJJHWeWREipAJXTS/00Rf9nR2/tRC0ttrb95U2q2dCPPj\n"
+    "kzoyH6O7XMjEm8zjBFYrHQEcbLH53m/5+RaAa7FOXaozM5IILu157Sc6cuB3dhiH\n"
+    "otlUTZpoaM76jD7nEFckw/z9B1f7qBW2KqGWYrIdF2+RyGVMEEYOkQrQrmmW5BUu\n"
+    "pXfe7TzbAnmmC0l8IQ3+UUSSiLTEsu0PlOhh298577P0HezEjYddzj4gY0OgFSHQ\n"
+    "hfRvkC5PXyXVBUfsdo/5D+vuSkNrjxz+iszP8NHRFTx5H7nz4baXcx5VFtfn5iFU\n"
+    "qstmMBEpAgMBAAECggEAAkQOPjgUsl7xuTtJ1CsdhNGYyPtX6tKSZj1gbvWD4/KN\n"
+    "/3zSPeWgbm5oMUeIPfrqtiCQydCcsnT5eKCMHC7m8SFRDRMJ7CdA0XEecqzoWVaI\n"
+    "HldVIstYpPZpjcbGkEhfJL56AKEBq5H9AsFtjy7FJtDuvxKZTX4T7B5aj+CrGTyD\n"
+    "aKR/I1IUmtzzX4j9WpbOBMG6OlinhxKzt4/7FDJzxx37X0KjDVvUh0issWt35HO+\n"
+    "0F0ea0xltv9cAsZRBh5bheQMY3bQOcUb/zQO7bCzL4fRvkiFylQxFjt/MKgMRbjP\n"
+    "apEWYRZM0d9Hfp4IgoMj8joMn1DPXL33Y8R5L+YhoQKBgQDiT+k+kOzIfYq9dsNS\n"
+    "IPtIQml6WHR62P5IQvWT0hRf4O6LTWtKd6oU4HMBDnf5xwGzA8UeigU8Mj+/763n\n"
+    "XPjHbOCkE1Ckz8O5iVPx2hHlhx8Ythqpj5iqkrzqEXN6WdFRAda0AIvI4LNv9Tzm\n"
+    "H0femnWbCf7h0tiUuyH+w7q0yQKBgQDVM63ccKfFp/rEtkwQ/XWz5dMrjnszwUZ+\n"
+    "PltS6d3yw8/xrd/IbngQ1vf7G7ZMyUDg+zjE39FvCSAXEMzaQFglW9iDQvw4Wqrr\n"
+    "KWf8aS47D30B6wuTFErlI9mXhZnDatM80Qphx73FA67PBr2KqsI6pWJJ3bziSRi3\n"
+    "X4oIVyKJYQKBgG1Ih2pmE2FRdlC9a95Z/N3M7CBfXIgCBvCgHPRvytTtymNMVFYW\n"
+    "aPRB2mcVNIxSNBjc5jA0GAkUfsJRnBmQRLYQdn3ksdmUVoBet0Gfu2qqEDMfpMpi\n"
+    "hCdCSqWBHdFkU/aZO7OaW+X508xpkSnSyyLMVaQzdHhaF6nin6zlmWA5AoGAFqYA\n"
+    "yDQnfnXTy+XZusxSHqRBhJUEPYFArdSN+wbhDxMCGhhwd2hU1OUhPsm42ftfKwdF\n"
+    "BpUIOJVtlUWxnVXMh1t0aq1JAeuP0J97bnL1+Ewy6WtAtYUoV6MxUElfBkVo30MN\n"
+    "qUmAvVcg0NlUdVCihXxgLpyhniBJweEiVrR69MECgYA07ebbgc3GBvHCIrcBMsrO\n"
+    "bdFMCyh1yOTizML7qtoQKInrj0Y0yM0TX/Q4vdZFtepy89BTCA4RfOYg5xUB65Yw\n"
+    "LMso5I/CHT5MsSAAlO7GyGWCDWRnZbg9Q5AuQLDrWjy8shiRvFyTncgzYeGXExSr\n"
+    "PpRSVDvtElyBUiljh0ZkkQ==\n"
+    "-----END PRIVATE KEY-----";
+
+/// A fake project's service account: the key is a real RSA PEM (the default
+/// sender parses it at construction), but no delivery happens in these tests.
+final String kAccountJson = jsonEncode({
+  'type': 'service_account',
+  'project_id': 'opencodebridge-reload-test',
+  'private_key': kPrivateKey,
+  'client_email': 'firebase-adminsdk-test@opencodebridge-reload-test.iam.gserviceaccount.com',
+  'client_id': '1234567890',
+  'token_uri': 'https://oauth2.googleapis.com/token',
+});
 
 /// An in-memory [SessionOrderStore] for tests that construct a
 /// [SessionsBackend] but never touch the order store (issue #271: the store
@@ -4752,10 +4843,12 @@ Future<void> _until(
   }
 }
 
-/// A recording FCM transport for the push registration tests (the endpoint
-/// under test only registers the device; nothing is sent).
+/// A recording FCM transport for the push tests. The registration tests
+/// record only the [token] (nothing is sent); the push-label tests record
+/// the [bodies] so they can assert on the body the label closure resolved.
 class _NotifyFakeSender extends FcmSender {
   final sent = <String>[];
+  final bodies = <String>[];
 
   @override
   Future<void> send({
@@ -4763,7 +4856,10 @@ class _NotifyFakeSender extends FcmSender {
     required String title,
     required String body,
     required String link,
-  }) async => sent.add(token);
+  }) async {
+    sent.add(token);
+    bodies.add(body);
+  }
 }
 
 /// A downstream event-connection recorder (the log-surface test): captures

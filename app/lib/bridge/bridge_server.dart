@@ -690,9 +690,14 @@ class BridgeServer {
   /// from the app-owned config (or `GOOGLE_APPLICATION_CREDENTIALS`), the
   /// Admin-SDK sender (the raw FCM HTTP v1 API stays the fallback,
   /// selected with `OPENCODEBRIDGE_FCM_TRANSPORT=http`), and the three push
-  /// events tapped off the event hub. `(null, null)` when this machine has
-  /// no service account (the setup step not done), in which case the
-  /// device-token endpoint reports `notify_unconfigured`.
+  /// events tapped off the event hub. The push body's session title is
+  /// resolved with the light single-session identity read (the service's
+  /// [OpencodeService.probe] — one targeted request), not a home-list read:
+  /// a push is the cheapest of the bridge's reads, so it never re-executes
+  /// the home-list composition's per-session waiting lookups (issue #288).
+  /// `(null, null)` when this machine has no service account (the setup step
+  /// not done), in which case the device-token endpoint reports
+  /// `notify_unconfigured`.
   static Future<(NotifyService?, PushDispatcher?)> _defaultNotify(
     SessionsBackend? backend,
     EventHub? hub, {
@@ -703,15 +708,22 @@ class BridgeServer {
     if (account == null) return (null, null);
     final sender = await (senderFactory ?? _defaultSenderFactory)(account);
     final service = NotifyService(sender: sender);
+    // The push body's label: the light identity read (issue #272's
+    // [OpencodeService.probe] — the same `GET /api/session/{id}` the detail
+    // answers from, without composing the costs, token usage, or the
+    // model-registry context limit). One targeted request, no per-session
+    // waiting lookups: resolving one id to a title must not re-execute the
+    // home-list composition (the slice's most expensive read, issue #288).
+    // A missing session (a 404) or an unreachable service degrades the label
+    // to the id — the body fallback — so a push never crashes or empties out.
     Future<String> label(String id) async {
       if (backend == null) return id;
       try {
-        final rows = await backend.list();
-        for (final row in rows) {
-          if (row.id == id) return row.title.isEmpty ? id : row.title;
-        }
+        final session = await backend.service.probe(id);
+        return session.title.isEmpty ? id : session.title;
       } catch (_) {
-        // The service is unreachable: the id is the body fallback.
+        // The session is gone or the service is unreachable: the id is the
+        // body fallback.
       }
       return id;
     }
