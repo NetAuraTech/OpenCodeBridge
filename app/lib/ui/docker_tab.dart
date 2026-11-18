@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
+import '../bridge/events/bridge_event.dart';
 import '../client/authenticated_http.dart';
 import '../client/docker_client.dart';
 import '../client/events_client.dart';
@@ -233,8 +234,8 @@ class DockerTabState extends State<DockerTab> with WidgetsBindingObserver {
   /// views re-fetch so the state and uptime columns stay up to date in the
   /// container list and in the compose section.
   void _onEvent(BridgeEvent event) {
-    if (event.type != 'docker.container.stopped' &&
-        event.type != 'docker.container.crashed') {
+    if (event.type != BridgeEventType.dockerContainerStopped &&
+        event.type != BridgeEventType.dockerContainerCrashed) {
       return;
     }
     _refreshAll();
@@ -496,8 +497,8 @@ class _ContainerDetailScreenState extends State<_ContainerDetailScreen> {
     final events = widget.events;
     if (events != null) {
       _sub = events.listen((event) {
-        if (event.type != 'docker.container.stopped' &&
-            event.type != 'docker.container.crashed') {
+        if (event.type != BridgeEventType.dockerContainerStopped &&
+            event.type != BridgeEventType.dockerContainerCrashed) {
           return;
         }
         if (event.data['name'] != _container.name) return;

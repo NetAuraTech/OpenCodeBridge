@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 
 import '../events/bridge_event.dart';
+import '../events/event_frame.dart';
 import '../events/event_hub.dart';
 import '../events/opencode_event_types.dart';
 import 'order_store.dart';
@@ -34,47 +34,21 @@ class OrderStoreCleanup implements EventConnection {
 
   @override
   Future<void> write(String rawPayload) async {
-    final sessionID = _sessionID(rawPayload);
-    if (sessionID == null) return;
+    final event = parseEventFrame(rawPayload);
+    if (event == null) return; // A malformed payload is not an event.
+    if (event.type != OpencodeEventType.sessionDeleted &&
+        event.type != BridgeEventType.sessionClosed) {
+      return; // Not a deletion/closing event.
+    }
+    final sessionID = event.sessionId;
+    if (sessionID == null) return; // A deletion/closing event that names no
+    // session is ignored (the envelope resolves the session id; the listener
+    // never re-derives it).
     await store.clear(sessionID);
   }
 
   @override
   Future<void> close() async {
     if (!_done.isCompleted) _done.complete();
-  }
-
-  /// The session id to clean, or `null` when the payload is not one of the
-  /// two deletion/closing events (or is malformed) — the listener ignores
-  /// everything else and never throws. The session id is read exactly the way
-  /// [TurnTracker] does: the durable aggregate id when the event carries one,
-  /// otherwise the `data.sessionID` the bridge-native events carry.
-  String? _sessionID(String rawPayload) {
-    Object? decoded;
-    try {
-      decoded = jsonDecode(rawPayload);
-    } catch (_) {
-      return null; // A malformed payload is not an event.
-    }
-    if (decoded is! Map<String, Object?>) return null;
-    final type = decoded['type'];
-    if (type is! String) return null;
-    if (type != OpencodeEventType.sessionDeleted &&
-        type != BridgeEventType.sessionClosed) {
-      return null; // Not a deletion/closing event.
-    }
-    final data = decoded['data'] is Map<String, Object?>
-        ? decoded['data'] as Map<String, Object?>
-        : const <String, Object?>{};
-    String? sessionID;
-    final durable = decoded['durable'];
-    if (durable is Map<String, Object?>) {
-      final id = durable['aggregateID'];
-      if (id is String) sessionID = id;
-    }
-    if (sessionID == null && data['sessionID'] is String) {
-      sessionID = data['sessionID'] as String;
-    }
-    return sessionID;
   }
 }

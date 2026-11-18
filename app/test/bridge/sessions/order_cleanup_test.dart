@@ -63,6 +63,24 @@ void main() {
     },
   );
 
+  test('a session.closed naming the session only under data.form.sessionID '
+      'clears it', () async {
+    await store.set('ses_1', 0);
+    final cleanup = OrderStoreCleanup(store: store);
+    // The third shape of the session-identity rule (the form-nested id) is
+    // owned by the envelope's session-id accessor: the listener just reads
+    // it off the decoded frame, never re-derives it.
+    await cleanup.write(
+      bridgeEvent(
+        type: BridgeEventType.sessionClosed,
+        data: {
+          'form': {'sessionID': 'ses_1'},
+        },
+      ),
+    );
+    expect(store.load(), isEmpty);
+  });
+
   test('the durable aggregate id wins over data.sessionID', () async {
     await store.set('ses_1', 0);
     final cleanup = OrderStoreCleanup(store: store);
