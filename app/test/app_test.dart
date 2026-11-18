@@ -48,10 +48,19 @@ void main() {
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       SharedPreferences.setMockInitialValues({});
 
-      // Hold the bridge port, as a second server-mode instance would.
-      late final HttpServer blocker;
+      // Hold the bridge port, as a second server-mode instance would —
+      // unless a live bridge already holds it, which is the same
+      // precondition (a second server-mode instance), so nothing to do.
+      HttpServer? blocker;
       await tester.runAsync(() async {
-        blocker = await HttpServer.bind('127.0.0.1', BridgeServer.defaultPort);
+        try {
+          blocker = await HttpServer.bind(
+            '127.0.0.1',
+            BridgeServer.defaultPort,
+          );
+        } on SocketException {
+          // The port is already held: the precondition is already met.
+        }
       });
 
       await tester.pumpWidget(const OpenCodeBridgeApp());
@@ -68,7 +77,9 @@ void main() {
       expect(find.text('How do you want to run?'), findsOneWidget);
       expect(find.textContaining('Could not start the bridge'), findsOneWidget);
 
-      await tester.runAsync(() => blocker.close(force: true).then((_) {}));
+      // Close only the server this test bound (an already-held port stays
+      // with its holder).
+      await tester.runAsync(() async => await blocker?.close(force: true));
       debugDefaultTargetPlatformOverride = null;
     });
 

@@ -13,3 +13,9 @@ Default five-role vocabulary, each label equal to its role name. See `docs/agent
 ### Domain docs
 
 Single-context layout: `GLOSSARY.md` at the root, ADRs in `docs/adr/`. See `docs/agents/domain.md`.
+
+## Verification
+
+Run the single local verification command — the fast local sequence (lockfile enforcement + analyze + format + test; CI's Linux release build is not part of it) — from the repo root before considering any change done:
+
+    cd app && flutter pub get --enforce-lockfile && flutter analyze && dart format --set-exit-if-changed --output=none lib test && flutter test --exclude-tags docker
