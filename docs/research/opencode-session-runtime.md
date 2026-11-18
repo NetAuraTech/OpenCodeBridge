@@ -557,7 +557,7 @@ purely-app-side extension (write fractional/integer positions between rows) with
 
 - **Store:** the bridge persists a `sessionID → position:int` map in an
   app-owned file (the same app-owned-file pattern as the tunnel's
-  `~/.config/opencodebridge/`, CONTEXT.md). Position `null`/absent = unpinned.
+  `~/.config/opencodebridge/`, GLOSSARY.md). Position `null`/absent = unpinned.
   On load, drop entries whose id is no longer in the merged list (deletion
   cleanup); the map follows a session across host↔orb moves for free (id
   preserved, ADR-0006).
@@ -912,7 +912,7 @@ Against the repo's conventions:
 
 1. **The bridge relays service facts; it does not impose display policy.**
    ADR-0001 makes the bridge the *stable wrapper* over a churning 130-endpoint
-   service, and CONTEXT.md makes it the app's single API. *Which rows count as
+   service, and GLOSSARY.md makes it the app's single API. *Which rows count as
    "home"* is a display choice (a policy the user can toggle), not a service
    fact — that is the app's concern. B keeps the bridge in its wrapper role: it
    faithfully relays `time.archived` as a row field. A instead makes the bridge
