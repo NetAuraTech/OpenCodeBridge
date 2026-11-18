@@ -542,24 +542,38 @@ void main() {
       ]);
     });
 
-    test(
-      'a store failure degrades to the unpinned order, never the list',
-      () async {
-        final service = FakeOpencodeService(
-          sessions: [s1, s2],
-          names: const {},
-        );
-        final backend = SessionsBackend(
-          service: service,
-          orderStore: _ThrowingOrderStore(),
-        );
+    test('a store failure degrades to the unpinned order, never the list, and '
+        'the degrade is scoped to that read (issue #273)', () async {
+      // The on-disk fact the read should see when it can read: the
+      // app-owned file carries a pin.
+      await SessionOrderStore(file: file).set('ses_1', 0);
+      final service = FakeOpencodeService(sessions: [s1, s2], names: const {});
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _ThrowingOrderStore(),
+      );
 
-        final rows = await backend.list();
+      final rows = await backend.list();
 
-        expect(rows.map((r) => r.id).toList(), ['ses_2', 'ses_1']);
-        expect(rows.every((r) => !r.pinned), isTrue);
-      },
-    );
+      // The failed read degrades that read only: the list stays up,
+      // unpinned.
+      expect(rows.map((r) => r.id).toList(), ['ses_2', 'ses_1']);
+      expect(rows.every((r) => !r.pinned), isTrue);
+      // ...and it never leaked into the store: the on-disk file still
+      // carries the pin (read back the way the ordering tests do).
+      final onDisk = jsonDecode(file.readAsStringSync()) as Map;
+      expect(onDisk, {'ses_1': 0});
+
+      // ...nor into later reads: a subsequent read over the store whose
+      // file is intact still pins (a fresh store reads the same
+      // app-owned file).
+      final laterRows = await SessionsBackend(
+        service: FakeOpencodeService(sessions: [s1, s2], names: const {}),
+        orderStore: SessionOrderStore(file: file),
+      ).list();
+      expect(laterRows.map((r) => r.id).toList(), ['ses_1', 'ses_2']);
+      expect(laterRows.byId('ses_1').pinned, isTrue);
+    });
 
     test(
       'a write failure cannot touch the read (issue #272): the load '
@@ -699,6 +713,64 @@ void main() {
       rows.sort((a, b) => SessionsBackend.homeListOrder(a, b, (id) => null));
 
       expect(rows.map((r) => r.id).toList(), ['b', 'c', 'a']);
+    });
+  });
+
+  // The read's tie (issue #273): the row's pinned fact (pinnedOf) and the
+  // pinned-first sort (the comparator's position closure) must both be
+  // derived from the read's one store read — a divergence (one derivation
+  // re-read from the store) would put a row in the wrong block silently.
+  // The store's reads are scripted (a counted load that serves a different
+  // map on a second call) so a second derivation would show.
+
+  group('SessionsBackend.list store tie (issue #273)', () {
+    test('one store read per list read, and the pinned rows are exactly the '
+        'rows the comparator sorted into the pinned block', () async {
+      // The store's read serves the first script's map; a second load
+      // (a re-derived derivation) would serve the next one, so a
+      // divergence between the pinned fact and the sort cannot hide.
+      final store = _ScriptedLoadOrderStore([
+        {'ses_3': 0, 'ses_1': 1},
+        {'ses_2': 0},
+      ]);
+      final backend = SessionsBackend(
+        service: FakeOpencodeService(
+          sessions: [s1, s2, s3],
+          names: {'p1': 'proj-one', 'p2': 'proj-two'},
+        ),
+        orderStore: store,
+      );
+
+      final rows = await backend.list();
+
+      // (a) exactly one store read per list read.
+      expect(store.loads, 1);
+      // (b) the set of rows whose pinned fact is true is exactly the set
+      // the comparator sorted into the pinned block: re-sorted over the
+      // rows with the map the store served, the pinned fact agrees and
+      // the read's order is the comparator's.
+      final served = store.served.single;
+      expect(
+        {
+          for (final row in rows)
+            if (row.pinned) row.id,
+        },
+        {
+          for (final row in rows)
+            if (served.containsKey(row.id)) row.id,
+        },
+      );
+      final reSorted = [...rows]
+        ..sort(
+          (a, b) => SessionsBackend.homeListOrder(a, b, (id) => served[id]),
+        );
+      expect(
+        reSorted.map((r) => r.id).toList(),
+        rows.map((r) => r.id).toList(),
+        reason:
+            'the read\u0027s order must be the comparator\u0027s order '
+            'over the map it served',
+      );
     });
   });
 
@@ -1223,4 +1295,46 @@ class _ReadThenFailOrderStore implements SessionOrderStore {
 
   @override
   Future<void> clear(String id) async => throw StateError('write down');
+}
+
+/// An order store whose reads are scripted (issue #273's tie): it counts
+/// its [load] calls and serves [scripts] in call order, a later call than
+/// the script's length serving the last one. The point of the different
+/// maps is that a second read does not read the same map, so a
+/// re-derived derivation (the pinned fact, or the comparator's input,
+/// re-read from the store) would show in [loads] and break the tie the
+/// test pins: one read per list read, one map feeding both. The write
+/// paths are not read from the list read (the #292 separation), so they
+/// fail, as the write-down store's do.
+class _ScriptedLoadOrderStore implements SessionOrderStore {
+  _ScriptedLoadOrderStore(this.scripts);
+
+  /// The maps the successive [load] calls serve, in call order.
+  final List<Map<String, num>> scripts;
+
+  /// The [load] calls so far (the tie's cost: one per list read).
+  int loads = 0;
+
+  /// The maps [load] has served so far (the tie's map: the one read).
+  final List<Map<String, num>> served = [];
+
+  @override
+  File get file => throw StateError('scripted-load store has no file');
+
+  @override
+  Map<String, num> load() {
+    final script = scripts[loads < scripts.length ? loads : scripts.length - 1];
+    loads++;
+    final map = Map<String, num>.from(script);
+    served.add(map);
+    return map;
+  }
+
+  @override
+  Future<void> set(String id, num position) async =>
+      throw StateError('scripted-load store is read-only');
+
+  @override
+  Future<void> clear(String id) async =>
+      throw StateError('scripted-load store is read-only');
 }

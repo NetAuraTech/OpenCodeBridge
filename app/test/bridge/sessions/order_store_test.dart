@@ -85,6 +85,58 @@ void main() {
     });
   });
 
+  // The pin write's cost (issue #273, the store half of "no full-list
+  // walk"): set is one load of the persisted map plus one entry, persisted
+  // with one write of the file. The other positions are kept by
+  // construction, never re-read or re-written one by one — the cost is
+  // pinned through the counted seams (the counted store, the counted
+  // file), the way the probe's cost is pinned through probedIds /
+  // listSessionsCalls.
+
+  group('SessionOrderStore.set cost (issue #273)', () {
+    test('keeps every other position with one load and one write of the '
+        'persisted map', () async {
+      // The file already carries several pinned sessions.
+      file.writeAsStringSync(jsonEncode({'ses_1': 1, 'ses_2': 0, 'ses_3': 3}));
+      final counted = _CountingFile(file);
+      final store = _CountingOrderStore(counted);
+
+      await store.set('ses_2', 9);
+
+      // The cost: one load of the persisted map, one read of the file's
+      // content, one write of it. A walk that re-read or re-wrote the other
+      // ids would show.
+      expect(store.loadCalls, 1);
+      expect(counted.readCalls, 1);
+      expect(counted.writeCalls, 1);
+      // The on-disk fact: the one entry moved, every other position kept.
+      // (The test's own read-back goes through the unwrapped file.)
+      expect(jsonDecode(file.readAsStringSync()), {
+        'ses_1': 1,
+        'ses_2': 9,
+        'ses_3': 3,
+      });
+    });
+
+    test('a new pin joins the persisted map the same way (one load, one '
+        'write)', () async {
+      file.writeAsStringSync(jsonEncode({'ses_1': 1, 'ses_2': 0}));
+      final counted = _CountingFile(file);
+      final store = _CountingOrderStore(counted);
+
+      await store.set('ses_3', 2);
+
+      expect(store.loadCalls, 1);
+      expect(counted.readCalls, 1);
+      expect(counted.writeCalls, 1);
+      expect(jsonDecode(file.readAsStringSync()), {
+        'ses_1': 1,
+        'ses_2': 0,
+        'ses_3': 2,
+      });
+    });
+  });
+
   group('SessionOrderStore.clear', () {
     test('removes the session\'s entry and keeps the rest', () async {
       final store = SessionOrderStore(file: file);
@@ -108,4 +160,79 @@ void main() {
       expect(store.load(), isEmpty);
     });
   });
+}
+
+/// A [SessionOrderStore] that counts its [load] calls (issue #273's cost
+/// seam): the store's one write path is a fresh [load] plus one entry, and
+/// [load] is public, so the call shape is counted through the override —
+/// the way the probe's cost is counted through [FakeOpencodeService]
+/// (backend_test.dart), no production logging added for the test.
+class _CountingOrderStore extends SessionOrderStore {
+  _CountingOrderStore(File file) : super(file: file);
+
+  /// The [load] calls (the pin write's one read of the persisted map).
+  int loadCalls = 0;
+
+  @override
+  Map<String, num> load() {
+    loadCalls++;
+    return super.load();
+  }
+}
+
+/// A [File] that counts the store's reads and writes of it (issue #273's
+/// cost seam): the store reads the persisted map through `readAsStringSync`
+/// and persists it through `writeAsString`, so the file's observable cost —
+/// one read of the content, one write of it — is counted here, and the
+/// on-disk fact (the other positions untouched) is read back through the
+/// unwrapped file.
+class _CountingFile implements File {
+  _CountingFile(this._file);
+
+  final File _file;
+
+  /// The `readAsString` calls (the store's [load] reads the map through
+  /// them).
+  int readCalls = 0;
+
+  /// The `writeAsString` calls (the store's write path persists through
+  /// them).
+  int writeCalls = 0;
+
+  @override
+  bool existsSync() => _file.existsSync();
+
+  @override
+  Directory get parent => _file.parent;
+
+  @override
+  String readAsStringSync({Encoding encoding = utf8}) {
+    readCalls++;
+    return _file.readAsStringSync(encoding: encoding);
+  }
+
+  @override
+  Future<String> readAsString({Encoding encoding = utf8}) {
+    readCalls++;
+    return _file.readAsString(encoding: encoding);
+  }
+
+  @override
+  Future<File> writeAsString(
+    String contents, {
+    Encoding encoding = utf8,
+    bool flush = false,
+    FileMode mode = FileMode.write,
+  }) {
+    writeCalls++;
+    return _file.writeAsString(
+      contents,
+      encoding: encoding,
+      flush: flush,
+      mode: mode,
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
