@@ -19,3 +19,7 @@ Single-context layout: `GLOSSARY.md` at the root, ADRs in `docs/adr/`. See `docs
 Run the single local verification command — the fast local sequence (lockfile enforcement + analyze + format + test; CI's Linux release build is not part of it) — from the repo root before considering any change done:
 
     cd app && flutter pub get --enforce-lockfile && flutter analyze && dart format --set-exit-if-changed --output=none lib test && flutter test --exclude-tags docker
+
+## Orb sandbox
+
+Dispatched orbs (the `orb_spawn` tool) run a git clone of this repo at `/workspace` with the same toolchain as CI: Flutter 3.47.8, Dart 3.13.7, git, `gh`. Known quirks: the sandbox runs as **root**, so tests that simulate permission denial or unset `GH_CONFIG_DIR` fail there (they pass on CI's non-root runners — treat them as environmental, reproduce on the clean base before flagging); the post-commit hook auto-pushes the `orb/<id>` branch, and the ticket branch named in the task text is pushed separately.
