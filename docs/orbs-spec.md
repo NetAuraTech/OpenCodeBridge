@@ -3,7 +3,7 @@
 **Status**: locked. This is the hand-off spec of the Orbs feature for the implementation effort — its entry point.
 **Source**: wayfinder map [#76 Orbs — spec: opencode agents coding in Docker sandboxes](https://github.com/NetAuraTech/OpenCodeBridge/issues/76). Every section cites the ticket that decided it (GitHub issue numbers). The tickets' resolution comments hold the full deliberation; this document is the consolidated, normative view.
 
-**Domain**: Flutter app OpenCodeBridge; the **bridge** (server mode) is the single API of the app. The orb host is the machine running the bridge — local Docker, Windows and Linux (no WSL). Vocabulary: [`CONTEXT.md`](../CONTEXT.md) (Orb, Orb session, Stop, Wake, Move, Seed, Broken orb, Session, Project, Bridge, Server mode).
+**Domain**: Flutter app OpenCodeBridge; the **bridge** (server mode) is the single API of the app. The orb host is the machine running the bridge — local Docker, Windows and Linux (no WSL). Vocabulary: [`GLOSSARY.md`](../GLOSSARY.md) (Orb, Orb session, Stop, Wake, Move, Seed, Broken orb, Session, Project, Bridge, Server mode).
 
 ## 0. Standing invariants
 

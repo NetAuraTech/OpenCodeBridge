@@ -33,7 +33,7 @@ Remote access runs on a locally-managed **named Cloudflare tunnel** exposed on y
   - `lib/access/` — Cloudflare Access (managed OAuth, loopback server, token store);
   - `lib/ui/` — mode choice, 3-tab shell (Sessions, Docker, Settings), structured view, permission banner, tunnel setup wizard;
   - `lib/model/` — data models; `lib/sse/`, `lib/notify/`, `lib/settings/` — transport, FCM, persisted settings.
-- `CONTEXT.md` — the domain glossary: bridge, session, turn, permission, orb, stop, wake, move, seed, and friends.
+- `GLOSSARY.md` — the domain glossary: bridge, session, turn, permission, orb, stop, wake, move, seed, and friends.
 - `docs/` — ADRs, the orbs spec, the Cloudflare dashboard setup reference, and research notes.
 
 ## Run
