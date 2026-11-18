@@ -1,4 +1,5 @@
 import '../bridge/events/bridge_event.dart';
+import '../bridge/events/opencode_event_types.dart';
 import '../client/events_client.dart';
 import '../model/session.dart';
 
@@ -158,19 +159,19 @@ class HomeListState {
   /// (the module holds no rows yet) it is always [ListStateVerdict.none].
   ListStateVerdict applyEvent(BridgeEvent event) {
     if (_rows == null) return ListStateVerdict.none;
-    final sessionId = sessionOf(event);
+    final sessionId = event.sessionId;
     switch (event.type) {
-      case 'session.created':
-      case 'session.renamed':
-      case 'session.deleted':
+      case OpencodeEventType.sessionCreated:
+      case OpencodeEventType.sessionRenamed:
+      case OpencodeEventType.sessionDeleted:
       case BridgeEventType.sessionClosed:
         // `created` always reloads, even for a known id: the row's location,
         // project or orb attribution is not something the id alone proves.
-        if (event.type == 'session.created' ||
+        if (event.type == OpencodeEventType.sessionCreated ||
             sessionId == null ||
             !hasRow(sessionId)) {
           return ListStateVerdict.reload;
-        } else if (event.type == 'session.renamed') {
+        } else if (event.type == OpencodeEventType.sessionRenamed) {
           patchRow(sessionId, title: _titleOf(event));
         } else {
           patchRow(sessionId, drop: true);
@@ -181,22 +182,25 @@ class HomeListState {
       // moves it accordingly. A known row's flip is the whole action (the
       // tap that caused it re-fetches nothing); an unknown id (a create was
       // missed) reloads, like any other unknown session.
-      case 'session.archived':
-      case 'session.unarchived':
+      case OpencodeEventType.sessionArchived:
+      case OpencodeEventType.sessionUnarchived:
         if (sessionId == null || !hasRow(sessionId)) {
           return ListStateVerdict.reload;
         }
-        patchRow(sessionId, archived: event.type == 'session.archived');
+        patchRow(
+          sessionId,
+          archived: event.type == OpencodeEventType.sessionArchived,
+        );
         return ListStateVerdict.none;
-      case 'session.execution.started':
+      case OpencodeEventType.sessionExecutionStarted:
         if (sessionId != null) {
           _setActive(sessionId, true);
           clearUnread(sessionId);
         }
         return ListStateVerdict.none;
-      case 'session.execution.succeeded':
-      case 'session.execution.failed':
-      case 'session.execution.interrupted':
+      case OpencodeEventType.sessionExecutionSucceeded:
+      case OpencodeEventType.sessionExecutionFailed:
+      case OpencodeEventType.sessionExecutionInterrupted:
         if (sessionId != null) {
           _setActive(sessionId, false);
           endUnread(sessionId);
@@ -234,11 +238,11 @@ class HomeListState {
       // is re-derived from the service's pending states, outside the module
       // (the dot flips orange, or off, the instant the permission or
       // question appears or resolves).
-      case 'permission.asked':
-      case 'permission.replied':
-      case 'form.created':
-      case 'form.replied':
-      case 'form.cancelled':
+      case OpencodeEventType.permissionAsked:
+      case OpencodeEventType.permissionReplied:
+      case OpencodeEventType.formCreated:
+      case OpencodeEventType.formReplied:
+      case OpencodeEventType.formCancelled:
         if (sessionId == null) return ListStateVerdict.none;
         if (hasRow(sessionId)) return ListStateVerdict.reDeriveWaiting;
         // The row is not known: a create was missed (a spawned orb session),
@@ -451,25 +455,6 @@ class HomeListState {
   void endReload() {
     _inFlight = false;
     _again = false;
-  }
-
-  /// The session an event names: the durable aggregate id (every
-  /// session-scoped opencode event carries one), else `data.sessionID` (the
-  /// bridge-native events), else the `form`'s nested session id, else `null`.
-  /// Public because [applyEvent]'s [ListStateVerdict.reDeriveWaiting] caller
-  /// needs the id for its lookups.
-  static String? sessionOf(BridgeEvent event) {
-    final durable = event.durable;
-    if (durable != null) return durable.aggregateID;
-    final data = event.data;
-    final id = data['sessionID'];
-    if (id is String && id.isNotEmpty) return id;
-    final form = data['form'];
-    if (form is Map<String, Object?>) {
-      final nested = form['sessionID'];
-      if (nested is String && nested.isNotEmpty) return nested;
-    }
-    return null;
   }
 
   /// The title a `session.renamed` payload carries (its `data.title`).

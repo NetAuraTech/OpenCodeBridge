@@ -3627,6 +3627,207 @@ void main() {
       },
     );
   });
+
+  group('HttpEventConnection (the shared SSE writer)', () {
+    test('the constructor owns the whole SSE response, set before the '
+        '`: connected` flush', () async {
+      final response = _FakeHttpResponse();
+      final conn = HttpEventConnection(response);
+      try {
+        expect(response.writes, [': connected\n\n']);
+        expect(response.firstWriteSnapshot, {
+          HttpHeaders.contentTypeHeader: ContentType.parse(
+            'text/event-stream; charset=utf-8',
+          ).toString(),
+          HttpHeaders.cacheControlHeader: 'no-cache',
+          HttpHeaders.connectionHeader: 'keep-alive',
+          'bufferOutput': false,
+          'statusCode': HttpStatus.ok,
+        }, reason: 'all the setup must be in place before the first byte');
+      } finally {
+        await conn.close();
+      }
+    });
+
+    test('write() frames the payload as `data: <payload>\n\n`', () async {
+      final response = _FakeHttpResponse();
+      final conn = HttpEventConnection(response);
+      try {
+        await conn.write('log line');
+        await conn.write('naïve — 中文');
+        expect(response.writes, [
+          ': connected\n\n',
+          'data: log line\n\n',
+          'data: naïve — 中文\n\n',
+        ]);
+      } finally {
+        await conn.close();
+      }
+    });
+
+    test(
+      'the keep-alive comment paces at the caller-supplied interval',
+      () async {
+        final response = _FakeHttpResponse();
+        final conn = HttpEventConnection(
+          response,
+          keepAliveInterval: const Duration(milliseconds: 50),
+        );
+        try {
+          await _until(
+            () =>
+                response.writes.where((w) => w == ': keep-alive\n\n').length >=
+                2,
+            message: 'expected the periodic keep-alive comments',
+          );
+          expect(
+            response.writes.where((w) => w.startsWith('data: ')),
+            isEmpty,
+            reason: 'the keep-alive is a comment, never a data frame',
+          );
+        } finally {
+          await conn.close();
+        }
+      },
+    );
+
+    test('close() ends the response and completes done; later writes are '
+        'dropped', () async {
+      final response = _FakeHttpResponse();
+      final conn = HttpEventConnection(response);
+
+      await conn.close();
+      expect(response.closed, isTrue);
+      await expectLater(conn.done, completes);
+
+      await conn.write('after close');
+      expect(response.writes, [': connected\n\n']);
+    });
+
+    test(
+      'a client disconnect completes done and stops the keep-alive',
+      () async {
+        final response = _FakeHttpResponse();
+        final conn = HttpEventConnection(
+          response,
+          keepAliveInterval: const Duration(milliseconds: 50),
+        );
+        await _until(
+          () =>
+              response.writes.where((w) => w == ': keep-alive\n\n').isNotEmpty,
+          message: 'expected a keep-alive before the disconnect',
+        );
+        final writesBefore = response.writes.length;
+        response.clientDisconnect();
+
+        await expectLater(conn.done, completes);
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        expect(
+          response.writes.length,
+          writesBefore,
+          reason: 'no byte may be written after the client is gone',
+        );
+        expect(response.closed, isFalse, reason: 'the bridge did not close it');
+        await conn.write('after disconnect');
+        expect(response.writes.length, writesBefore);
+      },
+    );
+  });
+}
+
+/// A recording [HttpResponse] for the shared-writer tests: it records what is
+/// written to the response (verbatim bytes) and snapshots the response's state
+/// at the first write, so a test can prove the setup predates the `: connected`
+/// flush.
+class _FakeHttpResponse implements HttpResponse {
+  final _FakeHeaders _headers = _FakeHeaders();
+  final List<String> writes = [];
+  final Completer<void> _done = Completer<void>();
+  final Map<String, Object?> firstWriteSnapshot = {};
+
+  @override
+  int statusCode = HttpStatus.ok;
+
+  @override
+  bool bufferOutput = true;
+  bool closed = false;
+
+  @override
+  HttpHeaders get headers => _headers;
+
+  @override
+  Future<void> get done => _done.future;
+
+  /// Simulates the client going away (the TCP close that completes
+  /// [HttpResponse.done]).
+  void clientDisconnect() {
+    if (!_done.isCompleted) _done.complete();
+  }
+
+  @override
+  void write(Object? object) {
+    if (object is! String) return;
+    if (firstWriteSnapshot.isEmpty) {
+      firstWriteSnapshot
+        ..[HttpHeaders.contentTypeHeader] = _headers.value(
+          HttpHeaders.contentTypeHeader,
+        )
+        ..[HttpHeaders.cacheControlHeader] = _headers.value(
+          HttpHeaders.cacheControlHeader,
+        )
+        ..[HttpHeaders.connectionHeader] = _headers.value(
+          HttpHeaders.connectionHeader,
+        )
+        ..['bufferOutput'] = bufferOutput
+        ..['statusCode'] = statusCode;
+    }
+    writes.add(object);
+  }
+
+  @override
+  Future<void> close() async {
+    closed = true;
+  }
+
+  @override
+  Future<void> flush() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// The minimal [HttpHeaders]: it records what the writer sets.
+class _FakeHeaders implements HttpHeaders {
+  final Map<String, Object?> _values = {};
+
+  @override
+  void set(String name, Object value, {bool preserveHeaderCase = false}) =>
+      _values[name.toLowerCase()] = value;
+
+  /// The value [set] under [name] (or `null`); a stored [ContentType]
+  /// (the `content-type` header) is reported as its string form.
+  @override
+  String? value(String name) {
+    final value = _values[name.toLowerCase()];
+    if (value is ContentType) return value.toString();
+    return value as String?;
+  }
+
+  @override
+  ContentType? get contentType =>
+      _values[HttpHeaders.contentTypeHeader] as ContentType?;
+
+  @override
+  set contentType(ContentType? contentType) {
+    if (contentType == null) {
+      _values.remove(HttpHeaders.contentTypeHeader);
+    } else {
+      _values[HttpHeaders.contentTypeHeader] = contentType;
+    }
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 /// An in-memory [SessionOrderStore] for tests that construct a
