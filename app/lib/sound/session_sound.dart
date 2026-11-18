@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../bridge/events/bridge_event.dart';
+import '../bridge/events/opencode_event_types.dart';
 import '../bridge/sessions/cancel_dedup.dart';
 import '../client/events_client.dart';
 
@@ -64,9 +65,9 @@ class SessionSoundMapper {
   /// nothing (a non-trigger, an event without a session, or the suppressed
   /// cancel follow-on terminal).
   SessionSound? soundFor(BridgeEvent event) {
-    final sessionId = _sessionOf(event);
+    final sessionId = event.sessionId;
     switch (event.type) {
-      case 'session.execution.started':
+      case OpencodeEventType.sessionExecutionStarted:
         // A fresh turn: a stale cancel marker (its terminal missed, e.g.
         // across a service restart) must not suppress this turn's later
         // outcomes.
@@ -76,11 +77,11 @@ class SessionSoundMapper {
         if (sessionId == null) return null;
         _dedup.cancelled(sessionId);
         return SessionSound.stopped;
-      case 'session.execution.succeeded':
+      case OpencodeEventType.sessionExecutionSucceeded:
         return _namesSession(sessionId) ? SessionSound.success : null;
-      case 'session.execution.failed':
+      case OpencodeEventType.sessionExecutionFailed:
         return _namesSession(sessionId) ? SessionSound.error : null;
-      case 'session.execution.interrupted':
+      case OpencodeEventType.sessionExecutionInterrupted:
         if (sessionId == null) return null;
         if (_dedup.isCancelledFollowOn(sessionId)) {
           // The cancel already sounded this turn's end as "stopped": its
@@ -88,8 +89,8 @@ class SessionSoundMapper {
           return null;
         }
         return SessionSound.stopped;
-      case 'permission.asked':
-      case 'form.created':
+      case OpencodeEventType.permissionAsked:
+      case OpencodeEventType.formCreated:
         return _namesSession(sessionId) ? SessionSound.attention : null;
       default:
         // Every other event on the stream (deltas, replies, resolutions,
@@ -102,25 +103,6 @@ class SessionSoundMapper {
   /// `data.sessionID`); one without a session has nothing to sound for.
   bool _namesSession(String? sessionId) =>
       sessionId != null && sessionId.isNotEmpty;
-
-  /// The session an event names: the durable aggregate id (every
-  /// session-scoped opencode event carries one), else `data.sessionID` (the
-  /// bridge-native events, and `permission.asked`), else the `form`'s nested
-  /// session id (`form.created` nests its session under `data.form`), else
-  /// `null`.
-  String? _sessionOf(BridgeEvent event) {
-    final durable = event.durable;
-    if (durable != null) return durable.aggregateID;
-    final data = event.data;
-    final id = data['sessionID'];
-    if (id is String && id.isNotEmpty) return id;
-    final form = data['form'];
-    if (form is Map<String, Object?>) {
-      final nested = form['sessionID'];
-      if (nested is String && nested.isNotEmpty) return nested;
-    }
-    return null;
-  }
 }
 
 /// Plays the desktop sounds on significant session events (issue #246).

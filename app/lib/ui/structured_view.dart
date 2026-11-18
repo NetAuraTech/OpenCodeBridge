@@ -9,6 +9,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../app_info.dart';
 import '../bridge/events/bridge_event.dart';
+import '../bridge/events/opencode_event_types.dart';
 import '../client/events_client.dart';
 import '../client/events_decode.dart';
 import '../client/sessions_client.dart';
@@ -1220,13 +1221,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     // Bridge-native, not per-session: the local llama.cpp server's
     // prefill/decode throughput, shown in the header for whichever session is
     // open.
-    if (event.type == 'llama.speed') {
+    if (event.type == BridgeEventType.llamaSpeed) {
       _applySpeed(event.data);
       return;
     }
     if (!_forSession(event)) return;
     switch (event.type) {
-      case 'session.execution.started':
+      case OpencodeEventType.sessionExecutionStarted:
         // The turn is about to run: the live footer takes over, ticking from
         // the turn's first prompt (issues #122/#124), and the service's
         // authoritative state is re-fetched so a prompt sent from another
@@ -1242,9 +1243,9 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         ));
         _normalize();
         break;
-      case 'session.execution.succeeded':
-      case 'session.execution.failed':
-      case 'session.execution.interrupted':
+      case OpencodeEventType.sessionExecutionSucceeded:
+      case OpencodeEventType.sessionExecutionFailed:
+      case OpencodeEventType.sessionExecutionInterrupted:
         // The turn ended: freeze the live footer into its final value (the
         // normalize below replaces the streamed steps with the history, so
         // the frozen stats read the identical window).
@@ -1270,79 +1271,73 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         ));
         _normalize();
         break;
-      case 'session.usage.updated':
+      case OpencodeEventType.sessionUsageUpdated:
         _applyUsage(event.data);
         break;
-      case 'session.step.started':
+      case OpencodeEventType.sessionStepStarted:
         _applyStepStarted(event.data);
         break;
-      case 'session.step.streamed':
+      case OpencodeEventType.sessionStepStreamed:
         _applyStepStreamed(event);
         break;
-      case 'session.step.ended':
+      case OpencodeEventType.sessionStepEnded:
         _applyStepEnded(event);
         break;
-      case 'session.compaction.delta':
+      case OpencodeEventType.sessionCompactionDelta:
         _applyCompactionDelta(event.data);
         break;
-      case 'session.compaction.ended':
+      case OpencodeEventType.sessionCompactionEnded:
         _applyCompactionEnded(event.data);
         break;
-      case 'session.text.started':
+      case OpencodeEventType.sessionTextStarted:
         _applyPartStarted(event.data, reasoning: false);
         break;
-      case 'session.reasoning.started':
+      case OpencodeEventType.sessionReasoningStarted:
         _applyPartStarted(event.data, reasoning: true);
         break;
-      case 'session.text.delta':
+      case OpencodeEventType.sessionTextDelta:
         _applyPartDelta(event.data, reasoning: false);
         break;
-      case 'session.reasoning.delta':
+      case OpencodeEventType.sessionReasoningDelta:
         _applyPartDelta(event.data, reasoning: true);
         break;
-      case 'session.tool.input.started':
+      case OpencodeEventType.sessionToolInputStarted:
         _applyToolInputStarted(event.data);
         break;
-      case 'session.tool.input.ended':
+      case OpencodeEventType.sessionToolInputEnded:
         _applyToolInputEnded(event.data);
         break;
-      case 'session.tool.called':
+      case OpencodeEventType.sessionToolCalled:
         _applyToolCalled(event.data);
         break;
-      case 'session.tool.success':
+      case OpencodeEventType.sessionToolSuccess:
         _applyToolSuccess(event.data);
         break;
-      case 'session.tool.failed':
+      case OpencodeEventType.sessionToolFailed:
         _applyToolFailed(event.data);
         break;
-      case 'permission.asked':
-      case 'permission.replied':
+      case OpencodeEventType.permissionAsked:
+      case OpencodeEventType.permissionReplied:
         _refreshPermissions();
         break;
       // The agent's `question` tool (issue #50): the form appears, is
       // answered, or is dismissed. The `form.created` payload nests the
       // session under `data.form` (matched in [_forSession]).
-      case 'form.created':
-      case 'form.replied':
-      case 'form.cancelled':
+      case OpencodeEventType.formCreated:
+      case OpencodeEventType.formReplied:
+      case OpencodeEventType.formCancelled:
         _refreshQuestions();
         break;
     }
   }
 
-  /// True when [event] belongs to this session: the durable aggregate id, or
-  /// the payload's `sessionID` when the event carries no durable position.
-  /// `form.created` nests the session under `data.form` (the form object),
-  /// so that shape is matched too.
+  /// True when [event] belongs to this session. The session is resolved
+  /// through the envelope's [BridgeEvent.sessionId] accessor instead of
+  /// re-deriving the shapes here (it covers every shape the stream carries:
+  /// the durable aggregate id, `data.sessionID`, and `form.created`'s nested
+  /// `data.form.sessionID`).
   bool _forSession(BridgeEvent event) {
-    final durable = event.durable;
-    if (durable != null) {
-      return durable.aggregateID == widget.sessionId;
-    }
-    if (event.data['sessionID'] == widget.sessionId) return true;
-    final form = event.data['form'];
-    return form is Map<String, Object?> &&
-        form['sessionID'] == widget.sessionId;
+    return event.sessionId == widget.sessionId;
   }
 
   /// A `llama.speed` payload moves the header's prefill/decode throughput.
