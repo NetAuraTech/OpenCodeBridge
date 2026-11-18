@@ -6,6 +6,26 @@ on:
   pull_request:
 
 jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.8
+          channel: stable
+          cache: true
+
+      # Fail fast when the committed lockfile does not reproduce under the
+      # CI-pinned Flutter, before any other job installs dependencies.
+      - name: Enforce pubspec.lock
+        working-directory: app
+        run: flutter pub get --enforce-lockfile
+
   analyze:
     runs-on: ubuntu-latest
 
