@@ -285,6 +285,23 @@ class _FakeDocker {
               stdout: row.finishedAt ?? '0001-01-01T00:00:00Z',
               stderr: '',
             );
+          case '{{.Id}}':
+            // The per-orb read's presence probe (issue #291): exit 1 for a
+            // missing container (an orphan has no container, like `ps`),
+            // exit 0 when the row's container exists.
+            final row = _row(names.single);
+            if (row == null) {
+              return const DockerCliResult(
+                exitCode: 1,
+                stdout: '',
+                stderr: 'no such container',
+              );
+            }
+            return const DockerCliResult(
+              exitCode: 0,
+              stdout: 'container-id',
+              stderr: '',
+            );
         }
         throw StateError('unexpected inspect format: $format');
       case 'volume':

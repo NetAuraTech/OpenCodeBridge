@@ -683,6 +683,50 @@ void main() {
       );
     });
 
+    // The per-orb read (issue #291): a single-orb op reads the ONE orb's
+    // container and the ONE workspace volume — it never enumerates the fleet
+    // (no `docker ps`, no label-filtered fleet `volume ls`) to find one row,
+    // as the old record read (the label-composed list) did.
+
+    test(
+      'a single-orb op reads one container, not the fleet (issue #291)',
+      () async {
+        // A stopped orb: `stop` reads the record, sees it is not stopable, and
+        // returns — so the only docker the op issues is the per-orb read's.
+        addOrb(state: 'exited');
+        stateDir();
+
+        await service().stop(orbId);
+
+        expect(
+          docker.runArgs.any((a) => a.first == 'ps'),
+          isFalse,
+          reason:
+              'a single-orb op must not enumerate the fleet with `docker ps`',
+        );
+        expect(
+          docker.runArgs.any(
+            (a) =>
+                a.first == 'volume' &&
+                a[1] == 'ls' &&
+                a.contains('label=ocb.orb=true'),
+          ),
+          isFalse,
+          reason:
+              'a single-orb op must not read the fleet with the '
+              'label-filtered `volume ls`',
+        );
+        // The one volume it reads is the orb's own workspace volume, by name.
+        final volumeLs = docker.runArgs.where(
+          (a) => a.first == 'volume' && a[1] == 'ls',
+        );
+        expect(volumeLs, isNotEmpty);
+        for (final ls in volumeLs) {
+          expect(ls, contains('name=orb-$orbId-workspace'));
+        }
+      },
+    );
+
     // ----------------------------------------------------------------------
     // The deletion guard (spec §2.7)
 
