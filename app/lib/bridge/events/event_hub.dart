@@ -94,25 +94,36 @@ class EventHub {
   }
 }
 
-/// An [EventConnection] over one app `GET /api/events` [HttpResponse].
+/// An [EventConnection] over one SSE [HttpResponse] — any route that streams
+/// `data:` frames at an app or a raw client (`/api/events` is one, the
+/// container log streams are the other).
 ///
-/// It writes each payload as `data: <payload>\n\n` and sends a per-client
-/// keep-alive comment (`: keep-alive\n\n`) so an idle tunnel connection is not
-/// reaped. The service's own `: heartbeat` lines are dropped (they never reach
-/// the hub), so keep-alive is the bridge's, per client.
+/// It owns the whole SSE response: the UTF-8 `text/event-stream` content-type
+/// (the response encodes its `write`s with the content-type's charset — the
+/// old Latin-1 default threw on any character above U+00FF and one such token
+/// used to drop the whole connection), the no-cache and keep-alive headers,
+/// the initial `: connected` comment that flushes the response headers on
+/// connect, the periodic keep-alive comment (`: keep-alive\n\n`) so an idle
+/// tunnel connection is not reaped, and the `data: <payload>\n\n` framing of
+/// every [write]. The service's own `: heartbeat` lines are dropped (they
+/// never reach the hub), so keep-alive is the bridge's, per client.
 class HttpEventConnection implements EventConnection {
   HttpEventConnection(
     this._response, {
     Duration keepAliveInterval = const Duration(seconds: 20),
   }) {
+    // The response setup, in this order, before the first byte goes out.
+    _response.headers.contentType = ContentType.parse(
+      'text/event-stream; charset=utf-8',
+    );
+    _response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+    _response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
     _response.bufferOutput = false;
-    // The response encodes its `write`s with the content-type's charset
-    // (the bridge sets `text/event-stream; charset=utf-8`). The old default
-    // was Latin-1, whose encoder threw on any character above U+00FF — one
-    // such token in a streamed delta used to abort the write and drop the
-    // whole connection from the fan-out.
+    _response.statusCode = HttpStatus.ok;
     // An initial comment flushes the response headers on connect (the client
-    // is blocked on them) and marks the stream live.
+    // is blocked on them) and marks the stream live: a producer with no
+    // output yet would otherwise hold the response open without a single
+    // byte.
     _response.write(': connected\n\n');
     _timer = Timer.periodic(keepAliveInterval, (_) => _keepAlive());
     unawaited(_response.done.then((_) => _markGone()));

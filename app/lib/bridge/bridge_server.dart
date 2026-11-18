@@ -1707,17 +1707,9 @@ class BridgeServer {
       BridgeServer._unavailable(response);
       return;
     }
-    // The charset matters: HttpResponse encodes its `write`s with the
-    // content-type's charset (default Latin-1, which throws on any character
-    // above U+00FF and used to drop the whole SSE connection on one such
-    // token). The stream is UTF-8, matching the client's Utf8Decoder.
-    response.headers.contentType = ContentType.parse(
-      'text/event-stream; charset=utf-8',
-    );
-    response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
-    response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
-    response.bufferOutput = false;
-    response.statusCode = HttpStatus.ok;
+    // The SSE response setup (UTF-8 content-type, headers, the `: connected`
+    // flush) lives in the shared writer; the hub owns the connection's
+    // lifecycle from here.
     events.add(HttpEventConnection(response));
   }
 
@@ -3811,59 +3803,21 @@ class BridgeServer {
       await response.close();
       return;
     }
-    // The charset matters exactly as on the events stream: the response
-    // encodes its `write`s with the content-type's charset, and log output
-    // is UTF-8.
-    response.headers.contentType = ContentType.parse(
-      'text/event-stream; charset=utf-8',
-    );
-    response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
-    response.headers.set(HttpHeaders.connectionHeader, 'keep-alive');
-    response.bufferOutput = false;
-    response.statusCode = HttpStatus.ok;
-    // The initial comment flushes the response headers on connect (the
-    // client is blocked on them) and marks the stream live, like the events
-    // endpoint: a container with no output yet would otherwise hold the
-    // response open without a single byte.
-    response.write(': connected\n\n');
-    // A keep-alive comment, exactly as on the events stream: an idle tunnel
-    // connection must not be reaped, and the keep-alive write is what
-    // completes [response.done] when the client disconnects (a silent
-    // container would otherwise hold the CLI child with no write left to
-    // fail).
-    final keepAliveTimer = Timer.periodic(keepAlive, (_) {
-      try {
-        response.write(': keep-alive\n\n');
-      } catch (_) {
-        // The client went away; [response.done] kills the CLI child.
-      }
-    });
-    final subscription = stream.lines.listen(
-      (line) {
-        try {
-          response.write('data: $line\n\n');
-        } catch (_) {
-          // The client went away; [response.done] kills the CLI child.
-        }
-      },
-      onDone: () {
-        keepAliveTimer.cancel();
-        response.close();
-      },
-      onError: (Object error) {
-        keepAliveTimer.cancel();
-        response.close();
-      },
+    // The SSE response setup (UTF-8 content-type, headers, the `: connected`
+    // flush) is the shared writer's: a container with no output yet would
+    // otherwise hold the response open without a single byte.
+    final conn = HttpEventConnection(response, keepAliveInterval: keepAlive);
+    // One log line per `data:` frame; the shared writer's keep-alive is what
+    // completes [conn.done] when the client disconnects (a silent container
+    // would otherwise hold the CLI child with no write left to fail).
+    stream.lines.listen(
+      (line) => conn.write(line),
+      onDone: () => conn.close(),
+      onError: (_) => conn.close(),
     );
     // The CLI child lives for this connection: it is killed when the client
     // disconnects or the log ends.
-    unawaited(
-      response.done.then((_) {
-        keepAliveTimer.cancel();
-        unawaited(subscription.cancel());
-        unawaited(stream.close());
-      }),
-    );
+    unawaited(conn.done.then((_) => stream.close()));
   }
 
   /// The single container name in an action path, or `null` when [path] is
