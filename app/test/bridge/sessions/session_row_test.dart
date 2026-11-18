@@ -100,6 +100,10 @@ class FakeComposerService implements OpencodeService {
   // Everything the composer never reads: stubs that throw if reached.
 
   @override
+  Future<OpencodeSession> probe(String id) async =>
+      throw StateError('not scripted');
+
+  @override
   Future<List<OpencodeProject>> projects() async =>
       throw StateError('not scripted');
   @override

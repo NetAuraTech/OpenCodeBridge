@@ -128,15 +128,19 @@ class SessionsBackend {
     }
   }
 
-  /// Whether the service still has [id] (the reopen guard): a composition of
-  /// the service's session list (the read that already degrades per-session,
-  /// not an identity probe the seam does not have).
+  /// Whether the service still has [id] (the pin write's existence check,
+  /// issue #272): a single identity probe on the service, not a walk of the
+  /// paginated list. A 404 from the probe is the "gone" answer; every other
+  /// failure propagates (the order route maps it, as it mapped the walk's
+  /// failures).
   Future<bool> exists(String id) async {
-    final sessions = await service.listSessions();
-    for (final session in sessions) {
-      if (session.id == id) return true;
+    try {
+      await service.probe(id);
+      return true;
+    } on OpencodeServiceError catch (e) {
+      if (e.statusCode == HttpStatus.notFound) return false;
+      rethrow;
     }
-    return false;
   }
 
   /// The home-list rows (spec §5 endpoint 1, §6), pinned-first (issue #237):
@@ -149,8 +153,16 @@ class SessionsBackend {
   /// (issue #292: a session invisible on a read keeps its pin); the entry is
   /// cleaned when the bridge observes the session being deleted or closed,
   /// not on the read.
-  /// A store failure degrades the read to the unpinned order — the list
-  /// itself stays up, like the waiting fact's degraded-orb posture.
+  ///
+  /// The read's one store failure is the [load] — and it degrades the read
+  /// to the unpinned order on its own (the list itself stays up, like the
+  /// waiting fact's degraded-orb posture). A store write can no longer fail
+  /// this read, because there is none: since issue #292 the read is 100 %
+  /// read-only on the store (it calls only [load]; the store's writes — the
+  /// pin/un-pin through [setOrder] / [clearOrder] and the event-driven
+  /// cleanup — run on the write paths and on the observed deletion events,
+  /// never on the read), so a load success can no longer be silently paired
+  /// with a prune failure for that read (issue #272).
   Future<List<Session>> list() async {
     final sessions = await service.listSessions();
     final names = await service.projectNames();

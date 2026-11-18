@@ -1915,6 +1915,56 @@ void main() {
       expect(file.existsSync(), isFalse);
     });
 
+    // The light probe (issue #272): the pin write's existence check is one
+    // identity read on the service, not a walk of the paginated session
+    // list — the cost is asserted here, on the route.
+    test('an absent id is 404 on the probe, with the paginated list never '
+        'walked (issue #272)', () async {
+      final (status, body) = await _patchRaw(
+        base,
+        'api/sessions/ses_missing/order',
+        jsonEncode({'position': 0}),
+      );
+      expect(status, 404);
+      expect(jsonDecode(body), {'error': 'not_found'});
+      // The cost: the validation spent one probe and zero list walks.
+      expect(service.probedIds, ['ses_missing']);
+      expect(service.listSessionsCalls, 0);
+    });
+
+    test('a present id is 204, the pin is persisted, the event is emitted, and '
+        'the paginated list is never walked (issue #272)', () async {
+      final tap = await _SseTap.open(base);
+      try {
+        await _until(() => tap.ready);
+        final (status, body) = await _patchRaw(
+          base,
+          'api/sessions/ses_one/order',
+          jsonEncode({'position': 0}),
+        );
+        expect(status, 204);
+        expect(body, isEmpty);
+        // The pin is persisted on the store the backend was given.
+        expect(jsonDecode(file.readAsStringSync()), {'ses_one': 0});
+        // The event rides the route, as before.
+        await _until(
+          () => tap.dataPayloads.any((p) => p.contains('order.changed')),
+          message: 'expected the session.order.changed frame',
+        );
+        final frame = jsonDecode(
+          tap.dataPayloads.firstWhere((p) => p.contains('order.changed')),
+        ) as Map<String, Object?>;
+        expect(frame['type'], 'session.order.changed');
+        expect(frame['data'], {'sessionID': 'ses_one', 'position': 0});
+        // The cost: one probe, and the list (walked by a later GET
+        // /api/sessions) was not spent on the validation.
+        expect(service.probedIds, ['ses_one']);
+        expect(service.listSessionsCalls, 0);
+      } finally {
+        await tap.close();
+      }
+    });
+
     for (final malformed in [
       jsonEncode({'position': 'two'}),
       jsonEncode({
@@ -3635,6 +3685,14 @@ class _FakeService implements OpencodeService {
   var failCancel = false;
   var failUsage = false;
 
+  /// The [listSessions] calls (the cost of the old paginated existence walk;
+  /// the order route's probe path never walks the list — issue #272).
+  var listSessionsCalls = 0;
+
+  /// The ids [probe] was asked about (the order route's existence check,
+  /// issue #272).
+  final List<String> probedIds = [];
+
   /// Per-session pending permission requests (the waiting fact, issue #208):
   /// a session scripted here answers its own list; an unscripted session
   /// answers the shared [permissions].
@@ -3681,6 +3739,7 @@ class _FakeService implements OpencodeService {
   @override
   Future<List<OpencodeSession>> listSessions() async {
     if (failList) throw const OpencodeServiceError(0, 'service down');
+    listSessionsCalls++;
     return [
       for (final session in const [_one, _two, _three])
         if (!removedFromService.contains(session.id)) session,
@@ -3771,6 +3830,19 @@ class _FakeService implements OpencodeService {
       throw const OpencodeServiceError(404, 'not found');
     }
     return d;
+  }
+
+  /// The light identity read (issue #272): the scripted session when it
+  /// exists, a service 404 otherwise — the order route's existence check.
+  @override
+  Future<OpencodeSession> probe(String id) async {
+    probedIds.add(id);
+    for (final session in const [_one, _two, _three]) {
+      if (session.id == id && !removedFromService.contains(session.id)) {
+        return session;
+      }
+    }
+    throw const OpencodeServiceError(404, 'not found');
   }
 
   @override

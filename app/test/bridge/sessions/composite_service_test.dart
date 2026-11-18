@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/orb/orb_upstreams.dart';
@@ -46,6 +48,7 @@ class FakeService implements OpencodeService {
   final List<String> cancelled = [];
   final List<String> deleted = [];
   final List<String> forked = [];
+  final List<String> probeCalls = [];
   final List<SessionMessage> messages;
   var projectsCalls = 0;
   var createCalls = 0;
@@ -112,6 +115,18 @@ class FakeService implements OpencodeService {
   Future<SessionDetail> getDetail(String id) async {
     detailCalls.add(id);
     throw const OpencodeServiceError(404, 'no detail scripted');
+  }
+
+  /// The light identity read (issue #272): the session when the fake has it,
+  /// a service 404 otherwise — the same 404 semantics the real services
+  /// answer for an id they do not have.
+  @override
+  Future<OpencodeSession> probe(String id) async {
+    probeCalls.add(id);
+    for (final session in sessions) {
+      if (session.id == id) return session;
+    }
+    throw const OpencodeServiceError(404, 'no such session');
   }
 
   @override
@@ -779,6 +794,60 @@ void main() {
         expect(orb1.archived, isEmpty);
       },
     );
+
+    test('probe routes to the owning orb (issue #272)', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final orb1 = FakeService(sessions: [orbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+      await composite.listSessions();
+
+      final probed = await composite.probe('ses_orb');
+
+      expect(probed.id, 'ses_orb');
+      expect(orb1.probeCalls, ['ses_orb']);
+      expect(host.probeCalls, isEmpty);
+    });
+
+    test('probe of a host session routes to the host (issue #272)', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final orb1 = FakeService(sessions: [orbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+      await composite.listSessions();
+
+      final probed = await composite.probe('ses_host');
+
+      expect(probed.id, 'ses_host');
+      expect(host.probeCalls, ['ses_host']);
+      expect(orb1.probeCalls, isEmpty);
+    });
+
+    test('probe of an unknown id falls back to the host, whose 404 is the '
+        'service 404 (issue #272)', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final composite = makeComposite(host: host);
+
+      await expectLater(
+        composite.probe('ses_unknown'),
+        throwsA(
+          isA<OpencodeServiceError>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            HttpStatus.notFound,
+          ),
+        ),
+      );
+      expect(host.probeCalls, ['ses_unknown']);
+    });
 
     test('cancelTurn routes to the owning orb', () async {
       final host = FakeService(sessions: [hostSession]);

@@ -133,6 +133,16 @@ class CompositeOpencodeService implements OpencodeService {
   Future<SessionDetail> getDetail(String id) async =>
       (await _route(id)).getDetail(id);
 
+  /// The light identity read (issue #272): routed through the `sessionID ->
+  /// orb` table exactly as [getDetail] (the same degraded-orb posture as the
+  /// other per-session ops) — a known orb session probes the orb, an unknown
+  /// id falls back to the host, whose 404 for an id it does not have is the
+  /// "the service no longer has this id" the pin write's existence check
+  /// reads.
+  @override
+  Future<OpencodeSession> probe(String id) async =>
+      (await _route(id)).probe(id);
+
   @override
   Future<List<SessionMessage>> getMessages(String id) async =>
       (await _route(id)).getMessages(id);
