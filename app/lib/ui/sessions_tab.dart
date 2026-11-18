@@ -408,7 +408,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       // Coalesced and quiet: the rows stay on screen while the load runs.
       unawaited(_refreshFromEvents());
     } else if (verdict == ListStateVerdict.reDeriveWaiting) {
-      final id = HomeListState.sessionOf(event);
+      final id = event.sessionId;
       if (id != null) unawaited(_setWaiting(id));
     } else {
       // The event was merged in place: rebuild from the module's state.

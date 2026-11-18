@@ -459,41 +459,30 @@ void main() {
       },
     );
 
-    test(
-      'sessionOf reads the durable id, then data.sessionID, then the form\'s '
-      'nested session id, else null',
-      () {
-        expect(
-          HomeListState.sessionOf(
-            _ev('session.execution.started', session: 's1'),
-          ),
-          's1',
-        );
-        expect(
-          HomeListState.sessionOf(
-            _ev(BridgeEventType.turnCancelled, data: {'sessionID': 's2'}),
-          ),
-          's2',
-        );
-        expect(
-          HomeListState.sessionOf(
-            _ev(
-              'form.replied',
-              data: {
-                'form': {'sessionID': 's3'},
-              },
-            ),
-          ),
-          's3',
-        );
-        expect(
-          HomeListState.sessionOf(
-            _ev(BridgeEventType.turnCancelled, data: const <String, Object?>{}),
-          ),
-          isNull,
-        );
-      },
-    );
+    test('the envelope\'s sessionId reads the durable id, then data.sessionID, '
+        'then the form\'s nested session id, else null', () {
+      expect(_ev('session.execution.started', session: 's1').sessionId, 's1');
+      expect(
+        _ev(BridgeEventType.turnCancelled, data: {'sessionID': 's2'}).sessionId,
+        's2',
+      );
+      expect(
+        _ev(
+          'form.replied',
+          data: {
+            'form': {'sessionID': 's3'},
+          },
+        ).sessionId,
+        's3',
+      );
+      expect(
+        _ev(
+          BridgeEventType.turnCancelled,
+          data: const <String, Object?>{},
+        ).sessionId,
+        isNull,
+      );
+    });
   });
 
   group('the merge the widget drives by hand', () {
