@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Pre-commit hook: refuse Dart commits that do not pass the formatter.
+#
+# Runs the repo's format check (the one CI runs:
+# `dart format --set-exit-if-changed --output=none lib test` from app/) on
+# the staged Dart files only. A clean commit passes with no friction; if no
+# Dart file is staged, the hook is a no-op. The analyzer deliberately stays
+# at CI — this hook is formatting only, so it stays fast and needs no
+# network.
+#
+# Activate it (one line, from the repo root):
+#
+#   git config core.hooksPath scripts/git-hooks
+#
+# Deliberate bypass: `git commit --no-verify` skips this hook.
+
+set -uo pipefail
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "pre-commit: git is not on PATH -- cannot check staged files." >&2
+  exit 1
+fi
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+# Staged Dart files only (additions and modifications); untracked and
+# deleted files do not need a format check.
+staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.dart')
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+# Nothing staged under app/ -> nothing for this repo's formatter to check.
+if ! printf '%s\n' "$staged" | grep -q '^app/'; then
+  exit 0
+fi
+
+if ! command -v dart >/dev/null 2>&1; then
+  echo "pre-commit: dart is not on PATH -- cannot run the format check." >&2
+  echo "  Install Dart/Flutter, or bypass deliberately with: git commit --no-verify" >&2
+  exit 1
+fi
+
+bad=$(
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue # the file may not exist on disk yet
+    if ! dart format --set-exit-if-changed --output=none -- "$f" >/dev/null 2>&1; then
+      printf '%s\n' "$f"
+    fi
+  done <<< "$staged"
+)
+
+if [ -n "$bad" ]; then
+  {
+    echo "commit refused: the staged Dart files are not formatted."
+    echo
+    echo "Files to format:"
+    printf '  %s\n' $bad
+    echo
+    echo "  (run: dart format <file> from app/, then re-stage the formatted files)"
+    echo
+    echo "Deliberate bypass: git commit --no-verify"
+  } >&2
+  exit 1
+fi

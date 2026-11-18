@@ -35,6 +35,7 @@ Remote access runs on a locally-managed **named Cloudflare tunnel** exposed on y
   - `lib/model/` — data models; `lib/sse/`, `lib/notify/`, `lib/settings/` — transport, FCM, persisted settings.
 - `GLOSSARY.md` — the domain glossary: bridge, session, turn, permission, orb, stop, wake, move, seed, and friends.
 - `docs/` — ADRs, the orbs spec, the Cloudflare dashboard setup reference, and research notes.
+- `scripts/git-hooks/` — the committed git hooks (currently the pre-commit Dart format check; see [docs/git-hooks.md](docs/git-hooks.md)).
 
 ## Run
 
