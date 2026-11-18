@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -11,6 +10,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import '../app_info.dart';
 import '../bridge/events/bridge_event.dart';
 import '../client/events_client.dart';
+import '../client/events_decode.dart';
 import '../client/sessions_client.dart';
 import '../model/command.dart';
 import '../model/message.dart';
@@ -21,135 +21,22 @@ import '../model/session_detail.dart';
 import '../model/turn_active.dart';
 import '../model/turn_stats.dart';
 import '../settings/app_settings.dart';
+import 'clipboard_image.dart';
 import 'diff_view.dart';
 import 'permission_banner.dart';
+import 'process_ports.dart';
 import 'prompt_menu.dart';
 import 'question_panel.dart';
 import 'slash_commands.dart';
 import 'tool_card_content.dart';
 
-/// An image read from the clipboard (issue #72): its raw bytes and mime type,
-/// sent to the model as a `files` data-URI attachment.
-class ClipboardImage {
-  const ClipboardImage({required this.bytes, required this.mime});
-
-  /// The image's raw bytes.
-  final Uint8List bytes;
-
-  /// The image's mime type (e.g. `image/png`).
-  final String mime;
-}
-
-/// The outcome of a clipboard image read (issue #72): the clipboard's
-/// image, or `null` when there is none — plus, for a read that cannot
-/// produce an image, a user-visible [failureMessage] saying how to get one
-/// (e.g. the read tool is not installed and how to install it).
-class ClipboardImageRead {
-  const ClipboardImageRead({this.image, this.failureMessage});
-
-  /// The clipboard's image, or `null` when there is none.
-  final ClipboardImage? image;
-
-  /// How to get an image read, to show the user (issue #72), or `null` when
-  /// there is nothing to report (a plain "no image").
-  final String? failureMessage;
-}
-
-/// Reads the clipboard's image (issue #72): no image reads as no [image],
-/// and a read that cannot produce one (e.g. the read tool is not installed)
-/// reports how to enable it. Injectable so the screen's tests can fake the
-/// read.
-typedef ClipboardImageReader = Future<ClipboardImageRead> Function();
-
-/// The service's per-attachment decoded image limit (issue #72): the service
-/// materializes inline data URLs up to 20 MiB decoded, so an image over it
-/// would be rejected — the client pre-checks and reports it instead of
-/// leaving a dead token.
-const int _kMaxClipboardImageBytes = 20 * 1024 * 1024;
-
-/// The image targets the default reader looks for, most preferred first
-/// (issue #72); when none of these is offered, any `image/` target is used.
-const List<String> _kPreferredImageTargets = [
-  'image/png',
-  'image/bmp',
-  'image/jpeg',
-  'image/jpg',
-  'image/gif',
-];
-
-/// The default clipboard image reader (issue #72): desktop Linux only, with
-/// no new package dependency — X11 via `xclip`, Wayland via `wl-paste`. The
-/// reader lists the clipboard's targets, picks an image one, and reads its
-/// bytes; any other platform, a failing read, or a clipboard with no image
-/// reads as no image. A missing tool reports how to install it, so the user
-/// can enable image paste.
-Future<ClipboardImageRead> _readClipboardImage() async {
-  if (!Platform.isLinux || Platform.isAndroid) {
-    return const ClipboardImageRead();
-  }
-  final env = Platform.environment;
-  final wayland =
-      env.containsKey('WAYLAND_DISPLAY') ||
-      env['XDG_SESSION_TYPE'] == 'wayland';
-  final tool = wayland ? 'wl-paste' : 'xclip';
-  try {
-    Future<List<int>> run(List<String> args) async {
-      final result = await Process.run(tool, args, stdoutEncoding: null);
-      if (result.exitCode != 0) return const <int>[];
-      return result.stdout as List<int>;
-    }
-
-    final targets = utf8
-        .decode(
-          await run(
-            wayland
-                ? const ['--list']
-                : const ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
-          ),
-        )
-        .split('\n')
-        .map((t) => t.trim())
-        .where((t) => t.isNotEmpty)
-        .toList();
-
-    String? target;
-    for (final preferred in _kPreferredImageTargets) {
-      if (targets.contains(preferred)) {
-        target = preferred;
-        break;
-      }
-    }
-    if (target == null) {
-      for (final t in targets) {
-        if (t.startsWith('image/')) {
-          target = t;
-          break;
-        }
-      }
-    }
-    if (target == null) return const ClipboardImageRead();
-
-    final bytes = await run(
-      wayland
-          ? ['--type', target]
-          : ['-selection', 'clipboard', '-t', target, '-o'],
-    );
-    if (bytes.isEmpty) return const ClipboardImageRead();
-    return ClipboardImageRead(
-      image: ClipboardImage(bytes: Uint8List.fromList(bytes), mime: target),
-    );
-  } on ProcessException {
-    // The tool is not installed: report how to enable the read.
-    return ClipboardImageRead(
-      failureMessage: wayland
-          ? 'Clipboard image paste needs wl-paste '
-                '(sudo apt install wl-clipboard).'
-          : 'Clipboard image paste needs xclip (sudo apt install xclip).',
-    );
-  } catch (_) {
-    return const ClipboardImageRead();
-  }
-}
+/// The clipboard-image contract the view's `imageReader` port and the
+/// structured-view tests consume (issue #72) now lives in its own module
+/// (issue #285) so the view no longer imports the process platform library
+/// for the default reader. Re-exported so the view's public surface (and the
+/// existing injection contract) is unchanged.
+export 'clipboard_image.dart'
+    show ClipboardImage, ClipboardImageRead, ClipboardImageReader;
 
 /// The message's full text as plain text (issue #198): the content the
 /// structured view renders for the row, in display order — the reasoning
@@ -482,6 +369,8 @@ class StructuredSessionPanel extends StatefulWidget {
     this.onThemeModeChanged,
     this.imageReader,
     this.clock = DateTime.now,
+    this.exitApp,
+    this.osLabel,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -546,6 +435,18 @@ class StructuredSessionPanel extends StatefulWidget {
   /// tick deterministically. Defaults to the real clock.
   final DateTime Function() clock;
 
+  /// The `/exit` local command's effect (issue #285): the view calls this
+  /// instead of `exit(0)` directly. `null` for the real hard exit
+  /// ([process_ports.exitApp]); injectable so a test can record the call
+  /// without killing the process.
+  final void Function()? exitApp;
+
+  /// The OS label the `/debug` local command shows (issue #285): the view
+  /// reads this instead of `Platform.operatingSystem` directly. `null` for
+  /// the real platform's label ([process_ports.osLabel]); injectable so a
+  /// test can pin a value.
+  final String Function()? osLabel;
+
   @override
   State<StructuredSessionPanel> createState() => _StructuredSessionPanelState();
 }
@@ -568,6 +469,8 @@ class StructuredSessionScreen extends StatelessWidget {
     this.onThemeModeChanged,
     this.imageReader,
     this.clock = DateTime.now,
+    this.exitApp,
+    this.osLabel,
   });
 
   /// The session to view (the bridge's `/api/sessions/{id}` family).
@@ -608,6 +511,14 @@ class StructuredSessionScreen extends StatelessWidget {
   /// The wall-clock for the live turn's ticking duration (issue #122).
   final DateTime Function() clock;
 
+  /// The `/exit` local command's effect (issue #285); see
+  /// [StructuredSessionPanel.exitApp].
+  final void Function()? exitApp;
+
+  /// The OS label the `/debug` local command shows (issue #285); see
+  /// [StructuredSessionPanel.osLabel].
+  final String Function()? osLabel;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -624,6 +535,8 @@ class StructuredSessionScreen extends StatelessWidget {
         onThemeModeChanged: onThemeModeChanged,
         imageReader: imageReader,
         clock: clock,
+        exitApp: exitApp,
+        osLabel: osLabel,
       ),
     );
   }
@@ -1692,8 +1605,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   void _applyToolSuccess(Map<String, Object?> data) {
     final toolId = data['id'] is String ? data['id'] as String : null;
     if (toolId == null || !mounted) return;
-    final servicePatch = _patchFromState(data);
-    final answers = _answersFromState(data);
+    // The tool-state decode (the success event's `data`) lives in the client
+    // (which routes through the model's one tool-state decoder), so the view
+    // adapts the decoded patch/answers to the card instead of decoding them.
+    final state = toolStateFacts(data);
     setState(
       () => _updateToolCard(
         toolId,
@@ -1701,38 +1616,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
           tool,
           status: 'completed',
           patch:
-              servicePatch ??
+              state.patch ??
               (tool.name == 'write' ? ToolCall.writePatch(tool.input) : null),
-          answers: answers,
+          answers: state.answers,
         ),
       ),
     );
-  }
-
-  /// The tool's file patch from a tool-state payload — the success event's
-  /// `data`, and the history's tool `state`, both carry
-  /// `metadata.files[0].patch` (the unified diff the terminal renders).
-  static String? _patchFromState(Map<String, Object?> state) {
-    final metadata = state['metadata'];
-    final files = metadata is Map<String, Object?> ? metadata['files'] : null;
-    if (files is List && files.isNotEmpty) {
-      final first = files.first;
-      if (first is Map<String, Object?> && first['patch'] is String) {
-        return first['patch'] as String;
-      }
-    }
-    return null;
-  }
-
-  /// The answers the user gave the agent's `question` tool (issue #50), from
-  /// a tool-state payload — the success event's `data` and the history's tool
-  /// `state` both carry `metadata.answers` — so the live card settles on the
-  /// same question/answer lines the reopened history shows.
-  static List<List<String>>? _answersFromState(Map<String, Object?> state) {
-    final metadata = state['metadata'];
-    return metadata is Map<String, Object?>
-        ? ToolCall.answersFrom(metadata['answers'])
-        : null;
   }
 
   /// The tool failed.
@@ -1754,10 +1643,10 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     final detail = _detail;
     if (detail == null) return;
     final cost = (data['cost'] as num?)?.toDouble() ?? detail.cost;
-    final tokensJson = data['tokens'];
-    final tokens = tokensJson == null
-        ? detail.tokens
-        : _tokensFromWire(tokensJson);
+    // The events' nested tokens payload is decoded in the client (which
+    // routes through the model's one events-side token decode); the view only
+    // applies the decoded usage to the in-flight detail.
+    final tokens = eventTokens(data) ?? detail.tokens;
     if (!mounted) return;
     setState(() => _detail = detail.withUsage(cost: cost, tokens: tokens));
   }
@@ -1788,33 +1677,26 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// can fold it in), and records the context the model call used. The
   /// envelope's `created` is the step's `completed` (its `time.completed`).
   void _applyStepEnded(BridgeEvent event) {
-    final data = event.data;
-    final id = _messageId(data);
+    final id = _messageId(event.data);
     if (id == null || !mounted) return;
-    final tokens = data['tokens'];
-    final map = tokens is Map<String, Object?>
-        ? tokens
-        : const <String, Object?>{};
+    // The step's turn-stats facts (the billed output/reasoning tokens and the
+    // context the model call used) are decoded in the client (which routes
+    // the context through the model's one token decode + context
+    // arithmetic); the view applies them to the in-flight step.
+    final facts = stepFacts(event.data);
     setState(() {
       _setLiveStepStats(
         id,
         completed: event.created,
-        outputTokens: (map['output'] as num?)?.toInt(),
-        reasoningTokens: (map['reasoning'] as num?)?.toInt(),
+        outputTokens: facts.outputTokens,
+        reasoningTokens: facts.reasoningTokens,
       );
-      // The context the model call used: the call's total input — the fresh
-      // input plus the prompt-cache reads and writes (the `input` alone is
-      // only the uncached slice, which read the context as nearly empty).
-      final input = (map['input'] as num?)?.toInt();
-      if (input != null) {
-        final cache = map['cache'] is Map<String, Object?>
-            ? map['cache'] as Map<String, Object?>
-            : const <String, Object?>{};
-        _contextUsed =
-            input +
-            ((cache['read'] as num?)?.toInt() ?? 0) +
-            ((cache['write'] as num?)?.toInt() ?? 0);
-      }
+      // The context the model call used (the `input` plus the prompt-cache
+      // reads and writes): the history path carries the same fact as
+      // `SessionMessage.contextTokens`, so the live gauge and the seeded
+      // gauge agree.
+      final context = facts.contextTokens;
+      if (context != null) _contextUsed = context;
     });
   }
 
@@ -1832,22 +1714,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         return;
       }
     }
-  }
-
-  /// A [TokenUsage] from the service's wire shape (the events' `tokens`
-  /// payload, `cache.read` / `cache.write` nested), tolerant of gaps.
-  static TokenUsage _tokensFromWire(Object? json) {
-    final map = json is Map<String, Object?> ? json : const <String, Object?>{};
-    final cache = map['cache'] is Map<String, Object?>
-        ? map['cache'] as Map<String, Object?>
-        : const <String, Object?>{};
-    return TokenUsage(
-      input: (map['input'] as num?)?.toInt() ?? 0,
-      output: (map['output'] as num?)?.toInt() ?? 0,
-      reasoning: (map['reasoning'] as num?)?.toInt() ?? 0,
-      cacheRead: (cache['read'] as num?)?.toInt() ?? 0,
-      cacheWrite: (cache['write'] as num?)?.toInt() ?? 0,
-    );
   }
 
   /// Appends a new in-flight tool card (created at `tool.input.started`):
@@ -2148,7 +2014,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   Future<void> _pasteFromClipboard() async {
     ClipboardImageRead read;
     try {
-      read = await (widget.imageReader ?? _readClipboardImage)();
+      read = await (widget.imageReader ?? readClipboardImage)();
     } catch (_) {
       read = const ClipboardImageRead();
     }
@@ -2159,7 +2025,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       if (message != null && mounted) _snackBar(message);
       return;
     }
-    if (image.bytes.length > _kMaxClipboardImageBytes) {
+    if (image.bytes.length > kMaxClipboardImageBytes) {
       // Over the service's decoded limit: report it, leave no dead token.
       if (mounted) _snackBar('The clipboard image is over the 20 MiB limit.');
       return;
@@ -2924,12 +2790,15 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
         _dialog(
           'Debug',
           'App: OpenCode Bridge $kAppVersion\n'
-              'OS: ${Platform.operatingSystem}\n\n'
+              'OS: ${(widget.osLabel ?? osLabel)()}\n\n'
               'Service:\n$service',
         );
         return;
       case 'exit':
-        exit(0);
+        // The hard exit is a process-platform concern: the view calls the
+        // injected port instead of `exit(0)` directly (issue #285), so the
+        // default is the real exit and a test can observe the call.
+        (widget.exitApp ?? exitApp)();
     }
   }
 

@@ -51,6 +51,120 @@ void main() {
         ),
       );
     });
+
+    // The events' nested token shape (issue #285): the service's
+    // `TokenUsage.Info` nests `cache.read`/`cache.write`, which the history
+    // contract flattens to `cacheRead`/`cacheWrite`. `fromEventTokens` is the
+    // one place the nested → flattened transform lives, so these pin the wire
+    // field names (a renamed or added field breaks exactly here).
+    test('fromEventTokens flattens the nested cache read/write', () {
+      expect(
+        TokenUsage.fromEventTokens({
+          'input': 1,
+          'output': 2,
+          'reasoning': 3,
+          'cache': {'read': 4, 'write': 5},
+        }),
+        const TokenUsage(
+          input: 1,
+          output: 2,
+          reasoning: 3,
+          cacheRead: 4,
+          cacheWrite: 5,
+        ),
+      );
+    });
+
+    test('fromEventTokens is tolerant of a missing or partial cache', () {
+      // A missing `cache` reads as zero reads/writes (not an error).
+      expect(
+        TokenUsage.fromEventTokens({'input': 7, 'output': 8}),
+        const TokenUsage(
+          input: 7,
+          output: 8,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        ),
+      );
+      // A cache with only a read, or no numeric value, is tolerant.
+      expect(
+        TokenUsage.fromEventTokens({
+          'input': 1,
+          'cache': {'read': 2},
+        }),
+        const TokenUsage(
+          input: 1,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 2,
+          cacheWrite: 0,
+        ),
+      );
+      expect(
+        TokenUsage.fromEventTokens({'cache': 'not a map'}),
+        const TokenUsage(
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        ),
+      );
+      expect(
+        TokenUsage.fromEventTokens(null),
+        const TokenUsage(
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        ),
+      );
+    });
+
+    // The context arithmetic (issue #285): the model call's context is its
+    // input plus the prompt-cache reads and writes. The one owner of that
+    // arithmetic, so the live path and the history path agree.
+    test('contextTokens is input plus the cache reads and writes', () {
+      expect(
+        const TokenUsage(
+          input: 30,
+          output: 5,
+          reasoning: 0,
+          cacheRead: 40,
+          cacheWrite: 30,
+        ).contextTokens,
+        100,
+      );
+      // No cache: the context is the input alone.
+      expect(
+        const TokenUsage(
+          input: 12,
+          output: 3,
+          reasoning: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+        ).contextTokens,
+        12,
+      );
+    });
+
+    test('contextTokensFrom decodes the nested payload to the context', () {
+      // The same fact the history message carries as `contextTokens`.
+      expect(
+        TokenUsage.contextTokensFrom({
+          'input': 30,
+          'cache': {'read': 40, 'write': 30},
+        }),
+        100,
+      );
+      // Tolerant of a missing cache (reads as zero), and `null` when there is
+      // no `input` (a step without tokens cannot feed the context).
+      expect(TokenUsage.contextTokensFrom({'input': 8}), 8);
+      expect(TokenUsage.contextTokensFrom({'output': 5}), isNull);
+      expect(TokenUsage.contextTokensFrom(null), isNull);
+    });
   });
 
   group('SessionDetail', () {

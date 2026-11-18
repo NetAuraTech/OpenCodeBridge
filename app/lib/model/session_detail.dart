@@ -31,6 +31,13 @@ class TokenUsage {
   /// Cache-write tokens (the service's `cache.write`).
   final int cacheWrite;
 
+  /// The context the model call used: its [input] plus the prompt-cache reads
+  /// and writes (the [input] alone is only the uncached slice, which reads the
+  /// context as nearly empty). The one owner of the context arithmetic
+  /// (issue #285), so the live path and the history path compute the same
+  /// fact the message model carries as [SessionMessage.contextTokens].
+  int get contextTokens => input + cacheRead + cacheWrite;
+
   Map<String, Object?> toJson() => {
     'input': input,
     'output': output,
@@ -48,6 +55,44 @@ class TokenUsage {
       cacheRead: (map['cacheRead'] as num?)?.toInt() ?? 0,
       cacheWrite: (map['cacheWrite'] as num?)?.toInt() ?? 0,
     );
+  }
+
+  /// The events' nested token shape (the service's `TokenUsage.Info`, whose
+  /// `cache` nests `read`/`write`) decoded to the contract's flattened
+  /// [TokenUsage]. Tolerant of gaps (a missing field reads as zero), like
+  /// [fromJson]. The one place the nested → flattened transform lives (issue
+  /// #285): the live path (the events' `tokens` payload) and the history path
+  /// (the service's detail/context read) both decode to [TokenUsage] through
+  /// here, so the two paths agree on the token fact.
+  factory TokenUsage.fromEventTokens(Object? json) {
+    final map = json is Map<String, Object?> ? json : const <String, Object?>{};
+    final cache = map['cache'] is Map<String, Object?>
+        ? map['cache'] as Map<String, Object?>
+        : const <String, Object?>{};
+    return TokenUsage(
+      input: (map['input'] as num?)?.toInt() ?? 0,
+      output: (map['output'] as num?)?.toInt() ?? 0,
+      reasoning: (map['reasoning'] as num?)?.toInt() ?? 0,
+      cacheRead: (cache['read'] as num?)?.toInt() ?? 0,
+      cacheWrite: (cache['write'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// The context a model call sent to the model, decoded from the service's
+  /// nested token payload (the one shape both the live `session.step.ended`
+  /// event and the history's assistant message carry): its [input] plus the
+  /// prompt-cache reads and writes, i.e. [contextTokens] of the decoded usage.
+  /// The one owner of that arithmetic (issue #285), so the live path (the
+  /// events' `session.step.ended`) and the history path (the message's
+  /// `SessionMessage.contextTokens`) agree on the same fact. `null` when the
+  /// payload carries no `input` (a step without tokens cannot feed the
+  /// context).
+  static int? contextTokensFrom(Object? json) {
+    final map = json is Map<String, Object?> ? json : null;
+    if (map == null) return null;
+    final input = (map['input'] as num?)?.toInt();
+    if (input == null) return null;
+    return TokenUsage.fromEventTokens(map).contextTokens;
   }
 
   @override

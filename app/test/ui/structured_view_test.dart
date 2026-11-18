@@ -315,6 +315,19 @@ class _FakeClient extends SessionsClient {
     return '{"servers":[]}';
   }
 
+  /// The service's status payload (the `/debug` command's Service section).
+  final String statusPayload = '{"ok":true}';
+
+  /// Thrown from `status` when set (the unreachable/unavailable cases).
+  Object? statusError;
+
+  @override
+  Future<String> status() async {
+    final error = statusError;
+    if (error is Object) throw error;
+    return statusPayload;
+  }
+
   @override
   Future<List<ModelOption>> listModels(String id) async => models;
 
@@ -657,6 +670,8 @@ Future<StreamController<BridgeEvent>> _pump(
   Stream<SessionGap>? gaps,
   ClipboardImageReader? imageReader,
   DateTime Function()? clock,
+  void Function()? exitApp,
+  String Function()? osLabel,
   bool wireEvents = true,
 }) async {
   final events = StreamController<BridgeEvent>.broadcast();
@@ -673,6 +688,8 @@ Future<StreamController<BridgeEvent>> _pump(
         gaps: gaps,
         imageReader: imageReader,
         clock: clock ?? DateTime.now,
+        exitApp: exitApp,
+        osLabel: osLabel,
       ),
     ),
   );
@@ -4887,6 +4904,43 @@ void main() {
         ThemeData.dark().colorScheme.surfaceContainerHighest,
       );
     });
+
+    testWidgets(
+      '/exit runs the injected exit port, not a hard exit (issue #285)',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        var exited = 0;
+        await _pump(tester, client: client, exitApp: () => exited++);
+
+        await _typePrompt(tester, '/exit');
+        await tester.pump();
+        await _pressEnter(tester);
+        await tester.pump();
+
+        // The hard exit is a process concern behind a port: the injected
+        // callback ran (and the test process is still alive to observe it,
+        // which a real `exit(0)` would have prevented).
+        expect(exited, 1);
+      },
+    );
+
+    testWidgets(
+      '/debug shows the injected OS label, not the platform (issue #285)',
+      (tester) async {
+        final client = _FakeClient(details: const [_detail0]);
+        await _pump(tester, client: client, osLabel: () => 'fake-os');
+
+        await _typePrompt(tester, '/debug');
+        await tester.pump();
+        await _pressEnter(tester);
+        await tester.pump();
+
+        // The OS label comes from the injected port, not `Platform`.
+        expect(find.textContaining('OS: fake-os'), findsOneWidget);
+        // The service section is still rendered from the client's payload.
+        expect(find.textContaining('Service:'), findsOneWidget);
+      },
+    );
   });
 
   group('StructuredSessionScreen `@` menu trigger (issue #56)', () {

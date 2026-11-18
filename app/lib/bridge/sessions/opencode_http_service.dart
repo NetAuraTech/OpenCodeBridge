@@ -215,7 +215,7 @@ class OpencodeHttpService implements OpencodeService {
       title: title ?? '',
       location: _nestedString(map, 'location', 'directory'),
       cost: (map['cost'] as num?)?.toDouble() ?? 0,
-      tokens: _tokensFrom(map['tokens']),
+      tokens: TokenUsage.fromEventTokens(map['tokens']),
       outcome: outcome,
       contextLimit: await _contextLimitFor(model),
       model: model == null ? null : ModelRef.fromJson(model),
@@ -1079,22 +1079,6 @@ class OpencodeHttpService implements OpencodeService {
     return decoded is List ? decoded : const <Object?>[];
   }
 
-  /// The service's `TokenUsage.Info` flattens `cache.{read,write}` to the
-  /// contract's `cacheRead`/`cacheWrite`.
-  static TokenUsage _tokensFrom(Object? json) {
-    final map = json is Map<String, Object?> ? json : const {};
-    final cache = map['cache'] is Map<String, Object?>
-        ? map['cache'] as Map<String, Object?>
-        : const <String, Object?>{};
-    return TokenUsage(
-      input: (map['input'] as num?)?.toInt() ?? 0,
-      output: (map['output'] as num?)?.toInt() ?? 0,
-      reasoning: (map['reasoning'] as num?)?.toInt() ?? 0,
-      cacheRead: (cache['read'] as num?)?.toInt() ?? 0,
-      cacheWrite: (cache['write'] as num?)?.toInt() ?? 0,
-    );
-  }
-
   /// One context message. Returns `null` for the non-conversational kinds the
   /// structured view does not render.
   static SessionMessage? _messageFrom(Map<String, Object?> item) {
@@ -1162,7 +1146,7 @@ class OpencodeHttpService implements OpencodeService {
       role: 'assistant',
       text: texts.isEmpty ? null : texts.join('\n'),
       reasoning: reasonings.isEmpty ? null : reasonings.join('\n'),
-      contextTokens: _contextTokensFrom(item['tokens']),
+      contextTokens: TokenUsage.contextTokensFrom(item['tokens']),
       tools: tools,
       created: _messageCreated(item),
       streamed: _messageTime(item, 'streamed'),
@@ -1196,26 +1180,11 @@ class OpencodeHttpService implements OpencodeService {
     return (map?[field] as num?)?.toInt();
   }
 
-  /// The context an assistant message's model call sent to the model: its
-  /// `tokens` input plus the prompt-cache reads and writes (the `input`
-  /// alone is only the uncached slice). `null` when the service carried no
-  /// tokens.
-  static int? _contextTokensFrom(Object? json) {
-    final map = json is Map<String, Object?> ? json : null;
-    if (map == null) return null;
-    final input = (map['input'] as num?)?.toInt();
-    if (input == null) return null;
-    final cache = map['cache'] is Map<String, Object?>
-        ? map['cache'] as Map<String, Object?>
-        : const <String, Object?>{};
-    return input +
-        ((cache['read'] as num?)?.toInt() ?? 0) +
-        ((cache['write'] as num?)?.toInt() ?? 0);
-  }
-
   /// One assistant tool part (the service's `Session.Message.Assistant.Tool`)
   /// flattens to a contract [ToolCall]; the error text is the structured
-  /// error's `message`.
+  /// error's `message`. The tool-state patch/answers are decoded by the
+  /// model's one tool-state decoder ([ToolCall.fromToolState], issue #285), so
+  /// the history path and the live events path share the same decode.
   static ToolCall _toolCallFrom(Map<String, Object?> part) {
     final state = part['state'] is Map<String, Object?>
         ? part['state'] as Map<String, Object?>
@@ -1229,38 +1198,19 @@ class OpencodeHttpService implements OpencodeService {
       }
     }
     final name = part['name'] as String? ?? '';
-    final metadata = state['metadata'];
     return ToolCall(
       id: part['id'] is String ? part['id'] as String : null,
       name: name,
       status: status,
       input: state['input'],
       error: error,
-      patch: _patchFrom(state, name: name),
-      answers: metadata is Map<String, Object?>
-          ? ToolCall.answersFrom(metadata['answers'])
-          : null,
+      // The service's unified diff (or, for a `write` which the service
+      // returns only as the file's content, the synthesized "new file" diff).
+      patch:
+          ToolCall.patchFrom(state) ??
+          (name == 'write' ? ToolCall.writePatch(state['input']) : null),
+      answers: ToolCall.answersFromState(state),
     );
-  }
-
-  /// The file patch the structured view renders for the tool: the service's
-  /// tool-state `metadata.files` unified diff (the one the terminal renders
-  /// for the edits), or — for a `write`, which the service returns only as
-  /// the file's full content — the "new file" diff synthesized from it.
-  /// `null` when the tool carries no patch and no synthesizable content.
-  static String? _patchFrom(
-    Map<String, Object?> state, {
-    required String name,
-  }) {
-    final metadata = state['metadata'];
-    final files = metadata is Map<String, Object?> ? metadata['files'] : null;
-    if (files is List && files.isNotEmpty) {
-      final first = files.first;
-      if (first is Map<String, Object?> && first['patch'] is String) {
-        return first['patch'] as String;
-      }
-    }
-    return name == 'write' ? ToolCall.writePatch(state['input']) : null;
   }
 
   static List<String> _stringList(Object? json) {
