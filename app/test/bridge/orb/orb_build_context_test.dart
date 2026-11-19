@@ -139,6 +139,52 @@ void main() {
     });
   });
 
+  group('OrbEmbedded.toolchain (issue #354)', () {
+    // The pins are the spec §5.1 values, hardcoded here as the independent
+    // expectations: a parser that reads them off the Dockerfile and a list
+    // that is hand-maintained in prose must agree on both sides.
+    const expectedPins = [
+      'NODE_VERSION=22.14.0',
+      'NPM_VERSION=10.9.2',
+      'PHP_VERSION=8.3',
+      'FLUTTER_VERSION=3.47.8',
+      'REDIS_VERSION=7.4.0',
+      'POSTGRES_VERSION=16',
+      'TYPESENSE_VERSION=28.0',
+      'MAILHOG_VERSION=1.0.1',
+      'GIT_VERSION=2.43',
+      'OPENCODE_VERSION=2.2.7',
+      'GH_VERSION=2.103.3',
+    ];
+
+    test('the surfaced toolchain is the Dockerfile ARG defaults', () {
+      // The base image is an image, not a toolchain, so it is not surfaced.
+      expect(OrbEmbedded.toolchain, expectedPins);
+    });
+
+    test('a changed image definition changes the surfaced toolchain '
+        '(the drift is observable)', () {
+      // The drift-proof (issue #354, acceptance #3): the visible toolchain
+      // is produced from the image definition, so a Dockerfile that bumps a
+      // pin (or adds one) surfaces the bump — the parser reads the file,
+      // it does not echo a second list.
+      final dockerfile = OrbEmbedded.files['Dockerfile']!;
+      final bumped = dockerfile
+          .replaceFirst('FLUTTER_VERSION=3.47.8', 'FLUTTER_VERSION=3.48.0')
+          .replaceFirst('GH_VERSION=2.103.3', 'GH_VERSION=2.104.0');
+      expect(bumped, isNot(dockerfile));
+      final parsed = OrbEmbedded.parseToolchain(bumped);
+      expect(parsed, isNot(OrbEmbedded.toolchain));
+      expect(parsed, contains('FLUTTER_VERSION=3.48.0'));
+      expect(parsed, contains('GH_VERSION=2.104.0'));
+      expect(parsed, isNot(contains('FLUTTER_VERSION=3.47.8')));
+      expect(parsed, isNot(contains('GH_VERSION=2.103.3')));
+      // Every other pin still reads off the definition.
+      expect(parsed, containsAll(expectedPins.where((p) => !p.startsWith(
+        'FLUTTER_VERSION') && !p.startsWith('GH_VERSION'))));
+    });
+  });
+
   group('OrbEmbedded (issue #92)', () {
     test('the Dockerfile pins every toolchain as an ARG with a default', () {
       final dockerfile = OrbEmbedded.files['Dockerfile']!;
