@@ -318,7 +318,8 @@ void main() {
     expect(
       source.split(fragment).length - 1,
       1,
-      reason: 'the toolchain sentence must appear exactly once in the '
+      reason:
+          'the toolchain sentence must appear exactly once in the '
           'orb_spawn description (a duplicated graft is a regression)',
     );
     // No dangling fragment left between two copies: the graft that corrupted
