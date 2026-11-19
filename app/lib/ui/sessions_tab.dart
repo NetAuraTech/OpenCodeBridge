@@ -1571,11 +1571,17 @@ class _SessionRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 5),
-            Text(
-              record?.name ?? orbId,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12),
+            // Bounded (issue #364): the name ellipsizes inside the pill
+            // instead of taking its full intrinsic width and overflowing
+            // the chip's inner row. A short name still hugs its content
+            // (the row stays MainAxisSize.min).
+            Flexible(
+              child: Text(
+                record?.name ?? orbId,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12),
+              ),
             ),
           ],
         ),
@@ -1640,7 +1646,13 @@ class _SessionRow extends StatelessWidget {
                     const SizedBox(height: 2),
                     Row(
                       children: [
-                        _orbIdentity(context),
+                        // Flexible, not Expanded (issue #364): the chip takes
+                        // only as much of the subtitle row as it needs, and a
+                        // long name/id ellipsizes inside the pill instead of
+                        // taking the row's full width and squeezing the
+                        // location to 0 (Expanded would eat all the leftover
+                        // width).
+                        Flexible(child: _orbIdentity(context)),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(

@@ -1624,6 +1624,73 @@ void main() {
         expect(find.byKey(const ValueKey('orb-chip-orb_1')), findsOneWidget);
         expect(find.text('orb_1'), findsOneWidget);
       });
+
+      testWidgets(
+        'a long orb name ellipsizes: no overflow, the location stays',
+        (tester) async {
+          // The long name (issue #364): the chip must take at most its
+          // share of the subtitle row, never the row's full width.
+          const long = OrbRecord(
+            id: 'orb_1',
+            name: 'i353-branch-contrast',
+            project: 'p1',
+            branch: 'orb/orb_1',
+            state: 'running',
+            created: '2025-01-01T00:00:00Z',
+          );
+          await _pumpTab(
+            tester,
+            rows: [_orbOne],
+            orbs: _FakeOrbsClient(orbs: [long]),
+          );
+
+          // No RenderFlex overflow anywhere in the row (the subtitle row
+          // or the chip's inner row).
+          expect(tester.takeException(), isNull);
+          final chip = tester.getRect(
+            find.byKey(const ValueKey('orb-chip-orb_1')),
+          );
+          final pane = tester.getRect(
+            find.byKey(const ValueKey('sessions-list-pane')),
+          );
+          // The chip stays within its list column…
+          expect(chip.left, greaterThanOrEqualTo(pane.left));
+          expect(chip.right, lessThanOrEqualTo(pane.right));
+          // …and the location text is still on screen to the chip's right.
+          final location = tester.getRect(find.text('/code/app'));
+          expect(location.left, greaterThanOrEqualTo(chip.right));
+          expect(location.width, greaterThan(0));
+        },
+      );
+
+      testWidgets('a long raw orb id (the fallback) ellipsizes: no overflow', (
+        tester,
+      ) async {
+        // The raw-id fallback path (orb list not loaded / orb gone) wears
+        // the same chip: a long id must ellipsize the same way.
+        const longId = 'i352-push-verify-branch-t352-push-verify';
+        const row = Session(
+          id: 'ses_orb2',
+          title: 'working in the orb',
+          project: SessionProject(id: 'p1', name: 'app'),
+          created: 100,
+          location: '/code/app',
+          active: false,
+          orb: longId,
+        );
+        await _pumpTab(tester, rows: [row], orbs: _FakeOrbsClient());
+
+        expect(tester.takeException(), isNull);
+        final chip = tester.getRect(find.byKey(ValueKey('orb-chip-$longId')));
+        final pane = tester.getRect(
+          find.byKey(const ValueKey('sessions-list-pane')),
+        );
+        expect(chip.left, greaterThanOrEqualTo(pane.left));
+        expect(chip.right, lessThanOrEqualTo(pane.right));
+        final location = tester.getRect(find.text('/code/app'));
+        expect(location.left, greaterThanOrEqualTo(chip.right));
+        expect(location.width, greaterThan(0));
+      });
     });
 
     group('workspace export (issue #98)', () {
