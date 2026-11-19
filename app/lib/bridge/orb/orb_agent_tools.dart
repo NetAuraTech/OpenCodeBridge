@@ -65,6 +65,8 @@ abstract class OrbAgentTools {
       // acbc8d7 (#169/#170): async-by-default spawn, the bounded orb_wait.
       // The version every install holds when #141's fix ships.
       '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
+      // 5bdd8c5 (#174): the direct-tool registration (the codemode opt-out).
+      '58872b1d3aaeda688746c42dc583b9bb1ad6c2ba07969358c727ec93f9878281',
     },
   };
 
@@ -235,7 +237,8 @@ export default {
                 "answers immediately and the completion message wakes this session later. A " +
                 "retried spawn of the very same task (the identical text from the same session, e.g. after " +
                 "a timeout) returns the already-running task — it is not duplicated. A different task " +
-                "text is always dispatched anew, even while another task runs on the orb.",
+                "text on an orb that already runs a task is refused (it is never stacked behind it): " +
+                "spawn with a distinct \"orb\" name for parallel work, or wait for the task to finish.",
             },
             orb: {
               type: "string",
@@ -332,6 +335,18 @@ export default {
             }
             if (code === "seed_not_found" || code === "seed_not_pushed" || code === "seed_conflict") {
               return { output: "Orb spawn refused (" + code + "): " + (row.details || "see the seed rules, spec §3.3.") }
+            }
+            if (code === "orb_busy") {
+              // Issue #351: the target orb already runs a task. Nothing was
+              // stacked — the dispatch was refused up front, and the answer
+              // names the busy orb / running task and the positive path.
+              return {
+                output:
+                  "Orb spawn refused (orb_busy): no task was dispatched — the orb is already " +
+                  "running a task. " +
+                  (row.details || "Wait for the task to complete, or spawn with a distinct \"orb\" name for parallel work.") +
+                  " This is not a queue: a second task on the same orb would be serialized, not parallel.",
+              }
             }
             return { output: "Orb spawn failed: " + code + (result.row && result.row.details ? " — " + result.row.details : "") }
           }
