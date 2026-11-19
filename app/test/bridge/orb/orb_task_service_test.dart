@@ -1691,24 +1691,45 @@ void main() {
         wait: false,
         callerSession: 'ses_caller',
       );
-      final second = await service.spawn(
-        task: '  fix   THE login form  ',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-      final third = await service.spawn(
-        task: 'Fix the\nlogin\tform.',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
 
+      // The trimmed variant is the same task (a retry of the running one).
       expect(trimmed, same(first));
-      expect(second.id, isNot(first.id));
-      expect(third.id, isNot(first.id));
-      expect(orbs.createSessionCalls, 3);
+      // The retyped variants are NOT the same task: they are not deduped into
+      // the running one — with the orb busy they are refused up front
+      // (issue #351), never silently stacked, and never returned as the
+      // running task. That refusal is the proof the dedup did not over-match.
+      await expectLater(
+        service.spawn(
+          task: '  fix   THE login form  ',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.orbBusy,
+          ),
+        ),
+      );
+      await expectLater(
+        service.spawn(
+          task: 'Fix the\nlogin\tform.',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.orbBusy,
+          ),
+        ),
+      );
+      expect(orbs.createSessionCalls, 1);
     });
 
-    test('a different task text dispatches a second session', () async {
+    test('a different task on a busy orb is refused (issue #351)', () async {
       scriptDispatch();
 
       final first = await service.spawn(
@@ -1716,16 +1737,35 @@ void main() {
         wait: false,
         callerSession: 'ses_caller',
       );
-      final second = await service.spawn(
-        task: 'Fix the signup form',
-        wait: false,
-        callerSession: 'ses_caller',
+      // The orb's single running task is not deduped away (a different text):
+      // the second dispatch is refused up front — never silently stacked, and
+      // never answered as a plain "running".
+      await expectLater(
+        service.spawn(
+          task: 'Fix the signup form',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>()
+              .having((e) => e.code, 'code', OrbRefusalError.orbBusy)
+              .having(
+                (e) => e.message,
+                'message',
+                allOf(
+                  contains('worker'),
+                  contains(first.id),
+                  contains('orb'),
+                  contains('wait'),
+                ),
+              ),
+        ),
       );
 
-      expect(second.id, isNot(first.id));
-      expect(orbs.createSessionCalls, 2);
-      expect(service.tasks, hasLength(2));
-      expect(backend.opencode.prompts, hasLength(2));
+      // The refusal dispatches nothing: one session, one task, one prompt.
+      expect(orbs.createSessionCalls, 1);
+      expect(service.tasks, hasLength(1));
+      expect(backend.opencode.prompts, hasLength(1));
     });
 
     test('a completed task with the same text dispatches anew', () async {
@@ -1775,77 +1815,114 @@ void main() {
       expect(dispatched.task, task);
     });
 
-    test('a substring of the running text is a new task', () async {
+    test('a substring of the running text is a distinct task', () async {
+      // Issue #147: the raw text is the identity — a substring is not a retry.
+      // With the orb busy (issue #351) the distinct dispatch is refused up
+      // front rather than deduped into the running task or stacked behind it.
       scriptDispatch();
 
-      final first = await service.spawn(
+      await service.spawn(
         task: 'Fix the login form validation',
         wait: false,
         callerSession: 'ses_caller',
       );
-      final second = await service.spawn(
-        task: 'Fix the login form',
-        wait: false,
-        callerSession: 'ses_caller',
+      await expectLater(
+        service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.orbBusy,
+          ),
+        ),
       );
-
-      expect(second.id, isNot(first.id));
     });
 
-    test('a superset containing the running text is a new task', () async {
+    test('a superset containing the running text is a distinct task', () async {
       scriptDispatch();
 
-      final first = await service.spawn(
+      await service.spawn(
         task: 'Fix the login form',
         wait: false,
         callerSession: 'ses_caller',
       );
-      final second = await service.spawn(
-        task: 'Fix the login form and then the signup form',
-        wait: false,
-        callerSession: 'ses_caller',
+      // The superset is a different raw text: refused (busy), not deduped into
+      // the running task and not given a second session.
+      await expectLater(
+        service.spawn(
+          task: 'Fix the login form and then the signup form',
+          wait: false,
+          callerSession: 'ses_caller',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.orbBusy,
+          ),
+        ),
       );
-
-      expect(second.id, isNot(first.id));
-      expect(second.session, isNot(first.session));
-    });
-
-    test('the running text with punctuation removed is a new task', () async {
-      scriptDispatch();
-
-      final first = await service.spawn(
-        task: 'Fix the login form!',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-      final second = await service.spawn(
-        task: 'Fix the login form',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-      final third = await service.spawn(
-        task: 'Fix the login form!!',
-        wait: false,
-        callerSession: 'ses_caller',
-      );
-
-      expect(second.id, isNot(first.id));
-      expect(third.id, isNot(first.id));
+      expect(orbs.createSessionCalls, 1);
     });
 
     test(
-      'two different tasks close together keep their own caller sessions',
+      'the running text with punctuation removed is a distinct task',
       () async {
         scriptDispatch();
+
+        await service.spawn(
+          task: 'Fix the login form!',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+        // Punctuation is part of the raw identity: each variant is a distinct
+        // task, refused on the busy orb rather than deduped or stacked.
+        for (final variant in ['Fix the login form', 'Fix the login form!!']) {
+          await expectLater(
+            service.spawn(
+              task: variant,
+              wait: false,
+              callerSession: 'ses_caller',
+            ),
+            throwsA(
+              isA<OrbRefusalError>().having(
+                (e) => e.code,
+                'code',
+                OrbRefusalError.orbBusy,
+              ),
+            ),
+          );
+        }
+      },
+    );
+
+    test(
+      'two different tasks on two orbs keep their own caller sessions',
+      () async {
+        // Issue #351: one orb runs one task, so two live tasks are two orbs.
+        // The attribution under test is unchanged: each dispatch keeps its
+        // own caller session (the second targets a distinct orb, so it is
+        // unaffected by the first's busy orb).
+        scriptDispatch();
+        orbs.listResult = [
+          _runningOrb(id: 'a1b2c3', name: 'worker'),
+          _runningOrb(id: 'b2c3d4', name: 'other'),
+        ];
 
         final first = await service.spawn(
           task: 'Fix the login form',
           wait: false,
+          orb: 'worker',
           callerSession: 'ses_caller',
         );
         final second = await service.spawn(
           task: 'Fix the login form validation',
           wait: false,
+          orb: 'other',
           callerSession: 'ses_b',
         );
 
@@ -1882,25 +1959,45 @@ void main() {
           wait: false,
           callerSession: 'ses_caller',
         );
-        final whitespace = await service.spawn(
-          task: 'Fix  the  login form',
-          wait: false,
-          callerSession: 'ses_caller',
-        );
-        final otherCaller = await service.spawn(
-          task: 'Fix the login form',
-          wait: false,
-          callerSession: 'ses_b',
-        );
 
         expect(retried, same(first));
         // The identity is the raw text's hash — persisted, never a normalized copy.
         expect(first.textHash, isNotNull);
         expect(retried.textHash, first.textHash);
-        expect(whitespace.id, isNot(first.id));
-        expect(whitespace.textHash, isNot(first.textHash));
-        expect(otherCaller.id, isNot(first.id));
-        expect(orbs.createSessionCalls, 3);
+        // A merely whitespace-different text (same caller) is NOT the retry:
+        // with the orb busy it is refused, not deduped into the running task.
+        await expectLater(
+          service.spawn(
+            task: 'Fix  the  login form',
+            wait: false,
+            callerSession: 'ses_caller',
+          ),
+          throwsA(
+            isA<OrbRefusalError>().having(
+              (e) => e.code,
+              'code',
+              OrbRefusalError.orbBusy,
+            ),
+          ),
+        );
+        // A different caller is a different task (even with identical text):
+        // it is refused on the busy orb, never collapsed into the running one.
+        await expectLater(
+          service.spawn(
+            task: 'Fix the login form',
+            wait: false,
+            callerSession: 'ses_b',
+          ),
+          throwsA(
+            isA<OrbRefusalError>().having(
+              (e) => e.code,
+              'code',
+              OrbRefusalError.orbBusy,
+            ),
+          ),
+        );
+        // One real dispatch (the first) plus its retry: nothing was stacked.
+        expect(orbs.createSessionCalls, 1);
       },
     );
 
@@ -1919,17 +2016,28 @@ void main() {
         callerSession: 'ses_caller',
         dispatchId: 'd_1',
       );
-      final again = await service.spawn(
-        task: 'Fix the login form',
-        wait: false,
-        callerSession: 'ses_caller',
-        dispatchId: 'd_2',
+      // A dispatch under a new id is a new task (issue #147) — but the orb is
+      // busy, so it is refused rather than stacked (issue #351). Either way it
+      // is not collapsed into the running task.
+      await expectLater(
+        service.spawn(
+          task: 'Fix the login form',
+          wait: false,
+          callerSession: 'ses_caller',
+          dispatchId: 'd_2',
+        ),
+        throwsA(
+          isA<OrbRefusalError>().having(
+            (e) => e.code,
+            'code',
+            OrbRefusalError.orbBusy,
+          ),
+        ),
       );
 
       expect(first.dispatchId, 'd_1');
       expect(retried, same(first));
-      expect(again.id, isNot(first.id));
-      expect(orbs.createSessionCalls, 2);
+      expect(orbs.createSessionCalls, 1);
     });
   });
 
