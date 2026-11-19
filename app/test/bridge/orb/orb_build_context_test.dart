@@ -180,8 +180,15 @@ void main() {
       expect(parsed, isNot(contains('FLUTTER_VERSION=3.47.8')));
       expect(parsed, isNot(contains('GH_VERSION=2.103.3')));
       // Every other pin still reads off the definition.
-      expect(parsed, containsAll(expectedPins.where((p) => !p.startsWith(
-        'FLUTTER_VERSION') && !p.startsWith('GH_VERSION'))));
+      expect(
+        parsed,
+        containsAll(
+          expectedPins.where(
+            (p) =>
+                !p.startsWith('FLUTTER_VERSION') && !p.startsWith('GH_VERSION'),
+          ),
+        ),
+      );
     });
   });
 
