@@ -28,6 +28,7 @@ class OrbTask {
     this.fallbackSent = false,
     this.textHash,
     this.dispatchId,
+    this.toolchain,
   });
 
   /// The task's technical id (`task_<token>`): what `orb_wait` takes.
@@ -85,6 +86,16 @@ class OrbTask {
 
   /// Epoch millis of the dispatch.
   final int created;
+
+  /// The orb image's toolchain (issue #354, acceptance #1): the pinned
+  /// toolchains the sandbox image installs, stamped on the task at dispatch
+  /// so the spawn answer carries them — a driver deciding whether a ticket
+  /// can run in an orb reads them off the answer, no probe orb. The list is
+  /// produced from the image definition (the Dockerfile ARGs,
+  /// `OrbEmbedded.toolchain`), never hand-maintained here: a pin that moves
+  /// in the image definition moves this list with it. `null` on a record
+  /// written before the stamp existed.
+  final List<String>? toolchain;
 
   /// `running` until the orb session's turn ends, then the service's
   /// outcome: `succeeded`, `failed`, or `interrupted`.
@@ -159,6 +170,9 @@ class OrbTask {
     if (textHash != null) 'textHash': textHash,
     if (dispatchId != null) 'dispatchId': dispatchId,
     'created': created,
+    // Only-when-present (issue #354): a record written before the stamp
+    // exists carries no toolchain, and the reader sees `null` for it.
+    if (toolchain != null) 'toolchain': toolchain,
     'status': status,
     'summary': summary,
     'results': results,
@@ -198,6 +212,9 @@ class OrbTask {
       summary: map['summary'] as String? ?? '',
       pr: map['pr'] as String?,
       completed: (map['completed'] as num?)?.toInt(),
+      // The image's toolchain (issue #354), stamped at dispatch: read back
+      // on reload, `null` on a record that predates the stamp.
+      toolchain: (map['toolchain'] as List<Object?>?)?.cast<String>(),
       // The explicit delivery facts (issue #260); a new record carries them.
       // A record written before they existed carries only the old `notified`
       // fact (issue #212) — or neither (a pre-#212 one): a settled

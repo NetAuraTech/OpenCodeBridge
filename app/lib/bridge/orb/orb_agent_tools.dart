@@ -65,8 +65,13 @@ abstract class OrbAgentTools {
       // acbc8d7 (#169/#170): async-by-default spawn, the bounded orb_wait.
       // The version every install holds when #141's fix ships.
       '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
-      // 5bdd8c5 (#174): the direct-tool registration (the codemode opt-out).
+      // 5bdd8c5 (#174): the direct-tool (non-Code-Mode) registrations. The
+      // bytes every #174-era install materialized (the digest #354's branch
+      // recorded for this version was miscomputed — see the #351 merge note).
       '58872b1d3aaeda688746c42dc583b9bb1ad6c2ba07969358c727ec93f9878281',
+      // 8a29af6 (#354): the spawn answer lists the sandbox toolchain. The
+      // version every install holds when the busy-orb refusal (#351) ships.
+      'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
     },
   };
 
@@ -145,6 +150,14 @@ function describe(row) {
   lines.push(`Orb ${row.orbName} (${row.orb}) — task ${row.id}`)
   lines.push(`Status: ${row.status}`)
   lines.push(`Branch: ${row.branch}`)
+  if (Array.isArray(row.toolchain) && row.toolchain.length > 0) {
+    // Issue #354: the sandbox image's toolchain, read off the row the
+    // bridge stamps from the image definition (the Dockerfile ARGs) at
+    // dispatch — the driver decides what can run in an orb without a probe
+    // orb. Never a list hardcoded here: an image pin change must move the
+    // answer with it.
+    lines.push(`Toolchain: ${row.toolchain.join(", ")}`)
+  }
   if (row.summary) lines.push("", row.summary)
   if (row.pr) lines.push("", `PR: ${row.pr}`)
   if (row.status === "refused") {
@@ -221,7 +234,9 @@ export default {
           "task (the hold is bounded; a still-running task answers as running). The work lands " +
           "on the orb's dedicated branch (orb/<id>) — the orb's agent commits and the branch is " +
           "pushed after every commit. The project is not an argument: this session's project " +
-          "is used.",
+          "is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
+           "installs, read from the image definition) — check it to decide whether a task can " +
+           "run in an orb, without a probe orb.",
         input: {
           type: "object",
           properties: {
