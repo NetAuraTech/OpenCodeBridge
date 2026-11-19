@@ -87,3 +87,17 @@ _Avoid_: orphan, corrupted
 **Structured view**:
 The app view of a session (any row in the home list): messages, tools in flight, costs, permissions.
 _Avoid_: message view, chat view
+
+### The AFK agent
+
+**AFK agent**:
+The persistent opencode session on the host's shared service, living in the main checkout and visible in the app's session list, that the bridge feeds issues to; per issue it runs the `implement-spec` skill and dispatches implementation into orbs. It never merges, force-pushes, or deletes: its runs end at a PR.
+_Avoid_: pilot, bot, worker, daemon
+
+**AFK run**:
+One complete execution of the AFK agent for one issue: from the bridge's dispatch of the issue to the PR (or to a recorded failure). The run's implementers are the orbs it spawned; the run is durable only in the bridge's state, the tracker, and the PRs.
+_Avoid_: task (that's an orb task), job
+
+**Ready gate**:
+The `ready-for-agent` label as the entry to the AFK system: an issue enters when the label is added and leaves the run's input side when the run reaches its PR (the human's review is the exit). The label is the gate, not a remote control: removing it mid-run does not stop the run.
+_Avoid_: trigger (mechanism-impl specific), queue
