@@ -69,9 +69,12 @@ abstract class OrbAgentTools {
       // bytes every #174-era install materialized (the digest #354's branch
       // recorded for this version was miscomputed — see the #351 merge note).
       '58872b1d3aaeda688746c42dc583b9bb1ad6c2ba07969358c727ec93f9878281',
-      // 8a29af6 (#354): the spawn answer lists the sandbox toolchain. The
-      // version every install holds when the busy-orb refusal (#351) ships.
+      // 8a29af6 (#354): the spawn answer lists the sandbox toolchain.
       'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
+      // #351: the busy-orb refusal (the spawn answer refuses a second task on
+      // a running orb). The version every install holds when the push
+      // verification (#352) ships.
+      '61460da818441d5f866993f4fc7708967e5478d38c315ec54237e668ac524e70',
     },
   };
 
@@ -149,7 +152,13 @@ function describe(row) {
   const lines = []
   lines.push(`Orb ${row.orbName} (${row.orb}) — task ${row.id}`)
   lines.push(`Status: ${row.status}`)
-  lines.push(`Branch: ${row.branch}`)
+  // Issue #352: the artifact is the remote-verified value the bridge read from
+  // the remote at settle (branch + sha), not the agent's claim. The sha is
+  // present once the settle verified the push; a push that never reached the
+  // remote settles `push_unverified` and carries the ls-remote evidence in the
+  // summary (already rendered below), never a `succeeded` with a phantom tip.
+  if (row.sha) lines.push(`Branch: ${row.branch} @ ${row.sha}`)
+  else lines.push(`Branch: ${row.branch}`)
   if (Array.isArray(row.toolchain) && row.toolchain.length > 0) {
     // Issue #354: the sandbox image's toolchain, read off the row the
     // bridge stamps from the image definition (the Dockerfile ARGs) at
