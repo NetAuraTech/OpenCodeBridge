@@ -56,8 +56,9 @@ class OrbRecord {
     this.bootReason,
   });
 
-  /// The technical identifier (label `ocb.id`): names the branch, the
-  /// volumes, and the state dir.
+  /// The technical identifier (label `ocb.id`): names the volumes and the
+  /// state dir, and is the fallback value of the orb's branch when the task
+  /// names none (issue #353).
   final String id;
 
   /// The user-facing handle, unique within the project (label `ocb.name`).
@@ -66,7 +67,9 @@ class OrbRecord {
   /// The project identifier as the bridge knows it (label `ocb.project`).
   final String project;
 
-  /// The one-branch-per-orb branch (label `ocb.branch`), `orb/<id>`.
+  /// The one-branch-per-orb branch (label `ocb.branch`, issue #353): the
+  /// branch the task named, else the internal `orb/<id>` default — the
+  /// branch the hook pushes and the report carries as its single artifact.
   final String branch;
 
   /// The composed state (spec §2.2): `running`, `stopped`,

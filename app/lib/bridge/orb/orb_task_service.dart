@@ -270,6 +270,11 @@ class OrbTaskService {
   /// dispatched record immediately — the completion watcher then persists
   /// the result and injects the completion message.
   ///
+  /// [branch] (issue #353, the one branch contract) is the named branch the
+  /// task's work lands on: threaded to [OrbService.create] when this call
+  /// creates the orb (an existing orb keeps its own branch — a wake never
+  /// re-names it). `null` keeps the internal `orb/<id>` default.
+  ///
   /// [task] is delivered to the orb's agent exactly as given (trimmed, issue
   /// #147) — no prompt text is prepended or appended. [callerSession] and
   /// [dispatchId] are the dispatch identity ([OrbTaskService._retriedTaskOn]).
@@ -279,6 +284,7 @@ class OrbTaskService {
     bool wait = true,
     String? orb,
     String? seed,
+    String? branch,
     String? callerSession,
     String? callerDirectory,
     String? dispatchId,
@@ -300,6 +306,7 @@ class OrbTaskService {
           model: model,
           orb: orb?.trim(),
           seed: seed?.trim(),
+          branch: branch?.trim(),
           callerSession: callerSession,
           callerDirectory: callerDirectory,
           dispatchId: dispatchId,
@@ -323,6 +330,7 @@ class OrbTaskService {
     ModelRef? model,
     String? orb,
     String? seed,
+    String? branch,
     String? callerSession,
     String? callerDirectory,
     String? dispatchId,
@@ -332,6 +340,7 @@ class OrbTaskService {
       task,
       orb,
       seed,
+      branch: branch,
     );
 
     // The idempotent dispatch (issue #143, tightened by #147): a retry of a
@@ -546,7 +555,8 @@ class OrbTaskService {
   /// - explicit [orb] name taken → that orb (woken when stopped);
   /// - explicit name not yet taken → the additional orb, a fresh clone
   ///   (from the default branch, or from [seed]'s pushed branch tip when
-  ///   given) on a fresh `orb/<id>` branch;
+  ///   given) on the branch the task names ([branch], issue #353) — or the
+  ///   fresh `orb/<id>` default when none is named;
   /// - name omitted → the single-orb wake-or-create: one orb (wake),
   ///   several ([OrbAmbiguousError] with the project's names), none
   ///   (create, name derived from the task).
@@ -554,12 +564,18 @@ class OrbTaskService {
   /// [seed] parameterizes a creation only: with an existing target it is
   /// refused ([OrbRefusalError.seedConflict]), and so is a seed with no
   /// target name to create under — a seed never changes a wake.
+  ///
+  /// [branch] (issue #353) is the named branch the new orb's work lands on —
+  /// it threads to the create (the orb's git state lives on it, the hook
+  /// pushes it, the report carries it). Like the seed, it parameterizes a
+  /// creation only: a wake keeps the targeted orb's own branch.
   Future<(OrbRecord, bool)> _targetOrCreateOrb(
     String projectId,
     String task,
     String? orb,
-    String? seed,
-  ) async {
+    String? seed, {
+    String? branch,
+  }) async {
     final rows = await orbs.list();
     final inProject = [
       for (final row in rows)
@@ -586,9 +602,12 @@ class OrbTaskService {
       }
       // The additional orb (spec §8.2): a fresh clone under the name.
       if (seed != null && seed.isNotEmpty) {
-        return (await _createSeeded(projectId, orb, seed), true);
+        return (
+          await _createSeeded(projectId, orb, seed, branch: branch),
+          true,
+        );
       }
-      return (await _createOrb(projectId, orb), true);
+      return (await _createOrb(projectId, orb, branch: branch), true);
     }
     // No target name: the single-orb wake-or-create (#99's contract).
     if (seed != null && seed.isNotEmpty) {
@@ -610,6 +629,7 @@ class OrbTaskService {
       await _createOrb(
         projectId,
         _derivedName(task, {for (final row in rows) row.name}),
+        branch: branch,
       ),
       true,
     );
@@ -643,9 +663,20 @@ class OrbTaskService {
   );
 
   /// The additional orb (fresh clone of the project's default branch).
-  Future<OrbRecord> _createOrb(String projectId, String name) async {
+  /// [branch] (issue #353) is the named branch the work lands on, threaded
+  /// to the create; `null` keeps the internal `orb/<id>` default.
+  Future<OrbRecord> _createOrb(
+    String projectId,
+    String name, {
+    String? branch,
+  }) async {
     final checkout = await _checkoutOf(projectId);
-    return orbs.create(project: projectId, name: name, checkout: checkout);
+    return orbs.create(
+      project: projectId,
+      name: name,
+      checkout: checkout,
+      branch: branch,
+    );
   }
 
   /// The seeded clone (spec §3.3): the seed's branch tip, read from the
@@ -653,11 +684,14 @@ class OrbTaskService {
   /// stopped, and its uncommitted working tree is never part of the seed.
   /// The clone's base label carries the seed's branch: the orb's PR stacks
   /// on the parent's branch, not the default.
+  /// [branch] (issue #353) is the named branch the work lands on; `null`
+  /// keeps the internal `orb/<id>` default.
   Future<OrbRecord> _createSeeded(
     String projectId,
     String name,
-    String seed,
-  ) async {
+    String seed, {
+    String? branch,
+  }) async {
     final checkout = await _checkoutOf(projectId);
     final base = await orbs.seedBranch(
       project: projectId,
@@ -681,6 +715,7 @@ class OrbTaskService {
       name: name,
       checkout: checkout,
       base: base,
+      branch: branch,
     );
   }
 
@@ -1300,7 +1335,8 @@ class OrbTaskService {
   }
 
   /// The out-of-band push fallback (issue #212): "Orb X done — work on branch
-  /// `orb/<id>`" (the PR link once it exists) through the existing FCM path
+  /// `<the orb's branch>`" (the PR link once it exists) through the existing
+  /// FCM path
   /// (issue #24), deep-linked to the calling session — the same place the
   /// in-app injection targets, where the completion message lands when the
   /// app reopens. Returns whether a push was actually dispatched, so the

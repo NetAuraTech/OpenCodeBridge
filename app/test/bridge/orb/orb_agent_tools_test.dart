@@ -59,6 +59,23 @@ void main() {
   });
 
   test(
+    'the spawn names the branch (issue #353, the one branch contract)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The tool input declares a `branch` argument — the named branch the
+      // work lands on — and the spawn body passes it to the bridge.
+      expect(source, contains('branch: args.branch'));
+      // The input property is a string (like the other targeting args).
+      expect(source, contains('branch: {'));
+      // The description no longer pins the internal `orb/<id>` as the branch:
+      // the named branch is the contract, the default is the fallback.
+      expect(source, contains('branch the work lands on'));
+    },
+  );
+
+  test(
     'a failed spawn fetch asks the recent tasks before answering (issue #143)',
     () async {
       await OrbAgentTools.materialize(into: temp);

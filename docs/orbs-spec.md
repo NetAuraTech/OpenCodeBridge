@@ -30,9 +30,9 @@ Why its own opencode per orb (not the host's shared service): a sandbox means th
 | Workspace volume | named volume, labeled `ocb.*` | holds the clone, `.env*`, dependencies |
 | Data volume | `orb-<id>-data` (labeled) | service state (postgres/redis/…); **not mounted into the workspace** — the agent reaches services by port only |
 | State dir | `~/.config/opencodebridge/orbs/<id>/` → bind-mounted to the container's XDG data/state | the in-flight `opencode.db` survives container recreation ([#83](https://github.com/NetAuraTech/OpenCodeBridge/issues/83)) |
-| Branch | `orb/<id>` on the remote | one per orb; the PR's head (§3) |
+| Branch | the orb's branch on the remote (§3.1) — the branch the task named, else the internal `orb/<id>` default | one per orb; the PR's head (§3) |
 
-`<id>` is a short generated token (label `ocb.id`) — the technical identifier of the branch, the volumes, the state dir, and the labels. The user-facing handle is `ocb.name`.
+`<id>` is a short generated token (label `ocb.id`) — the technical identifier of the volumes, the state dir, and the labels, and the fallback value of the orb's branch when the task names none. The user-facing handle is `ocb.name`.
 
 ### 1.3 Orb ↔ sessions
 
@@ -60,7 +60,7 @@ The container **and** both volumes carry the labels ([#84](https://github.com/Ne
 | `ocb.id` | short generated token — technical identifier |
 | `ocb.name` | user-facing handle, **unique within the project** |
 | `ocb.project` | project identifier as the bridge knows it |
-| `ocb.branch` | `orb/<id>` |
+| `ocb.branch` | the orb's branch (§3.1) — the branch the task named, else the internal `orb/<id>` default |
 | `ocb.created` | creation timestamp |
 | `ocb.stopped` | clean-stop marker: set at the **end** of the stop path (after `docker stop`), removed on Wake |
 
@@ -122,7 +122,7 @@ Uses:
 
 **Guard**: deletion is **refused** when the tree is dirty — `git status --porcelain` non-empty (untracked included, ignored excluded) — **or** when commits not on any remote exist (unpushed — rare under the post-commit hook, real on push failure) ([#84](https://github.com/NetAuraTech/OpenCodeBridge/issues/84)).
 
-"Safe" = clean tree + everything pushed to `orb/<id>` (work safe on GitHub, PR open or not). Explicit **force** overrides: a UI action for humans, `force: true` for agents ([#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79)) — the "discard the prototype without committing" case is the intended use of force, not an error case. The automated path **never** uses force (§2.10).
+"Safe" = clean tree + everything pushed to the orb's branch (§3.1 — the branch the task named, else the `orb/<id>` default) (work safe on GitHub, PR open or not). Explicit **force** overrides: a UI action for humans, `force: true` for agents ([#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79)) — the "discard the prototype without committing" case is the intended use of force, not an error case. The automated path **never** uses force (§2.10).
 
 Delete = removal of the container + the workspace volume + the data volume + the state dir `~/.config/opencodebridge/orbs/<id>/` (nothing to release port-wise — the port is ephemeral). **Accepted consequence**: deletion wipes the service data volumes — the guard protects git work, not database content; the DBs are disposable dev state by design ([#89](https://github.com/NetAuraTech/OpenCodeBridge/issues/89)).
 
@@ -161,14 +161,14 @@ Automation lives in the **bridge**: a periodic lifecycle pass (~1 min, over all 
 
 ### 3.1 Branch model & commit convention
 
-- **One branch per orb**: `orb/<orb-id>` — long-lived across the orb's life, **multiple tasks per orb**. No per-task branches ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80)).
+- **The one branch contract** ([#353](https://github.com/NetAuraTech/OpenCodeBridge/issues/353)): an orb's git state lives on **one branch**, and **that branch is what is pushed and reported**. The branch is **named by the task** — `orb_spawn`'s `branch` argument carries it through spawn → create → the `ocb.branch` label → the entrypoint's `ORB_BRANCH` env → the post-commit hook's push refspec → the completion report. When no branch is named the bridge passes its internal default, `orb/<orb-id>` (one per orb, long-lived across the orb's life, **multiple tasks per orb**); `orb/<id>` is then merely a fallback value — it is **never** the reported artifact on its own, and the `orb/<id>` scheme as a *second, separately-pushed* branch is retired. No per-task branches beyond the one the task names ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80)).
 - **Identity**: the project checkout's git identity (repo-local first, global fallback — the same way `git commit` resolves it in the repo), captured into the container-local gitconfig the entrypoint synthesizes (§4).
-- **When to push**: a `post-commit` hook in the orb's clone pushes `HEAD` to `orb/<orb-id>` **after every commit** — the remote is always the mirror of the branch; the agent just commits. (Hook installation belongs to boot preparation, §6.3.) A failed push must not leave the orb looking healthy ([#120](https://github.com/NetAuraTech/OpenCodeBridge/issues/120)): the hook reports the failure in its output (git streams it to the committing agent; git ignores a post-commit hook's exit code) and writes a `push-failed` marker on the state mount, which the orb list composes as the row's `pushFailing` flag (the card shows "push to the remote is failing" — seed, the PR flow, and the guard's pushed side all silently ride on that push). A successful push clears the marker; so does a start that re-staged the gh credentials (§4 — the verdict is no longer known, the next push proves it).
+- **When to push**: a `post-commit` hook in the orb's clone pushes `HEAD` to **the orb's branch** (the branch the task named, else the `orb/<id>` default) **after every commit** — the remote is always the mirror of the branch; the agent just commits. The hook's target is the entrypoint's `ORB_BRANCH` env (`refs/heads/$ORB_BRANCH`), falling back to `orb/<id>` in the script ([#353](https://github.com/NetAuraTech/OpenCodeBridge/issues/353)). (Hook installation belongs to boot preparation, §6.3.) A failed push must not leave the orb looking healthy ([#120](https://github.com/NetAuraTech/OpenCodeBridge/issues/120)): the hook reports the failure in its output (git streams it to the committing agent; git ignores a post-commit hook's exit code) and writes a `push-failed` marker on the state mount, which the orb list composes as the row's `pushFailing` flag (the card shows "push to the remote is failing" — seed, the PR flow, and the guard's pushed side all silently ride on that push). A successful push clears the marker; so does a start that re-staged the gh credentials (§4 — the verdict is no longer known, the next push proves it).
 
 ### 3.2 The PR is the return channel
 
 - The branch accumulates commits/pushes continuously from the first task.
-- The **orb's agent opens the PR only once the work is done** — "done" is per task, and the work can span several tasks. On the task that completes the work, the agent runs `gh pr create` (head `orb/<id>`, **base = the branch the clone started from** — the remote's default branch for a fresh clone, or the seed parent's branch for a seeded one, §3.3) with the mounted gh auth; the task result includes the PR URL ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80), [#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)).
+- The **orb's agent opens the PR only once the work is done** — "done" is per task, and the work can span several tasks. On the task that completes the work, the agent runs `gh pr create` (head = **the orb's branch**, §3.1 — the branch the task named, else the `orb/<id>` default; **base = the branch the clone started from** — the remote's default branch for a fresh clone, or the seed parent's branch for a seeded one, §3.3) with the mounted gh auth; the task result includes the PR URL ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80), [#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)).
 - **One PR per orb**: later tasks push to the same branch, updating the same PR (never a second PR).
 - **The agent never merges its own PR**; merging is human, the `implement-pr` rule applied as-is.
 - **Post-merge semantics**: merging the PR = the work is done = the orb is at end of life (deletable — the deletion guard is satisfied; the automated path then applies, §2.10.3). **Safety net** if an orb outlives its work: **at the start of every task**, if the branch tip is an ancestor of the remote default (fully merged), the workspace resets to the new default; otherwise the task continues on the branch.
@@ -178,12 +178,12 @@ Automation lives in the **bridge**: a periodic lifecycle pass (~1 min, over all 
 Creation gains an optional **`seed`** (orb name), agent-facing (`orb_spawn` argument; no UI field) ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87), ADR-0007):
 
 - omitted → fresh clone of the project's default branch (unchanged);
-- present → the new clone starts from the seed's **branch tip** (committed state of `orb/<id-B>`, read **from the remote** — the branch is always pushed, so the parent may be stopped); the new orb's branch `orb/<id-C>` is based on that tip;
+- present → the new clone starts from the seed's **branch tip** (committed state of the parent's branch — the branch its task named, or its `orb/<id>` default, §3.1 — read **from the remote** — the branch is always pushed, so the parent may be stopped); the new orb's own branch (§3.1) is based on that tip;
 - the seed is **git state only** — the uncommitted working tree is never in it (the durable state is the branch tip; an agent needing the exact current state commits first — the post-commit push flow). A parent whose branch was never pushed cannot be seeded (its state is the default branch anyway) → refused;
 - the seed is **git state only**: the new orb's services start **empty** (clean base + its own migrations); copying the parent's data volume is an escape hatch, not spec;
 - the new orb gets the full boot preparation (§6) — only the clone source differs.
 
-**PR base** for a seeded orb: the PR targets the branch the clone started from — it stacks on the parent's branch (`orb/<id-C>` → `orb/<id-B>`). A winning variant merges into the parent; a losing one is force-deleted (the intended discard case of [#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79)) and, like any force-deleted orb, leaves its pushed branch on the remote (orphan-branch cleanup is owned by the automated lifecycle, §2.10.4).
+**PR base** for a seeded orb: the PR targets the branch the clone started from — it stacks on the parent's branch (the child's branch → the parent's branch, each per §3.1). A winning variant merges into the parent; a losing one is force-deleted (the intended discard case of [#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79)) and, like any force-deleted orb, leaves its pushed branch on the remote (orphan-branch cleanup is owned by the automated lifecycle, §2.10.4).
 
 ### 3.4 `docker cp` export — the WIP escape hatch
 
@@ -254,7 +254,7 @@ opencode v2 discovers skills from a **global config dir** *and* two **global com
 On the container's first start (the workspace volume holds only the injected `.env*`):
 
 1. **Clone** (non-empty-dir-tolerant, from the default branch or the seed, §2.3/§3.3).
-2. **Install the `post-commit` hook** (push `HEAD` to `orb/<id>` after every commit, §3.1).
+2. **Install the `post-commit` hook** (push `HEAD` to the orb's branch — `ORB_BRANCH`, falling back to `orb/<id>` — after every commit, §3.1).
 3. **Run the installers** — non-fatal (log + continue), triggered purely by file presence in the clone:
    - npm: `npm ci` if `package-lock.json`, else `npm install` (npm only — no yarn/pnpm; that would be a base-image concern, §5);
    - composer: `composer install` if `composer.json`;
@@ -362,16 +362,17 @@ Idempotent **wake-or-create** on the project's workspace orb. The project is **n
 | `wait` | no | Boolean, default `false` ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)): the tool returns the orb handle as soon as the dispatch lands and the completion injection wakes the caller (§8.3); when true the tool blocks for the structured result, **bounded** to a grace window ([#143](https://github.com/NetAuraTech/OpenCodeBridge/issues/143)) -- a longer task answers as `running` |
 | `orb` | no | **Name** of the target orb ([#84](https://github.com/NetAuraTech/OpenCodeBridge/issues/84)) — see targeting below |
 | `seed` | no | **Name** of the orb to clone from ([#87](https://github.com/NetAuraTech/OpenCodeBridge/issues/87)) — see §3.3 |
+| `branch` | no | **Name** of the branch the work lands on ([#353](https://github.com/NetAuraTech/OpenCodeBridge/issues/353), the one branch contract) — threaded to the create, the hook pushes it, and the completion report carries it as its single branch artifact. Omitted → the orb's internal `orb/<id>` default. Parameterizes a creation: a woken (existing) orb keeps its own branch |
 
 **Idempotent dispatch** ([#143](https://github.com/NetAuraTech/OpenCodeBridge/issues/143)): a spawn whose task text matches (normalized) a task **still running** on the target orb returns that task instead of dispatching a second one -- the retry of a call whose transport timed out is not duplicate work. A deliberately different task still dispatches normally. The timeout-aware plugin asks the bridge for the project's recent tasks (`POST /api/orb/tasks`) before reporting a failed fetch, so the caller learns the dispatch landed and waits on it rather than retrying blind.
 
-**`orb` targeting**: omitted → the project's single orb (wake it); several orbs exist → the tool **refuses and lists** the project's orbs (the agent retries with an explicit name); none → **create** (name derived from the task). An explicit name not yet taken → **additional orb** (fresh clone, fresh `orb/<id>` branch), attached to the calling agent's spawn tree.
+**`orb` targeting**: omitted → the project's single orb (wake it); several orbs exist → the tool **refuses and lists** the project's orbs (the agent retries with an explicit name); none → **create** (name derived from the task). An explicit name not yet taken → **additional orb** (fresh clone, a fresh branch — the one the task names via `branch`, else the `orb/<id>` default, §3.1), attached to the calling agent's spawn tree.
 
 ### 8.3 `orb_wait` & completion
 
-- `orb_wait` — holds briefly (the same bounded grace as a blocking spawn, [#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)) and answers once: the structured result — **status, summary, results, dedicated branch name** — and the **PR URL** once the work is done ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80) refinement of the [#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79) contract), or the task as `running` when the hold ran out. A wait held past the agent tool's own fetch timeout reads as an unreachable bridge ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)) — it never blocks until completion anymore.
+- `orb_wait` — holds briefly (the same bounded grace as a blocking spawn, [#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)) and answers once: the structured result — **status, summary, results, the one branch** (the branch the task named, else the `orb/<id>` default, §3.1) — and the **PR URL** once the work is done ([#80](https://github.com/NetAuraTech/OpenCodeBridge/issues/80) refinement of the [#79](https://github.com/NetAuraTech/OpenCodeBridge/issues/79) contract), or the task as `running` when the hold ran out. A wait held past the agent tool's own fetch timeout reads as an unreachable bridge ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)) — it never blocks until completion anymore.
 - **Settling without an outcome** ([#169](https://github.com/NetAuraTech/OpenCodeBridge/issues/169)): a task whose orb session reports no outcome is not left running forever — opencode persists no outcome for a turn whose session was migrated to the host when its orb stopped. A session read **idle** (not in the service's active list, no permission parked on it) without an outcome for a settle window completes the task `succeeded`; a session the service reports **gone** (404) for one settles it `failed`. Without these, a task survives its orb's death (and every bridge restart, §8.3's resume) as a permanent `running` record the completion watcher polls forever.
-- **Async path**: when the task completes, the bridge (which aggregates the orb's opencode session) **injects a message** into the calling session ("Orb X done — work on branch `orb/<id>`"). The work itself comes back via commit/push on the dedicated branch (the primary channel, §3), not via the tool.
+- **Async path**: when the task completes, the bridge (which aggregates the orb's opencode session) **injects a message** into the calling session ("Orb X done — work on branch `<the orb's branch>`" — the branch the task named, else the `orb/<id>` default, §3.1). The result carries **exactly one branch artifact** ([#353](https://github.com/NetAuraTech/OpenCodeBridge/issues/353)). The work itself comes back via commit/push on that branch (the primary channel, §3), not via the tool.
 - **Calling session ends before the orb finishes**: the orb keeps running (it is the project's workspace, not an ephemeral process); the result is persisted; the notification to a dead session is dropped. Cleanup of such orphaned orbs belongs to the lifecycle (§2.10).
 
 ### 8.4 Permissions — scoped to the spawn tree

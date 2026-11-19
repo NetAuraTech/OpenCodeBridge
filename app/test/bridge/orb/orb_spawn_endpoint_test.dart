@@ -125,6 +125,9 @@ class _FakeOrbs implements OrbService {
   String? createName;
   String? createBase;
 
+  /// The named branch the spawn body carried to the create (issue #353).
+  String? createBranch;
+
   String? seedBranchResult;
   Object? seedBranchError;
   String? seedRequested;
@@ -161,9 +164,11 @@ class _FakeOrbs implements OrbService {
     required String name,
     required String checkout,
     String? base,
+    String? branch,
   }) async {
     createName = name;
     createBase = base;
+    createBranch = branch;
     return createResult!;
   }
 
@@ -320,6 +325,51 @@ void main() {
         await server.stop();
       }
     });
+
+    test(
+      'a branch in the body is threaded to the create (issue #353)',
+      () async {
+        final tasks = OrbTaskService(
+          orbs: orbs,
+          sessions: backend,
+          file: tasksFile,
+        );
+        // No orb yet: the spawn creates one, threading the named branch.
+        orbs.listResult = const [];
+        final created = OrbRecord(
+          id: 'a1b2c3',
+          name: 'worker',
+          project: 'prj_1',
+          branch: 't353-branch-contract',
+          state: 'running',
+          created: '2026-01-01T00:00:00.000Z',
+          url: 'http://127.0.0.1:9999',
+        );
+        orbs.createResult = created;
+        backend.opencode.detailOf = (id) => _detail(id);
+        final server = await serverWith(tasks: tasks);
+        try {
+          final (status, body) = await _postRaw(
+            server.baseUri,
+            '/api/orb/spawn',
+            jsonEncode({
+              'task': 'do the thing',
+              'wait': false,
+              'session': 'ses_caller',
+              'branch': 't353-branch-contract',
+            }),
+          );
+          expect(status, 201);
+          // The named branch reached the create…
+          expect(orbs.createBranch, 't353-branch-contract');
+          // …and the task's branch is the single branch artifact.
+          final row = jsonDecode(body);
+          expect(row['branch'], 't353-branch-contract');
+        } finally {
+          await server.stop();
+        }
+      },
+    );
 
     test('wait: true (the default) answers the structured result', () async {
       final tasks = OrbTaskService(

@@ -67,6 +67,9 @@ abstract class OrbAgentTools {
       '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
       // 5bdd8c5 (#174): the direct-tool (non-Code-Mode) registrations.
       '53b96042d0b654b5a4e8c41d1778bd11b3b7df98c581a8bc87dc3885fc3bf005',
+      // (#353): the one branch contract — the `branch` input on orb_spawn,
+      // the description no longer pins `orb/<id>` as the reported artifact.
+      'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
     },
   };
 
@@ -227,8 +230,12 @@ export default {
           "session receives a message when it completes (do not poll; end your turn and the " +
           "completion will wake you). Pass wait: true to hold this call briefly for a quick " +
           "task (the hold is bounded; a still-running task answers as running). The work lands " +
-          "on the orb's dedicated branch (orb/<id>) — the orb's agent commits and the branch is " +
-          "pushed after every commit. The project is not an argument: this session's project " +
+           "on the branch the task names (issue #353, the one branch contract): pass branch for " +
+           "a named branch (e.g. a ticket branch) and the orb's git state lives there, its agent " +
+           "commits, and the post-commit hook pushes it after every commit — the completion " +
+           "report carries exactly that one branch as its artifact. Omit branch and the orb " +
+           "falls back to its internal default. The project is not an argument: this session's " +
+           "project is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
           "is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
            "installs, read from the image definition) — check it to decide whether a task can " +
            "run in an orb, without a probe orb.",
@@ -264,6 +271,14 @@ export default {
                 "seed's branch instead of the default branch. Only parameterizes a creation — pass it with a " +
                 "new orb name.",
             },
+             branch: {
+               type: "string",
+               description:
+                 "The branch the work lands on (issue #353, the one branch contract): the orb's git state " +
+                 "lives there, its agent commits, and the post-commit hook pushes it after every commit. The " +
+                 "completion report carries exactly this one branch as its artifact. Omitted: the orb's " +
+                 "internal default. Parameterizes a creation — an existing (woken) orb keeps its own branch.",
+             },
           },
           required: ["task"],
         },
@@ -289,6 +304,7 @@ export default {
               wait: args.wait ?? false,
               orb: args.orb,
               seed: args.seed,
+               branch: args.branch,
               session: context?.sessionID,
             })
           } catch (e) {

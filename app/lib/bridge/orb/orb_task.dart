@@ -45,7 +45,9 @@ class OrbTask {
   /// The orb's user-facing name (the injection message addresses it).
   final String orbName;
 
-  /// The orb's dedicated branch (`orb/<id>`): where the work lands.
+  /// The orb's branch (issue #353, the one branch contract): where the work
+  /// lands — the branch the task named, else the internal `orb/<id>` default.
+  /// This is the single branch artifact the completion report carries.
   final String branch;
 
   /// The orb session the task was dispatched to.
@@ -151,8 +153,11 @@ class OrbTask {
   /// Whether the task has reached its terminal status.
   bool get isDone => completed != null;
 
-  /// The structured result's artifacts (spec §8.3's `results`): the branch
-  /// always, the PR once it exists.
+  /// The structured result's artifacts (spec §8.3's `results`): **exactly one
+  /// branch** — the orb's branch, §3.1 (issue #353) — always, and the PR once
+  /// it exists. The branch is the single branch artifact: the named one the
+  /// task gave, or the internal `orb/<id>` default; it is never a second,
+  /// separately-pushed branch.
   List<String> get results => ['branch: $branch', if (pr != null) 'PR: $pr'];
 
   Map<String, Object?> toJson() => {

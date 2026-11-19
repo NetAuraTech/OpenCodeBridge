@@ -8,7 +8,7 @@ A workflow rule for any agent that dispatches orbs (or merges an orb's work). Th
 
        git ls-remote origin <branch>
 
-   where `<branch>` is whichever scheme the orb pushed — **both naming schemes are covered**: the named ticket branch (e.g. `t346-review-fixups`) and the orb-id branch (`orb/<id>`).
+   where `<branch>` is **the one branch the completion report carries** (issue #353, the one branch contract) — the named branch the task gave the orb (`orb_spawn`'s `branch` argument, e.g. `t346-review-fixups`), or the orb's internal default `orb/<id>` when the task named none. That single branch is what the post-commit hook pushed and what the orb's git state lives on.
 
 2. **Remote branch missing ⇒ re-dispatch or an explicit failure, never a merge attempt.** Ask the orb to re-verify its local state and re-push (e.g. `git push origin HEAD:<branch>`). If it still fails, the driver reports the task as failed with the `ls-remote` output as evidence — not a merge attempt on the orb's word.
 
