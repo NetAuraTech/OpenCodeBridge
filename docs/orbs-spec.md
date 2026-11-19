@@ -247,6 +247,8 @@ The host's opencode **config + auth** are **copied to a container-local config d
 
 The staged copy is **rewritten for container networking** ([#117](https://github.com/NetAuraTech/OpenCodeBridge/issues/117)): every `http(s)` URL whose host is the loopback (`localhost`, `127.0.0.1`, `0.0.0.0`) — provider `baseURL`, MCP server URLs — becomes `host.docker.internal` on the same port/path: inside the container `localhost` is the container itself, so a host-local provider (llama.cpp/llama-swap…) would be dead in every orb. Remote URLs pass through untouched; the **host config file is never modified** (host-authoritative — the rewrite lives only in the staged copy).
 
+opencode v2 discovers skills from a **global config dir** *and* two **global compatibility roots** (`~/.claude/skills`, `~/.agents/skills`). The config copy alone would leave skills installed under those roots invisible in the orb (the host's `tdd`/`pr` live in `~/.agents/skills`), so the §6.2 staging also copies each root's **`skills/` subdir only** (never the rest of `~/.claude`, which can hold the host's Claude project state and credentials) to the root's **native path** in the orb (`/root/.claude/skills`, `/root/.agents/skills`) ([#350](https://github.com/NetAuraTech/OpenCodeBridge/issues/350)). Copy-if-exists, host-authoritative, re-copied at every start — a skill added to the host after the fact appears in the orb on its next start, and opencode in the orb then applies the **same discovery and precedence** as on the host.
+
 ### 6.3 First start — clone, hook, installers — entrypoint, create only
 
 On the container's first start (the workspace volume holds only the injected `.env*`):

@@ -3055,9 +3055,31 @@ class OrbService {
     if (source.existsSync()) {
       _copyTree(source, staged);
     }
+    _stageCompatSkillRoots(staged);
     _injectBridgeUrl(staged);
     _rewriteLoopbackUrls(staged);
     return staged;
+  }
+
+  /// The global compatibility skill roots opencode v2 discovers in addition to
+  /// `~/.config/opencode/skills` (docs → Discovery): `~/.agents/skills` and
+  /// `~/.claude/skills`. The §6.2 config copy carries only `~/.config/opencode`,
+  /// so a skill installed under one of these roots is invisible in the orb
+  /// (issue #350) — the host's `tdd`/`pr` live in `~/.agents/skills`. Stage
+  /// **only each root's `skills/`** (never the rest of `~/.claude`, which can
+  /// hold the host's Claude project state and credentials) under the root's
+  /// native name, so [_copyStagedConfig] rides them to `/root/.agents/` and
+  /// `/root/.claude/` — opencode in the orb then applies the same discovery and
+  /// precedence as on the host. Copy-if-exists (host-authoritative): a root
+  /// absent on the host stages nothing, and the orb is unchanged.
+  void _stageCompatSkillRoots(Directory staged) {
+    for (final name in const ['.agents', '.claude']) {
+      final sourceSkills = Directory('$home/$name/skills');
+      if (!sourceSkills.existsSync()) continue;
+      final dest = Directory('${staged.path}/$name/skills')
+        ..createSync(recursive: true);
+      _copyTree(sourceSkills, dest);
+    }
   }
 
   /// Recursively copies [from] into [to] (host-authoritative, §6.2),
@@ -3148,10 +3170,20 @@ class OrbService {
     for (final entry in staged.listSync(followLinks: false)) {
       final name = entry.path.split('/').last;
       final isDir = entry is Directory;
+      // The two compatibility skill roots ride to their NATIVE paths (the
+      // orb's `~/.agents` / `~/.claude`), not into the opencode config dir —
+      // opencode discovers skills at both, so the orb sees the same roots
+      // with the same precedence as the host (issue #350). A top-level dir
+      // merge-cp (`<src>/.` → `<dest>/`) into the existing `/root` parent
+      // creates the single missing leaf; a deeper `…/skills` dest would fail
+      // (its parent is absent) in the created, not-started container.
+      final inContainerBase = name == '.agents' || name == '.claude'
+          ? '/root'
+          : '/root/.config/opencode';
       await _runOrThrow([
         'cp',
         isDir ? '${entry.path}/.' : entry.path,
-        '$container:/root/.config/opencode/$name${isDir ? '/' : ''}',
+        '$container:$inContainerBase/$name${isDir ? '/' : ''}',
       ]);
     }
   }

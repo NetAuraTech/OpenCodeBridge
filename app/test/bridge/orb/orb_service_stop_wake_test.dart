@@ -1496,6 +1496,11 @@ void main() {
         stateDir();
         setMarker();
         hostConfig();
+        // A global compatibility skill root present on the host (issue #350):
+        // wake must re-stage and re-copy it, host-authoritative.
+        File('${home.path}/.agents/skills/tdd/SKILL.md')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('---\nname: tdd\n---\ntdd body\n');
         File('${home.path}/.local/share/opencode/auth.json')
           ..createSync(recursive: true)
           ..writeAsStringSync('{}\n');
@@ -1550,6 +1555,18 @@ void main() {
               '${home.path}/.local/share/opencode/auth.json',
               '$container:/root/.local/share/opencode/auth.json',
             ]),
+          ),
+        );
+        // The compatibility skill root re-stages (host-authoritative) and
+        // rides to its native orb path (issue #350).
+        expect(
+          File('$staged/.agents/skills/tdd/SKILL.md').existsSync(),
+          isTrue,
+        );
+        expect(
+          copies,
+          contains(
+            equals(['cp', '$staged/.agents/.', '$container:/root/.agents/']),
           ),
         );
 

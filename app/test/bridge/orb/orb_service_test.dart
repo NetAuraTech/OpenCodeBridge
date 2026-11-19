@@ -612,6 +612,134 @@ void main() {
       );
     });
 
+    group('the global compatibility skill roots (issue #350)', () {
+      /// The host's two global compatibility skill roots: a `tdd` skill and a
+      /// dotfile under `~/.agents/skills`, a `pr` skill under
+      /// `~/.claude/skills` — and, under `~/.claude`, a `settings.json` plus a
+      /// `projects/` state dir that must NOT ride into the orb (only `skills/`
+      /// is staged).
+      void compatRoots() {
+        final agents = Directory('${home.path}/.agents/skills')
+          ..createSync(recursive: true);
+        File('${agents.path}/tdd/SKILL.md')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('---\nname: tdd\n---\ntdd body\n');
+        File('${agents.path}/.hidden-note').writeAsStringSync('dot\n');
+        final claude = Directory('${home.path}/.claude')..createSync();
+        File('${claude.path}/skills/pr/SKILL.md')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('---\nname: pr\n---\npr body\n');
+        File('${claude.path}/settings.json').writeAsStringSync('{}\n');
+        Directory('${claude.path}/projects').createSync();
+      }
+
+      test('create stages ~/.agents/skills and ~/.claude/skills (only skills) '
+          'and rides them to their native orb paths', () async {
+        hostConfig(withPlugins: false);
+        compatRoots();
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          request.response.statusCode = 200;
+          unawaited(request.response.close());
+        });
+        final port = http.port;
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+        docker.logs = 'server password pw\n';
+
+        await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+        );
+        await http.close(force: true);
+
+        final container = docker.runArgs.firstWhere(
+          (a) => a.first == 'create',
+        )[2];
+        final id = container.substring('orb-'.length);
+        final staged = '${stateRoot.path}/staged-$id';
+
+        // Each root's skills/ is staged, with its dotfiles intact…
+        expect(
+          File('$staged/.agents/skills/tdd/SKILL.md').existsSync(),
+          isTrue,
+        );
+        expect(
+          File('$staged/.agents/skills/.hidden-note').existsSync(),
+          isTrue,
+        );
+        expect(File('$staged/.claude/skills/pr/SKILL.md').existsSync(), isTrue);
+        // …but the rest of the root (Claude state/credentials) never is:
+        expect(File('$staged/.claude/settings.json').existsSync(), isFalse);
+        expect(Directory('$staged/.claude/projects').existsSync(), isFalse);
+
+        // They ride to their NATIVE orb paths (not into the opencode config
+        // dir), as the top-level-dir merge form.
+        final copies = docker.runArgs.where((a) => a.first == 'cp').toList();
+        expect(
+          copies,
+          containsAll([
+            ['cp', '$staged/.agents/.', '$container:/root/.agents/'],
+            ['cp', '$staged/.claude/.', '$container:/root/.claude/'],
+          ]),
+        );
+        // …and the §6.2 config entries still land where they always did.
+        expect(
+          copies,
+          containsAll([
+            [
+              'cp',
+              '$staged/opencode.jsonc',
+              '$container:/root/.config/opencode/opencode.jsonc',
+            ],
+          ]),
+        );
+        expect(copies.where((a) => a.last.contains('service.json')), isEmpty);
+      });
+
+      test(
+        'create leaves the orb untouched when neither compat root exists',
+        () async {
+          hostConfig(withPlugins: false);
+          final http = await HttpServer.bind('127.0.0.1', 0);
+          http.listen((request) {
+            request.response.statusCode = 200;
+            unawaited(request.response.close());
+          });
+          final port = http.port;
+          docker.ports =
+              '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+          docker.logs = 'server password pw\n';
+
+          await service().create(
+            project: 'proj-1',
+            name: 'dev',
+            checkout: checkout.path,
+          );
+          await http.close(force: true);
+
+          final container = docker.runArgs.firstWhere(
+            (a) => a.first == 'create',
+          )[2];
+          final id = container.substring('orb-'.length);
+          final staged = '${stateRoot.path}/staged-$id';
+
+          expect(Directory('$staged/.agents').existsSync(), isFalse);
+          expect(Directory('$staged/.claude').existsSync(), isFalse);
+          final copies = docker.runArgs.where((a) => a.first == 'cp').toList();
+          expect(
+            copies.where((a) => a.last.contains('/root/.agents')),
+            isEmpty,
+          );
+          expect(
+            copies.where((a) => a.last.contains('/root/.claude')),
+            isEmpty,
+          );
+        },
+      );
+    });
+
     test('the boot streams orb.boot events', () async {
       final events = <Map<String, Object?>>[];
       hostConfig(withPlugins: false);
