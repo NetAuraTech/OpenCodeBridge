@@ -65,6 +65,26 @@ class OrbPermissionError implements Exception {
   String toString() => 'OrbPermissionError($orb)';
 }
 
+/// The outcome of the settle's push verification (issue #352): [ok] whether
+/// the turn may settle `succeeded` (the push is verified), [sha] the
+/// remote-verified tip (the artifact's sha, set only when [ok]), and [note]
+/// the `ls-remote` evidence — the `push_unverified` settle's summary — that
+/// names the positive path (re-dispatch the same task to re-verify and
+/// re-push) when the push is not verified.
+class _PushVerdict {
+  const _PushVerdict({required this.ok, this.sha, this.note = ''});
+
+  /// Whether the turn may settle `succeeded`.
+  final bool ok;
+
+  /// The remote-verified tip sha (the report's artifact), or `null`.
+  final String? sha;
+
+  /// The `ls-remote` evidence for a failed verification (the settle's
+  /// summary), naming the positive path.
+  final String note;
+}
+
 /// The spawn surface's task service (issue #99 + #100, spec §8): what the
 /// bridge does behind the global `orb_spawn`/`orb_wait`/`orb_stop`/
 /// `orb_delete`/`orb_export` tools.
@@ -1183,8 +1203,32 @@ class OrbTaskService {
     if (target.isDone) return;
     // (a) The terminal fields: the status, the summary (or the settle's own
     // reason when there is none to report), and the PR.
-    target.status = status;
-    target.summary = summary;
+    //
+    // The push gate (issue #352): a turn the agent reported `succeeded`
+    // settles `succeeded` only once the harness has verified the push itself
+    // — the report's artifact (branch, sha) is what the remote shows, not the
+    // agent's claim. A push that never reached the remote (or a sha mismatch)
+    // settles a distinct `push_unverified` with the `ls-remote` evidence and
+    // the positive path named (re-dispatch). A turn that already failed (or a
+    // session gone) is not re-gated: it is already a failure for its own
+    // reason, and re-gating it would lose that cause.
+    var effectiveStatus = status;
+    var effectiveSummary = summary;
+    String? verifiedSha;
+    if (status == 'succeeded') {
+      final verdict = await _verifyPush(target);
+      if (!verdict.ok) {
+        effectiveStatus = 'push_unverified';
+        effectiveSummary = effectiveSummary.isEmpty
+            ? verdict.note
+            : '$effectiveSummary\n\n${verdict.note}';
+      } else {
+        verifiedSha = verdict.sha;
+      }
+    }
+    target.status = effectiveStatus;
+    target.summary = effectiveSummary;
+    target.sha = verifiedSha;
     target.pr = await _prUrl(target);
     // The read above crossed the event loop: a concurrent settler (the
     // watcher and a waiter poll the same task) may have completed it in the
@@ -1217,6 +1261,77 @@ class OrbTaskService {
     // chance the caller is reachable (issue #212). A no-op when the watcher
     // already runs.
     if (target.deliveryOwed) _startWatching();
+  }
+
+  /// The settle's push gate (issue #352, acceptance #1–#3): the harness reads
+  /// the pushed state **itself** — `git ls-remote <origin> refs/heads/<branch>`
+  /// from the project checkout through the public [OrbService.remoteBranchTip]
+  /// seam — and decides whether a `succeeded` turn may stay that way.
+  ///
+  /// The agent carries no sha to the harness (its turn outcome is a word,
+  /// never a sha), so the sha-mismatch signal is the orb-side push-failed
+  /// marker ([OrbRecord.pushFailing], fed by the entrypoint's post-commit
+  /// hook): a branch the remote carries while the hook says the push failed is
+  /// settled `push_unverified` too (acceptance #3), not a silent success.
+  /// A branch that is simply not on the remote (acceptance #2) — the #346
+  /// observation: the agent reported "pushed", the remote has no branch — and
+  /// a probe that cannot answer at all (no GitHub origin, the CLI failing)
+  /// are all failures: the verification never upgrades to `succeeded`.
+  Future<_PushVerdict> _verifyPush(OrbTask target) async {
+    final row = await _orbRow(target);
+    final pushFailing = row?.pushFailing ?? false;
+    // The remote's tip of the task's branch: the probe resolution itself
+    // (the project checkout read, the `ls-remote`) is best-effort — **any**
+    // failure to run it (no usable checkout, no GitHub origin, the CLI
+    // failing) is "cannot verify", never a silent success.
+    String? sha;
+    try {
+      sha = await orbs.remoteBranchTip(
+        await _checkoutOf(target.project),
+        target.branch,
+      );
+    } catch (_) {
+      return const _PushVerdict(
+        ok: false,
+        note:
+            'the push could not be verified — the remote probe failed '
+            '(the project checkout or its origin is unavailable). To recover, '
+            're-dispatch the same task to re-verify and re-push.',
+      );
+    }
+    if (sha == null) {
+      return _PushVerdict(
+        ok: false,
+        note:
+            'the push was not verified — branch ${target.branch} is not on '
+            'the remote (git ls-remote found no such branch). To recover, '
+            're-dispatch the same task to re-verify and re-push.',
+      );
+    }
+    if (pushFailing) {
+      return _PushVerdict(
+        ok: false,
+        note:
+            'the push was not verified — the orb\'s post-commit hook '
+            'reported its push to the remote failed (push-failed marker), so '
+            'the remote tip is not the work this turn ended with. To recover, '
+            're-dispatch the same task to re-verify and re-push.',
+      );
+    }
+    return _PushVerdict(ok: true, sha: sha);
+  }
+
+  /// The task's orb row from the live list (`null` when the list cannot be
+  /// read or the orb is not in it): the push-failed badge is read off it.
+  Future<OrbRecord?> _orbRow(OrbTask target) async {
+    try {
+      for (final row in await orbs.list()) {
+        if (row.id == target.orb) return row;
+      }
+    } catch (_) {
+      // The list cannot be read (docker down): no badge, no conclusion.
+    }
+    return null;
   }
 
   /// The branch's PR URL (the return channel, spec §3.2), read through the

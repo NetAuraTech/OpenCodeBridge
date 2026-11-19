@@ -291,6 +291,20 @@ void main() {
     },
   );
 
+  test('the spawn/wait answers render the remote-verified branch sha '
+      '(issue #352)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The completion report's artifact is the remote-verified value the
+    // bridge read from the remote at settle: the branch, with the sha once the
+    // settle verified the push (row.sha, persisted on the task record). The
+    // render reads the row the bridge answers with — never a sha the plugin
+    // invents of its own.
+    expect(source, contains('row.sha'));
+    expect(source, contains(r'Branch: ${row.branch} @ ${row.sha}'));
+  });
+
   test('the host dir is the global opencode plugins dir', () {
     final home = Platform.environment['HOME'] ?? '/';
     final path = OrbAgentTools.hostDir().path;

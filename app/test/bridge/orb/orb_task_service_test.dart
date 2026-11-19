@@ -32,6 +32,11 @@ const _project = OpencodeProject(
   canonical: '/home/dev/shop',
 );
 
+/// The remote tip the fake orb service's `remoteBranchTip` answers (issue
+/// #352): a verified push, so a `succeeded` turn settles `succeeded`. A test
+/// that wants the unverified case points the fake at `null` instead.
+const _remoteTip = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+
 final _callerRow = Session(
   id: 'ses_caller',
   title: 'caller',
@@ -232,6 +237,11 @@ class _FakeOrbs implements OrbService {
   /// `UpstreamVerdict.unknown` for every orb (issue #276's non-conclusive 404).
   Object? listError;
 
+  /// The settle's remote probe (issue #352): the tip it answers for the task's
+  /// branch. Defaulted to a verified sha so a `succeeded` turn stays
+  /// `succeeded`; a test that wants the unverified case sets it to `null`.
+  String? remoteBranchTipResult = _remoteTip;
+
   @override
   Future<List<OrbRecord>> list({bool includePr = false}) async {
     lastListIncludePr = includePr;
@@ -297,6 +307,13 @@ class _FakeOrbs implements OrbService {
     if (error != null) throw error;
     return seedBranchResult;
   }
+
+  /// The settle's push verification (issue #352): the remote probe answers
+  /// [remoteBranchTipResult] for the task's branch — `null` (the branch not on
+  /// the remote) makes a `succeeded` turn settle `push_unverified`.
+  @override
+  Future<String?> remoteBranchTip(String checkout, String branch) async =>
+      remoteBranchTipResult;
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -1333,7 +1350,13 @@ void main() {
       expect(task.summary, 'All done.');
       expect(task.branch, 'orb/a1b2c3');
       expect(task.pr, 'https://gh/pr/1');
-      expect(task.results, ['branch: orb/a1b2c3', 'PR: https://gh/pr/1']);
+      // The artifact carries the remote-verified sha (issue #352, acceptance
+      // #2): the sha the harness read from the remote, not the agent's claim.
+      expect(task.sha, _remoteTip);
+      expect(task.results, [
+        'branch: orb/a1b2c3 @ $_remoteTip',
+        'PR: https://gh/pr/1',
+      ]);
       expect(task.isDone, isTrue);
     });
 
@@ -1346,7 +1369,7 @@ void main() {
         callerSession: 'ses_caller',
       );
       expect(task.pr, isNull);
-      expect(task.results, ['branch: orb/a1b2c3']);
+      expect(task.results, ['branch: orb/a1b2c3 @ $_remoteTip']);
     });
 
     test('the failed outcome is the task status', () async {

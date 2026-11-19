@@ -23,6 +23,7 @@ class OrbTask {
     this.status = 'running',
     this.summary = '',
     this.pr,
+    this.sha,
     this.completed,
     this.deliveryOwed = false,
     this.fallbackSent = false,
@@ -100,7 +101,12 @@ class OrbTask {
   final List<String>? toolchain;
 
   /// `running` until the orb session's turn ends, then the service's
-  /// outcome: `succeeded`, `failed`, or `interrupted`.
+  /// outcome: `succeeded`, `failed`, or `interrupted` — or `push_unverified`
+  /// (issue #352, acceptance #2) when a turn that reported `succeeded`
+  /// settled after the harness could not verify the push: the branch is not
+  /// on the remote, the remote probe failed, or the orb's push-failed marker
+  /// says the tip is not this turn's work. The report's summary carries the
+  /// `ls-remote` evidence and the positive path (re-dispatch).
   String status;
 
   /// The orb agent's final message (its summary of the work), captured at
@@ -110,6 +116,15 @@ class OrbTask {
   /// The branch's PR URL once one exists (the return channel, spec §3.2),
   /// or `null` when the work has none yet.
   String? pr;
+
+  /// The **remote-verified** tip sha of the branch (issue #352, acceptance
+  /// #2): the sha the completion report carries, read by the harness itself
+  /// from the remote (`git ls-remote <origin> refs/heads/<branch>` at settle)
+  /// — not the agent's claim. Set only once the settle has verified the push,
+  /// so `null` while running, and `null` when the verification found the
+  /// branch absent (there is no remote sha to carry — the task then settles
+  /// `push_unverified`, never `succeeded`).
+  String? sha;
 
   /// Epoch millis of the completion, or `null` while running.
   int? completed;
@@ -154,11 +169,15 @@ class OrbTask {
   bool get isDone => completed != null;
 
   /// The structured result's artifacts (spec §8.3's `results`): **exactly one
-  /// branch** — the orb's branch, §3.1 (issue #353) — always, and the PR once
-  /// it exists. The branch is the single branch artifact: the named one the
-  /// task gave, or the internal `orb/<id>` default; it is never a second,
-  /// separately-pushed branch.
-  List<String> get results => ['branch: $branch', if (pr != null) 'PR: $pr'];
+  /// branch** — the orb's branch, §3.1 (issue #353: the named one the task
+  /// gave, or the internal `orb/<id>` default; never a second,
+  /// separately-pushed branch) — always, its **remote-verified** sha once the
+  /// settle verified the push (issue #352, acceptance #2), and the PR once it
+  /// exists.
+  List<String> get results => [
+    'branch: $branch${sha == null ? '' : ' @ $sha'}',
+    if (pr != null) 'PR: $pr',
+  ];
 
   Map<String, Object?> toJson() => {
     'id': id,
@@ -182,6 +201,10 @@ class OrbTask {
     'summary': summary,
     'results': results,
     if (pr != null) 'pr': pr,
+    // The remote-verified sha (issue #352): only-when-present, like the
+    // toolchain — a record settled before the verification existed carries
+    // no sha, and the reader sees `null` for it.
+    if (sha != null) 'sha': sha,
     if (completed != null) 'completed': completed,
     // Always written (issue #212, #260): the delivery's explicit facts. A
     // settled task that still owes its completion injection must reload as
@@ -216,6 +239,9 @@ class OrbTask {
       status: map['status'] as String? ?? 'running',
       summary: map['summary'] as String? ?? '',
       pr: map['pr'] as String?,
+      // The remote-verified sha (issue #352): read back on reload, `null` on
+      // a record settled before the verification existed.
+      sha: map['sha'] as String?,
       completed: (map['completed'] as num?)?.toInt(),
       // The image's toolchain (issue #354), stamped at dispatch: read back
       // on reload, `null` on a record that predates the stamp.

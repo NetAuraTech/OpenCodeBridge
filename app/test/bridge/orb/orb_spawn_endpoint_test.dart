@@ -39,6 +39,10 @@ const _project = OpencodeProject(
   canonical: '/home/dev/shop',
 );
 
+/// The remote tip the fake orb service's `remoteBranchTip` answers (issue
+/// #352): a verified push, so a `succeeded` turn settles `succeeded`.
+const _remoteTip = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+
 final _callerRow = Session(
   id: 'ses_caller',
   title: 'caller',
@@ -183,6 +187,12 @@ class _FakeOrbs implements OrbService {
     if (error != null) throw error;
     return seedBranchResult;
   }
+
+  /// The settle's push verification (issue #352): the remote probe answers a
+  /// verified sha, so a `succeeded` turn stays `succeeded`.
+  @override
+  Future<String?> remoteBranchTip(String checkout, String branch) async =>
+      _remoteTip;
 
   @override
   Future<void> stop(String id) async {
@@ -398,7 +408,10 @@ void main() {
         final row = jsonDecode(body);
         expect(row['status'], 'succeeded');
         expect(row['summary'], 'Shipped it.');
-        expect(row['results'], ['branch: orb/a1b2c3', 'PR: https://gh/pr/9']);
+        expect(row['results'], [
+          'branch: orb/a1b2c3 @ $_remoteTip',
+          'PR: https://gh/pr/9',
+        ]);
         expect(row['pr'], 'https://gh/pr/9');
         expect(row['completed'], isNotNull);
       } finally {
