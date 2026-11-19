@@ -189,10 +189,18 @@ class OrbRefusalError implements Exception {
   /// code task can land on it.
   static const String noShell = 'no_shell';
 
+  /// The target orb already runs a task (issue #351): a second dispatch onto
+  /// the same orb is refused up front instead of silently queued behind the
+  /// running task (which would serialize "parallel" work onto one branch).
+  /// [message] names the busy orb and the running task, and states the
+  /// positive path (a distinct `orb` name, or wait for completion).
+  static const String orbBusy = 'orb_busy';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
   /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
   /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`,
-  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`, `no_shell`).
+  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`, `no_shell`,
+  /// `orb_busy`).
   final String code;
 
   /// The clear message for the app.
@@ -524,11 +532,18 @@ class OrbService {
   /// the seed's branch, whose tip the entrypoint's first-start clone checks
   /// out (`ORB_BASE_BRANCH`) instead of the remote's default; the record
   /// carries it as the PR base of the orb's work.
+  ///
+  /// [branch] (issue #353, the one branch contract) is the named branch the
+  /// orb's git state lives on: it is the single branch the post-commit hook
+  /// pushes (the entrypoint reads it as `ORB_BRANCH`) and the single branch
+  /// the completion report carries. `null` (the default) keeps the internal
+  /// `orb/<id>` fallback — the value that never appears as a named artifact.
   Future<OrbRecord> create({
     required String project,
     required String name,
     required String checkout,
     String? base,
+    String? branch,
   }) async {
     // The up-front refusals (spec §2.3), in order.
     await _refuseIfNameTaken(project, name);
@@ -540,7 +555,10 @@ class OrbService {
     final id = _mintId();
     final container = 'orb-$id';
     final created = DateTime.now().toUtc().toIso8601String();
-    final branch = 'orb/$id';
+    // The one branch contract (issue #353): the named branch when the
+    // caller gave one, else the internal `orb/<id>` fallback.
+    final named = branch?.trim() ?? '';
+    final resolved = named.isEmpty ? 'orb/$id' : named;
 
     // The workspace + data volumes (labeled, §2.1) and the state dir.
     await _createVolume(
@@ -548,7 +566,7 @@ class OrbService {
       id,
       name,
       project,
-      branch,
+      resolved,
       created,
       base,
     );
@@ -557,7 +575,7 @@ class OrbService {
       id,
       name,
       project,
-      branch,
+      resolved,
       created,
       base,
     );
@@ -593,6 +611,8 @@ class OrbService {
       'ORB_GIT_NAME=${gitIdentity.$1}',
       '-e',
       'ORB_GIT_EMAIL=${gitIdentity.$2}',
+      '-e',
+      'ORB_BRANCH=$resolved',
       if (base != null) ...['-e', 'ORB_BASE_BRANCH=$base'],
       '-l',
       'ocb.orb=true',
@@ -603,7 +623,7 @@ class OrbService {
       '-l',
       'ocb.project=$project',
       '-l',
-      'ocb.branch=$branch',
+      'ocb.branch=$resolved',
       if (base != null) ...['-l', 'ocb.base=$base'],
       '-l',
       'ocb.created=$created',
@@ -654,7 +674,7 @@ class OrbService {
         id: id,
         name: name,
         project: project,
-        branch: branch,
+        branch: resolved,
         state: OrbState.runningWire,
         created: created,
         url: url,
@@ -706,6 +726,41 @@ class OrbService {
       );
     }
     return seedOrb.branch;
+  }
+
+  /// The remote's tip of [branch] (issue #352): `git ls-remote origin
+  /// refs/heads/branch` run at [checkout], so the completion
+  /// report carries the **remote-verified** sha, not the agent's claim. The
+  /// read is from the remote, never the orb's volume (the bridge cannot read
+  /// it) — a stopped orb's branch still answers. The 40-hex sha when the
+  /// branch is on the remote; `null` when it is not (the probe's empty
+  /// answer); throws when the remote cannot be probed at all (no GitHub
+  /// origin, or the CLI fails — a genuine "cannot verify", which the caller
+  /// degrades to `push_unverified`, never `succeeded`).
+  Future<String?> remoteBranchTip(String checkout, String branch) async {
+    await _remoteUrl(checkout);
+    final probe = await git([
+      'ls-remote',
+      '--heads',
+      'origin',
+      branch,
+    ], workingDirectory: checkout);
+    if (probe.exitCode != 0) {
+      throw const OrbRefusalError(
+        OrbRefusalError.noRemote,
+        'the remote probe failed — the push could not be verified',
+      );
+    }
+    final line = probe.stdout
+        .trim()
+        .split('\n')
+        .where((l) => l.isNotEmpty)
+        .cast<String?>()
+        .firstWhere((l) => l != null, orElse: () => null);
+    if (line == null) return null;
+    // `ls-remote --heads` answers "<sha>\t<ref>": the tip is the first field.
+    final sha = line.split('\t').first.trim();
+    return sha.isEmpty ? null : sha;
   }
 
   /// The orb list composed from the labels (spec §2.2): the labeled

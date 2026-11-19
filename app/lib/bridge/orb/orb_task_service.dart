@@ -14,6 +14,7 @@ import '../notify/delivery_policy.dart';
 import '../notify/notify_service.dart';
 import '../sessions/backend.dart';
 import '../sessions/opencode_service.dart';
+import 'orb_embedded.dart';
 import 'orb_service.dart';
 import 'orb_state_machine.dart';
 import 'orb_task.dart';
@@ -62,6 +63,26 @@ class OrbPermissionError implements Exception {
 
   @override
   String toString() => 'OrbPermissionError($orb)';
+}
+
+/// The outcome of the settle's push verification (issue #352): [ok] whether
+/// the turn may settle `succeeded` (the push is verified), [sha] the
+/// remote-verified tip (the artifact's sha, set only when [ok]), and [note]
+/// the `ls-remote` evidence — the `push_unverified` settle's summary — that
+/// names the positive path (re-dispatch the same task to re-verify and
+/// re-push) when the push is not verified.
+class _PushVerdict {
+  const _PushVerdict({required this.ok, this.sha, this.note = ''});
+
+  /// Whether the turn may settle `succeeded`.
+  final bool ok;
+
+  /// The remote-verified tip sha (the report's artifact), or `null`.
+  final String? sha;
+
+  /// The `ls-remote` evidence for a failed verification (the settle's
+  /// summary), naming the positive path.
+  final String note;
 }
 
 /// The spawn surface's task service (issue #99 + #100, spec §8): what the
@@ -269,6 +290,11 @@ class OrbTaskService {
   /// dispatched record immediately — the completion watcher then persists
   /// the result and injects the completion message.
   ///
+  /// [branch] (issue #353, the one branch contract) is the named branch the
+  /// task's work lands on: threaded to [OrbService.create] when this call
+  /// creates the orb (an existing orb keeps its own branch — a wake never
+  /// re-names it). `null` keeps the internal `orb/<id>` default.
+  ///
   /// [task] is delivered to the orb's agent exactly as given (trimmed, issue
   /// #147) — no prompt text is prepended or appended. [callerSession] and
   /// [dispatchId] are the dispatch identity ([OrbTaskService._retriedTaskOn]).
@@ -278,6 +304,7 @@ class OrbTaskService {
     bool wait = true,
     String? orb,
     String? seed,
+    String? branch,
     String? callerSession,
     String? callerDirectory,
     String? dispatchId,
@@ -299,6 +326,7 @@ class OrbTaskService {
           model: model,
           orb: orb?.trim(),
           seed: seed?.trim(),
+          branch: branch?.trim(),
           callerSession: callerSession,
           callerDirectory: callerDirectory,
           dispatchId: dispatchId,
@@ -322,6 +350,7 @@ class OrbTaskService {
     ModelRef? model,
     String? orb,
     String? seed,
+    String? branch,
     String? callerSession,
     String? callerDirectory,
     String? dispatchId,
@@ -331,6 +360,7 @@ class OrbTaskService {
       task,
       orb,
       seed,
+      branch: branch,
     );
 
     // The idempotent dispatch (issue #143, tightened by #147): a retry of a
@@ -344,6 +374,23 @@ class OrbTaskService {
     // check-then-dispatch race-free.
     final retried = _retriedTaskOn(record.id, task, callerSession, dispatchId);
     if (retried != null) return retried;
+
+    // The orb's busy-orb refusal (issue #351): the target orb already runs a
+    // task, and this dispatch is not its idempotent retry (checked above).
+    // The dispatch is refused up front — never stacked behind the running
+    // task (which would serialize the "parallel" work onto one orb's single
+    // `orb/<id>` branch) and never answered as a plain "running". A spawn
+    // that just created its orb (a fresh clone) has no task yet, so it is
+    // unaffected — a distinct `orb` name stays the parallel path.
+    final busy = _busyTaskOn(record.id);
+    if (busy != null) {
+      throw OrbRefusalError(
+        OrbRefusalError.orbBusy,
+        'the orb ${record.name} already runs task ${busy.id}. Dispatch with a '
+        'distinct "orb" name for parallel work, or wait for the task to '
+        'complete.',
+      );
+    }
 
     // The orb's boot proved the agent cannot execute (issue #149, spec §6.8):
     // an existing orb's refusal already fired in the targeting, and an orb
@@ -367,6 +414,9 @@ class OrbTaskService {
         status: 'refused',
         summary: record.bootReason ?? 'no usable shell',
         completed: DateTime.now().millisecondsSinceEpoch,
+        // The image's toolchain (issue #354): the answer carries it even on a
+        // refusal — it is a property of the image, not of the run.
+        toolchain: OrbEmbedded.toolchain,
       );
       _tasks.insert(0, refused);
       _persist();
@@ -403,6 +453,12 @@ class OrbTaskService {
       textHash: _textHash(task),
       dispatchId: dispatchId?.trim(),
       created: DateTime.now().millisecondsSinceEpoch,
+      // The sandbox image's toolchain (issue #354, acceptance #1): the
+      // driver reads the toolchain off the spawn answer instead of spending
+      // a probe orb. It is the image definition's own pins —
+      // `OrbEmbedded.toolchain` parses the Dockerfile's ARG defaults — so a
+      // pin that moves there moves the answer with it (never a prose copy).
+      toolchain: OrbEmbedded.toolchain,
     );
     _tasks.insert(0, dispatched);
     _persist();
@@ -522,6 +578,28 @@ class OrbTaskService {
     return null;
   }
 
+  /// The first not-done task running on orb [orbId], or `null` (issue #351):
+  /// the busy-orb refusal's running task.
+  ///
+  /// A fresh orb this spawn just created has no task yet, so it is never
+  /// busy; a wake-or-create target is. The check is keyed by the orb **id**,
+  /// so a dispatch to a *different* orb is unaffected — parallelism still
+  /// works, the refusal only stops a second task stacking on *this* orb's
+  /// single `orb/<id>` branch.
+  ///
+  /// The idempotent retry check ([_retriedTaskOn]) runs first and returns
+  /// early (issue #143/#147): by the time this check runs, the dispatch
+  /// cannot be the retry of the orb's running task, so no exclusion is
+  /// needed — any running task found here is a *different* task, and the
+  /// refusal is correct.
+  OrbTask? _busyTaskOn(String orbId) {
+    for (final running in _tasks) {
+      if (running.orb != orbId || running.isDone) continue;
+      return running;
+    }
+    return null;
+  }
+
   /// The dispatch text's identity in the tasks file: a SHA-256 of the raw
   /// caller text (exactly what was delivered, issue #147), so the file
   /// carries no instruction text twice and no lossy comparison can make two
@@ -536,7 +614,8 @@ class OrbTaskService {
   /// - explicit [orb] name taken → that orb (woken when stopped);
   /// - explicit name not yet taken → the additional orb, a fresh clone
   ///   (from the default branch, or from [seed]'s pushed branch tip when
-  ///   given) on a fresh `orb/<id>` branch;
+  ///   given) on the branch the task names ([branch], issue #353) — or the
+  ///   fresh `orb/<id>` default when none is named;
   /// - name omitted → the single-orb wake-or-create: one orb (wake),
   ///   several ([OrbAmbiguousError] with the project's names), none
   ///   (create, name derived from the task).
@@ -544,12 +623,18 @@ class OrbTaskService {
   /// [seed] parameterizes a creation only: with an existing target it is
   /// refused ([OrbRefusalError.seedConflict]), and so is a seed with no
   /// target name to create under — a seed never changes a wake.
+  ///
+  /// [branch] (issue #353) is the named branch the new orb's work lands on —
+  /// it threads to the create (the orb's git state lives on it, the hook
+  /// pushes it, the report carries it). Like the seed, it parameterizes a
+  /// creation only: a wake keeps the targeted orb's own branch.
   Future<(OrbRecord, bool)> _targetOrCreateOrb(
     String projectId,
     String task,
     String? orb,
-    String? seed,
-  ) async {
+    String? seed, {
+    String? branch,
+  }) async {
     final rows = await orbs.list();
     final inProject = [
       for (final row in rows)
@@ -576,9 +661,12 @@ class OrbTaskService {
       }
       // The additional orb (spec §8.2): a fresh clone under the name.
       if (seed != null && seed.isNotEmpty) {
-        return (await _createSeeded(projectId, orb, seed), true);
+        return (
+          await _createSeeded(projectId, orb, seed, branch: branch),
+          true,
+        );
       }
-      return (await _createOrb(projectId, orb), true);
+      return (await _createOrb(projectId, orb, branch: branch), true);
     }
     // No target name: the single-orb wake-or-create (#99's contract).
     if (seed != null && seed.isNotEmpty) {
@@ -600,6 +688,7 @@ class OrbTaskService {
       await _createOrb(
         projectId,
         _derivedName(task, {for (final row in rows) row.name}),
+        branch: branch,
       ),
       true,
     );
@@ -633,9 +722,20 @@ class OrbTaskService {
   );
 
   /// The additional orb (fresh clone of the project's default branch).
-  Future<OrbRecord> _createOrb(String projectId, String name) async {
+  /// [branch] (issue #353) is the named branch the work lands on, threaded
+  /// to the create; `null` keeps the internal `orb/<id>` default.
+  Future<OrbRecord> _createOrb(
+    String projectId,
+    String name, {
+    String? branch,
+  }) async {
     final checkout = await _checkoutOf(projectId);
-    return orbs.create(project: projectId, name: name, checkout: checkout);
+    return orbs.create(
+      project: projectId,
+      name: name,
+      checkout: checkout,
+      branch: branch,
+    );
   }
 
   /// The seeded clone (spec §3.3): the seed's branch tip, read from the
@@ -643,11 +743,14 @@ class OrbTaskService {
   /// stopped, and its uncommitted working tree is never part of the seed.
   /// The clone's base label carries the seed's branch: the orb's PR stacks
   /// on the parent's branch, not the default.
+  /// [branch] (issue #353) is the named branch the work lands on; `null`
+  /// keeps the internal `orb/<id>` default.
   Future<OrbRecord> _createSeeded(
     String projectId,
     String name,
-    String seed,
-  ) async {
+    String seed, {
+    String? branch,
+  }) async {
     final checkout = await _checkoutOf(projectId);
     final base = await orbs.seedBranch(
       project: projectId,
@@ -671,6 +774,7 @@ class OrbTaskService {
       name: name,
       checkout: checkout,
       base: base,
+      branch: branch,
     );
   }
 
@@ -1098,8 +1202,32 @@ class OrbTaskService {
     if (target.isDone) return;
     // (a) The terminal fields: the status, the summary (or the settle's own
     // reason when there is none to report), and the PR.
-    target.status = status;
-    target.summary = summary;
+    //
+    // The push gate (issue #352): a turn the agent reported `succeeded`
+    // settles `succeeded` only once the harness has verified the push itself
+    // — the report's artifact (branch, sha) is what the remote shows, not the
+    // agent's claim. A push that never reached the remote (or a sha mismatch)
+    // settles a distinct `push_unverified` with the `ls-remote` evidence and
+    // the positive path named (re-dispatch). A turn that already failed (or a
+    // session gone) is not re-gated: it is already a failure for its own
+    // reason, and re-gating it would lose that cause.
+    var effectiveStatus = status;
+    var effectiveSummary = summary;
+    String? verifiedSha;
+    if (status == 'succeeded') {
+      final verdict = await _verifyPush(target);
+      if (!verdict.ok) {
+        effectiveStatus = 'push_unverified';
+        effectiveSummary = effectiveSummary.isEmpty
+            ? verdict.note
+            : '$effectiveSummary\n\n${verdict.note}';
+      } else {
+        verifiedSha = verdict.sha;
+      }
+    }
+    target.status = effectiveStatus;
+    target.summary = effectiveSummary;
+    target.sha = verifiedSha;
     target.pr = await _prUrl(target);
     // The read above crossed the event loop: a concurrent settler (the
     // watcher and a waiter poll the same task) may have completed it in the
@@ -1132,6 +1260,83 @@ class OrbTaskService {
     // chance the caller is reachable (issue #212). A no-op when the watcher
     // already runs.
     if (target.deliveryOwed) _startWatching();
+  }
+
+  /// The settle's push gate (issue #352, acceptance #1–#3): the harness reads
+  /// the pushed state **itself** — `git ls-remote <origin> refs/heads/<branch>`
+  /// from the project checkout through the public [OrbService.remoteBranchTip]
+  /// seam — and decides whether a `succeeded` turn may stay that way.
+  ///
+  /// The agent carries no sha to the harness (its turn outcome is a word,
+  /// never a sha), so the sha-mismatch signal is the orb-side push-failed
+  /// marker ([OrbRecord.pushFailing], fed by the entrypoint's post-commit
+  /// hook): a branch the remote carries while the hook says the push failed is
+  /// settled `push_unverified` too (acceptance #3), not a silent success.
+  /// A branch that is simply not on the remote (acceptance #2) — the #346
+  /// observation: the agent reported "pushed", the remote has no branch — and
+  /// a probe that cannot answer at all (no GitHub origin, the CLI failing)
+  /// are all failures: the verification never upgrades to `succeeded`.
+  /// The recovery path every unverified-push note names (issue #352): the
+  /// caller re-dispatches the very same task (the idempotent retry returns it
+  /// if still running) so the push is re-verified and re-pushed.
+  static const String _reDispatchRecovery =
+      're-dispatch the same task to re-verify and re-push.';
+
+  Future<_PushVerdict> _verifyPush(OrbTask target) async {
+    final row = await _orbRow(target);
+    final pushFailing = row?.pushFailing ?? false;
+    // The remote's tip of the task's branch: the probe resolution itself
+    // (the project checkout read, the `ls-remote`) is best-effort — **any**
+    // failure to run it (no usable checkout, no GitHub origin, the CLI
+    // failing) is "cannot verify", never a silent success.
+    String? sha;
+    try {
+      sha = await orbs.remoteBranchTip(
+        await _checkoutOf(target.project),
+        target.branch,
+      );
+    } catch (_) {
+      return const _PushVerdict(
+        ok: false,
+        note:
+            'the push could not be verified — the remote probe failed '
+            '(the project checkout or its origin is unavailable). '
+            'To recover, $_reDispatchRecovery',
+      );
+    }
+    if (sha == null) {
+      return _PushVerdict(
+        ok: false,
+        note:
+            'the push was not verified — branch ${target.branch} is not on '
+            'the remote (git ls-remote found no such branch). '
+            'To recover, $_reDispatchRecovery',
+      );
+    }
+    if (pushFailing) {
+      return _PushVerdict(
+        ok: false,
+        note:
+            'the push was not verified — the orb\'s post-commit hook '
+            'reported its push to the remote failed (push-failed marker), so '
+            'the remote tip is not the work this turn ended with. '
+            'To recover, $_reDispatchRecovery',
+      );
+    }
+    return _PushVerdict(ok: true, sha: sha);
+  }
+
+  /// The task's orb row from the live list (`null` when the list cannot be
+  /// read or the orb is not in it): the push-failed badge is read off it.
+  Future<OrbRecord?> _orbRow(OrbTask target) async {
+    try {
+      for (final row in await orbs.list()) {
+        if (row.id == target.orb) return row;
+      }
+    } catch (_) {
+      // The list cannot be read (docker down): no badge, no conclusion.
+    }
+    return null;
   }
 
   /// The branch's PR URL (the return channel, spec §3.2), read through the
@@ -1290,7 +1495,8 @@ class OrbTaskService {
   }
 
   /// The out-of-band push fallback (issue #212): "Orb X done — work on branch
-  /// `orb/<id>`" (the PR link once it exists) through the existing FCM path
+  /// `<the orb's branch>`" (the PR link once it exists) through the existing
+  /// FCM path
   /// (issue #24), deep-linked to the calling session — the same place the
   /// in-app injection targets, where the completion message lands when the
   /// app reopens. Returns whether a push was actually dispatched, so the

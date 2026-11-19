@@ -841,6 +841,47 @@ void main() {
     });
   });
 
+  group('the branch contract (issue #353)', () {
+    // The one branch per orb: the task names the branch (the bridge passes
+    // ORB_BRANCH at `docker create`), the clone lands on it, and the
+    // post-commit hook pushes HEAD to it. `orb/<id>` is the internal default
+    // the bridge passes when the caller named no branch — it is a fallback
+    // value, never a second scheme.
+
+    test('the hook pushes to the named branch (ORB_BRANCH)', () async {
+      final r = await h.run(
+        firstStart: true,
+        env: {'ORB_BRANCH': 't353-branch-contract'},
+      );
+      expect(r.exitCode, 0);
+      final hook = File('${h.workspace.path}/.git/hooks/post-commit');
+      final body = hook.readAsStringSync();
+      expect(
+        body,
+        contains('refs/heads/t353-branch-contract'),
+        reason: 'the named branch is the hook\'s push target',
+      );
+      expect(
+        body,
+        isNot(contains('orb/testorb1')),
+        reason: 'the internal orb/<id> default never appears as the target',
+      );
+    });
+
+    test(
+      'without ORB_BRANCH the hook falls back to the orb/<id> default',
+      () async {
+        // The bridge always passes ORB_BRANCH (it defaults to `orb/<id>`
+        // itself); the entrypoint's own fallback keeps the script standalone-
+        // runnable and is the contract's internal detail.
+        final r = await h.run(firstStart: true);
+        expect(r.exitCode, 0);
+        final hook = File('${h.workspace.path}/.git/hooks/post-commit');
+        expect(hook.readAsStringSync(), contains('refs/heads/orb/testorb1'));
+      },
+    );
+  });
+
   group('the staged gh credentials (issue #120)', () {
     test('a staged gh config redirects gh: GH_CONFIG_DIR is exported and '
         'baked into the hook', () async {

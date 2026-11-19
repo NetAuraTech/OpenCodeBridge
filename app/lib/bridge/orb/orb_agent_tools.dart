@@ -65,6 +65,20 @@ abstract class OrbAgentTools {
       // acbc8d7 (#169/#170): async-by-default spawn, the bounded orb_wait.
       // The version every install holds when #141's fix ships.
       '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
+      // 5bdd8c5 (#174): the direct-tool (non-Code-Mode) registrations. The
+      // bytes every #174-era install materialized (the digest #354's branch
+      // recorded for this version was miscomputed — see the #351 merge note).
+      '58872b1d3aaeda688746c42dc583b9bb1ad6c2ba07969358c727ec93f9878281',
+      // 8a29af6 (#354): the spawn answer lists the sandbox toolchain.
+      'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
+      // c795196 (#351): the busy-orb refusal (a second task is refused, not
+      // stacked). The version every install holds when the one branch
+      // contract (#353) ships.
+      '8ff9503b181fd649f05ca88a246f774499b24631af0948d877d014ffd22d2235',
+      // The #352 branch point: the busy-orb refusal as the push-verification
+      // change (#352) shipped from it — kept in the union so an install
+      // holding that exact version also refreshes (#352).
+      '61460da818441d5f866993f4fc7708967e5478d38c315ec54237e668ac524e70',
     },
   };
 
@@ -142,7 +156,21 @@ function describe(row) {
   const lines = []
   lines.push(`Orb ${row.orbName} (${row.orb}) — task ${row.id}`)
   lines.push(`Status: ${row.status}`)
-  lines.push(`Branch: ${row.branch}`)
+  // Issue #352: the artifact is the remote-verified value the bridge read from
+  // the remote at settle (branch + sha), not the agent's claim. The sha is
+  // present once the settle verified the push; a push that never reached the
+  // remote settles `push_unverified` and carries the ls-remote evidence in the
+  // summary (already rendered below), never a `succeeded` with a phantom tip.
+  if (row.sha) lines.push(`Branch: ${row.branch} @ ${row.sha}`)
+  else lines.push(`Branch: ${row.branch}`)
+  if (Array.isArray(row.toolchain) && row.toolchain.length > 0) {
+    // Issue #354: the sandbox image's toolchain, read off the row the
+    // bridge stamps from the image definition (the Dockerfile ARGs) at
+    // dispatch — the driver decides what can run in an orb without a probe
+    // orb. Never a list hardcoded here: an image pin change must move the
+    // answer with it.
+    lines.push(`Toolchain: ${row.toolchain.join(", ")}`)
+  }
   if (row.summary) lines.push("", row.summary)
   if (row.pr) lines.push("", `PR: ${row.pr}`)
   if (row.status === "refused") {
@@ -217,9 +245,14 @@ export default {
           "session receives a message when it completes (do not poll; end your turn and the " +
           "completion will wake you). Pass wait: true to hold this call briefly for a quick " +
           "task (the hold is bounded; a still-running task answers as running). The work lands " +
-          "on the orb's dedicated branch (orb/<id>) — the orb's agent commits and the branch is " +
-          "pushed after every commit. The project is not an argument: this session's project " +
-          "is used.",
+           "on the branch the task names (issue #353, the one branch contract): pass branch for " +
+           "a named branch (e.g. a ticket branch) and the orb's git state lives there, its agent " +
+           "commits, and the post-commit hook pushes it after every commit — the completion " +
+           "report carries exactly that one branch as its artifact. Omit branch and the orb " +
+           "falls back to its internal default. The project is not an argument: this session's " +
+           "project is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
+           "installs, read from the image definition) — check it to decide whether a task can " +
+           "run in an orb, without a probe orb.",
         input: {
           type: "object",
           properties: {
@@ -235,7 +268,8 @@ export default {
                 "answers immediately and the completion message wakes this session later. A " +
                 "retried spawn of the very same task (the identical text from the same session, e.g. after " +
                 "a timeout) returns the already-running task — it is not duplicated. A different task " +
-                "text is always dispatched anew, even while another task runs on the orb.",
+                "text on an orb that already runs a task is refused (it is never stacked behind it): " +
+                "spawn with a distinct \"orb\" name for parallel work, or wait for the task to finish.",
             },
             orb: {
               type: "string",
@@ -252,6 +286,14 @@ export default {
                 "seed's branch instead of the default branch. Only parameterizes a creation — pass it with a " +
                 "new orb name.",
             },
+             branch: {
+               type: "string",
+               description:
+                 "The branch the work lands on (issue #353, the one branch contract): the orb's git state " +
+                 "lives there, its agent commits, and the post-commit hook pushes it after every commit. The " +
+                 "completion report carries exactly this one branch as its artifact. Omitted: the orb's " +
+                 "internal default. Parameterizes a creation — an existing (woken) orb keeps its own branch.",
+             },
           },
           required: ["task"],
         },
@@ -277,6 +319,7 @@ export default {
               wait: args.wait ?? false,
               orb: args.orb,
               seed: args.seed,
+               branch: args.branch,
               session: context?.sessionID,
             })
           } catch (e) {
@@ -332,6 +375,18 @@ export default {
             }
             if (code === "seed_not_found" || code === "seed_not_pushed" || code === "seed_conflict") {
               return { output: "Orb spawn refused (" + code + "): " + (row.details || "see the seed rules, spec §3.3.") }
+            }
+            if (code === "orb_busy") {
+              // Issue #351: the target orb already runs a task. Nothing was
+              // stacked — the dispatch was refused up front, and the answer
+              // names the busy orb / running task and the positive path.
+              return {
+                output:
+                  "Orb spawn refused (orb_busy): no task was dispatched — the orb is already " +
+                  "running a task. " +
+                  (row.details || "Wait for the task to complete, or spawn with a distinct \"orb\" name for parallel work.") +
+                  " This is not a queue: a second task on the same orb would be serialized, not parallel.",
+              }
             }
             return { output: "Orb spawn failed: " + code + (result.row && result.row.details ? " — " + result.row.details : "") }
           }

@@ -25,6 +25,36 @@ abstract class OrbEmbedded {
   /// from the embedded copy at every startup (issue #145).
   static const Set<String> pinnedFiles = {'Dockerfile'};
 
+  /// The toolchain the sandbox image installs (issue #354), parsed from the
+  /// image definition: the toolchain pins ([parseToolchain] over the
+  /// embedded Dockerfile's `ARG` defaults), one `NAME=version` per line in
+  /// the Dockerfile's own order. This is the single source of truth — the
+  /// embedded Dockerfile — so a pin that moves there (an ARG bump) moves
+  /// the surfaced list with it: there is no hand-maintained copy to drift.
+  ///
+  /// Where it is visible: stamped on the task answer at spawn
+  /// (`OrbTaskService` puts it on the `OrbTask`) and rendered in the
+  /// `orb_spawn`/`orb_wait` output, so the driver sees it without a probe
+  /// orb.
+  static List<String> get toolchain => parseToolchain(_dockerfile);
+
+  /// The toolchain pins of an orb Dockerfile (issue #354): the `ARG
+  /// NAME=version` defaults — the toolchains the image installs, each
+  /// explicit, no rolling `latest` (spec §5.1). A one-argument `ARG NAME`
+  /// (no default) is not a pin and is skipped, and the base-image `ARG` is
+  /// excluded — an image is not a toolchain.
+  static List<String> parseToolchain(String dockerfile) {
+    final lines = <String>[];
+    for (final line in dockerfile.split('\n')) {
+      final match = RegExp(r'^ARG (\w+)=(\S+)').firstMatch(line.trim());
+      if (match == null) continue;
+      final name = match.group(1);
+      if (name == null || name == 'BASE_IMAGE') continue;
+      lines.add('$name=${match.group(2)}');
+    }
+    return lines;
+  }
+
   /// The shared base image (spec §5.1). One image for all projects: node,
   /// npm, php, flutter, redis, postgres, typesense, mailhog, opencode, git —
   /// every one pinned to an explicit version (the ARGs below; no rolling
@@ -183,7 +213,8 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   /// The container entrypoint (issues #93 + #94, spec §6). Boot prep, in
   /// order:
   ///   1. first start only: clone the project remote into the fresh
-  ///      workspace and install the `orb/<id>` post-commit hook (spec §6.1);
+  ///      workspace and install the post-commit hook that pushes the orb's
+  ///      branch (`ORB_BRANCH`, issue #353) after every commit (spec §6.1);
   ///   2. every start: the container-local gitconfig (identity + the gh
   ///      credential helper — spec §4), the staged gh credentials when the
   ///      bridge staged them (issue #120), and the SSH known-hosts fallback;
@@ -214,7 +245,10 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
   /// show the stage (spec §9.3/§9.4).
   ///
   /// The env the bridge passes at `docker create` (spec §2.3): `ORB_ID`
-  /// (the orb id, which the hook bakes into its push refspec),
+  /// (the orb id — the volumes, the state dir, the labels, and the hook's
+  /// push refspec *fallback*), `ORB_BRANCH` (issue #353, the one branch
+  /// contract: the named branch the clone lands on and the hook pushes to —
+  /// the bridge always sets it, defaulting to the internal `orb/<id>`),
   /// `ORB_REPO_URL` (the project's GitHub remote url, spec §4),
   /// `ORB_GIT_NAME`/`ORB_GIT_EMAIL` (the project checkout's git identity —
   /// repo-local first, global fallback — copied verbatim
@@ -240,7 +274,9 @@ ENTRYPOINT ["/usr/local/bin/orb-entrypoint"]
 #
 # Boot prep, in order (spec §6.1–§6.5):
 #   1. first start only: clone the project remote into the fresh workspace
-#      and install the `orb/<id>` post-commit hook (spec §6.1);
+#      and install the post-commit hook that pushes the orb's branch
+#      (ORB_BRANCH, issue #353 — the named branch, defaulting to the
+#      internal orb/<id>) after every commit (spec §6.1);
 #   2. every start: the container-local gitconfig (identity + the gh
 #      credential helper — spec §4), the staged gh credentials when the
 #      bridge staged them (issue #120), and the SSH known-hosts fallback;
@@ -306,6 +342,13 @@ if [ ! -d "$WORKSPACE/.git" ]; then
     else
         git -C "$WORKSPACE" checkout -f "$(git -C "$WORKSPACE" symbolic-ref --short refs/remotes/origin/HEAD)"
     fi
+    # The branch the clone lands on and the hook pushes to (issue #353, the
+    # one branch contract): the named branch the bridge passed as
+    # ORB_BRANCH, else the internal `orb/<id>` default. ORB_ID stays the
+    # technical id (the volumes, the state dir, the labels); the branch is
+    # what the remote carries, and the default never leaks as the reported
+    # artifact (the bridge reads `ocb.branch`, not the id).
+    PUSH_BRANCH=${ORB_BRANCH:-orb/${ORB_ID}}
     hook="$WORKSPACE/.git/hooks/post-commit"
     # The push-failed marker (issue #120): a hook push that fails must not
     # leave the orb looking healthy — the branch is the return channel
@@ -317,10 +360,10 @@ if [ ! -d "$WORKSPACE/.git" ]; then
     # the bridge staged the gh credentials (the keyring host case, §4),
     # the hook carries their config dir itself.
     marker="$STATE_DIR/push-failed"
-    hook_body="if git push origin HEAD:refs/heads/orb/${ORB_ID}; then
+    hook_body="if git push origin HEAD:refs/heads/${PUSH_BRANCH}; then
     rm -f '$marker'
 else
-    printf '%s\n' 'git push origin HEAD:refs/heads/orb/${ORB_ID} failed -- the branch is not on the remote' | tee '$marker' >&2
+    printf '%s\n' 'git push origin HEAD:refs/heads/${PUSH_BRANCH} failed -- the branch is not on the remote' | tee '$marker' >&2
     exit 1
 fi"
     printf '%s\n' '#!/bin/sh' > "$hook"

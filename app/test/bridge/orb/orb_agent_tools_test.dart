@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/orb/orb_agent_tools.dart';
+import 'package:opencodebridge/bridge/orb/orb_embedded.dart';
 
 import 'stale_plugin_v1_fixture.dart';
 
@@ -56,6 +57,23 @@ void main() {
     expect(source, isNot(contains('docker')));
     expect(OrbAgentTools.files.keys, ['opencodebridge_orbs.ts']);
   });
+
+  test(
+    'the spawn names the branch (issue #353, the one branch contract)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The tool input declares a `branch` argument — the named branch the
+      // work lands on — and the spawn body passes it to the bridge.
+      expect(source, contains('branch: args.branch'));
+      // The input property is a string (like the other targeting args).
+      expect(source, contains('branch: {'));
+      // The description no longer pins the internal `orb/<id>` as the branch:
+      // the named branch is the contract, the default is the fallback.
+      expect(source, contains('branch the work lands on'));
+    },
+  );
 
   test(
     'a failed spawn fetch asks the recent tasks before answering (issue #143)',
@@ -110,6 +128,25 @@ void main() {
       expect(source, contains('this orb cannot run commands'));
     },
   );
+
+  test('a busy orb is refused with its running task (issue #351)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The spawn surface answers the bridge's orb_busy refusal by naming the
+    // busy orb / running task (carried in row.details) and the positive path,
+    // instead of falling through to the generic "failed" text or a plain
+    // "running" answer.
+    expect(source, contains('code === "orb_busy"'));
+    expect(source, contains('no task was dispatched'));
+    // The positive path: a distinct orb name for parallel work (the quotes are
+    // escaped in the source, so match around them).
+    expect(source, contains('name for parallel work'));
+    expect(source, contains('Wait for the task to complete'));
+    // And the tool doc no longer promises a different text is "always
+    // dispatched anew": it says a busy orb refuses, not stacks.
+    expect(source, isNot(contains('always dispatched anew, even while')));
+  });
 
   test(
     'the spawn answers async by default and the wait is bounded (issue #169)',
@@ -230,6 +267,67 @@ void main() {
       expect(source, contains('127.0.0.1:48201'));
     },
   );
+
+  test(
+    'the spawn/wait answers render the task toolchain (issue #354)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The driver reads the sandbox toolchain off the spawn answer — no
+      // probe orb. The render reads the row the bridge answers with
+      // (row.toolchain, stamped from the image definition at dispatch), so
+      // an image pin change moves the answer with it: the plugin must never
+      // hardcode a toolchain list of its own.
+      expect(source, contains('row.toolchain'));
+      expect(source, contains('Toolchain'));
+      // The plugin's own text carries no pinned version — no second,
+      // hand-maintained list to drift from the image definition.
+      expect(source, isNot(contains('3.47.8')));
+      expect(source, isNot(contains('2.103.3')));
+      // And the row the plugin renders from is what the bridge answers:
+      // the Dart task row must carry the field the plugin reads.
+      expect(OrbEmbedded.toolchain, isNotEmpty);
+    },
+  );
+
+  test('the spawn/wait answers render the remote-verified branch sha '
+      '(issue #352)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The completion report's artifact is the remote-verified value the
+    // bridge read from the remote at settle: the branch, with the sha once the
+    // settle verified the push (row.sha, persisted on the task record). The
+    // render reads the row the bridge answers with — never a sha the plugin
+    // invents of its own.
+    expect(source, contains('row.sha'));
+    expect(source, contains(r'Branch: ${row.branch} @ ${row.sha}'));
+  });
+
+  test('the orb_spawn description names the toolchain sentence exactly once '
+      '(review fixup, #353/#354 graft)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The #354 toolchain sentence was once grafted onto the #353 text with a
+    // duplicated fragment (a re-concat left the fragment twice, with a dangling
+    // "is used." between). A re-concat that corrupts it again must fail here:
+    // the stable fragment appears exactly once in the embedded description.
+    const fragment = "The answer lists the sandbox image's toolchain";
+    expect(
+      source.split(fragment).length - 1,
+      1,
+      reason:
+          'the toolchain sentence must appear exactly once in the '
+          'orb_spawn description (a duplicated graft is a regression)',
+    );
+    // No dangling fragment left between two copies: the graft that corrupted
+    // the sentence left "pinned versions it" directly followed by a repeated
+    // "is used. The answer lists …" — that adjacency cannot occur in the one
+    // clean sentence.
+    expect(source, isNot(contains("pinned versions it is used.")));
+  });
 
   test('the host dir is the global opencode plugins dir', () {
     final home = Platform.environment['HOME'] ?? '/';

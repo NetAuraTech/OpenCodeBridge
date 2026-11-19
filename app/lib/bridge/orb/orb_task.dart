@@ -23,11 +23,13 @@ class OrbTask {
     this.status = 'running',
     this.summary = '',
     this.pr,
+    this.sha,
     this.completed,
     this.deliveryOwed = false,
     this.fallbackSent = false,
     this.textHash,
     this.dispatchId,
+    this.toolchain,
   });
 
   /// The task's technical id (`task_<token>`): what `orb_wait` takes.
@@ -44,7 +46,9 @@ class OrbTask {
   /// The orb's user-facing name (the injection message addresses it).
   final String orbName;
 
-  /// The orb's dedicated branch (`orb/<id>`): where the work lands.
+  /// The orb's branch (issue #353, the one branch contract): where the work
+  /// lands — the branch the task named, else the internal `orb/<id>` default.
+  /// This is the single branch artifact the completion report carries.
   final String branch;
 
   /// The orb session the task was dispatched to.
@@ -86,8 +90,23 @@ class OrbTask {
   /// Epoch millis of the dispatch.
   final int created;
 
+  /// The orb image's toolchain (issue #354, acceptance #1): the pinned
+  /// toolchains the sandbox image installs, stamped on the task at dispatch
+  /// so the spawn answer carries them — a driver deciding whether a ticket
+  /// can run in an orb reads them off the answer, no probe orb. The list is
+  /// produced from the image definition (the Dockerfile ARGs,
+  /// `OrbEmbedded.toolchain`), never hand-maintained here: a pin that moves
+  /// in the image definition moves this list with it. `null` on a record
+  /// written before the stamp existed.
+  final List<String>? toolchain;
+
   /// `running` until the orb session's turn ends, then the service's
-  /// outcome: `succeeded`, `failed`, or `interrupted`.
+  /// outcome: `succeeded`, `failed`, or `interrupted` — or `push_unverified`
+  /// (issue #352, acceptance #2) when a turn that reported `succeeded`
+  /// settled after the harness could not verify the push: the branch is not
+  /// on the remote, the remote probe failed, or the orb's push-failed marker
+  /// says the tip is not this turn's work. The report's summary carries the
+  /// `ls-remote` evidence and the positive path (re-dispatch).
   String status;
 
   /// The orb agent's final message (its summary of the work), captured at
@@ -97,6 +116,15 @@ class OrbTask {
   /// The branch's PR URL once one exists (the return channel, spec §3.2),
   /// or `null` when the work has none yet.
   String? pr;
+
+  /// The **remote-verified** tip sha of the branch (issue #352, acceptance
+  /// #2): the sha the completion report carries, read by the harness itself
+  /// from the remote (`git ls-remote <origin> refs/heads/<branch>` at settle)
+  /// — not the agent's claim. Set only once the settle has verified the push,
+  /// so `null` while running, and `null` when the verification found the
+  /// branch absent (there is no remote sha to carry — the task then settles
+  /// `push_unverified`, never `succeeded`).
+  String? sha;
 
   /// Epoch millis of the completion, or `null` while running.
   int? completed;
@@ -140,9 +168,16 @@ class OrbTask {
   /// Whether the task has reached its terminal status.
   bool get isDone => completed != null;
 
-  /// The structured result's artifacts (spec §8.3's `results`): the branch
-  /// always, the PR once it exists.
-  List<String> get results => ['branch: $branch', if (pr != null) 'PR: $pr'];
+  /// The structured result's artifacts (spec §8.3's `results`): **exactly one
+  /// branch** — the orb's branch, §3.1 (issue #353: the named one the task
+  /// gave, or the internal `orb/<id>` default; never a second,
+  /// separately-pushed branch) — always, its **remote-verified** sha once the
+  /// settle verified the push (issue #352, acceptance #2), and the PR once it
+  /// exists.
+  List<String> get results => [
+    'branch: $branch${sha == null ? '' : ' @ $sha'}',
+    if (pr != null) 'PR: $pr',
+  ];
 
   Map<String, Object?> toJson() => {
     'id': id,
@@ -159,10 +194,17 @@ class OrbTask {
     if (textHash != null) 'textHash': textHash,
     if (dispatchId != null) 'dispatchId': dispatchId,
     'created': created,
+    // Only-when-present (issue #354): a record written before the stamp
+    // exists carries no toolchain, and the reader sees `null` for it.
+    if (toolchain != null) 'toolchain': toolchain,
     'status': status,
     'summary': summary,
     'results': results,
     if (pr != null) 'pr': pr,
+    // The remote-verified sha (issue #352): only-when-present, like the
+    // toolchain — a record settled before the verification existed carries
+    // no sha, and the reader sees `null` for it.
+    if (sha != null) 'sha': sha,
     if (completed != null) 'completed': completed,
     // Always written (issue #212, #260): the delivery's explicit facts. A
     // settled task that still owes its completion injection must reload as
@@ -197,7 +239,13 @@ class OrbTask {
       status: map['status'] as String? ?? 'running',
       summary: map['summary'] as String? ?? '',
       pr: map['pr'] as String?,
+      // The remote-verified sha (issue #352): read back on reload, `null` on
+      // a record settled before the verification existed.
+      sha: map['sha'] as String?,
       completed: (map['completed'] as num?)?.toInt(),
+      // The image's toolchain (issue #354), stamped at dispatch: read back
+      // on reload, `null` on a record that predates the stamp.
+      toolchain: (map['toolchain'] as List<Object?>?)?.cast<String>(),
       // The explicit delivery facts (issue #260); a new record carries them.
       // A record written before they existed carries only the old `notified`
       // fact (issue #212) — or neither (a pre-#212 one): a settled

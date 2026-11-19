@@ -12,6 +12,8 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Close**: `gh issue close <number> --comment "..."`
 - **Close from a PR**: GitHub closes an issue on merge only when the PR body carries a closing keyword — `Fixes #<n>`, `Closes #<n>` or `Resolves #<n>` (several: `Fixes #<n>, #<m>`). `Implements`, `Part of` and `Related to` do **not** close. The PR template (`.github/PULL_REQUEST_TEMPLATE.md`) starts with the `Fixes #` line; when a merged PR missed it, close manually with the `Close` command.
 
+**A closing keyword only fires on merge into the default branch** (`main`). A PR merged into an integration branch with `Closes #<n>` in its body closes nothing — the keyword is a no-op until the work lands on `main`. In the integration-branch workflow, per-ticket PRs keep their `Closes` line (harmless, documents intent), and the **final merge PR into `main` lists every ticket number** so the issues close in one shot; anything still open afterwards (missed keyword, closed early) is closed manually with the `Close` command and a comment naming the PR.
+
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
 ## Pull requests as a triage surface

@@ -39,6 +39,10 @@ const _project = OpencodeProject(
   canonical: '/home/dev/shop',
 );
 
+/// The remote tip the fake orb service's `remoteBranchTip` answers (issue
+/// #352): a verified push, so a `succeeded` turn settles `succeeded`.
+const _remoteTip = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+
 final _callerRow = Session(
   id: 'ses_caller',
   title: 'caller',
@@ -125,6 +129,9 @@ class _FakeOrbs implements OrbService {
   String? createName;
   String? createBase;
 
+  /// The named branch the spawn body carried to the create (issue #353).
+  String? createBranch;
+
   String? seedBranchResult;
   Object? seedBranchError;
   String? seedRequested;
@@ -161,9 +168,11 @@ class _FakeOrbs implements OrbService {
     required String name,
     required String checkout,
     String? base,
+    String? branch,
   }) async {
     createName = name;
     createBase = base;
+    createBranch = branch;
     return createResult!;
   }
 
@@ -178,6 +187,12 @@ class _FakeOrbs implements OrbService {
     if (error != null) throw error;
     return seedBranchResult;
   }
+
+  /// The settle's push verification (issue #352): the remote probe answers a
+  /// verified sha, so a `succeeded` turn stays `succeeded`.
+  @override
+  Future<String?> remoteBranchTip(String checkout, String branch) async =>
+      _remoteTip;
 
   @override
   Future<void> stop(String id) async {
@@ -321,6 +336,51 @@ void main() {
       }
     });
 
+    test(
+      'a branch in the body is threaded to the create (issue #353)',
+      () async {
+        final tasks = OrbTaskService(
+          orbs: orbs,
+          sessions: backend,
+          file: tasksFile,
+        );
+        // No orb yet: the spawn creates one, threading the named branch.
+        orbs.listResult = const [];
+        final created = OrbRecord(
+          id: 'a1b2c3',
+          name: 'worker',
+          project: 'prj_1',
+          branch: 't353-branch-contract',
+          state: 'running',
+          created: '2026-01-01T00:00:00.000Z',
+          url: 'http://127.0.0.1:9999',
+        );
+        orbs.createResult = created;
+        backend.opencode.detailOf = (id) => _detail(id);
+        final server = await serverWith(tasks: tasks);
+        try {
+          final (status, body) = await _postRaw(
+            server.baseUri,
+            '/api/orb/spawn',
+            jsonEncode({
+              'task': 'do the thing',
+              'wait': false,
+              'session': 'ses_caller',
+              'branch': 't353-branch-contract',
+            }),
+          );
+          expect(status, 201);
+          // The named branch reached the create…
+          expect(orbs.createBranch, 't353-branch-contract');
+          // …and the task's branch is the single branch artifact.
+          final row = jsonDecode(body);
+          expect(row['branch'], 't353-branch-contract');
+        } finally {
+          await server.stop();
+        }
+      },
+    );
+
     test('wait: true (the default) answers the structured result', () async {
       final tasks = OrbTaskService(
         orbs: orbs,
@@ -348,7 +408,10 @@ void main() {
         final row = jsonDecode(body);
         expect(row['status'], 'succeeded');
         expect(row['summary'], 'Shipped it.');
-        expect(row['results'], ['branch: orb/a1b2c3', 'PR: https://gh/pr/9']);
+        expect(row['results'], [
+          'branch: orb/a1b2c3 @ $_remoteTip',
+          'PR: https://gh/pr/9',
+        ]);
         expect(row['pr'], 'https://gh/pr/9');
         expect(row['completed'], isNotNull);
       } finally {
@@ -438,6 +501,84 @@ void main() {
         expect(orbs.wokenId, isNull, reason: 'no wake was attempted');
         expect(orbs.createSessionOrbId, isNull, reason: 'no session');
         expect(backend.opencode.prompts, isEmpty);
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('a busy orb is a 400 orb_busy naming the orb and running task, '
+        'dispatching nothing (issue #351)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      // The turn never ends: the first task stays running.
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        // The first dispatch lands and is running on the orb.
+        final (firstStatus, firstBody) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the first thing", "wait": false, "session": "ses_caller"}',
+        );
+        expect(firstStatus, 201);
+        final first = jsonDecode(firstBody) as Map<String, Object?>;
+
+        // A different task onto the same (busy) orb is refused up front.
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the second thing", "wait": false, "session": "ses_caller"}',
+        );
+        expect(status, 400);
+        final refused = jsonDecode(body) as Map<String, Object?>;
+        expect(refused['error'], 'orb_busy');
+        // The answer names the busy orb and the running task, and states the
+        // positive path (a distinct orb name, or wait).
+        expect(refused['details'], contains('worker'));
+        expect(refused['details'], contains(first['id'] as String));
+        expect(refused['details'], contains('orb'));
+        // The refusal dispatches nothing: only the first session was created
+        // and only one prompt was delivered.
+        expect(backend.opencode.prompts, hasLength(1));
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('a spawn naming a new orb while another orb is busy is unaffected '
+        '(issue #351)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      orbs.listResult = [_runningOrb(id: 'a1b2c3', name: 'worker')];
+      orbs.createResult = _runningOrb(id: 'b2c3d4', name: 'variant');
+      // The turn never ends: the first task stays running on the busy orb.
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        // Occupy the existing orb with a running task.
+        await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the first thing", "wait": false, "session": "ses_caller", "orb": "worker"}',
+        );
+        // A distinct, unused orb name creates a fresh clone and dispatches
+        // onto it: the other orb's running task is irrelevant (parallelism).
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the second thing", "wait": false, "session": "ses_caller", "orb": "variant"}',
+        );
+        expect(status, 201);
+        final row = jsonDecode(body) as Map<String, Object?>;
+        expect(row['orb'], 'b2c3d4');
+        expect(row['status'], 'running');
+        expect(orbs.createName, 'variant');
       } finally {
         await server.stop();
       }
@@ -717,6 +858,13 @@ void main() {
           sessions: backend,
           file: tasksFile,
         );
+        // Issue #351: one orb runs one task, so the distinct live dispatches
+        // land on distinct orbs (the attribution under test is unchanged).
+        orbs.listResult = [
+          _runningOrb(id: 'a1b2c3', name: 'worker'),
+          _runningOrb(id: 'b2c3d4', name: 'beta'),
+          _runningOrb(id: 'c3d4e5', name: 'gamma'),
+        ];
         backend.opencode.detailOf = (id) => _detail(id);
         final server = await serverWith(tasks: tasks);
         try {
@@ -729,11 +877,20 @@ void main() {
             active: false,
           );
 
-          Future<String> dispatch(String task, String session) async {
+          Future<String> dispatch(
+            String task,
+            String session,
+            String orb,
+          ) async {
             final (status, body) = await _postRaw(
               server.baseUri,
               '/api/orb/spawn',
-              jsonEncode({'task': task, 'wait': false, 'session': session}),
+              jsonEncode({
+                'task': task,
+                'wait': false,
+                'session': session,
+                'orb': orb,
+              }),
             );
             expect(status, 201);
             return body;
@@ -743,12 +900,21 @@ void main() {
           // contains A's, then B's own task: each dispatch with a different
           // raw text (or a different caller) is a task of its own — none is
           // collapsed into A's running task (issue #147).
-          final firstBody = await dispatch('Fix the login form', 'ses_caller');
+          final firstBody = await dispatch(
+            'Fix the login form',
+            'ses_caller',
+            'worker',
+          );
           final secondBody = await dispatch(
             'Fix the login form and the signup form',
             'ses_b',
+            'beta',
           );
-          final thirdBody = await dispatch('Fix the login form', 'ses_b');
+          final thirdBody = await dispatch(
+            'Fix the login form',
+            'ses_b',
+            'gamma',
+          );
           final rows = {
             for (final body in [firstBody, secondBody, thirdBody])
               jsonDecode(body)['id'] as String: jsonDecode(body),
