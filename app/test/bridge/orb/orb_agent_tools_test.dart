@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/orb/orb_agent_tools.dart';
+import 'package:opencodebridge/bridge/orb/orb_embedded.dart';
 
 import 'stale_plugin_v1_fixture.dart';
 
@@ -228,6 +229,29 @@ void main() {
       expect(source, contains('"bridgeUrl"'));
       expect(source, contains('OPENCODEBRIDGE_URL'));
       expect(source, contains('127.0.0.1:48201'));
+    },
+  );
+
+  test(
+    'the spawn/wait answers render the task toolchain (issue #354)',
+    () async {
+      await OrbAgentTools.materialize(into: temp);
+      final source = File('${temp.path}/opencodebridge_orbs.ts')
+          .readAsStringSync();
+      // The driver reads the sandbox toolchain off the spawn answer — no
+      // probe orb. The render reads the row the bridge answers with
+      // (row.toolchain, stamped from the image definition at dispatch), so
+      // an image pin change moves the answer with it: the plugin must never
+      // hardcode a toolchain list of its own.
+      expect(source, contains('row.toolchain'));
+      expect(source, contains('Toolchain'));
+      // The plugin's own text carries no pinned version — no second,
+      // hand-maintained list to drift from the image definition.
+      expect(source, isNot(contains('3.47.8')));
+      expect(source, isNot(contains('2.103.3')));
+      // And the row the plugin renders from is what the bridge answers:
+      // the Dart task row must carry the field the plugin reads.
+      expect(OrbEmbedded.toolchain, isNotEmpty);
     },
   );
 

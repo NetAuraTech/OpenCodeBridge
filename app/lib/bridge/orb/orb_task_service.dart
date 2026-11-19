@@ -14,6 +14,7 @@ import '../notify/delivery_policy.dart';
 import '../notify/notify_service.dart';
 import '../sessions/backend.dart';
 import '../sessions/opencode_service.dart';
+import 'orb_embedded.dart';
 import 'orb_service.dart';
 import 'orb_state_machine.dart';
 import 'orb_task.dart';
@@ -367,6 +368,9 @@ class OrbTaskService {
         status: 'refused',
         summary: record.bootReason ?? 'no usable shell',
         completed: DateTime.now().millisecondsSinceEpoch,
+        // The image's toolchain (issue #354): the answer carries it even on a
+        // refusal — it is a property of the image, not of the run.
+        toolchain: OrbEmbedded.toolchain,
       );
       _tasks.insert(0, refused);
       _persist();
@@ -403,6 +407,12 @@ class OrbTaskService {
       textHash: _textHash(task),
       dispatchId: dispatchId?.trim(),
       created: DateTime.now().millisecondsSinceEpoch,
+      // The sandbox image's toolchain (issue #354, acceptance #1): the
+      // driver reads the toolchain off the spawn answer instead of spending
+      // a probe orb. It is the image definition's own pins —
+      // `OrbEmbedded.toolchain` parses the Dockerfile's ARG defaults — so a
+      // pin that moves there moves the answer with it (never a prose copy).
+      toolchain: OrbEmbedded.toolchain,
     );
     _tasks.insert(0, dispatched);
     _persist();
