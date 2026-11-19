@@ -211,6 +211,10 @@ class _FakeOrbs implements OrbService {
   String? createCheckout;
   String? createBase;
 
+  /// The named branch the spawn passed to the create (issue #353): the
+  /// one branch contract's explicit input, threaded to [OrbService.create].
+  String? createBranch;
+
   /// The scripted `seedBranch` result; [seedBranchError] throws instead.
   String? seedBranchResult;
   Object? seedBranchError;
@@ -262,11 +266,13 @@ class _FakeOrbs implements OrbService {
     required String name,
     required String checkout,
     String? base,
+    String? branch,
   }) async {
     createProject = project;
     createName = name;
     createCheckout = checkout;
     createBase = base;
+    createBranch = branch;
     return createResult!;
   }
 
@@ -542,6 +548,54 @@ void main() {
       // Three words max, lowercased, non-alphanumerics dashed.
       expect(orbs.createName, 'fix-the-login');
       expect(derived.orbName, 'fix-login');
+    });
+
+    test('an explicit branch is threaded to the create and carried by the task '
+        '(issue #353)', () async {
+      orbs.listResult = const [];
+      // The created record carries the named branch (the bridge's create
+      // would have minted it from the `branch` arg).
+      final created = OrbRecord(
+        id: 'a1b2c3',
+        name: 'fix-login',
+        project: 'prj_1',
+        branch: 't353-branch-contract',
+        state: 'running',
+        created: '2026-01-01T00:00:00.000Z',
+        url: 'http://127.0.0.1:9999',
+      );
+      orbs.createResult = created;
+      scriptDispatch();
+
+      final task = await service.spawn(
+        task: 'Fix login',
+        wait: false,
+        branch: 't353-branch-contract',
+        callerSession: 'ses_caller',
+      );
+
+      // The named branch reaches the create (the orb's git state lives on it).
+      expect(orbs.createBranch, 't353-branch-contract');
+      // The task carries that same single branch (the report's artifact).
+      expect(task.branch, 't353-branch-contract');
+    });
+
+    test('a spawn with no branch leaves the create to its default '
+        '(issue #353 fallback)', () async {
+      orbs.listResult = const [];
+      orbs.createResult = _runningOrb(name: 'fix-login');
+      scriptDispatch();
+
+      final task = await service.spawn(
+        task: 'Fix login',
+        wait: false,
+        callerSession: 'ses_caller',
+      );
+
+      // No explicit branch: the create is asked for none, so the bridge
+      // mints the internal `orb/<id>` default (the record carries it).
+      expect(orbs.createBranch, isNull);
+      expect(task.branch, 'orb/a1b2c3');
     });
 
     test('one stopped orb is woken, not created', () async {

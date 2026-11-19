@@ -408,6 +408,10 @@ void main() {
         final create = docker.runArgs.firstWhere((a) => a.first == 'create');
         final container = create[2];
         final id = container.substring('orb-'.length);
+        // No named branch (issue #353): the internal `orb/<id>` default is
+        // the one branch contract's fallback value, carried on the labels
+        // and baked into the hook through the `ORB_BRANCH` env.
+        expect(create, contains('ORB_BRANCH=orb/$id'));
         final createdIndex = create.indexWhere(
           (element) => element.startsWith('ocb.created='),
         );
@@ -440,6 +444,8 @@ void main() {
           'ORB_GIT_NAME=HeinTouchableFR',
           '-e',
           'ORB_GIT_EMAIL=HeinTouchableFR@users.noreply.github.com',
+          '-e',
+          'ORB_BRANCH=orb/$id',
           '-l',
           'ocb.orb=true',
           '-l',
@@ -572,6 +578,54 @@ void main() {
         expect(firstRun.first.first, 'ps');
         expect(firstRun[1], ['image', 'inspect', builder.expectedTag]);
         expect(firstRun.where((a) => a.first == 'volume').length, 2);
+      },
+    );
+
+    test(
+      'create honors a named branch (issue #353): labels + ORB_BRANCH env',
+      () async {
+        checkoutEnv();
+        hostConfig();
+
+        const password = 'pw-named';
+        final http = await HttpServer.bind('127.0.0.1', 0);
+        http.listen((request) {
+          request.response.statusCode =
+              request.headers.value('authorization') ==
+                  'Basic ${base64.encode(utf8.encode('opencode:$password'))}'
+              ? 200
+              : 401;
+          unawaited(request.response.close());
+        });
+        final port = http.port;
+        docker.ports =
+            '{"4096/tcp":[{"HostIp":"127.0.0.1","HostPort":"$port"}]}';
+        docker.logs = 'server password $password\nlistening on 0.0.0.0:4096\n';
+
+        final record = await service().create(
+          project: 'proj-1',
+          name: 'dev',
+          checkout: checkout.path,
+          branch: 't353-branch-contract',
+        );
+        await http.close(force: true);
+
+        // The named branch is the single branch the orb's work lives on.
+        expect(record.branch, 't353-branch-contract');
+
+        final create = docker.runArgs.firstWhere((a) => a.first == 'create');
+        // The hook bakes the named branch through the ORB_BRANCH env (the
+        // entrypoint's push target, issue #353).
+        expect(create, contains('ORB_BRANCH=t353-branch-contract'));
+        // The container label carries the named branch (the report's source).
+        expect(create, contains('ocb.branch=t353-branch-contract'));
+        // Both volumes are labeled with the named branch too.
+        for (final suffix in const ['workspace', 'data']) {
+          final volume = docker.runArgs.firstWhere(
+            (a) => a.first == 'volume' && a[3] == 'orb-${record.id}-$suffix',
+          );
+          expect(volume, contains('ocb.branch=t353-branch-contract'));
+        }
       },
     );
 

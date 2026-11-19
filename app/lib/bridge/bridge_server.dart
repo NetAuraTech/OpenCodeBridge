@@ -3188,7 +3188,9 @@ class BridgeServer {
   /// The spawn surface's dispatch (issue #99, spec §8.2): `POST` with the
   /// body `{"task": "free text", "model"?: {"id", "providerID", "variant"?},
   /// "wait"?: bool (default true), "session"?: the calling session id,
-  /// "directory"?: the calling working directory, "dispatchId"?: the
+  /// "directory"?: the calling working directory, "branch"?: the named
+  /// branch the task's work lands on (issue #353 — the one branch contract;
+  /// absent keeps the internal `orb/<id>` default), "dispatchId"?: the
   /// caller's own id for this dispatch — a retry repeats it and returns the
   /// running task, a new id dispatches anew (issue #147)}. The
   /// session/directory pair identifies the caller (the tool's context): the
@@ -3221,6 +3223,7 @@ class BridgeServer {
         wait: wait,
         orb: BridgeServer._stringField(body, 'orb'),
         seed: BridgeServer._stringField(body, 'seed'),
+        branch: BridgeServer._stringField(body, 'branch'),
         callerSession: BridgeServer._stringField(body, 'session'),
         callerDirectory: BridgeServer._stringField(body, 'directory'),
         dispatchId: BridgeServer._stringField(body, 'dispatchId'),

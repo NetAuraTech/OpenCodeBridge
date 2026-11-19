@@ -532,11 +532,18 @@ class OrbService {
   /// the seed's branch, whose tip the entrypoint's first-start clone checks
   /// out (`ORB_BASE_BRANCH`) instead of the remote's default; the record
   /// carries it as the PR base of the orb's work.
+  ///
+  /// [branch] (issue #353, the one branch contract) is the named branch the
+  /// orb's git state lives on: it is the single branch the post-commit hook
+  /// pushes (the entrypoint reads it as `ORB_BRANCH`) and the single branch
+  /// the completion report carries. `null` (the default) keeps the internal
+  /// `orb/<id>` fallback — the value that never appears as a named artifact.
   Future<OrbRecord> create({
     required String project,
     required String name,
     required String checkout,
     String? base,
+    String? branch,
   }) async {
     // The up-front refusals (spec §2.3), in order.
     await _refuseIfNameTaken(project, name);
@@ -548,7 +555,10 @@ class OrbService {
     final id = _mintId();
     final container = 'orb-$id';
     final created = DateTime.now().toUtc().toIso8601String();
-    final branch = 'orb/$id';
+    // The one branch contract (issue #353): the named branch when the
+    // caller gave one, else the internal `orb/<id>` fallback.
+    final named = branch?.trim() ?? '';
+    final resolved = named.isEmpty ? 'orb/$id' : named;
 
     // The workspace + data volumes (labeled, §2.1) and the state dir.
     await _createVolume(
@@ -556,7 +566,7 @@ class OrbService {
       id,
       name,
       project,
-      branch,
+      resolved,
       created,
       base,
     );
@@ -565,7 +575,7 @@ class OrbService {
       id,
       name,
       project,
-      branch,
+      resolved,
       created,
       base,
     );
@@ -601,6 +611,8 @@ class OrbService {
       'ORB_GIT_NAME=${gitIdentity.$1}',
       '-e',
       'ORB_GIT_EMAIL=${gitIdentity.$2}',
+      '-e',
+      'ORB_BRANCH=$resolved',
       if (base != null) ...['-e', 'ORB_BASE_BRANCH=$base'],
       '-l',
       'ocb.orb=true',
@@ -611,7 +623,7 @@ class OrbService {
       '-l',
       'ocb.project=$project',
       '-l',
-      'ocb.branch=$branch',
+      'ocb.branch=$resolved',
       if (base != null) ...['-l', 'ocb.base=$base'],
       '-l',
       'ocb.created=$created',
@@ -662,7 +674,7 @@ class OrbService {
         id: id,
         name: name,
         project: project,
-        branch: branch,
+        branch: resolved,
         state: OrbState.runningWire,
         created: created,
         url: url,

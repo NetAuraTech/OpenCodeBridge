@@ -71,9 +71,13 @@ abstract class OrbAgentTools {
       '58872b1d3aaeda688746c42dc583b9bb1ad6c2ba07969358c727ec93f9878281',
       // 8a29af6 (#354): the spawn answer lists the sandbox toolchain.
       'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
-      // #351: the busy-orb refusal (the spawn answer refuses a second task on
-      // a running orb). The version every install holds when the push
-      // verification (#352) ships.
+      // c795196 (#351): the busy-orb refusal (a second task is refused, not
+      // stacked). The version every install holds when the one branch
+      // contract (#353) ships.
+      '8ff9503b181fd649f05ca88a246f774499b24631af0948d877d014ffd22d2235',
+      // The #352 branch point: the busy-orb refusal as the push-verification
+      // change (#352) shipped from it — kept in the union so an install
+      // holding that exact version also refreshes (#352).
       '61460da818441d5f866993f4fc7708967e5478d38c315ec54237e668ac524e70',
     },
   };
@@ -241,8 +245,12 @@ export default {
           "session receives a message when it completes (do not poll; end your turn and the " +
           "completion will wake you). Pass wait: true to hold this call briefly for a quick " +
           "task (the hold is bounded; a still-running task answers as running). The work lands " +
-          "on the orb's dedicated branch (orb/<id>) — the orb's agent commits and the branch is " +
-          "pushed after every commit. The project is not an argument: this session's project " +
+           "on the branch the task names (issue #353, the one branch contract): pass branch for " +
+           "a named branch (e.g. a ticket branch) and the orb's git state lives there, its agent " +
+           "commits, and the post-commit hook pushes it after every commit — the completion " +
+           "report carries exactly that one branch as its artifact. Omit branch and the orb " +
+           "falls back to its internal default. The project is not an argument: this session's " +
+           "project is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
           "is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
            "installs, read from the image definition) — check it to decide whether a task can " +
            "run in an orb, without a probe orb.",
@@ -279,6 +287,14 @@ export default {
                 "seed's branch instead of the default branch. Only parameterizes a creation — pass it with a " +
                 "new orb name.",
             },
+             branch: {
+               type: "string",
+               description:
+                 "The branch the work lands on (issue #353, the one branch contract): the orb's git state " +
+                 "lives there, its agent commits, and the post-commit hook pushes it after every commit. The " +
+                 "completion report carries exactly this one branch as its artifact. Omitted: the orb's " +
+                 "internal default. Parameterizes a creation — an existing (woken) orb keeps its own branch.",
+             },
           },
           required: ["task"],
         },
@@ -304,6 +320,7 @@ export default {
               wait: args.wait ?? false,
               orb: args.orb,
               seed: args.seed,
+               branch: args.branch,
               session: context?.sessionID,
             })
           } catch (e) {

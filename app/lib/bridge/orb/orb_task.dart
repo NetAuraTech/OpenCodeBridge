@@ -46,7 +46,9 @@ class OrbTask {
   /// The orb's user-facing name (the injection message addresses it).
   final String orbName;
 
-  /// The orb's dedicated branch (`orb/<id>`): where the work lands.
+  /// The orb's branch (issue #353, the one branch contract): where the work
+  /// lands — the branch the task named, else the internal `orb/<id>` default.
+  /// This is the single branch artifact the completion report carries.
   final String branch;
 
   /// The orb session the task was dispatched to.
@@ -166,9 +168,12 @@ class OrbTask {
   /// Whether the task has reached its terminal status.
   bool get isDone => completed != null;
 
-  /// The structured result's artifacts (spec §8.3's `results`): the branch
-  /// always, its **remote-verified** sha once the settle verified the push
-  /// (issue #352, acceptance #2), and the PR once it exists.
+  /// The structured result's artifacts (spec §8.3's `results`): **exactly one
+  /// branch** — the orb's branch, §3.1 (issue #353: the named one the task
+  /// gave, or the internal `orb/<id>` default; never a second,
+  /// separately-pushed branch) — always, its **remote-verified** sha once the
+  /// settle verified the push (issue #352, acceptance #2), and the PR once it
+  /// exists.
   List<String> get results => [
     'branch: $branch${sha == null ? '' : ' @ $sha'}',
     if (pr != null) 'PR: $pr',
