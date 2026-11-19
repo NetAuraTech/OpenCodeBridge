@@ -1,6 +1,6 @@
 # Orb reliability tickets — implementation notes
 
-Repo: /run/media/aymeric/Data/Developpement/opencodebridge (worktrees under /tmp/opencodebridge/wt-*)
+Repo: the OpenCodeBridge checkout (the working directory). Each implementer works in its own worktree of it, wherever the driver places it (worktrees and notes live wherever the driver puts them).
 Integration branch: **retro/orb-reliability** (base: origin/main @ eec7f7f).
 Each implementer: `git fetch origin && git checkout -B t<NNN>-<slug> origin/retro/orb-reliability` in its own worktree.
 All work in English (code, comments, commits, PR text). Artifacts written in English.

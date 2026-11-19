@@ -251,7 +251,6 @@ export default {
            "report carries exactly that one branch as its artifact. Omit branch and the orb " +
            "falls back to its internal default. The project is not an argument: this session's " +
            "project is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
-          "is used. The answer lists the sandbox image's toolchain (the pinned versions it " +
            "installs, read from the image definition) — check it to decide whether a task can " +
            "run in an orb, without a probe orb.",
         input: {

@@ -305,6 +305,30 @@ void main() {
     expect(source, contains(r'Branch: ${row.branch} @ ${row.sha}'));
   });
 
+  test('the orb_spawn description names the toolchain sentence exactly once '
+      '(review fixup, #353/#354 graft)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The #354 toolchain sentence was once grafted onto the #353 text with a
+    // duplicated fragment (a re-concat left the fragment twice, with a dangling
+    // "is used." between). A re-concat that corrupts it again must fail here:
+    // the stable fragment appears exactly once in the embedded description.
+    const fragment = "The answer lists the sandbox image's toolchain";
+    expect(
+      source.split(fragment).length - 1,
+      1,
+      reason:
+          'the toolchain sentence must appear exactly once in the '
+          'orb_spawn description (a duplicated graft is a regression)',
+    );
+    // No dangling fragment left between two copies: the graft that corrupted
+    // the sentence left "pinned versions it" directly followed by a repeated
+    // "is used. The answer lists …" — that adjacency cannot occur in the one
+    // clean sentence.
+    expect(source, isNot(contains("pinned versions it is used.")));
+  });
+
   test('the host dir is the global opencode plugins dir', () {
     final home = Platform.environment['HOME'] ?? '/';
     final path = OrbAgentTools.hostDir().path;

@@ -382,7 +382,7 @@ class OrbTaskService {
     // `orb/<id>` branch) and never answered as a plain "running". A spawn
     // that just created its orb (a fresh clone) has no task yet, so it is
     // unaffected — a distinct `orb` name stays the parallel path.
-    final busy = _busyTaskOn(record.id, excludeId: retried?.id);
+    final busy = _busyTaskOn(record.id);
     if (busy != null) {
       throw OrbRefusalError(
         OrbRefusalError.orbBusy,
@@ -587,15 +587,14 @@ class OrbTaskService {
   /// works, the refusal only stops a second task stacking on *this* orb's
   /// single `orb/<id>` branch.
   ///
-  /// [excludeId] skips the idempotent retry's own match (issue #143/#147): a
-  /// retry of the very same dispatch must still return the running task
-  /// rather than be refused — the caller checked the retry first, so this
-  /// never sees it, but the exclusion keeps the two checks independent of
-  /// their ordering.
-  OrbTask? _busyTaskOn(String orbId, {String? excludeId}) {
+  /// The idempotent retry check ([_retriedTaskOn]) runs first and returns
+  /// early (issue #143/#147): by the time this check runs, the dispatch
+  /// cannot be the retry of the orb's running task, so no exclusion is
+  /// needed — any running task found here is a *different* task, and the
+  /// refusal is correct.
+  OrbTask? _busyTaskOn(String orbId) {
     for (final running in _tasks) {
       if (running.orb != orbId || running.isDone) continue;
-      if (running.id == excludeId) continue;
       return running;
     }
     return null;
@@ -1277,6 +1276,12 @@ class OrbTaskService {
   /// observation: the agent reported "pushed", the remote has no branch — and
   /// a probe that cannot answer at all (no GitHub origin, the CLI failing)
   /// are all failures: the verification never upgrades to `succeeded`.
+  /// The recovery path every unverified-push note names (issue #352): the
+  /// caller re-dispatches the very same task (the idempotent retry returns it
+  /// if still running) so the push is re-verified and re-pushed.
+  static const String _reDispatchRecovery =
+      're-dispatch the same task to re-verify and re-push.';
+
   Future<_PushVerdict> _verifyPush(OrbTask target) async {
     final row = await _orbRow(target);
     final pushFailing = row?.pushFailing ?? false;
@@ -1295,8 +1300,8 @@ class OrbTaskService {
         ok: false,
         note:
             'the push could not be verified — the remote probe failed '
-            '(the project checkout or its origin is unavailable). To recover, '
-            're-dispatch the same task to re-verify and re-push.',
+            '(the project checkout or its origin is unavailable). '
+            'To recover, $_reDispatchRecovery',
       );
     }
     if (sha == null) {
@@ -1304,8 +1309,8 @@ class OrbTaskService {
         ok: false,
         note:
             'the push was not verified — branch ${target.branch} is not on '
-            'the remote (git ls-remote found no such branch). To recover, '
-            're-dispatch the same task to re-verify and re-push.',
+            'the remote (git ls-remote found no such branch). '
+            'To recover, $_reDispatchRecovery',
       );
     }
     if (pushFailing) {
@@ -1314,8 +1319,8 @@ class OrbTaskService {
         note:
             'the push was not verified — the orb\'s post-commit hook '
             'reported its push to the remote failed (push-failed marker), so '
-            'the remote tip is not the work this turn ended with. To recover, '
-            're-dispatch the same task to re-verify and re-push.',
+            'the remote tip is not the work this turn ended with. '
+            'To recover, $_reDispatchRecovery',
       );
     }
     return _PushVerdict(ok: true, sha: sha);
