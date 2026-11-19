@@ -65,11 +65,17 @@ abstract class OrbAgentTools {
       // acbc8d7 (#169/#170): async-by-default spawn, the bounded orb_wait.
       // The version every install holds when #141's fix ships.
       '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
-      // 5bdd8c5 (#174): the direct-tool (non-Code-Mode) registrations.
-      '53b96042d0b654b5a4e8c41d1778bd11b3b7df98c581a8bc87dc3885fc3bf005',
-      // (#353): the one branch contract — the `branch` input on orb_spawn,
-      // the description no longer pins `orb/<id>` as the reported artifact.
+      // 5bdd8c5 (#174): the direct-tool (non-Code-Mode) registrations. The
+      // bytes every #174-era install materialized (the digest #354's branch
+      // recorded for this version was miscomputed — see the #351 merge note).
+      '58872b1d3aaeda688746c42dc583b9bb1ad6c2ba07969358c727ec93f9878281',
+      // 8a29af6 (#354): the spawn answer lists the sandbox toolchain. The
+      // version every install holds when the busy-orb refusal (#351) ships.
       'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
+      // c795196 (#351): the busy-orb refusal (a second task is refused, not
+      // stacked). The version every install holds when the one branch
+      // contract (#353) ships.
+      '8ff9503b181fd649f05ca88a246f774499b24631af0948d877d014ffd22d2235',
     },
   };
 
@@ -254,7 +260,8 @@ export default {
                 "answers immediately and the completion message wakes this session later. A " +
                 "retried spawn of the very same task (the identical text from the same session, e.g. after " +
                 "a timeout) returns the already-running task — it is not duplicated. A different task " +
-                "text is always dispatched anew, even while another task runs on the orb.",
+                "text on an orb that already runs a task is refused (it is never stacked behind it): " +
+                "spawn with a distinct \"orb\" name for parallel work, or wait for the task to finish.",
             },
             orb: {
               type: "string",
@@ -360,6 +367,18 @@ export default {
             }
             if (code === "seed_not_found" || code === "seed_not_pushed" || code === "seed_conflict") {
               return { output: "Orb spawn refused (" + code + "): " + (row.details || "see the seed rules, spec §3.3.") }
+            }
+            if (code === "orb_busy") {
+              // Issue #351: the target orb already runs a task. Nothing was
+              // stacked — the dispatch was refused up front, and the answer
+              // names the busy orb / running task and the positive path.
+              return {
+                output:
+                  "Orb spawn refused (orb_busy): no task was dispatched — the orb is already " +
+                  "running a task. " +
+                  (row.details || "Wait for the task to complete, or spawn with a distinct \"orb\" name for parallel work.") +
+                  " This is not a queue: a second task on the same orb would be serialized, not parallel.",
+              }
             }
             return { output: "Orb spawn failed: " + code + (result.row && result.row.details ? " — " + result.row.details : "") }
           }

@@ -129,6 +129,25 @@ void main() {
     },
   );
 
+  test('a busy orb is refused with its running task (issue #351)', () async {
+    await OrbAgentTools.materialize(into: temp);
+    final source = File('${temp.path}/opencodebridge_orbs.ts')
+        .readAsStringSync();
+    // The spawn surface answers the bridge's orb_busy refusal by naming the
+    // busy orb / running task (carried in row.details) and the positive path,
+    // instead of falling through to the generic "failed" text or a plain
+    // "running" answer.
+    expect(source, contains('code === "orb_busy"'));
+    expect(source, contains('no task was dispatched'));
+    // The positive path: a distinct orb name for parallel work (the quotes are
+    // escaped in the source, so match around them).
+    expect(source, contains('name for parallel work'));
+    expect(source, contains('Wait for the task to complete'));
+    // And the tool doc no longer promises a different text is "always
+    // dispatched anew": it says a busy orb refuses, not stacks.
+    expect(source, isNot(contains('always dispatched anew, even while')));
+  });
+
   test(
     'the spawn answers async by default and the wait is bounded (issue #169)',
     () async {

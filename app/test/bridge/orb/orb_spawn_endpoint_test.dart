@@ -493,6 +493,84 @@ void main() {
       }
     });
 
+    test('a busy orb is a 400 orb_busy naming the orb and running task, '
+        'dispatching nothing (issue #351)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      // The turn never ends: the first task stays running.
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        // The first dispatch lands and is running on the orb.
+        final (firstStatus, firstBody) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the first thing", "wait": false, "session": "ses_caller"}',
+        );
+        expect(firstStatus, 201);
+        final first = jsonDecode(firstBody) as Map<String, Object?>;
+
+        // A different task onto the same (busy) orb is refused up front.
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the second thing", "wait": false, "session": "ses_caller"}',
+        );
+        expect(status, 400);
+        final refused = jsonDecode(body) as Map<String, Object?>;
+        expect(refused['error'], 'orb_busy');
+        // The answer names the busy orb and the running task, and states the
+        // positive path (a distinct orb name, or wait).
+        expect(refused['details'], contains('worker'));
+        expect(refused['details'], contains(first['id'] as String));
+        expect(refused['details'], contains('orb'));
+        // The refusal dispatches nothing: only the first session was created
+        // and only one prompt was delivered.
+        expect(backend.opencode.prompts, hasLength(1));
+      } finally {
+        await server.stop();
+      }
+    });
+
+    test('a spawn naming a new orb while another orb is busy is unaffected '
+        '(issue #351)', () async {
+      final tasks = OrbTaskService(
+        orbs: orbs,
+        sessions: backend,
+        file: tasksFile,
+      );
+      orbs.listResult = [_runningOrb(id: 'a1b2c3', name: 'worker')];
+      orbs.createResult = _runningOrb(id: 'b2c3d4', name: 'variant');
+      // The turn never ends: the first task stays running on the busy orb.
+      backend.opencode.detailOf = (id) => _detail(id);
+      final server = await serverWith(tasks: tasks);
+      try {
+        // Occupy the existing orb with a running task.
+        await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the first thing", "wait": false, "session": "ses_caller", "orb": "worker"}',
+        );
+        // A distinct, unused orb name creates a fresh clone and dispatches
+        // onto it: the other orb's running task is irrelevant (parallelism).
+        final (status, body) = await _postRaw(
+          server.baseUri,
+          '/api/orb/spawn',
+          '{"task": "do the second thing", "wait": false, "session": "ses_caller", "orb": "variant"}',
+        );
+        expect(status, 201);
+        final row = jsonDecode(body) as Map<String, Object?>;
+        expect(row['orb'], 'b2c3d4');
+        expect(row['status'], 'running');
+        expect(orbs.createName, 'variant');
+      } finally {
+        await server.stop();
+      }
+    });
+
     test('several orbs are a 409 orb_ambiguous listing the names', () async {
       final tasks = OrbTaskService(
         orbs: orbs,
@@ -767,6 +845,13 @@ void main() {
           sessions: backend,
           file: tasksFile,
         );
+        // Issue #351: one orb runs one task, so the distinct live dispatches
+        // land on distinct orbs (the attribution under test is unchanged).
+        orbs.listResult = [
+          _runningOrb(id: 'a1b2c3', name: 'worker'),
+          _runningOrb(id: 'b2c3d4', name: 'beta'),
+          _runningOrb(id: 'c3d4e5', name: 'gamma'),
+        ];
         backend.opencode.detailOf = (id) => _detail(id);
         final server = await serverWith(tasks: tasks);
         try {
@@ -779,11 +864,20 @@ void main() {
             active: false,
           );
 
-          Future<String> dispatch(String task, String session) async {
+          Future<String> dispatch(
+            String task,
+            String session,
+            String orb,
+          ) async {
             final (status, body) = await _postRaw(
               server.baseUri,
               '/api/orb/spawn',
-              jsonEncode({'task': task, 'wait': false, 'session': session}),
+              jsonEncode({
+                'task': task,
+                'wait': false,
+                'session': session,
+                'orb': orb,
+              }),
             );
             expect(status, 201);
             return body;
@@ -793,12 +887,21 @@ void main() {
           // contains A's, then B's own task: each dispatch with a different
           // raw text (or a different caller) is a task of its own — none is
           // collapsed into A's running task (issue #147).
-          final firstBody = await dispatch('Fix the login form', 'ses_caller');
+          final firstBody = await dispatch(
+            'Fix the login form',
+            'ses_caller',
+            'worker',
+          );
           final secondBody = await dispatch(
             'Fix the login form and the signup form',
             'ses_b',
+            'beta',
           );
-          final thirdBody = await dispatch('Fix the login form', 'ses_b');
+          final thirdBody = await dispatch(
+            'Fix the login form',
+            'ses_b',
+            'gamma',
+          );
           final rows = {
             for (final body in [firstBody, secondBody, thirdBody])
               jsonDecode(body)['id'] as String: jsonDecode(body),
