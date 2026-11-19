@@ -67,6 +67,9 @@ abstract class OrbAgentTools {
       '6f6f7f6c1b62fc3d083eb1e5fe840f5646393a2cd9f6590d16d402dbed1af2e0',
       // 5bdd8c5 (#174): the direct-tool (non-Code-Mode) registrations.
       '53b96042d0b654b5a4e8c41d1778bd11b3b7df98c581a8bc87dc3885fc3bf005',
+      // #354: the answer carries the image's toolchain, read off the row the
+      // bridge stamps at dispatch.
+      'bcfda267b5fc28455e7942aaef34ec764fb19d6575571b31175d19e80c54b218',
     },
   };
 
@@ -144,7 +147,13 @@ function describe(row) {
   const lines = []
   lines.push(`Orb ${row.orbName} (${row.orb}) — task ${row.id}`)
   lines.push(`Status: ${row.status}`)
-  lines.push(`Branch: ${row.branch}`)
+  // Issue #352: the artifact is the remote-verified value the bridge read from
+  // the remote at settle (branch + sha), not the agent's claim. The sha is
+  // present once the settle verified the push; a push that never reached the
+  // remote settles `push_unverified` and carries the ls-remote evidence in the
+  // summary (already rendered below), never a `succeeded` with a phantom tip.
+  if (row.sha) lines.push(`Branch: ${row.branch} @ ${row.sha}`)
+  else lines.push(`Branch: ${row.branch}`)
   if (Array.isArray(row.toolchain) && row.toolchain.length > 0) {
     // Issue #354: the sandbox image's toolchain, read off the row the
     // bridge stamps from the image definition (the Dockerfile ARGs) at

@@ -101,6 +101,14 @@ class _FakeService extends OpencodeService {
   /// Every prompt delivered: (session id, text).
   final List<(String, String)> prompts = [];
 
+  /// The project the host serves (the resume test's caller lives here): the
+  /// settle's push verification (issue #352) resolves the task's project
+  /// checkout through the composite, which delegates `projects()` to the host.
+  @override
+  Future<List<OpencodeProject>> projects() async => const [
+    OpencodeProject(id: 'prj_1', name: 'shop', canonical: '/home/dev/shop'),
+  ];
+
   @override
   Future<List<OpencodeSession>> listSessions() async => sessions;
 
@@ -165,6 +173,12 @@ class _FakeOrbs implements OrbService {
     createSessionCalls++;
     return createSessionResult!;
   }
+
+  /// The settle's push verification (issue #352): the remote probe answers a
+  /// verified sha, so the resumed task's `succeeded` turn stays `succeeded`.
+  @override
+  Future<String?> remoteBranchTip(String checkout, String branch) async =>
+      'b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
 
   @override
   Future<String?> lastPassword(String id) async => 'orb-secret';

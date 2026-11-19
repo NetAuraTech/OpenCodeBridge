@@ -708,6 +708,41 @@ class OrbService {
     return seedOrb.branch;
   }
 
+  /// The remote's tip of [branch] (issue #352): `git ls-remote origin
+  /// refs/heads/branch` run at [checkout], so the completion
+  /// report carries the **remote-verified** sha, not the agent's claim. The
+  /// read is from the remote, never the orb's volume (the bridge cannot read
+  /// it) — a stopped orb's branch still answers. The 40-hex sha when the
+  /// branch is on the remote; `null` when it is not (the probe's empty
+  /// answer); throws when the remote cannot be probed at all (no GitHub
+  /// origin, or the CLI fails — a genuine "cannot verify", which the caller
+  /// degrades to `push_unverified`, never `succeeded`).
+  Future<String?> remoteBranchTip(String checkout, String branch) async {
+    await _remoteUrl(checkout);
+    final probe = await git([
+      'ls-remote',
+      '--heads',
+      'origin',
+      branch,
+    ], workingDirectory: checkout);
+    if (probe.exitCode != 0) {
+      throw const OrbRefusalError(
+        OrbRefusalError.noRemote,
+        'the remote probe failed — the push could not be verified',
+      );
+    }
+    final line = probe.stdout
+        .trim()
+        .split('\n')
+        .where((l) => l.isNotEmpty)
+        .cast<String?>()
+        .firstWhere((l) => l != null, orElse: () => null);
+    if (line == null) return null;
+    // `ls-remote --heads` answers "<sha>\t<ref>": the tip is the first field.
+    final sha = line.split('\t').first.trim();
+    return sha.isEmpty ? null : sha;
+  }
+
   /// The orb list composed from the labels (spec §2.2): the labeled
   /// containers (running with their ephemeral URL, or stopped/broken) plus
   /// the labeled volumes without a container (orphans, surfaced for
