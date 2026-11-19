@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/orb/orb_agent_tools.dart';
+import 'package:opencodebridge/bridge/orb/orb_embedded.dart';
 
 import 'stale_plugin_v1_fixture.dart';
 

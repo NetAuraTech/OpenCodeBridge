@@ -1131,6 +1131,36 @@ void main() {
     });
 
     test(
+      'the spawn answer carries the orb image toolchain (issue #354)',
+      () async {
+        scriptDispatch();
+
+        final task = await service.spawn(
+          task: 'do the thing',
+          wait: false,
+          callerSession: 'ses_caller',
+        );
+
+        // The driver sees the sandbox's toolchain in the spawn answer — no
+        // probe orb needed: the list is the image's pinned toolchains, read
+        // from the image definition (the Dockerfile ARGs).
+        expect(task.toolchain, isNotNull);
+        expect(
+          task.toolchain,
+          containsAll(const [
+            'FLUTTER_VERSION=3.47.8',
+            'GIT_VERSION=2.43',
+            'GH_VERSION=2.103.3',
+          ]),
+        );
+        expect(
+          task.toJson()['toolchain'],
+          containsAll(const ['FLUTTER_VERSION=3.47.8', 'GH_VERSION=2.103.3']),
+        );
+      },
+    );
+
+    test(
       'dispatch is one fresh session per task with the task prompt',
       () async {
         scriptDispatch();
