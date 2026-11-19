@@ -189,10 +189,18 @@ class OrbRefusalError implements Exception {
   /// code task can land on it.
   static const String noShell = 'no_shell';
 
+  /// The target orb already runs a task (issue #351): a second dispatch onto
+  /// the same orb is refused up front instead of silently queued behind the
+  /// running task (which would serialize "parallel" work onto one branch).
+  /// [message] names the busy orb and the running task, and states the
+  /// positive path (a distinct `orb` name, or wait for completion).
+  static const String orbBusy = 'orb_busy';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
   /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
   /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`,
-  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`, `no_shell`).
+  /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`, `no_shell`,
+  /// `orb_busy`).
   final String code;
 
   /// The clear message for the app.

@@ -366,6 +366,23 @@ class OrbTaskService {
     final retried = _retriedTaskOn(record.id, task, callerSession, dispatchId);
     if (retried != null) return retried;
 
+    // The orb's busy-orb refusal (issue #351): the target orb already runs a
+    // task, and this dispatch is not its idempotent retry (checked above).
+    // The dispatch is refused up front — never stacked behind the running
+    // task (which would serialize the "parallel" work onto one orb's single
+    // `orb/<id>` branch) and never answered as a plain "running". A spawn
+    // that just created its orb (a fresh clone) has no task yet, so it is
+    // unaffected — a distinct `orb` name stays the parallel path.
+    final busy = _busyTaskOn(record.id, excludeId: retried?.id);
+    if (busy != null) {
+      throw OrbRefusalError(
+        OrbRefusalError.orbBusy,
+        'the orb ${record.name} already runs task ${busy.id}. Dispatch with a '
+        'distinct "orb" name for parallel work, or wait for the task to '
+        'complete.',
+      );
+    }
+
     // The orb's boot proved the agent cannot execute (issue #149, spec §6.8):
     // an existing orb's refusal already fired in the targeting, and an orb
     // this spawn just created can boot straight into `broken:shell`. The
@@ -548,6 +565,29 @@ class OrbTaskService {
       if (running.callerSession == null) return running;
       if (callerSession == null || callerSession.isEmpty) continue;
       if (running.callerSession == callerSession) return running;
+    }
+    return null;
+  }
+
+  /// The first not-done task running on orb [orbId], or `null` (issue #351):
+  /// the busy-orb refusal's running task.
+  ///
+  /// A fresh orb this spawn just created has no task yet, so it is never
+  /// busy; a wake-or-create target is. The check is keyed by the orb **id**,
+  /// so a dispatch to a *different* orb is unaffected — parallelism still
+  /// works, the refusal only stops a second task stacking on *this* orb's
+  /// single `orb/<id>` branch.
+  ///
+  /// [excludeId] skips the idempotent retry's own match (issue #143/#147): a
+  /// retry of the very same dispatch must still return the running task
+  /// rather than be refused — the caller checked the retry first, so this
+  /// never sees it, but the exclusion keeps the two checks independent of
+  /// their ordering.
+  OrbTask? _busyTaskOn(String orbId, {String? excludeId}) {
+    for (final running in _tasks) {
+      if (running.orb != orbId || running.isDone) continue;
+      if (running.id == excludeId) continue;
+      return running;
     }
     return null;
   }
