@@ -11,7 +11,9 @@ import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
 import 'afk/afk_charter.dart';
 import 'afk/afk_component.dart';
+import 'afk/afk_ready_gate_poller.dart';
 import 'afk/afk_settings.dart';
+import 'afk/github_reader.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/composite_event_service.dart';
@@ -329,6 +331,14 @@ class BridgeServer {
   /// server mode).
   final AfkComponent? _afk;
 
+  /// The AFK Ready gate's admission poller (spec #376, "The Ready gate and
+  /// the feed", T2): the bridge's GitHub-reading admission loop. Built in
+  /// [start] when this bridge has an AFK component and the unified event
+  /// hub; the admission events ride the same fan-out the app's SSE sees.
+  /// Re-synced with the arming state by [updateAfKSettings]; stopped by
+  /// [stop].
+  AfkReadyGatePoller? _afkPoller;
+
   /// The route dispatch table (issue #253, C3): the ordered method→path→
   /// closure the HTTP server listens on. Built by [_buildRoutes] once at start
   /// (the composition root's route wiring), before the port is listened on.
@@ -590,6 +600,20 @@ class BridgeServer {
     // hands it the persisted settings at startup and on every change
     // (in-process, no HTTP endpoint).
     final afkComponent = afk ?? AfkComponent(backend: backend);
+    // The AFK Ready gate's admission poller (spec #376, "The Ready gate and
+    // the feed", T2): the real `gh` reader, the component's run store, and
+    // the unified event hub's emit — the admission events ride the same
+    // fan-out the app's SSE sees. Armed ⇒ the schedule starts via
+    // [updateAfKSettings]; the system is inert when disarmed or when there
+    // is no event hub (no SSE surface for the events).
+    final afkPoller = eventHub == null
+        ? null
+        : AfkReadyGatePoller(
+            reader: GhGitHubReader(),
+            store: afkComponent.store,
+            isArmed: () => afkComponent.enabled,
+            emitEvent: eventHub.emit,
+          );
     final bridge = BridgeServer._(
       server,
       health ?? BridgeServer._defaultHealth(bootstrapOpencode),
@@ -610,6 +634,7 @@ class BridgeServer {
       bootstrapOpencode,
       afkComponent,
     );
+    bridge._afkPoller = afkPoller;
     // The route dispatch table (issue #253, C3): the composition root's route
     // wiring. It is built here — at start, not in the request path — so a
     // wiring change (a new component, a re-tied closure) re-builds the table
@@ -845,6 +870,9 @@ class BridgeServer {
   /// component (no shared opencode service).
   Future<String?> updateAfKSettings(AfkSettings settings) async {
     _afk?.updateSettings(settings);
+    // The Ready gate's admission poller follows the arming toggle live
+    // (spec #376, T2): start on arm, stop on disarm.
+    _afkPoller?.syncArmed(settings.enabled);
     if (!settings.enabled) return null;
     return ensureAfKSession();
   }
@@ -871,6 +899,7 @@ class BridgeServer {
     _tasksArmTimer?.cancel();
     _tasksArmTimer = null;
     _orbs?.stopLifecyclePass();
+    _afkPoller?.stop();
     _tasks?.close();
     await _server.close(force: true);
     await _hostServer?.close(force: true);
