@@ -259,6 +259,39 @@ void main() {
     });
 
     test(
+      'spawnGate is null with no stored AFK session (no AFK orbs to cap)',
+      () {
+        final component = mkComponent(armed: true);
+        expect(component.spawnGate(), isNull);
+      },
+    );
+
+    test(
+      'spawnGate carries the AFK session id (the attribution anchor) and the '
+      'live cap, read fresh on every call',
+      () async {
+        final component = mkComponent(armed: true);
+        await component.ensureSession(); // Persists the AFK session id.
+
+        final gate = component.spawnGate();
+        expect(gate, isNotNull);
+        expect(gate!.afkSessionId, 'ses_afk_1');
+        expect(gate.cap, 5);
+        // The attribution fact: only the AFK session's spawns are AFK orbs.
+        expect(gate.isAfk('ses_afk_1'), isTrue);
+        expect(gate.isAfk('ses_other'), isFalse);
+        expect(gate.isAfk(null), isFalse);
+
+        // A changed cap is effective from the next read (the next spawn): the
+        // gate re-reads the live settings, no restart.
+        component.updateSettings(
+          const AfkSettings(enabled: true, parallelOrbs: 2, model: ''),
+        );
+        expect(component.spawnGate()!.cap, 2);
+      },
+    );
+
+    test(
       'no backend: no AFK session can be created (degrades to null)',
       () async {
         final component = AfkComponent(
