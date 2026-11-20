@@ -91,6 +91,39 @@ class AfkRun {
     narrationId,
   );
 
+  /// The row with the given run-state fields replaced (the run service
+  /// writes the row back after every state-machine step it takes). A field
+  /// left unset keeps its value; a nullable field is cleared by passing
+  /// `null` explicitly (the unset/cleared distinction rides on the
+  /// [absent] sentinel).
+  AfkRun copyWith({
+    Object? state = absent,
+    Object? retryCount = absent,
+    Object? prNumber = absent,
+    Object? prUrl = absent,
+    Object? closedUnmerged = absent,
+    Object? retryAt = absent,
+    Object? narrationId = absent,
+  }) => AfkRun(
+    issueNumber: issueNumber,
+    title: title,
+    state: state == absent ? this.state : state as String,
+    retryCount: retryCount == absent ? this.retryCount : retryCount as int,
+    prNumber: prNumber == absent ? this.prNumber : prNumber as int?,
+    prUrl: prUrl == absent ? this.prUrl : prUrl as String?,
+    closedUnmerged: closedUnmerged == absent
+        ? this.closedUnmerged
+        : closedUnmerged as bool,
+    retryAt: retryAt == absent ? this.retryAt : retryAt as int?,
+    narrationId: narrationId == absent
+        ? this.narrationId
+        : narrationId as String?,
+  );
+
+  /// The [copyWith] "field left unset" sentinel (distinct from a `null`
+  /// value, which clears).
+  static const Object absent = Object();
+
   @override
   String toString() =>
       'AfkRun(issueNumber: $issueNumber, title: $title, state: $state)';
