@@ -1,0 +1,4 @@
+# Release signing material — never commit keystores (release.yml decodes the
+# keystore from the ANDROID_KEYSTORE_BASE64 repo secret instead).
+*.keystore
+*.jks
