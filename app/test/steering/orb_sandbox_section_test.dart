@@ -2,9 +2,10 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// The repo-root AGENTS.md. Tests run with cwd `app/`; the root is the
-/// nearest ancestor directory that holds an AGENTS.md, so the test does not
-/// depend on the checkout's depth.
+/// The repo-root AGENTS.md. Tests run with cwd `app/`; the locator tries a
+/// fixed list of candidate paths (1 to 3 levels up from the cwd) and uses the
+/// first that exists, so the test does not depend on the checkout's depth.
+/// Mirrors the locator/section-scan in verification_signature_test.dart.
 File _agentsMd() {
   final candidates = ['../AGENTS.md', '../../AGENTS.md', '../../../AGENTS.md'];
   for (final c in candidates) {
