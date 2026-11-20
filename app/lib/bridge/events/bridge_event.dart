@@ -61,6 +61,23 @@ abstract class BridgeEventType {
   /// title) and emits this on the unified stream; `data` carries
   /// `issueNumber` and `title`.
   static const String afkReadyAdmitted = 'afk.ready_admitted';
+
+  /// An AFK run reached `pr-open` (spec #376, "Push", T3): the agent's
+  /// `PR opened` narration landed and the bridge confirmed the PR is open
+  /// (its number recorded on the run row). This is one of the two "look now"
+  /// bridge events the run service emits — the push dispatcher maps it to
+  /// the `afkRun` notification kind (the push ticket, T5). `data` carries
+  /// `issueNumber`, `title`, `prNumber`, and `prUrl`.
+  static const String afkPrOpen = 'afk.pr_open';
+
+  /// An AFK run reached `failed` (spec #376, "Push", T3): the run's retries
+  /// exhausted on the agent's `FAILED` narrations — the issue is labelled
+  /// `needs-triage` with a comment, and this is the other "look now" bridge
+  /// event (the push dispatcher maps it to the `afkRun` notification kind,
+  /// deep-linking to the AFK session so the human reads the narration).
+  /// `data` carries `issueNumber`, `title`, and `reason` (the agent's
+  /// `FAILED` reason).
+  static const String afkFailed = 'afk.failed';
 }
 
 /// Build the wire payload for a bridge-native event: the same `data:` envelope

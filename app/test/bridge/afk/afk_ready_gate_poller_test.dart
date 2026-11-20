@@ -22,11 +22,27 @@ class _FakeReader implements GitHubReader {
   }
 
   @override
-  Future<String?> readLastComment(int issueNumber) async =>
-      'comment $issueNumber';
+  Future<IssueComment?> readLastComment(int issueNumber) async =>
+      IssueComment(id: 'IC_$issueNumber', body: 'comment $issueNumber');
 
   @override
   Future<String> readIssueState(int issueNumber) async => 'OPEN';
+
+  @override
+  Future<bool> hasLabel(int issueNumber, String label) async => true;
+
+  @override
+  Future<PrInfo?> readPr(int prNumber) async => PrInfo(
+    number: prNumber,
+    url: 'https://github.com/o/r/pull/$prNumber',
+    state: 'OPEN',
+  );
+
+  @override
+  Future<void> addLabel(int issueNumber, String label) async {}
+
+  @override
+  Future<void> addComment(int issueNumber, String body) async {}
 }
 
 /// An [AfkStore] whose writes fail — the poller's store-failure path.

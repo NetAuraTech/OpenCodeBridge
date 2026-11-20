@@ -209,6 +209,31 @@ abstract class OpencodeService {
     List<Map<String, Object?>>? skills,
   });
 
+  /// The session's idle-wait (the service's
+  /// `POST /api/experimental/session/{id}/wait` — "wait for a session agent
+  /// loop to become idle"): a **long-poll**, `204` at idle / `503` running —
+  /// the service holds the request while a turn runs, so the client bounds
+  /// the hold with its own [timeout] (the research note on the opencode v2
+  /// service API, ticket #360: at idle it returns 204 promptly; while a turn
+  /// runs it holds).
+  ///
+  /// Completes with `true` when the session's agent loop is idle (the turn
+  /// is over) and `false` when the wait timed out while the session was
+  /// still running — the caller treats a timeout exactly like a 503 and
+  /// asks again later.
+  ///
+  /// The default answers from a **single active-set probe** (an
+  /// implementation without the wait route degrades to the non-blocking
+  /// check — it answers idle only when the session is not active *now*; the
+  /// caller re-asks on its next pass): fakes and the tests inherit it.
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final active = await activeSessionIds();
+    return !active.contains(id);
+  }
+
   /// The session's pending permission requests (spec §5, endpoint 8).
   Future<List<PermissionRequest>> pendingPermissions(String id);
 

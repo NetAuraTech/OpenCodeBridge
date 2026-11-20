@@ -4048,6 +4048,15 @@ class _FakeService implements OpencodeService {
   Future<Set<String>> activeSessionIds() async => const {'ses_three'};
 
   @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final active = await activeSessionIds();
+    return !active.contains(id);
+  }
+
+  @override
   Future<List<OpencodeProject>> projects() async {
     if (failProjects) throw const OpencodeServiceError(0, 'service down');
     final override = overrideProjects;

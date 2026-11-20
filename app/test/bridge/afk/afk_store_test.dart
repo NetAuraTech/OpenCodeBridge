@@ -134,4 +134,109 @@ void main() {
       expect(reloaded.runFor(7)!.issueNumber, 7);
     });
   });
+
+  group('the run row grows with the run state (spec #376, T3: the retry '
+      'count, the PR number/URL, the backoff deadline, the narration)', () {
+    test(
+      'updateRun persists the full row; runFor reads every field back',
+      () async {
+        final store = AfkStore(file: file);
+        await store.addRun(7, 'Add a README');
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'pr-open',
+            prNumber: 41,
+            prUrl: 'https://github.com/org/repo/pull/41',
+            narrationId: 'IC_1',
+          ),
+        );
+        final reloaded = AfkStore(file: file);
+        final run = reloaded.runFor(7)!;
+        expect(run.state, 'pr-open');
+        expect(run.retryCount, 0);
+        expect(run.prNumber, 41);
+        expect(run.prUrl, 'https://github.com/org/repo/pull/41');
+        expect(run.closedUnmerged, isFalse);
+        expect(run.retryAt, isNull);
+        expect(run.narrationId, 'IC_1');
+      },
+    );
+
+    test('the retry fields: the count, the backoff deadline, the '
+        'processed-narration id', () async {
+      final store = AfkStore(file: file);
+      await store.addRun(7, 'Add a README');
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+          retryCount: 2,
+          retryAt: 1761000000000,
+          narrationId: 'IC_9',
+        ),
+      );
+      final run = AfkStore(file: file).runFor(7)!;
+      expect(run.retryCount, 2);
+      expect(run.retryAt, 1761000000000);
+      expect(run.narrationId, 'IC_9');
+    });
+
+    test('updateRun upserts: the row is replaced wholesale (a cleared PR '
+        'number stays cleared)', () async {
+      final store = AfkStore(file: file);
+      await store.addRun(7, 'Add a README');
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'pr-open',
+          prNumber: 41,
+        ),
+      );
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'done',
+          closedUnmerged: true,
+        ),
+      );
+      final run = store.runFor(7)!;
+      expect(run.state, 'done');
+      expect(run.prNumber, isNull);
+      expect(run.closedUnmerged, isTrue);
+    });
+
+    test('a T2-era row (no new fields) reads back with the defaults '
+        '(the store grows without migrating the rows)', () async {
+      await file.writeAsString(
+        jsonEncode({
+          'afk.run.7': '{"state":"idle","issueNumber":7,"title":"A"}',
+        }),
+      );
+      final run = AfkStore(file: file).runFor(7)!;
+      expect(run.state, 'idle');
+      expect(run.retryCount, 0);
+      expect(run.prNumber, isNull);
+      expect(run.prUrl, isNull);
+      expect(run.closedUnmerged, isFalse);
+      expect(run.retryAt, isNull);
+      expect(run.narrationId, isNull);
+    });
+
+    test('a row with a corrupt new field degrades to the default for that '
+        'field (never a throw)', () async {
+      await file.writeAsString(
+        jsonEncode({
+          'afk.run.7': '{"state":"failed","issueNumber":7,"title":"A","retryCount":"lots"}',
+        }),
+      );
+      final run = AfkStore(file: file).runFor(7)!;
+      expect(run.state, 'failed');
+      expect(run.retryCount, 0);
+    });
+  });
 }
