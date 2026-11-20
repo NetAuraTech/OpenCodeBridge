@@ -1219,14 +1219,14 @@ void main() {
         expect(
           task.toolchain,
           containsAll(const [
-            'FLUTTER_VERSION=3.47.8',
+            'FLUTTER_VERSION=3.50.1',
             'GIT_VERSION=2.43',
             'GH_VERSION=2.103.3',
           ]),
         );
         expect(
           task.toJson()['toolchain'],
-          containsAll(const ['FLUTTER_VERSION=3.47.8', 'GH_VERSION=2.103.3']),
+          containsAll(const ['FLUTTER_VERSION=3.50.1', 'GH_VERSION=2.103.3']),
         );
       },
     );

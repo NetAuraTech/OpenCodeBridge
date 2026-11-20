@@ -283,7 +283,7 @@ void main() {
       expect(source, contains('Toolchain'));
       // The plugin's own text carries no pinned version — no second,
       // hand-maintained list to drift from the image definition.
-      expect(source, isNot(contains('3.47.8')));
+      expect(source, isNot(contains('3.50.1')));
       expect(source, isNot(contains('2.103.3')));
       // And the row the plugin renders from is what the bridge answers:
       // the Dart task row must carry the field the plugin reads.

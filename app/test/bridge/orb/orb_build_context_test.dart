@@ -147,7 +147,7 @@ void main() {
       'NODE_VERSION=22.14.0',
       'NPM_VERSION=10.9.2',
       'PHP_VERSION=8.3',
-      'FLUTTER_VERSION=3.47.8',
+      'FLUTTER_VERSION=3.50.1',
       'REDIS_VERSION=7.4.0',
       'POSTGRES_VERSION=16',
       'TYPESENSE_VERSION=28.0',
@@ -170,14 +170,14 @@ void main() {
       // it does not echo a second list.
       final dockerfile = OrbEmbedded.files['Dockerfile']!;
       final bumped = dockerfile
-          .replaceFirst('FLUTTER_VERSION=3.47.8', 'FLUTTER_VERSION=3.48.0')
+          .replaceFirst('FLUTTER_VERSION=3.50.1', 'FLUTTER_VERSION=3.50.2')
           .replaceFirst('GH_VERSION=2.103.3', 'GH_VERSION=2.104.0');
       expect(bumped, isNot(dockerfile));
       final parsed = OrbEmbedded.parseToolchain(bumped);
       expect(parsed, isNot(OrbEmbedded.toolchain));
-      expect(parsed, contains('FLUTTER_VERSION=3.48.0'));
+      expect(parsed, contains('FLUTTER_VERSION=3.50.2'));
       expect(parsed, contains('GH_VERSION=2.104.0'));
-      expect(parsed, isNot(contains('FLUTTER_VERSION=3.47.8')));
+      expect(parsed, isNot(contains('FLUTTER_VERSION=3.50.1')));
       expect(parsed, isNot(contains('GH_VERSION=2.103.3')));
       // Every other pin still reads off the definition.
       expect(
@@ -200,7 +200,7 @@ void main() {
         'NODE_VERSION=22.14.0',
         'NPM_VERSION=10.9.2',
         'PHP_VERSION=8.3',
-        'FLUTTER_VERSION=3.47.8',
+        'FLUTTER_VERSION=3.50.1',
         'REDIS_VERSION=7.4.0',
         'POSTGRES_VERSION=16',
         'TYPESENSE_VERSION=28.0',
