@@ -76,4 +76,5 @@ T1 #377 (settings, charter, session)
 
 ## Done (driver appends)
 
-- [ ]
+- [x] T1 #377 — merged as `295d10d` (branch `t377-afk-settings-charter` @ 4033b30b; orphan `orb/ea23f47d` on the remote carries the same commit — candidate for deletion at cleanup, needs the developer's OK). Landed: `app/lib/bridge/afk/` (afk_settings, afk_charter + install guarantee, afk_store, afk_session_manager, afk_component), settings section in `settings_tab.dart` (server-mode only, after "Host connection", keys `afk.enabled`/`afk.parallelOrbs`/`afk.model`, defaults off/5/empty), in-process handoff in `bridge_server.dart` (`updateAfKSettings`/`ensureAfKSession`/`afkSettings`) and `app.dart`. T2/T4 build on `app/lib/bridge/afk/` and the store surface.
+- Local verification signature on this host (Flutter 3.50, non-root): `--enforce-lockfile` fails on `origin/main` itself (host Flutter ≠ CI's 3.47.8) — treat as environmental; `flutter analyze` fails on pre-existing 30 `material` deprecation infos (host-only); **authoritative local gate here = `flutter test --exclude-tags docker` (0 failures) + `dart format`**. CI (Flutter 3.47.8) runs the full command. Do not commit a regenerated `pubspec.lock` from the host.
