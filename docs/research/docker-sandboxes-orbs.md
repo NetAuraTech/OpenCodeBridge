@@ -1,0 +1,233 @@
+# Docker Sandboxes (`sbx`) vs the orb system
+
+**Ticket**: [#395](https://github.com/NetAuraTech/OpenCodeBridge/issues/395) — "research: Docker Sandboxes (sbx microVM) — can it replace or improve the orb container?"
+**Branch**: `research/docker-sandboxes-orbs` (research branch — never merged, no PR)
+**Date**: 2026-11-20. All Docker docs fetched on this date; the product launched 2026-11-19 and the vs-containers comparison post is dated 2026-11-05, so this substrate is ~2 weeks old at research time.
+**Method**: primary sources only (Docker docs + launch posts + product page), cross-checked section-by-section against the normative orb design in [`docs/orbs-spec.md`](../orbs-spec.md), plus a hands-on attempt to install and run `sbx` inside this sandbox (a Linux Docker container). The hands-on result is recorded verbatim in [§ Hands-on](#hands-on-attempting-sbx-inside-this-sandbox).
+
+## What `sbx` is (grounded in the docs, not marketing)
+
+Docker Sandboxes run AI coding agents inside a **microVM with its own Linux kernel, filesystem, network stack, and a private Docker Engine** ([architecture](https://docs.docker.com/ai/sandboxes/architecture/); [vs-containers post](https://www.docker.com/blog/docker-sandboxes-vs-containers/)). The control surface is a CLI (`sbx`) plus a local daemon (`sandboxd`); "The `sbx` CLI and local sandbox compute are free to use, including for commercial work. Cloud compute uses a pay-as-you-go subscription" ([index](https://docs.docker.com/ai/sandboxes/)).
+
+Mechanics the docs commit to:
+
+- **Workspace** — three modes: a direct read-write mount of a host path (preserving the host absolute path, virtiofs-backed), **clone mode** (`--clone`: host repo mounted read-only at `/run/sandbox/source`, agent works on a private in-VM clone), or **mountless** (no host mount; files live in the VM and persist across stops) ([architecture](https://docs.docker.com/ai/sandboxes/architecture/), [usage](https://docs.docker.com/ai/sandboxes/usage/)).
+- **Network** — "All outbound TCP traffic from the sandbox routes through a proxy on your host", deny-by-default policy; "Outbound UDP is blocked unless you turn on the experimental UDP feature … ICMP is blocked"; DNS uses a sandbox-internal resolver that enforces policy ([architecture](https://docs.docker.com/ai/sandboxes/architecture/), [defaults](https://docs.docker.com/ai/sandboxes/security/defaults/), [local policy](https://docs.docker.com/ai/sandboxes/governance/local/)). Host services are reachable via the hostname `host.docker.internal`, which "the sandbox proxy translates … to `localhost` before forwarding the request", provided the `localhost:<port>` is allow-listed ([local services](https://docs.docker.com/ai/sandboxes/workflows/development/)).
+- **Credentials** — host-side proxy injects HTTP/HTTPS auth headers; "The real credential stays on the host when proxy management is active; the sandbox sees only a sentinel value" ([credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/)). SSH is handled by **agent forwarding** ("SSH agent forwarding is enabled by default. … The private keys stay on your host"), not by key files.
+- **Config** — "kits" (YAML descriptors published as container images; v3 recommended, v2 supported) for the environment and [sandbox environment files](https://docs.docker.com/ai/sandboxes/configuration/environment-files/) (`sbxenv.yaml`) for per-project selection — the docs mark `sbx env` as **(Experimental)** and custom secrets as "experimental … may change without notice" ([customize](https://docs.docker.com/ai/sandboxes/customize/), [credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/)).
+- **Programmatic API** — the documented REST/SDK surface is **cloud-only**: "Use the Docker Sandboxes API to create cloud sandboxes …", requiring "a Docker Agentic Platform subscription" ([API & SDK](https://docs.docker.com/ai/sandboxes-api/)). Local sandboxes are driven by the CLI against the local daemon.
+
+## Hands-on: attempting `sbx` inside this sandbox
+
+**Environment** (this orb = a Linux Docker container; the probe below):
+
+- `PRETTY_NAME="Ubuntu 24.04.5 LTS"`, `x86_64`, running as **root**
+- `/.dockerenv` present → we are inside a container; `lsmod` shows no `kvm*` module
+- `/dev/kvm`: `ls: cannot access '/dev/kvm': No such file or directory`; no `/dev/vfio`
+- `grep -o 'vmx\|svm' /proc/cpuinfo` → `vmx` (the *underlying* CPU exposes VT-x, but the container's kernel does not pass `/dev/kvm` through)
+
+**Attempt 1 — install.** `curl -fsSL https://get.docker.com | REPO_ONLY=1 sh` then `apt-get install -y docker-sbx`:
+
+```
+$ sbx --version
+sbx version v0.54.0 4bec4a5ce093466e54b034146965b143d065dc09
+```
+
+The package installs cleanly **without any KVM gate** — install and virtualization-readiness are separate (as the [install docs](https://docs.docker.com/ai/sandboxes/install/) state: "Hypervisor and KVM setup is required only to run local sandboxes").
+
+**Attempt 2 — diagnose.** `sbx diagnose --no-input`:
+
+```
+INSTALLATION
+  ✓ CLI binary — found
+  ✓ Binary version — v0.54.0
+  ✗ Daemon — not reachable
+      Get "http://localhost/daemon/health": dial unix /root/.local/state/sandboxes/sandboxes/sandboxd/sandboxd.sock: …
+PLATFORM
+  ✗ Virtualization — no hypervisor present
+      /dev/kvm does not exist
+      No hypervisor is available to this machine. Either the platform's virtualization feature is
+      not enabled, or the machine is itself a virtual machine or VDI desktop whose host does not
+      expose virtualization extensions (nested virtualization).
+  ...
+  10 passed · 2 failed · 8 skipped
+```
+
+**Attempt 3 — daemon + create.** `sbx daemon start --no-input` runs the daemon in the foreground (it stays attached, printing `daemon — starting at …/sandboxd.sock`); run in the background and `sbx daemon status` reports `Status: ● running`, socket at `/root/.local/state/sandboxes/sandboxes/sandboxd/sandboxd.sock`. So the daemon itself starts fine without KVM — the gate is at VM boot. Then:
+
+```
+$ sbx create --no-input --name probe-sbx shell
+error: not signed in to Docker
+  try: sbx login
+```
+
+The CLI gates on **Docker sign-in before it even reaches the virtualization stage**. No Docker credentials exist in this environment (no `DOCKER_*` env, no `~/.docker`), and `sbx login` is an interactive OAuth flow (CI variant: `echo "$DOCKER_PAT" | sbx login --username me --password-stdin`, per `sbx login --help`), so I did not log in — the exact VM-boot error string in a no-KVM environment is not captured here. The platform verdict above is `sbx`'s own output, and the install docs state the hard requirement: "The local sandbox runtime requires KVM to start" ([install](https://docs.docker.com/ai/sandboxes/install/)). Daemon stopped afterward as cleanup.
+
+**What this proves about point 1**: a container host — and by extension any VM/VDI host that does not expose KVM — **cannot run a local sandbox at all**, while it runs Docker containers (and therefore orbs) without any hypervisor. Notably, *this research itself ran inside an orb container*: even with a VT-x-capable CPU underneath, no `sbx` microVM can be nested inside an orb. Local `sbx` is strictly less portable than the container substrate the orb already uses. Where the hands-on is impossible, the docs are the source of truth throughout the rest of this note.
+
+---
+
+## 1. Platform fit
+
+**Facts.**
+
+- Linux: "Ubuntu 24.04 or later", 64-bit Intel/AMD or Arm; "For local sandboxes, KVM hardware virtualization supported and turned on by the CPU, and your user account in the `kvm` group"; "The local sandbox runtime requires KVM to start." Also: "Docker does not test or support Docker Sandboxes on Ubuntu derivatives, such as Linux Mint and Pop!_OS" ([install](https://docs.docker.com/ai/sandboxes/install/)).
+- Nested: "To run local sandboxes inside a virtual machine or virtual desktop infrastructure environment, the environment must support nested virtualization. Cloud sandboxes don't require this setup." ([install](https://docs.docker.com/ai/sandboxes/install/))
+- Windows: "Windows 11", 64-bit Intel/AMD, "Windows Hypervisor Platform for local sandboxes" (enabled via `Enable-WindowsOptionalFeature … HypervisorPlatform`) ([install](https://docs.docker.com/ai/sandboxes/install/)).
+- Headless: "Can I use Docker Sandboxes on headless Linux? Yes." — the only headless-specific accommodation is secret storage falling back from the Secret Service keyring to a permission-protected file under `~/.config/com.docker.sandboxes` ([FAQ](https://docs.docker.com/ai/sandboxes/faq/), [credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/)). No GUI requirement is stated for local sandboxes.
+- Hands-on: install works, daemon starts, but platform check fails — see [§ Hands-on](#hands-on-attempting-sbx-inside-this-sandbox).
+
+**Verdict vs the orb design — gaps.** The orb model (§1.1) targets "the machine running the bridge — local Docker, Windows and Linux (no WSL)". A **headless Linux desktop qualifies** (Ubuntu 24.04+, KVM on, user in `kvm` group — the headless FAQ confirms no desktop needed), and a **Windows 11 host qualifies** with Windows Hypervisor Platform. But the KVM requirement is a hard new substrate constraint the container never had: (a) any bridge machine that is itself a VM/VDI **without nested virtualization** — or a container, as this research sandbox is — loses local sandboxes entirely, while keeping every orb capability; (b) Ubuntu **derivatives are explicitly unsupported**, narrowing the distro base; (c) the supported OS list is exact-versioned ("Ubuntu 24.04 or later"), and Docker's own caveat is that the presence of a release artifact "does not indicate that Docker tests or supports the corresponding distribution". Whether a given deployment fleet uniformly qualifies is unknown — it depends on each user machine's hypervisor exposure, which the bridge cannot assume today.
+
+## 2. Programmatic control
+
+**Facts.**
+
+- The local control surface is the `sbx` CLI against a local daemon. Commands include `create`, `run`, `stop`, `rm`, `inspect`, `exec`, `cp`, `port`, `prune`, `policy`, `secret`, `settings`, `template`, `kit`, `env` (experimental), `daemon` (observed via `sbx --help`, v0.54.0). A global `--no-input` flag exists: "Never prompt; commands that need an answer fail with the command to run instead" — i.e., a headless/scripting mode is designed for. The usage page points scripts at "CI and headless use" and notes "the v0.48.0 CLI migration", i.e., the CLI's script-facing shape has already changed once recently ([usage](https://docs.docker.com/ai/sandboxes/usage/)).
+- Non-attached creation: `sbx create` (and `sbx run --detach`/`-d`, which "starts the sandbox, prints its ID, and returns without opening an agent session") ([usage](https://docs.docker.com/ai/sandboxes/usage/)).
+- Machine-readable state: `sbx inspect <name> --format json` ("Show a human-readable summary of a sandbox: … state, … workspace and mounts, network policy, secrets, published ports, and active sessions") ([CLI, `sbx inspect --help`](https://docs.docker.com/reference/cli/sbx/)).
+- Network exposure: "To let the OS pick a free host port instead of choosing one yourself, specify only the sandbox port. Then use `sbx port ls` to check which host port was assigned"; "Published ports survive restarts: `sbx` re-publishes them when the sandbox or the daemon restarts. Explicit host ports are reused, while a port published with an OS-assigned host port … gets a different host port on each start." ([local services](https://docs.docker.com/ai/sandboxes/workflows/development/))
+- Lifecycle events: no event stream, webhook, or watch is documented for local sandboxes; state is read by `sbx ls` / `sbx inspect` (polling).
+- The documented REST/SDK ("Docker Sandboxes API and SDK", OpenAPI spec, TypeScript SDK) applies to **cloud sandboxes only** and requires a Docker Agentic Platform subscription ([API & SDK](https://docs.docker.com/ai/sandboxes-api/)). The local daemon's Unix-socket protocol (`…/sandboxd/sandboxd.sock`, observed in the hands-on) is not documented as a stable API.
+- Sign-in is required even for local use: every command after `login` ("Why do I need to sign in? … Authenticate against Docker infrastructure. Sandboxes pull images, run daemons, and talk to Docker services.") ([FAQ](https://docs.docker.com/ai/sandboxes/faq/)); the hands-on hit `error: not signed in to Docker` before reaching VM creation.
+
+**Verdict vs the orb design — fits with changes required.** The bridge's standing pattern — "The bridge shells out to the `docker` CLI" (invariant 1) and derives each descriptor per start from `docker inspect` (ephemeral host port, §2.9) and `docker logs` (password, §7.1) — translates in *shape*: `sbx create`/`sbx run -d` for start, `sbx stop`/`sbx rm` for stop/delete, `sbx inspect --format json` for state, `sbx port ls` for the ephemeral host port (read after every start, exactly like §2.9's "no range, no pin, no allocation logic"). But it changes the spec's standing assumptions in three ways:
+
+1. **Control surface**: `docker` CLI → `sbx` CLI + a second local daemon (`sandboxd`) the bridge must start/keep healthy — a new process to own, with no documented local API and a CLI that has already undergone a breaking "v0.48.0 CLI migration".
+2. **State store**: the "Docker labels as the only state store" invariant (5, §2.1) has no counterpart — sandboxes are invisible to the host `docker` CLI (each sandbox owns a *private* Docker Engine; nothing shows in the host's `docker ps`), and the `ocb.*` label scheme (used for enumeration at §2.2, orphans at §2.2, cleanup at §2.10) cannot be expressed. The bridge would need `sbx ls` enumeration plus its own per-orb bookkeeping, which the spec explicitly ruled out as drift-prone.
+3. **No lifecycle events**: §7.3's composite event service and the ~1-min lifecycle pass (§2.10) can only *poll* `sbx inspect`/`sbx ls`; there is no documented local event stream to hook.
+
+Unknown: the stability of `sbx inspect --format json` fields and the daemon's restart semantics across `sbx` upgrades — undocumented, and the project's own release cadence (0.45 → 0.54 in ~2 weeks) argues for caution.
+
+## 3. Long-lived service semantics
+
+**Facts.**
+
+- Persistence: "When you create a sandbox, everything inside it persists until you remove it: Docker images and containers built or pulled by the agent, installed packages, agent state and history, and files in mountless or cloned workspaces." "You can stop and restart without recreating the VM, preserving installed packages, Docker images, and in-sandbox files." "Stopped sandboxes retain their state and can be restarted with `sbx run`." ([architecture](https://docs.docker.com/ai/sandboxes/architecture/), [CLI `sbx stop --help`](https://docs.docker.com/reference/cli/sbx/stop/))
+- Keeping a sandbox running: "After `sbx create` finishes, the local sandbox stops automatically when no sessions keep it running. Its files and configuration persist." To hold one: `sbx run --detach` — "A detached sandbox keeps running until you stop it with `sbx stop` or remove it with `sbx rm`." ([usage](https://docs.docker.com/ai/sandboxes/usage/))
+- Service reachability: a service "must listen on all interfaces inside the sandbox, not only `127.0.0.1`"; port publishing is the host-reachable path; "Publishing a port on a stopped local sandbox starts it first." ([local services](https://docs.docker.com/ai/sandboxes/workflows/development/))
+- **The built-in OpenCode workload launches the TUI, not a server**: "OpenCode launches a TUI (text user interface) where you can select your preferred LLM provider"; "The sandbox runs `opencode` with no implicit flags." ([opencode agent page](https://docs.docker.com/ai/sandboxes/agents/opencode/)). A headless `opencode serve` would come from a custom kit (the kit's workload entrypoint) or `sbx exec` — the docs' agent model is "attach an agent", not "host a headless service".
+
+**Verdict vs the orb design — gaps, with a workable (unofficial) mapping.** The orb contract is a *long-lived headless service*: `opencode serve` per orb (§1.1), the bridge aggregates its SSE events and routes/moves sessions to it (§2.5/§2.6, §7.1–7.3), and Wake must restore that exact service. Mapping each piece:
+
+- *State across stop/resume* — fits: VM disk (including the in-orb `opencode.db`, the "agent state and history") persists across `stop`/start, satisfying "workspace and branch untouched, sessions re-attachable" (§2.4) at the data level.
+- *Process* — gap: nothing in `sbx` auto-restarts a listening process on start. Our container does this via the entrypoint re-exec on every `docker start` (§2.4, §6.5). In `sbx`, the bridge would have to (re)launch `opencode serve` itself after every start — e.g., define a kit whose workload entrypoint is `opencode serve --port <const>` and keep `sbx run --name <orb>` attached (or detached) as the holder process, or `sbx exec` the server after start. The docs present no first-class "headless service" pattern; this mapping is inference from the documented primitives, not a documented workflow.
+- *Auto-stop without sessions* — fights the design: the sandbox "stops automatically when no sessions keep it running", while the orb is *defined* by a service running with zero attached users. Detached mode (`-d`) works around it, but it is a permanent mode switch ("Running `sbx run -d --name <sandbox-name>` against an existing sandbox … switches it to detached mode permanently") and adds a holder process the bridge must manage — versus the container's plain entrypoint.
+- *Port descriptor* — fits in shape (ephemeral host port read via `sbx port ls`, §2.9 analogue), with the wrinkle that OS-assigned ports re-roll on every start while explicit ones are reused — same re-read-per-start obligation we already have.
+
+The session move primitive itself (export/import with preserved ids, §2.6) is substrate-independent — it runs over the opencode HTTP API — and works unchanged as long as the in-sandbox service is reachable.
+
+## 4. Credential & auth mapping
+
+**Facts.**
+
+- Model-provider and `gh` credentials: host-side proxy injects headers for declared services; the sandbox sees a sentinel. The built-in `github` service maps env `GH_TOKEN`/`GITHUB_TOKEN` to domains `api.github.com`, `github.com`, `raw.githubusercontent.com`, `gist.github.com`, `copilot.github.com`, `api.githubcopilot.com` — and "The built-in `github` service doesn't inject credentials into requests to `npm.pkg.github.com`" (needs a custom secret). The docs' own recipe: `sbx secret set github --command 'gh auth token'`; "The daemon refreshes the token from the host command after the default cache period" (55 min default; `--refresh on-demand` available). ([credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/))
+- SSH: **agent forwarding only** — "SSH agent forwarding is enabled by default. … The private keys stay on your host, but any process inside the sandbox can request signatures from the forwarded agent". Outbound SSH still obeys network policy (e.g., `sbx policy allow network "myhost:22"`). No mechanism is documented to mount or read `~/.ssh/` key files. ([credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/), [isolation](https://docs.docker.com/ai/sandboxes/security/isolation/), [local policy](https://docs.docker.com/ai/sandboxes/governance/local/))
+- Non-HTTP service credentials (postgres/redis/typesense passwords, API keys for localhost services): out of scope for the proxy — it only "injects credentials into outbound HTTP headers" for declared services. Values reach the sandbox via env (`-e`/`--env-file`) or files. ([isolation](https://docs.docker.com/ai/sandboxes/security/isolation/), [usage](https://docs.docker.com/ai/sandboxes/usage/))
+- Host config is not imported: "Sandboxes don't pick up user-level configuration from your host. Only project-level configuration in the working directory is available inside the sandbox." (the agent pages, e.g. [opencode](https://docs.docker.com/ai/sandboxes/agents/opencode/)). Per-start host-side staging is possible only through `lifecycle` host commands (experimental environment files) or manual `sbx cp`/`sbx exec`; host commands "require approval for every invocation by default" unless `env.rememberHostCommands` is set. ([environment files](https://docs.docker.com/ai/sandboxes/configuration/environment-files/))
+- Headless keyring: "On headless Linux hosts and WSL setups without a running Secret Service, `sbx` stores secrets in a file protected by file permissions. No setup is required." ([FAQ](https://docs.docker.com/ai/sandboxes/faq/))
+- Host services: "Services running on your host are reachable from inside a sandbox using the hostname `host.docker.internal`. … you must add the `localhost` address with the specific port to your network policy allowlist." ([local services](https://docs.docker.com/ai/sandboxes/workflows/development/))
+- Non-interactive credential approval: "In non-interactive contexts (CI or `--detach`), there's no one to answer the prompt. … the sandbox starts with the credential withheld when no binding exists." — bindings must be pre-created. ([credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/))
+
+**Verdict vs the orb design — mixed: easier on the keyring axis, gaps on the rest.** Cross-checked against spec §4/§6:
+
+| Orb mechanism | `sbx` counterpart | Fit |
+|---|---|---|
+| RO mounts of `~/.ssh/` + `~/.config/gh/` (surface, §4) | SSH **agent forwarding** (no key files); `gh` via `github` service + host `--command 'gh auth token'` | **Gap**: SSH works only if the host runs an agent with the key loaded; a key-file-only host (the common headless case our §4 accommodates) has no supported path. The "mount the auth surface" invariant is replaced by "the host must expose what the proxy/agent can fetch". |
+| Staged gh token, re-staged every start, mid-run re-stage on `push-failed` (§4, #120/#167 machinery) | `--command` secret re-resolved by the daemon (55 min cache or `on-demand`); rotation picked up without any `docker cp`/wake | **Easier**: the entire staging + boot-validation + re-stage pass could be dropped for gh-over-HTTPS — the host command *is* the host-authoritative re-stage. Caveats: scope is global/sandbox-scoped per host user, not per-orb; multi-account hosts need the command to name the login (`gh auth token --user <login>`, mirroring #145's rule); non-interactive starts need pre-created credential bindings or the credential is silently withheld. |
+| Provider credentials posted to the in-orb server (§6.7) | Proxy injection per provider domain (`openai`, `anthropic`, `google`, `groq`, `xai`, `openrouter`, …) | **Easier in kind** (no token in the VM at all), but it is a fixed domain table — a host-local provider (llama.cpp) is not a credential case, it is a network-policy case (`localhost:<port>` allow). |
+| `.env*` re-injection, host-authoritative, every start (§6.1) | No declarative per-start file injection into a mountless/clone workspace; `sbx cp` per file, or `lifecycle.initialize` host commands (experimental, approval-gated) | **Gap**: the "host is authoritative, overwritten every start" invariant needs a manual-per-start mechanism built from `sbx cp`/host commands. |
+| Loopback-URL rewrite in the copied config (§6.2, #117) | Same rewrite is still needed (`host.docker.internal`), **plus** a per-service `sbx policy allow network localhost:<port>` rule | Convergence with one extra step; note `host.docker.internal` exists in both substrates (the spec's §8.5 mechanism carries over verbatim). |
+| opencode config+auth copy (§6.2) | No user-level config import at all — staging would be per-start `sbx cp` + `sbx exec` | **Gap**: the whole §6.2 "copy on every start" pipeline must be re-implemented with `sbx cp`/host commands; there is no equivalent of "copied into the container on every start". |
+
+Bottom line: the proxy model is genuinely *simpler* for the HTTP-credential axis (it deletes the keyring-probe/stage/validate machinery of §4) and removes the raw token from the sandbox — but it does not cover our SSH key-file story, non-HTTP service credentials, or any host-authoritative file/config copy, all of which the spec treats as load-bearing.
+
+## 5. Workspace & seeding
+
+**Facts.**
+
+- Direct mount: "the sandbox sees your actual host files, so changes in either direction are instant"; mounted at the same absolute path; virtiofs-cached. ([architecture](https://docs.docker.com/ai/sandboxes/architecture/))
+- Clone mode: "The host repository is mounted read-only at `/run/sandbox/source`, and the agent works in a private clone inside the sandbox."; "The clone follows whichever ref your host repository has checked out at create time. No branch is created automatically." The host repo gains a `sandbox-<name>` remote (daemon-socket fetch); "`sbx stop` makes the remote unavailable." ([architecture](https://docs.docker.com/ai/sandboxes/architecture/), [usage](https://docs.docker.com/ai/sandboxes/usage/), [git workflows](https://docs.docker.com/ai/sandboxes/workflows/git/))
+- Mountless: "the sandbox doesn't mount a host workspace. The agent uses the sandbox template's default working directory … Files created there stay inside the sandbox and persist across stops and restarts." ([architecture](https://docs.docker.com/ai/sandboxes/architecture/))
+- Importing files: `sbx cp` (one side must be `SANDBOX:PATH`); mountless git workflow = "Clone repositories inside the sandbox … Push branches to a Git remote to share the results." ([usage](https://docs.docker.com/ai/sandboxes/usage/), [git workflows](https://docs.docker.com/ai/sandboxes/workflows/git/))
+- Data volumes: "Persistent kit volumes in local sandboxes also survive removal" — kit-scoped, not general per-sandbox named volumes. ([usage](https://docs.docker.com/ai/sandboxes/usage/))
+- Host-authoritative re-injection: not a documented capability. `lifecycle.initialize` runs "for every `create` and `run`" **on the host**; the only documented way to get host files *into* a mountless/clone sandbox is `sbx cp` (a host command, so a lifecycle command *could* invoke it, but that is a composition of an experimental feature with a copy command — not a first-class injection). ([environment files](https://docs.docker.com/ai/sandboxes/configuration/environment-files/), [usage](https://docs.docker.com/ai/sandboxes/usage/))
+
+**Verdict vs the orb design — gaps.** Cross-checked against §2.3, §3.3, §6.1:
+
+- **Clone lives in a named volume, seeded from the default branch or a seed orb's branch tip read from the remote** (§2.3/§3.3). `sbx` offers seeding only from **the host checkout's currently checked-out ref** (clone mode) or from **whatever the agent clones inside a mountless sandbox**. There is no primitive for "start this sandbox from remote branch tip X" — the seed orb's tip in particular (which may belong to a *stopped* orb, read from the remote) has no counterpart; the bridge would have to instruct the in-sandbox agent to `git clone` at the right ref (agent behavior, not substrate guarantee) or transfer a bundle via `sbx cp`. The spec's seed is a deterministic, bridge-guaranteed step; the `sbx` equivalent is not.
+- **`.env*` re-injection, host-authoritative, every start** (§6.1): no declarative equivalent (see above) — and it matters more here, because the workspace is *not* the host tree, so `.env` cannot simply be "already there".
+- **Host checkout isolation** (the "sandbox: the orb sees no host tree" property, §6.1/§0.3): *stronger* in `sbx` — mountless/clone never exposes the host working tree (direct mode would, and the docs warn to review it as untrusted code, [isolation](https://docs.docker.com/ai/sandboxes/security/isolation/)); clone mode even documents that untracked/`.gitignore`-excluded files like `.env` remain *readable* at `/run/sandbox/source` — so the mountless mode is the honest match for our volume model.
+- **Data volume for local services** (`orb-<id>-data`, §1.2/§6.4): no general per-sandbox named data volume; kit volumes survive removal but are kit-scoped. Postgres state would live on the VM disk — same survivability semantics, different control surface.
+
+## 6. Post-commit push hook
+
+**Facts.**
+
+- Inside the VM the agent has "full privileges: sudo access, package installation, a private Docker Engine, and read-write access to its in-sandbox filesystem" — `git` and `gh` install and run normally ([security](https://docs.docker.com/ai/sandboxes/security/)).
+- Egress: the Balanced preset's baseline allowlist covers "AI provider APIs, package managers, OS package repositories, **code hosts**, container registries, cloud services, and certificate validation"; rules can name host:port for non-HTTP TCP (e.g., `myhost:22`); unmatched destinations under Balanced/Locked Down are "blocked and ask for your approval instead of being denied outright" — a problem for unattended push. ([local policy](https://docs.docker.com/ai/sandboxes/governance/local/))
+- `gh` in the sandbox works via the `github` service (host `--command 'gh auth token'`, proxy header injection for the listed GitHub domains); `git push` over HTTPS works when the credential helper path lands on the injected header, and SSH pushes work via agent forwarding (keys never in the VM) + an allowed `host:22` rule. ([credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/), [git workflows](https://docs.docker.com/ai/sandboxes/workflows/git/))
+- The push path the docs describe for a mountless/clone sandbox is "ask the agent to push directly … 'Push feat/my-feature to origin and open a PR'" ([git workflows](https://docs.docker.com/ai/sandboxes/workflows/git/)) — i.e., git hooks inside the clone are ordinary files the agent can install and they run in-VM on commit; nothing in the docs restricts or replaces `post-commit` hooks.
+- Failure surfacing: hook output streams to the committing agent (same as ours, §3.1), but there is no host-visible marker channel: the spec's `push-failed` marker works because the marker rides a **bridge-owned state mount** the list reads host-side (§2.2/§2.9). A mountless sandbox's filesystem is not host-visible; the bridge would read the marker via `sbx exec` (polling, per-sandbox).
+
+**Verdict vs the orb design — fits, with changes required.** The hook + gh path works *unmodified as a hook* (it is a plain file in the clone, executed in-VM on commit); the push channel needs the allow-list to cover the remote (`github.com`/`api.github.com` for HTTPS — covered by the Balanced baseline for code hosts — or `host:22` for SSH) and the credential to reach git (built-in `github` service for HTTPS; forwarded agent for SSH). Two spec mechanisms must be re-homed: (a) the `push-failed` marker → `sbx exec` read of a file the hook writes in-VM, instead of the state-mount label read (§3.1/§4 mid-run re-stage #167 — the "re-stage" itself becomes the daemon re-resolving the host `gh` command, §4 above); (b) the "failed push must not leave the orb looking healthy" guarantee now depends on polling `sbx exec` in the lifecycle pass, since there is no host-side state mount. Also note: a deny-by-default preset with no explicit allow for the remote fails *unattended* (approval prompt) — the bridge must provision the allow-list at create, which the docs do support non-interactively (`sbx policy allow network …`, `sbx policy init balanced`).
+
+## 7. Density, boot time, cost
+
+**Facts.**
+
+- Per-sandbox overhead: "It needs a supported hypervisor … and running inside another VM requires nested virtualization. The separate kernel and Docker Engine also consume more memory and disk than one additional container would." ([vs-containers](https://www.docker.com/blog/docker-sandboxes-vs-containers/)) — no numeric per-sandbox memory/disk figures are published.
+- No image sharing: "Multiple sandboxes don't share images or layers. Each sandbox consumes disk space for its VM image, Docker images, container layers, and volumes, and this grows as you build images and install packages." Templates are "checked … in the registry … by default and downloads missing or updated layers" (per-sandbox cache). ([architecture](https://docs.docker.com/ai/sandboxes/architecture/), [usage](https://docs.docker.com/ai/sandboxes/usage/))
+- Boot: "The first run takes a little longer while the agent image is pulled. Subsequent runs reuse the cached image and start in seconds." ([get started](https://docs.docker.com/ai/sandboxes/get-started/)); product page: "Docker's own virtual machine monitor, tuned for sandboxes that start in seconds and leave nothing behind" (marketing). Cloud tier pricing is published (e.g., $0.07–$1.12/h by size); **local** compute is free ("free to use, including for commercial work"). ([product page](https://www.docker.com/products/docker-sandboxes/), [index](https://docs.docker.com/ai/sandboxes/))
+- Telemetry/license: the CLI "collects basic usage data about CLI invocations: which command … whether it succeeded … how long it took … your Docker username"; no prompts/code; opt-out via `telemetry.disabled`/`SBX_NO_TELEMETRY=1`. Docker account required for *all* use (including local). ([FAQ](https://docs.docker.com/ai/sandboxes/faq/))
+- Idle: "Sandboxes persist after the agent exits" — a stopped sandbox retains its VM state on disk; `sbx prune` reaps stopped ones (with an age filter). ([usage](https://docs.docker.com/ai/sandboxes/usage/), [get started](https://docs.docker.com/ai/sandboxes/get-started/))
+
+**Verdict vs the orb design — unknown numerically, structurally worse for the churn model.** The orb lifecycle *is* churn (spec §2.10): orbs are created per task, several may run at once, idle orbs auto-stop after 60 min, stopped ones delete after 24 h. Against that: (a) **density** — our §5 design deliberately shares *one* pinned base image across all orbs (content-hashed tag, §5.3); `sbx` multiplies a VM + private Docker Engine + private image cache **per sandbox**, with no sharing, so N concurrent orbs costs ~N×(VM + engine + cache) of the container cost — the exact opposite of §5.1's "one image for all projects"; (b) **boot** — "start in seconds" applies to cached *sandbox* starts, not to our health-gated full boot (entrypoint + service gate, §6.5), which under `sbx` additionally needs the in-VM toolchain (kit/template) populated *per sandbox*, not from a shared image; (c) **steady-state** — a stopped `sbx` sandbox keeps its VM disk (images, engine state) rather than becoming a lightweight stopped container; our auto-stop is currently cheap, and would become "keep paying disk for a sleeping VM"; (d) **cost/license** — local is free (no licensing blocker) and telemetry is opt-out, but every machine gains a hard dependency on a Docker account (auth, telemetry, Docker-infra connectivity per the FAQ's allow-list domain table), and the cloud tier (where a public API exists) is metered. No published numbers let me size (a)/(b) against our typical concurrent-orb count — that is the unknown that decides whether the churn model survives.
+
+## 8. Maturity & risk
+
+**Facts.**
+
+- Age: "Docker Sandboxes vs. Containers" post dated **Nov 5, 2026**; the launch/rebrand post "Meet the New Docker: Built to Run on Trust" dated **Nov 19, 2026** (our research date: Nov 20, 2026 — the product is ~2 weeks old). The post positions it as "New" in the nav and on the product page.
+- Explicit experimental markers in the docs: `sbx env` (environment files) is "(Experimental) … The command interface and file format may change"; "Custom secrets are experimental. Behavior, flags, and the placeholder format may change without notice."; "Upstream proxy support is experimental and subject to change"; UDP egress is "an experimental UDP feature"; the vs-containers post: "**Kits are in early access and environment files are experimental, so plan for changes to both.**" ([environment files](https://docs.docker.com/ai/sandboxes/configuration/environment-files/), [credentials](https://docs.docker.com/ai/sandboxes/configuration/credentials/), [architecture](https://docs.docker.com/ai/sandboxes/architecture/), [governance](https://docs.docker.com/ai/sandboxes/governance/local/), [vs-containers](https://www.docker.com/blog/docker-sandboxes-vs-containers/))
+- Version churn: kits v3 "requires `sbx` v0.45 or later" while the installable package at research time is **v0.54.0** — the minor version moved from 0.45 → 0.54 within the launch window; the usage page documents a breaking "v0.48.0 CLI migration" for scripts. ([customize](https://docs.docker.com/ai/sandboxes/customize/), [usage](https://docs.docker.com/ai/sandboxes/usage/))
+- Support surface: "Docker does not test or support Docker Sandboxes on Ubuntu derivatives"; "The availability of a Linux release artifact does not indicate that Docker tests or supports the corresponding distribution." Bugs go to a separate `docker/sbx-releases` issue tracker. ([install](https://docs.docker.com/ai/sandboxes/install/), [index](https://docs.docker.com/ai/sandboxes/))
+- Commitments: what Docker has *committed* in writing is (a) the local free tier, (b) a docs structure with a stable-looking security model (five isolation layers), (c) the cloud API/SDK as the programmatic surface (paid), and (d) kit format versioning (v2 supported, not deprecated, v3 recommended). There is no documented deprecation/compatibility commitment for the local CLI or daemon socket.
+
+**Verdict vs the orb design — risk: high.** The orb spec is *locked* and every mechanism in it is verified against exact versions (opencode v2.1.4; the image pins, §11 "Known risks"). The standing risk statement there is that an *experimental opencode API surface* could break the stop sequence. `sbx` imports a larger experimental surface at once: a 0.x CLI with a recent breaking migration, experimental env files/secrets/proxy features, early-access kits, a thin tested-distro matrix, a second local daemon to own, and a mandatory Docker account — while *removing* none of our existing opencode-version risk (the in-sandbox opencode is still the same pinned-version dependency, now installed per-sandbox via kits). A brand-new substrate under a locked spec is exactly the "real risk" the ticket warns about; the facts above are the maturity baseline, not the marketing framing.
+
+---
+
+## Where `sbx` changes the spec's standing assumptions (summary)
+
+| Spec assumption (citation) | Under `sbx` |
+|---|---|
+| `docker` CLI as the control surface (invariant 1, §0) | `sbx` CLI + local `sandboxd` daemon; no documented stable local API; CLI already migrated once (v0.48.0) |
+| Docker labels as the *only* state store (invariant 5, §2.1/§2.2) | No counterpart — sandboxes are invisible to the host `docker` CLI (private per-sandbox engine); discovery = `sbx ls`; the `ocb.*` label scheme (orphan/cleanup/broken-orb detection) is inexpressible |
+| Ephemeral host ports, read via `docker inspect` per start (§2.9) | Same *idea* (`sbx port publish` with OS-assigned port, read via `sbx port ls`) — the closest fit of all |
+| One shared, pinned base image for all orbs (§5) | No sharing: VM + private Docker Engine + per-sandbox image/template cache per sandbox; "kits"/"templates" are the image sources |
+| Entrypoint boot preparation, health-gated, re-run on every start (§6) | Kits (workload entrypoint + install commands) + `lifecycle` host commands (experimental, approval-gated); no documented health-gate primitive; no auto-restart of the in-VM service on wake |
+| Host checkout never mounted; `.env*` re-injected host-authoritative every start (§6.1) | Mountless mode keeps the host tree out (good), but per-start host→sandbox file injection is only `sbx cp`/host-command composition |
+| Read-only mounts of `~/.ssh/` + `~/.config/gh/`, staged token (§4) | SSH agent forwarding (no key files) + host `--command` secrets via the proxy; keyring staging machinery removed, but key-file hosts have no supported path |
+| `docker cp` export escape hatch (§3.4) | `sbx cp` — direct analogue |
+| Crash recovery via container enumeration + labels (§2.11) | Daemon-sandbox state (`sbx ls`/`inspect`); the `ocb.stopped` marker concept has no substrate equivalent — the bridge would own it |
+
+## Recommendation
+
+**Not yet — do not replace the orb container with `sbx`.** The case for `sbx` rests on one axis — a hypervisor boundary with host-enforced deny-by-default egress and credentials that never enter the VM — and on that axis it is real and better than our container's shared-kernel boundary. But as a *substrate swap* it fails on more than it fixes:
+
+1. **Portability regression (point 1)**: local `sbx` *requires* KVM and a supported Ubuntu, and our hands-on proved a container/VM-without-nested host cannot run it at all — while running every orb today. Orbs would stop working on a class of hosts (VDI, nested VMs, containers) the container substrate serves for free.
+2. **Density regression (point 7)**: the spec's "one shared pinned image for all projects" (§5) is the opposite of `sbx`'s per-sandbox VM + private engine + unshared image cache, against a lifecycle that deliberately churns (create per task, 60-min idle stop, 24-h TTL). No published numbers exist to size this; the structural direction is unfavorable.
+3. **Control-surface regression (point 2)**: the bridge would trade the `docker` CLI it already owns for a 0.x CLI + undocumented local daemon socket, lose the label-based state store (invariant 5 — the spec's explicit drift protection), and get no lifecycle events. The documented public API is cloud-only and paid.
+4. **Mechanism rewrites (points 3, 4, 5)**: headless `opencode serve` is not a documented `sbx` pattern (the built-in OpenCode workload launches a TUI; nothing auto-restarts the service on wake; sandboxes auto-stop without sessions); SSH key-file auth and per-start host-authoritative `.env`/config injection have no supported primitives; seeding from a remote branch tip (the seed model, §3.3) has none.
+5. **Maturity (point 8)**: ~2 weeks old, 0.x with a recent breaking CLI migration, experimental env files/secrets/proxy, early-access kits, a two-distro tested matrix, and a mandatory Docker account — sitting underneath a *locked* spec that pins opencode v2.1.4.
+
+**What would make it interesting (specific conditions):**
+
+- **A stable local control surface**: a documented, versioned local API (or a documented stability commitment for the CLI + `inspect --format json` + daemon socket) with lifecycle events — the day that exists, points 2 and 8 become re-evaluatable.
+- **The containment axis becomes the product's primary value**: e.g., orbs are expected to run long-unattended with auto-approved permissions against untrusted input, on machines where the user cannot vouch for the agent's host access. Today the orb's threat model already keeps the host checkout, host Docker daemon, and host credentials out of the sandbox at the mechanism level (§0.3, §4, §6.1); the microVM is a second wall, not a first.
+- **Density closes**: a shared image/layer store across sandboxes, or published per-sandbox overhead that fits the churn model (N concurrent sandboxes on a laptop).
+- **The substrate grows the missing primitives**: remote-branch-tip seeding, declarative per-start host-authoritative file injection, headless long-lived service hosting (auto-restart on wake), SSH key-file support, per-sandbox credential scoping.
+- **The isolation win is wanted for its own sake** on the supported host class (bare-metal/first-class-VM Ubuntu 24.04+ and Windows 11 with WHP), and the user base demonstrably runs on exactly that class.
+
+**The "improve" half of the ticket is worth more than the "replace" half today**: two `sbx` ideas can be borrowed into the *existing* container substrate without a substrate swap — (a) a deny-by-default **egress allow-list for the orb container** (network policy instead of "the container can reach anything the host can"), and (b) a **host-side credential proxy** so the staged gh token (spec §4) never enters the container as a file. Both attack the real, residual weakness of the container model (shared kernel + in-container secret) with the same host-enforced logic `sbx` popularizes, and both are implementable against the locked spec without touching invariants 1, 5, or the base-image design. If point 1's portability gap and point 7's density gap stay open, that borrowing — not the swap — is the durable gain.
