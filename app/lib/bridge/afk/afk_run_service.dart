@@ -12,10 +12,11 @@ import 'github_reader.dart';
 /// session's idle-wait (the long-poll that is the trigger — not the
 /// signal). All injected, all faked in the tests.
 ///
-/// - [sessionId] resolves the resident AFK session (create-or-reuse, the
-///   bridge's own stored id): `null` when the system has no session yet
-///   (no shared opencode service, or the main checkout unresolved) — the
-///   service then feeds nothing on this pass and asks again on the next.
+/// - [sessionId] reads the **resident** AFK session's id (the bridge's
+///   stored id — created by the **arming** action, never by this service):
+///   `null` when no session is armed yet (no shared opencode service, not
+///   armed, or the main checkout unresolved) — the service then feeds
+///   nothing on this pass and asks again on the next.
 /// - [prompt] is the feed: a prompt admitted while the agent is busy parks
 ///   in the service's durable inbox and runs in order — the service's
 ///   inbox is the queue, the bridge keeps no feed queue of its own.
@@ -23,7 +24,9 @@ import 'github_reader.dart';
 ///   (the turn is over — go read the issue), `false` when it is still
 ///   running (or the wait timed out while it ran — ask again next pass).
 abstract class AfkSessionPort {
-  /// The AFK session's id, or `null` when it is not (yet) available.
+  /// The AFK session's id, or `null` when no session is (yet) armed —
+  /// read-only: the run service never creates the session (the arming
+  /// action does).
   Future<String?> sessionId();
 
   /// Feed [text] to the AFK session (the existing prompt path on the host
@@ -37,37 +40,44 @@ abstract class AfkSessionPort {
 
 /// The run service's one port implementation: the composite session
 /// service's prompt path + idle-wait, over the AFK session the
-/// [AfkComponent] owns (create-or-reuse, the id the bridge stores). The
-/// bridge wires this at startup (the poller-style wiring).
+/// [AfkComponent] owns (its **stored** id — the one the arming action
+/// created and persisted). The bridge wires this at startup (the
+/// poller-style wiring). The session id is read, never created, here: a
+/// disarmed pass must not create the session as a side effect.
 class CompositeAfkSessions implements AfkSessionPort {
   CompositeAfkSessions({required this.component, required this.backend});
 
-  /// The AFK subsystem (the create-or-reuse, the stored id).
+  /// The AFK subsystem (the stored session id).
   final AfkComponent component;
 
   /// The composite sessions backend (host + running orbs; the AFK session
-  /// is host-only, so its operations resolve to the host).
-  final SessionsBackend backend;
+  /// is host-only, so its operations resolve to the host); `null` on a
+  /// machine with no shared opencode service (no host to place the AFK
+  /// session on — the operations degrade to "not available").
+  final SessionsBackend? backend;
 
   @override
-  Future<String?> sessionId() async => component.ensureSession();
+  Future<String?> sessionId() async => component.sessionId;
 
   @override
   Future<void> prompt(String text) async {
-    // The run service checks [sessionId] before feeding (the port's
-    // contract): a null here is a wiring error, not a "not ready" — let it
-    // surface (the pass's per-row catch keeps the row as it stands).
-    final id = await component.ensureSession();
+    final id = component.sessionId;
     if (id == null) {
-      throw StateError('the AFK session is not available to feed');
+      throw StateError('the AFK session is not armed to feed');
+    }
+    final backend = this.backend;
+    if (backend == null) {
+      throw StateError('no shared opencode service to feed the AFK session');
     }
     await backend.service.prompt(id, text);
   }
 
   @override
   Future<bool> waitIdle({Duration? timeout}) async {
-    final id = await component.ensureSession();
-    if (id == null) return false; // Not (yet) available: still "running".
+    final backend = this.backend;
+    if (backend == null) return false; // No host: never "idle" here.
+    final id = component.sessionId;
+    if (id == null) return false; // Not armed: nothing to wait on.
     return backend.service.waitIdle(
       id,
       timeout: timeout ?? const Duration(seconds: 25),
@@ -76,19 +86,28 @@ class CompositeAfkSessions implements AfkSessionPort {
 }
 
 /// The AFK run service (spec #376, "The per-issue state machine
-/// (bridge-owned)", T3): while armed, it drives every run row in the AFK
-/// store through the per-issue state machine —
-/// `idle → dispatched → pr-open → done`, plus the terminal `failed` —
-/// shaped on the orb task service (all dependencies injected: the GitHub
-/// reader, the session port, the event hub's emit, the arming predicate,
-/// the clock, the poll interval; tests inject milliseconds).
+/// (bridge-owned)", T3): it drives every run row in the AFK store through
+/// the per-issue state machine — `idle → dispatched → pr-open → done`,
+/// plus the terminal `failed` — shaped on the orb task service (all
+/// dependencies injected: the GitHub reader, the session port, the event
+/// hub's emit, the arming predicate, the clock, the poll interval; tests
+/// inject milliseconds).
+///
+/// **The arming is a gate for new work, never a destructive kill** (spec
+/// #376, user story #24): the periodic pass runs from [start] to [stop]
+/// regardless of the arming state, and it keeps driving **in-flight** runs
+/// (`dispatched`, `pr-open`, `failed`) to their PR or failure — only the
+/// steps that start new work (the `idle → dispatched` feed and the
+/// deliberate retry's re-dispatch) read [isArmed] and wait while it is
+/// false.
 ///
 /// The per-state work, one pass ([pollOnce], the timer's body and the test
 /// seam):
-/// - **`idle`** (can dispatch): the issue still carries the
+/// - **`idle`** (can dispatch): **armed** and the issue still carries the
 ///   `ready-for-agent` label → the feed goes out — a **pure availability
 ///   notice** (issue number + title, nothing more, the charter's) through
-///   the existing prompt path — and the row is `dispatched`.
+///   the existing prompt path — and the row is `dispatched`. Disarmed, an
+///   admitted issue simply waits (no feed, no state change).
 /// - **`dispatched`**: a pending retry re-feeds once its backoff deadline
 ///   ([AfkRun.retryAt]) has passed (an **ordinary FIFO feed** — the same
 ///   prompt as any feed, no priority over newer feeds). Otherwise the
@@ -115,9 +134,12 @@ class CompositeAfkSessions implements AfkSessionPort {
 ///   is a human decision, not a system error) → the run is `done`. A
 ///   `FAILED`-like narration read here is a no-op (a run with an open PR
 ///   is **never** retried).
-/// - **`failed`**: the deliberate retry — the human re-adds the
-///   `ready-for-agent` label → the feed goes out again and the run is
-///   `dispatched` with the retry counter reset.
+/// - **`failed`**: first the hand-back stands (the `needs-triage` label +
+///   comment, re-attempted until they land). Then the deliberate retry —
+///   the human re-adds the `ready-for-agent` label, the system is **armed**
+///   → the feed goes out again and the run is `dispatched` with the retry
+///   counter reset. Disarmed, the re-dispatch waits (the label stands for
+///   the arm).
 /// - **`done`**: the end; the pass does nothing.
 ///
 /// **Failures are inert**: a failed read, feed, or store write changes
@@ -180,7 +202,11 @@ class AfkRunService {
   /// go out on it (the push mapping is the push ticket, T5).
   final void Function(String rawPayload) emitEvent;
 
-  /// The live arming predicate — the service runs only while this is true.
+  /// The live arming predicate — the **new-work gate** (user story #24):
+  /// the `idle → dispatched` feed and the deliberate retry's re-dispatch
+  /// wait while this is false; the in-flight runs' steps (the follow, the
+  /// completion, the hand-back) do not read it, so a disarm never strands
+  /// a run in flight (it finishes to its PR or failure).
   final bool Function() isArmed;
 
   /// The pass pace (tests inject milliseconds).
@@ -202,38 +228,27 @@ class AfkRunService {
   /// Whether the periodic pass is scheduled.
   bool get isPolling => _timer != null;
 
-  /// Start the periodic pass: schedules only while [isArmed]; the tick
-  /// re-checks armed, so a disarm racing a start drives nothing. Idempotent
+  /// Start the periodic pass (the bridge calls it once, at startup). The
+  /// pass runs from here to [stop] **regardless of the arming state** — the
+  /// arming is a gate for the new-work steps, not a switch for the loop
+  /// (user story #24: a disarm must let in-flight runs finish). Idempotent
   /// — a start replaces any running schedule.
   void start() {
     stop();
-    if (!isArmed()) return;
     _timer = Timer.periodic(pollInterval, (_) => _tick());
   }
 
-  /// Cancel the periodic pass.
+  /// Cancel the periodic pass (the bridge calls it from [stop]).
   void stop() {
     _timer?.cancel();
     _timer = null;
   }
 
-  /// Re-sync the schedule with the live arming state: [armed] true starts
-  /// (the tick re-checks armed), false stops. Idempotent — the bridge calls
-  /// it from its settings notification.
-  void syncArmed(bool armed) {
-    if (armed) {
-      start();
-    } else {
-      stop();
-    }
-  }
-
-  /// One pass over every run row (the timer's body, and the test seam):
-  /// inert when disarmed; each row is driven by its state, one step, and a
-  /// failed read, feed, or store write changes nothing — the next pass
-  /// retries.
+  /// One pass over every run row (the timer's body, and the test seam): each
+  /// row is driven by its state, one step — the new-work steps gated on
+  /// [isArmed], the in-flight steps ungated — and a failed read, feed, or
+  /// store write changes nothing (the next pass retries).
   Future<void> pollOnce() async {
-    if (!isArmed()) return;
     for (final run in store.runs()) {
       try {
         await _advance(run);
@@ -287,6 +302,7 @@ class AfkRunService {
   Future<void> _dispatch(AfkRun run) async {
     final state = AfkRunState.parse(run.state);
     if (!state.canDispatch) return;
+    if (!isArmed()) return; // New work waits for the arm (user story #24).
     final ready = await reader.hasLabel(run.issueNumber, readyLabel);
     if (!ready) return; // The gate is the entry: no label, no feed.
     final fed = await _feed(run);
@@ -452,6 +468,7 @@ class AfkRunService {
   Future<void> _deliberateRetry(AfkRun run) async {
     final state = AfkRunState.parse(run.state);
     if (!state.canDispatch) return;
+    if (!isArmed()) return; // New work waits for the arm (user story #24).
     // The human re-added the gate's label: the run is dispatched again, the
     // retry counter reset (a fresh bound of retries). The processed
     // narration's id is kept — the old `FAILED` is still the last comment

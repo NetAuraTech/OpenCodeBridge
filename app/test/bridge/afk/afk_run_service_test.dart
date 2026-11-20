@@ -565,43 +565,104 @@ void main() {
       expect(payloads, isEmpty);
     });
 
-    test('disarmed: the pass is inert (no reader calls, no state change, no '
-        'events)', () async {
+    test('disarmed: the pass is a gate for new work, never a stop for '
+        'in-flight runs (user story #24)', () async {
+      // A ready-but-idle issue: disarmed ⇒ no feed, no label read, no state
+      // change (the new-work gate reads no GitHub at all).
       await store.addRun(7, 'Add a README');
       reader.labels[7] = {'ready-for-agent'};
       armed = false;
       await service.pollOnce();
       expect(reader.hasLabelCalls, 0);
       expect(store.runFor(7)!.state, 'idle');
-      expect(payloads, isEmpty);
+      expect(sessions.prompts, isEmpty);
+
+      // An in-flight run in the same disarmed pass: the follow does not read
+      // the arming — at idle it reads the narration and the PR-open
+      // transition still lands (a run finishes to its PR through a disarm).
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 9,
+          title: 'Ship the widget',
+          state: 'dispatched',
+        ),
+      );
+      reader.lastComments[9] = IssueComment(
+        id: 'IC1',
+        body: 'PR opened: https://github.com/o/r/pull/42',
+      );
+      reader.prs[42] = PrInfo(
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'OPEN',
+      );
+      sessions.idle = true;
+      await service.pollOnce();
+      expect(store.runFor(9)!.state, 'pr-open');
+      expect(_eventsOfType(payloads, 'afk.pr_open'), hasLength(1));
+      // And the idle run stayed idle all along (the disarm gated it).
+      expect(store.runFor(7)!.state, 'idle');
     });
   });
 
   group('arming (the pass schedule)', () {
-    test('inert when disarmed at start; syncArmed follows the toggle', () {
-      armed = false;
-      service.start();
-      expect(service.isPolling, isFalse);
-      armed = true;
-      service.syncArmed(true);
-      expect(service.isPolling, isTrue);
-      service.syncArmed(false);
-      expect(service.isPolling, isFalse);
-    });
-
     test(
-      'the timer drives passes while armed; stop ends the schedule',
+      'the pass runs from start to stop regardless of the arming (user story '
+      '#24); the arming gates only the new-work steps, read live',
       () async {
+        // Disarmed at start: the schedule still runs (a disarm is not a
+        // stop), but the idle ready issue is not fed (the new-work gate).
         await store.addRun(7, 'Add a README');
         reader.labels[7] = {'ready-for-agent'};
-        armed = true;
+        armed = false;
         service.start();
-        expect(service.isPolling, isTrue);
+        expect(
+          service.isPolling,
+          isTrue,
+          reason: 'the pass is not armed-gated',
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 15));
+        expect(store.runFor(7)!.state, 'idle', reason: 'disarmed: no feed');
+        expect(sessions.prompts, isEmpty);
+
+        // The arm arrives: the live read on the next tick feeds it.
+        armed = true;
         await until(() => store.runFor(7)!.state == 'dispatched');
+
+        // A disarm mid-run stops nothing: the schedule keeps ticking and the
+        // in-flight run is still driven (the follow is not armed-gated).
+        armed = false;
+        await Future<void>.delayed(const Duration(milliseconds: 15));
+        expect(service.isPolling, isTrue, reason: 'a disarm never stops it');
+
         service.stop();
         expect(service.isPolling, isFalse);
       },
     );
+
+    test('a disarm mid-run lets the in-flight run finish to its PR', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      reader.lastComments[7] = IssueComment(
+        id: 'IC1',
+        body: 'PR opened: https://github.com/o/r/pull/41',
+      );
+      reader.prs[41] = PrInfo(
+        number: 41,
+        url: 'https://github.com/o/r/pull/41',
+        state: 'OPEN',
+      );
+      sessions.idle = true;
+      armed = false; // Disarmed mid-run.
+      service.start();
+      await until(() => store.runFor(7)!.state == 'pr-open');
+      service.stop();
+    });
   });
 
   group('the pure helpers', () {

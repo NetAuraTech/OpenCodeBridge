@@ -58,6 +58,15 @@ class FakeComposerService implements OpencodeService {
   Future<Set<String>> activeSessionIds() async => Set.of(active);
 
   @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final active = await activeSessionIds();
+    return !active.contains(id);
+  }
+
+  @override
   Future<List<PermissionRequest>> pendingPermissions(String id) async {
     final scripted = permissionsBySession;
     if (scripted.containsKey(id)) {

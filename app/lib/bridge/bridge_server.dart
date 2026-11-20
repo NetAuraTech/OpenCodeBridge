@@ -12,6 +12,7 @@ import '../model/tunnel_setup.dart';
 import 'afk/afk_charter.dart';
 import 'afk/afk_component.dart';
 import 'afk/afk_ready_gate_poller.dart';
+import 'afk/afk_run_service.dart';
 import 'afk/afk_settings.dart';
 import 'afk/github_reader.dart';
 import 'docker/docker_backend.dart';
@@ -339,6 +340,17 @@ class BridgeServer {
   /// [stop].
   AfkReadyGatePoller? _afkPoller;
 
+  /// The AFK run service (spec #376, "The per-issue state machine
+  /// (bridge-owned)", T3): the bridge's loop that drives every admitted run
+  /// through its state machine (feed, wait, narration, transitions, retry,
+  /// terminal failure). Built and started in [start] when this bridge has an
+  /// AFK component and the unified event hub; the run's `afk.pr_open` /
+  /// `afk.failed` events ride the same fan-out the app's SSE sees. Its pass
+  /// runs for the life of the bridge — the arming gates only its new-work
+  /// steps (read live through [AfkRunService.isArmed], so a disarm lets
+  /// in-flight runs finish, user story #24) — and it is stopped by [stop].
+  AfkRunService? _afkRuns;
+
   /// The route dispatch table (issue #253, C3): the ordered method→path→
   /// closure the HTTP server listens on. Built by [_buildRoutes] once at start
   /// (the composition root's route wiring), before the port is listened on.
@@ -614,6 +626,25 @@ class BridgeServer {
             isArmed: () => afkComponent.enabled,
             emitEvent: eventHub.emit,
           );
+    // The AFK run service (spec #376, T3): the real `gh` reader, the
+    // component's run store, and the session operations over the composite
+    // backend + component — the run's `afk.pr_open` / `afk.failed` events
+    // ride the same fan-out the app's SSE sees. Its pass runs for the life
+    // of the bridge (in-flight runs must finish through a disarm, user
+    // story #24); the arming gates only its new-work steps. Built only
+    // when there is an event hub (no SSE surface for the events otherwise).
+    final afkRuns = eventHub == null
+        ? null
+        : AfkRunService(
+            reader: GhGitHubReader(),
+            store: afkComponent.store,
+            sessions: CompositeAfkSessions(
+              component: afkComponent,
+              backend: backend,
+            ),
+            emitEvent: eventHub.emit,
+            isArmed: () => afkComponent.enabled,
+          );
     final bridge = BridgeServer._(
       server,
       health ?? BridgeServer._defaultHealth(bootstrapOpencode),
@@ -635,6 +666,7 @@ class BridgeServer {
       afkComponent,
     );
     bridge._afkPoller = afkPoller;
+    bridge._afkRuns = afkRuns;
     // The route dispatch table (issue #253, C3): the composition root's route
     // wiring. It is built here — at start, not in the request path — so a
     // wiring change (a new component, a re-tied closure) re-builds the table
@@ -672,6 +704,11 @@ class BridgeServer {
     }
     bridge._tasks = taskService;
     speed?.start();
+    // The AFK run service's pass (spec #376, T3): it runs for the life of
+    // the bridge, armed or not — the arming gates only its new-work steps,
+    // so a disarm mid-run lets the in-flight runs finish (user story #24).
+    // Stopped by [stop], below.
+    afkRuns?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
     // the single actor of orb automation — bridge down = no automation
     // (accepted by construction). Tests arm it explicitly; the pass keeps
@@ -873,6 +910,11 @@ class BridgeServer {
     // The Ready gate's admission poller follows the arming toggle live
     // (spec #376, T2): start on arm, stop on disarm.
     _afkPoller?.syncArmed(settings.enabled);
+    // The run service does not follow the toggle live (spec #376, user
+    // story #24): its pass runs for the life of the bridge and its
+    // new-work steps read the arming live through [isArmed] — a disarm
+    // gates new feeds and re-dispatches while the in-flight runs finish to
+    // their PR or failure. No destructive stop here.
     if (!settings.enabled) return null;
     return ensureAfKSession();
   }
@@ -900,6 +942,7 @@ class BridgeServer {
     _tasksArmTimer = null;
     _orbs?.stopLifecyclePass();
     _afkPoller?.stop();
+    _afkRuns?.stop();
     _tasks?.close();
     await _server.close(force: true);
     await _hostServer?.close(force: true);
