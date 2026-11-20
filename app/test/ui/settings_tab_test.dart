@@ -103,6 +103,7 @@ void main() {
     VoidCallback? onPushProjectCommitted,
     VoidCallback? onServiceAccountCommitted,
     String? serviceAccountPath,
+    VoidCallback? onAfkChanged,
   }) async {
     final settings = await AppSettings.load();
     if (tunnelUrl != null) settings.tunnelUrl = tunnelUrl;
@@ -119,6 +120,7 @@ void main() {
             onPushProjectCommitted: onPushProjectCommitted,
             onServiceAccountCommitted: onServiceAccountCommitted,
             serviceAccountPath: serviceAccountPath,
+            onAfkChanged: onAfkChanged,
           ),
         ),
       ),
@@ -562,6 +564,7 @@ void main() {
         tunnelClient: tunnel,
       );
 
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-status')));
       expect(find.byKey(const ValueKey('tunnel-status')), findsOneWidget);
       expect(find.text('Tunnel up'), findsOneWidget);
       expect(find.text('bridge.example.com'), findsOneWidget);
@@ -583,6 +586,7 @@ void main() {
         tunnelClient: tunnel,
       );
 
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-status')));
       expect(find.text('Tunnel down'), findsOneWidget);
       expect(
         find.textContaining(
@@ -613,6 +617,7 @@ void main() {
         tunnelClient: tunnel,
       );
 
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-status')));
       tunnel.reportValue = _kUpReport;
       await tester.tap(find.byKey(const ValueKey('tunnel-start')));
       await tester.pump();
@@ -637,6 +642,10 @@ void main() {
         tunnelClient: tunnel,
       );
 
+      await scrollSettings(
+        tester,
+        find.text('This host does not run a tunnel.'),
+      );
       expect(find.text('This host does not run a tunnel.'), findsOneWidget);
     });
 
@@ -651,6 +660,7 @@ void main() {
         tunnelClient: tunnel,
       );
 
+      await scrollSettings(tester, find.text('Cannot reach the bridge.'));
       expect(find.text('Cannot reach the bridge.'), findsOneWidget);
 
       tunnel.reportError = null;
@@ -730,6 +740,7 @@ void main() {
         tunnelClient: tunnel,
       );
 
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-setup')));
       expect(find.byKey(const ValueKey('tunnel-setup')), findsOneWidget);
       expect(find.text('Set up the tunnel'), findsOneWidget);
     });
@@ -771,6 +782,10 @@ void main() {
           mode: AppMode.server,
           localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
           tunnelClient: tunnel,
+        );
+        await scrollSettings(
+          tester,
+          find.byKey(const ValueKey('tunnel-setup')),
         );
         await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
         await tester.pump();
@@ -817,6 +832,10 @@ void main() {
           localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
           tunnelClient: tunnel,
         );
+        await scrollSettings(
+          tester,
+          find.byKey(const ValueKey('tunnel-setup')),
+        );
         await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
         await tester.pump();
 
@@ -849,6 +868,10 @@ void main() {
           mode: AppMode.server,
           localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
           tunnelClient: tunnel,
+        );
+        await scrollSettings(
+          tester,
+          find.byKey(const ValueKey('tunnel-setup')),
         );
         await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
         await tester.pump();
@@ -888,6 +911,7 @@ void main() {
         localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
         tunnelClient: tunnel,
       );
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-setup')));
       await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
       await tester.pump();
 
@@ -914,6 +938,14 @@ void main() {
       expect(tunnel.setupCredentials, kSetupCredentialsJson);
       // The dialog is gone; the tab shows the fresh report.
       expect(find.byKey(const ValueKey('setup-submit')), findsNothing);
+      // The dialog left the list scrolled to the tunnel section's former
+      // bottom; the fresh "up" report is shorter, so drag back to the top and
+      // scroll down to the status again.
+      for (var i = 0; i < 6; i++) {
+        await tester.drag(find.byType(ListView), const Offset(0, 800));
+        await tester.pump();
+      }
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-status')));
       expect(find.text('Tunnel up'), findsOneWidget);
     });
 
@@ -926,6 +958,7 @@ void main() {
         localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
         tunnelClient: tunnel,
       );
+      await scrollSettings(tester, find.byKey(const ValueKey('tunnel-setup')));
       await tester.tap(find.byKey(const ValueKey('tunnel-setup')));
       await tester.pump();
 
@@ -955,6 +988,167 @@ void main() {
       );
       // The dialog stays open for a retry.
       expect(find.byKey(const ValueKey('setup-submit')), findsOneWidget);
+    });
+  });
+
+  group('SettingsTab AFK agent section (spec #376, T1)', () {
+    testWidgets('server mode shows the section with the three controls', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+      );
+
+      await scrollSettings(tester, find.byKey(const ValueKey('afk-enabled')));
+      expect(find.byKey(const ValueKey('afk-enabled')), findsOneWidget);
+      expect(find.byKey(const ValueKey('afk-parallel-orbs')), findsOneWidget);
+      expect(find.byKey(const ValueKey('afk-model')), findsOneWidget);
+      // The arm toggle defaults off (a fresh install is inert).
+      final tile = tester
+          .widgetList<SwitchListTile>(find.byKey(const ValueKey('afk-enabled')))
+          .single;
+      expect(tile.value, isFalse);
+    });
+
+    testWidgets('client mode shows no AFK section', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await pumpSettings(tester, mode: AppMode.client);
+
+      expect(find.byKey(const ValueKey('afk-enabled')), findsNothing);
+      expect(find.byKey(const ValueKey('afk-parallel-orbs')), findsNothing);
+      expect(find.byKey(const ValueKey('afk-model')), findsNothing);
+    });
+
+    testWidgets('arming toggles and notifies the in-process bridge', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var changes = 0;
+      final settings = await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        onAfkChanged: () => changes++,
+      );
+
+      await scrollSettings(tester, find.byKey(const ValueKey('afk-enabled')));
+      expect(settings.afkEnabled, isFalse);
+      await tester.tap(find.byKey(const ValueKey('afk-enabled')));
+      await tester.pump();
+      expect(settings.afkEnabled, isTrue);
+      expect(changes, 1);
+      // Persisted across launches.
+      expect((await AppSettings.load()).afkEnabled, isTrue);
+    });
+
+    testWidgets('the cap commits a valid value and notifies the bridge', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var changes = 0;
+      final settings = await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        onAfkChanged: () => changes++,
+      );
+
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('afk-parallel-orbs')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('afk-parallel-orbs')),
+        '7',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(settings.afkParallelOrbs, 7);
+      expect(changes, 1);
+      expect((await AppSettings.load()).afkParallelOrbs, 7);
+    });
+
+    testWidgets('the cap rejects an out-of-bounds value and saves nothing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var changes = 0;
+      final settings = await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        onAfkChanged: () => changes++,
+      );
+
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('afk-parallel-orbs')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('afk-parallel-orbs')),
+        '11',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      // Out of the 1–10 bounds: a problem is shown, nothing is saved.
+      expect(find.textContaining('between 1 and 10'), findsOneWidget);
+      expect(settings.afkParallelOrbs, 5);
+      expect(changes, 0);
+    });
+
+    testWidgets('the model commits a valid value and notifies the bridge', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var changes = 0;
+      final settings = await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        onAfkChanged: () => changes++,
+      );
+
+      await scrollSettings(tester, find.byKey(const ValueKey('afk-model')));
+      await tester.enterText(
+        find.byKey(const ValueKey('afk-model')),
+        'zhipu/glm-4.7',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(settings.afkModel, 'zhipu/glm-4.7');
+      expect(changes, 1);
+      expect((await AppSettings.load()).afkModel, 'zhipu/glm-4.7');
+    });
+
+    testWidgets('the model rejects a malformed value and saves nothing', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      var changes = 0;
+      final settings = await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        onAfkChanged: () => changes++,
+      );
+
+      await scrollSettings(tester, find.byKey(const ValueKey('afk-model')));
+      await tester.enterText(
+        find.byKey(const ValueKey('afk-model')),
+        'no-slash-here',
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+
+      expect(find.textContaining('"provider/model"'), findsOneWidget);
+      expect(settings.afkModel, '');
+      expect(changes, 0);
     });
   });
 }

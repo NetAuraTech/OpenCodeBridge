@@ -32,6 +32,7 @@ class HomeShell extends StatefulWidget {
     this.onServiceAccountCommitted,
     this.onThemeModeChanged,
     this.onEventSource,
+    this.onAfkChanged,
   });
 
   final ConnectionMonitor monitor;
@@ -85,6 +86,12 @@ class HomeShell extends StatefulWidget {
   /// SSE connection. Called with the source when it comes up and with
   /// `null` when it goes away (the tunnel URL cleared).
   final void Function(EventSource? source)? onEventSource;
+
+  /// Hands the AFK settings to the in-process bridge on every change (spec
+  /// #376, T1, server mode): the next orb spawn reads the new cap, the next
+  /// AFK session creation the new model. The Settings tab calls it; `null` in
+  /// client mode (the bridge runs on the host, not here).
+  final VoidCallback? onAfkChanged;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -218,6 +225,7 @@ class _HomeShellState extends State<HomeShell> {
             onPushProjectCommitted: widget.onPushProjectCommitted,
             onServiceAccountCommitted: widget.onServiceAccountCommitted,
             onThemeModeChanged: widget.onThemeModeChanged,
+            onAfkChanged: widget.onAfkChanged,
           ),
         ],
       ),
