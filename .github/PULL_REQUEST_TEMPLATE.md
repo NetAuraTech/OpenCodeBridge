@@ -24,5 +24,4 @@ degradation-sensitive work, state each fact's degradation posture.)
 ## Tests
 
 - (Name the tests and what each asserts, with their files.)
-
-`flutter analyze` and `dart format --set-exit-if-changed --output=none lib test` are clean; `flutter test --exclude-tags docker <paths>` passes.
+- Verification result: `verification matches the clean-base signature (root AGENTS.md, Verification section)` — the one-line result reported against the canonical clean-base signature. Replace this line only when the run deviates; a full results paragraph is required only on deviation, and a deviation is reportable only after reproduction on a clean base.
