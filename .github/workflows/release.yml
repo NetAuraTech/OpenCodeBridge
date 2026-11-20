@@ -179,9 +179,11 @@ jobs:
         working-directory: app
         run: flutter pub get --enforce-lockfile
 
+      # Absolute path: gradle resolves relative storeFile paths against the
+      # :app module dir (app/android/app), not the repo root.
       - name: Build APK
         env:
-          KEYSTORE_PATH: app/android/app/keystore/release.keystore
+          KEYSTORE_PATH: ${{ github.workspace }}/app/android/app/keystore/release.keystore
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -190,7 +192,7 @@ jobs:
 
       - name: Build AAB
         env:
-          KEYSTORE_PATH: app/android/app/keystore/release.keystore
+          KEYSTORE_PATH: ${{ github.workspace }}/app/android/app/keystore/release.keystore
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
