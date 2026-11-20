@@ -802,6 +802,18 @@ void main() {
     test(
       'a first start without a base checks out the remote default',
       () async {
+        // The harness spawns the entrypoint with includeParentEnvironment
+        // (default), so an ORB_BASE_BRANCH already exported in the parent
+        // environment leaks into the fake container and steers the clone to
+        // the seed branch instead of the remote default. That is a property
+        // of the sandbox, not of the entrypoint: skip it there.
+        if (Platform.environment.containsKey('ORB_BASE_BRANCH')) {
+          markTestSkipped(
+            'ORB_BASE_BRANCH is set in the parent environment and leaks '
+            'into the fake container',
+          );
+          return;
+        }
         // The fake git answers `symbolic-ref` with `origin/main` (the fake
         // default branch).
         final r = await h.run(firstStart: true);
@@ -907,6 +919,18 @@ void main() {
     test(
       'no staged gh config: gh keeps the default (mounted) config',
       () async {
+        // The harness spawns the entrypoint with includeParentEnvironment
+        // (default), so a GH_CONFIG_DIR already exported in the parent
+        // environment leaks into the fake container and is picked up as the
+        // "staged" config — the default-config assertion then fails. That is
+        // a property of the sandbox, not of the entrypoint: skip it there.
+        if (Platform.environment.containsKey('GH_CONFIG_DIR')) {
+          markTestSkipped(
+            'GH_CONFIG_DIR is set in the parent environment and leaks into '
+            'the fake container',
+          );
+          return;
+        }
         // A host whose gh config is self-sufficient (or has no token at
         // all): nothing is staged, nothing is redirected — the §4 mount
         // stays the surface.

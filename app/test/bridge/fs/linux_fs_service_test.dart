@@ -49,7 +49,10 @@ void main() {
 
     test('drives skips a mountpoint it cannot stat', () async {
       if (_runningAsRoot()) {
+        // markTestSkipped marks the result skipped but does NOT abort the
+        // body, so the trailing expect() would still run and fail as root.
         markTestSkipped('permission denial cannot be exercised as root');
+        return;
       }
       final locked = Directory('${tmp.path}/locked')..createSync();
       Directory('${locked.path}/inner').createSync();
@@ -103,7 +106,10 @@ void main() {
       'createDirectory maps a permission denial to permissionDenied',
       () async {
         if (_runningAsRoot()) {
+          // markTestSkipped marks the result skipped but does NOT abort the
+          // body, so the trailing expect() would still run and fail as root.
           markTestSkipped('permission denial cannot be exercised as root');
+          return;
         }
         final locked = Directory('${tmp.path}/locked')..createSync();
         Process.runSync('chmod', ['0', locked.path]);
@@ -160,7 +166,10 @@ void main() {
       'subdirectories maps a permission denial to permissionDenied',
       () async {
         if (_runningAsRoot()) {
+          // markTestSkipped marks the result skipped but does NOT abort the
+          // body, so the trailing expect() would still run and fail as root.
           markTestSkipped('permission denial cannot be exercised as root');
+          return;
         }
         final locked = Directory('${tmp.path}/locked')..createSync();
         Process.runSync('chmod', ['0', locked.path]);

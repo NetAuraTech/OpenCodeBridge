@@ -18,6 +18,18 @@ int argsIndex(List<List<String>> args, List<String> target) => args.indexWhere(
       [for (var i = 0; i < a.length; i++) a[i] == target[i]].every((x) => x),
 );
 
+/// Whether the test runs as root, under which a recursive delete never fails
+/// (a mode-555 dir is still unlinkable) and the throwaway-container fallback
+/// cannot be exercised.
+bool _runningAsRoot() {
+  try {
+    final out = Process.runSync('id', ['-u'], runInShell: true);
+    return out.exitCode == 0 && out.stdout.toString().trim() == '0';
+  } on Object {
+    return false;
+  }
+}
+
 /// A scripted docker CLI child (the boot follow stream).
 class _FakeProcess {
   final StreamController<String> stdout = StreamController<String>();
@@ -1167,6 +1179,17 @@ void main() {
 
       test('force delete cleans a root-owned state dir through a throwaway '
           'container over the same mount', () async {
+        // As root the host-side recursive delete of the chmod-555 dir
+        // succeeds, so the `on FileSystemException` branch (the throwaway
+        // container) never runs and the runArgs assertion has nothing to
+        // point at. That is a property of the sandbox, not of the service.
+        if (_runningAsRoot()) {
+          markTestSkipped(
+            'a recursive delete cannot fail as root, so the throwaway-'
+            'container fallback cannot be exercised',
+          );
+          return;
+        }
         addOrb(port: 49101);
         // The state dir as the container leaves it: content the host user
         // cannot unlink (a directory the recursive delete cannot enter).
