@@ -54,6 +54,13 @@ abstract class BridgeEventType {
   /// failure). `data` carries `line`. This is the "log surface" a failed
   /// boot is visible on; the health report carries the outcome.
   static const String opencodeBoot = 'opencode.boot';
+
+  /// An issue newly became `ready-for-agent` and was admitted to the AFK run
+  /// store by the Ready-gate poller (spec #376, "The Ready gate and the
+  /// feed", T2): the poller persists the run row (state `idle`, issue number,
+  /// title) and emits this on the unified stream; `data` carries
+  /// `issueNumber` and `title`.
+  static const String afkReadyAdmitted = 'afk.ready_admitted';
 }
 
 /// Build the wire payload for a bridge-native event: the same `data:` envelope

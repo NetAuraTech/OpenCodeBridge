@@ -79,4 +79,59 @@ void main() {
       },
     );
   });
+
+  group('run rows (spec #376, "The Ready gate and the feed", T2: the '
+      'poller\'s admissions, beside the session record)', () {
+    test(
+      'addRun persists + runFor reads back (state idle, number, title)',
+      () async {
+        final store = AfkStore(file: file);
+        await store.addRun(7, 'Add a README');
+        final reloaded = AfkStore(file: file);
+        final run = reloaded.runFor(7);
+        expect(run, isNotNull);
+        expect(run!.issueNumber, 7);
+        expect(run.title, 'Add a README');
+        expect(run.state, 'idle');
+      },
+    );
+
+    test('runs() lists every row, sorted by issue number', () async {
+      final store = AfkStore(file: file);
+      await store.addRun(9, 'Nine');
+      await store.addRun(7, 'Seven');
+      expect(store.runs().map((run) => run.issueNumber).toList(), [7, 9]);
+    });
+
+    test('a corrupt run row reads as absent', () async {
+      await file.writeAsString(
+        jsonEncode({
+          'afk.run.7': 'not json',
+          'afk.run.9': '{"state":"idle","issueNumber":9,"title":"Nine"}',
+        }),
+      );
+      final store = AfkStore(file: file);
+      expect(store.runFor(7), isNull);
+      expect(store.runFor(8), isNull);
+      expect(store.runs().map((run) => run.issueNumber).toList(), [9]);
+    });
+
+    test('addRun upserts: re-adding an issue updates its row', () async {
+      final store = AfkStore(file: file);
+      await store.addRun(7, 'Old title');
+      await store.addRun(7, 'New title');
+      final run = store.runFor(7);
+      expect(run!.title, 'New title');
+      expect(store.runs(), hasLength(1));
+    });
+
+    test('run rows coexist with the session record', () async {
+      final store = AfkStore(file: file);
+      await store.setSessionId('ses_afk_1');
+      await store.addRun(7, 'Add a README');
+      final reloaded = AfkStore(file: file);
+      expect(reloaded.sessionId(), 'ses_afk_1');
+      expect(reloaded.runFor(7)!.issueNumber, 7);
+    });
+  });
 }
