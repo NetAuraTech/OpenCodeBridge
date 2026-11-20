@@ -1,5 +1,6 @@
 import 'afk_session_manager.dart';
 import 'afk_settings.dart';
+import 'afk_spawn_gate.dart';
 import 'afk_store.dart';
 import '../sessions/backend.dart';
 
@@ -76,6 +77,19 @@ class AfkComponent {
   /// The stored AFK session id (the bridge's own persisted fact), or `null`
   /// when the system is not armed (no id persisted).
   String? get sessionId => store.sessionId();
+
+  /// The spawn-boundary view of the AFK attribution (spec #376, T4): the AFK
+  /// session id (a spawn is AFK-attributed when its caller session is this
+  /// one) and the parallel-orbs cap, **read live** — the cap from the current
+  /// settings (effective from the next spawn, no restart), the session id
+  /// fresh from the store (a restart, or a fresh arming, is picked up).
+  /// `null` when no AFK session id is persisted: there is no AFK session, so
+  /// no spawn is AFK-attributed and the cap never applies.
+  AfkSpawnGate? spawnGate() {
+    final id = store.sessionId();
+    if (id == null || id.isEmpty) return null;
+    return AfkSpawnGate(afkSessionId: id, cap: _settings.parallelOrbs);
+  }
 
   /// Ensure the AFK session exists and return its id (the **arming** action).
   ///

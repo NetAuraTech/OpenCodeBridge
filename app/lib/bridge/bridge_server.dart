@@ -668,6 +668,12 @@ class BridgeServer {
         file: File('${homeDirectory()}/.config/opencodebridge/tasks.json'),
         notifyProvider: () => bridge._notify,
         upstreams: orbUpstreams,
+        // The AFK parallel-orbs cap (issue #379, spec #376 T4): the spawn
+        // boundary reads the AFK attribution live — the AFK session id (the
+        // bridge's own persisted fact) and the current cap — so a Settings
+        // change is effective from the next spawn, and a spawn is AFK-attributed
+        // when its caller session is the AFK session.
+        afkGate: () => afkComponent.spawnGate(),
       );
     }
     bridge._tasks = taskService;
@@ -961,6 +967,9 @@ class BridgeServer {
               // The shared live-upstream module (issue #278): the re-arm's
               // task service asks the same module the composites read.
               upstreams: upstreams,
+              // The AFK parallel-orbs cap (issue #379, spec #376 T4): read
+              // live at each spawn, like the push fallback reads [_notify].
+              afkGate: () => _afk?.spawnGate(),
             );
           },
           onError: (Object _) {
