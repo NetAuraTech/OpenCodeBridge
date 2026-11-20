@@ -23,8 +23,12 @@ concurrency:
   group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
-# Tag-driven release: Linux tarball + Android APK/AAB, published as a GitHub
-# release (pre-release by default for -pre/-rc/-alpha tags). Bump the
+# Tag-driven release: Linux tarball + Android APK, published as a GitHub
+# release (pre-release by default for -pre/-rc/-alpha tags). The AAB is built
+# too but only kept as a run artifact (the `play-aab` artifact on the release
+# run) — it is the Google Play upload format and is deliberately NOT attached
+# to the public release, so the signed bundle cannot be republished on a
+# competing Play account under the same package name. Bump the
 # `version:` in app/pubspec.yaml, push, then tag `vX.Y.Z[-pre.N]` — or run the
 # workflow manually with the tag input (it creates the tag).
 #
@@ -201,15 +205,23 @@ jobs:
 
       - name: Stage artifacts
         run: |
-          mkdir -p artifacts
+          mkdir -p artifacts artifacts-play
           cp app/build/app/outputs/flutter-apk/app-release.apk "artifacts/opencodebridge_${VERSION}_android.apk"
-          cp app/build/app/outputs/bundle/release/app-release.aab "artifacts/opencodebridge_${VERSION}_android.aab"
+          cp app/build/app/outputs/bundle/release/app-release.aab "artifacts-play/opencodebridge_${VERSION}_android.aab"
 
-      - name: Upload artifact
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-android
           path: artifacts/
+
+      # The AAB is the Google Play upload format: kept as a run artifact for
+      # the Play upload, never attached to the public release (see header).
+      - name: Upload AAB artifact (Play upload only, not released)
+        uses: actions/upload-artifact@v4
+        with:
+          name: play-aab
+          path: artifacts-play/
 
   release:
     runs-on: ubuntu-latest
@@ -218,10 +230,13 @@ jobs:
       contents: write
 
     steps:
+      # release-* only: the play-aab artifact (Google Play upload format) is
+      # deliberately excluded from the published release assets.
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: 'release-*'
           merge-multiple: true
 
       - name: Publish GitHub release
