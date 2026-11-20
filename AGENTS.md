@@ -26,7 +26,7 @@ Skips are named by the reason that triggers them (what to look for, never a numb
 
 - **Root — the orb sandbox runs as root:**
   - the permission-denial tests self-skip — *permission denial cannot be exercised as root* (a mode-000 dir is still listable and writable as root, so the denial branch is unreachable);
-  - the entrypoint default-config tests self-skip when the sandbox exports `GH_CONFIG_DIR` / `ORB_BASE_BRANCH` — the variable is set in the parent environment and *leaks into the fake container*, so the default-config assertion is no longer the one under test;
+  - the entrypoint default-config and fallback tests self-skip when the sandbox exports `GH_CONFIG_DIR` / `ORB_BASE_BRANCH` / `ORB_BRANCH` — the variable is set in the parent environment and *leaks into the fake container*, so the default-config or `orb/<id>`-fallback assertion is no longer the one under test;
   - the throwaway-container state-dir delete test self-skip — *a recursive delete cannot fail as root*, so the `on FileSystemException` fallback is unreachable.
 - **Non-root host — the environment-conditional skip family:** when a real *docker CLI on PATH* or a shared *opencode service descriptor* is present, the tests that would otherwise reach the docker / opencode fake seams self-skip, because the bridge builds a real backend there and the fake seam is no longer the one under test.
 

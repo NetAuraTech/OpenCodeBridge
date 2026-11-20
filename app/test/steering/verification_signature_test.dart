@@ -60,7 +60,7 @@ void main() {
     });
 
     test('names the root parent-env-leak self-skip (GH_CONFIG_DIR / '
-        'ORB_BASE_BRANCH)', () {
+        'ORB_BASE_BRANCH / ORB_BRANCH)', () {
       expect(
         section,
         contains('GH_CONFIG_DIR'),
@@ -70,6 +70,11 @@ void main() {
         section,
         contains('ORB_BASE_BRANCH'),
         reason: 'the ORB_BASE_BRANCH parent-env leak must be named',
+      );
+      expect(
+        section,
+        contains('ORB_BRANCH'),
+        reason: 'the ORB_BRANCH parent-env leak must be named',
       );
       expect(
         section,
