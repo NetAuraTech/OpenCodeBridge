@@ -124,6 +124,11 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
           bootstrapOpencode: BridgeServer.defaultOpencodeBooter(),
         );
         _bridge = bridge;
+        // The AFK settings (spec #376, T1): the bridge is handed the persisted
+        // values at startup (in-process, no HTTP endpoint). When the arm is on,
+        // this also ensures the AFK session (create or reuse the one the
+        // service still has — the bridge's startup re-arm) and stores its id.
+        unawaited(bridge.updateAfKSettings(settings.afk));
         _serverError = null;
         _mode = mode;
         _monitor.connect(() => bridge.healthUri);
@@ -285,6 +290,16 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
           // The Settings save already wrote the file; the running bridge
           // picks it up without a restart (issue #24).
           unawaited(_bridge?.reloadNotify());
+        },
+        onAfkChanged: () {
+          // The AFK setting already persisted in the Settings tab; hand the
+          // fresh values to the in-process bridge (spec #376, T1) — no
+          // restart. The next orb spawn reads the new cap, the next AFK
+          // session creation the new model, and a toggle-on (re-)ensures the
+          // session (create or reuse the one the service still has).
+          final settings = _settings;
+          if (settings == null) return;
+          unawaited(_bridge?.updateAfKSettings(settings.afk));
         },
         onThemeModeChanged: () {
           // The choice is already persisted by whoever changed it (the

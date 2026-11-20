@@ -9,6 +9,9 @@ import '../model/permission.dart';
 import '../model/question.dart';
 import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
+import 'afk/afk_charter.dart';
+import 'afk/afk_component.dart';
+import 'afk/afk_settings.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/composite_event_service.dart';
@@ -74,6 +77,7 @@ class BridgeServer {
     this._pushDispatcher,
     this._lifecycle,
     this._opencodeBoot,
+    this._afk,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -316,6 +320,15 @@ class BridgeServer {
   /// `not_configured`.
   final OpencodeServiceBooter? _opencodeBoot;
 
+  /// The AFK subsystem (spec #376, T1): the arming toggle, the parallel-orbs
+  /// cap, the model, and the AFK session's create/reuse + stored id. Built on
+  /// the backend when one exists (a machine without a shared opencode service
+  /// has no host to place the AFK session on). The app hands it the persisted
+  /// settings at startup and on every change ([updateAfKSettings]) — in
+  /// process, no HTTP endpoint (the bridge runs in the app's process in
+  /// server mode).
+  final AfkComponent? _afk;
+
   /// The route dispatch table (issue #253, C3): the ordered method→path→
   /// closure the HTTP server listens on. Built by [_buildRoutes] once at start
   /// (the composition root's route wiring), before the port is listened on.
@@ -411,6 +424,7 @@ class BridgeServer {
     bool autoLifecyclePass = false,
     Duration? lifecyclePassInterval,
     OpencodeServiceBooter? bootstrapOpencode,
+    AfkComponent? afk,
   }) async {
     final server = await HttpServer.bind(host, port);
     // The host opencode service boot (issue #153, ADR-0002/ADR-0008): it runs
@@ -442,6 +456,19 @@ class BridgeServer {
     try {
       await OrbAgentTools.materialize();
     } catch (_) {}
+    // The AFK agent's charter (spec #376, T1): the canonical markdown agent
+    // file for the `afk` agent, installed into the global opencode config's
+    // agents dir **only if absent** — an existing (hand-edited) file is never
+    // rewritten, the developer's edit wins. Server mode only: [bootstrapOpencode]
+    // is the on-switch the app passes only there (client mode and the default
+    // start pass nothing), which is exactly "the bridge's startup, server
+    // mode". A failure degrades: the AFK session simply cannot be created on
+    // a host that has no writable config dir.
+    if (bootstrapOpencode != null) {
+      try {
+        await AfkCharter.install();
+      } catch (_) {}
+    }
     final orbBuilder =
         orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
     // The backend the orb service's PR repo resolver (issue #96) reaches:
@@ -556,6 +583,13 @@ class BridgeServer {
           cli: TunnelCli(binary: supervisor.binary),
           credentialsDir: Directory('${homeDirectory()}/.cloudflared'),
         );
+    // The AFK subsystem (spec #376, T1): the arming toggle, the parallel-orbs
+    // cap, the model, and the AFK session's create/reuse + stored id. Built on
+    // the backend (a machine without a shared opencode service has no host to
+    // place the AFK session on, so the component degrades to `null`); the app
+    // hands it the persisted settings at startup and on every change
+    // (in-process, no HTTP endpoint).
+    final afkComponent = afk ?? AfkComponent(backend: backend);
     final bridge = BridgeServer._(
       server,
       health ?? BridgeServer._defaultHealth(bootstrapOpencode),
@@ -574,6 +608,7 @@ class BridgeServer {
       pushDispatcher,
       lifecycle,
       bootstrapOpencode,
+      afkComponent,
     );
     // The route dispatch table (issue #253, C3): the composition root's route
     // wiring. It is built here — at start, not in the request path — so a
@@ -778,6 +813,51 @@ class BridgeServer {
     // this reload pushes through the new sender automatically — the bridge
     // no longer re-points a mutable field on the task service.
   }
+
+  // --------------------------------------------------------------------------
+  // The AFK subsystem's in-process surface (spec #376, T1).
+  //
+  // The bridge runs in the app's process in server mode, so the app talks to
+  // this surface directly — there is no HTTP endpoint for AFK. The app hands
+  // the current persisted settings to the bridge at startup and on every
+  // change ([updateAfKSettings]); a changed cap is effective from the next
+  // orb spawn and a changed model from the next AFK session creation.
+  //
+  // [updateAfKSettings] is the whole surface: it holds the values live and,
+  // when the arming toggle is on, ensures the AFK session exists (create or
+  // reuse, idempotent) and stores its id. Arming is therefore idempotent —
+  // startup with the persisted arm reuses the session the service still has,
+  // a re-arm after a disarm reuses it (no duplicate), and a toggle-on creates
+  // it. Disarming (the toggle off) holds the values but leaves the session
+  // alone — it outlives a disarm.
+
+  /// The AFK subsystem's live settings (the values the app last handed the
+  /// bridge). The arming toggle, the parallel-orbs cap, and the model.
+  AfkSettings get afkSettings => _afk?.settings ?? const AfkSettings();
+
+  /// The in-process notification the app calls at startup and on every AFK
+  /// setting change in Settings: the new values are held live, so the next
+  /// orb spawn reads the new cap and the next AFK session creation reads the
+  /// new model (no restart). When the arming toggle is on, the AFK session is
+  /// ensured (create or reuse, idempotent) and its id stored; when it is off
+  /// the values are held and the session is left alone. Returns the session id
+  /// when armed, else `null`. A no-op session-wise when this bridge has no AFK
+  /// component (no shared opencode service).
+  Future<String?> updateAfKSettings(AfkSettings settings) async {
+    _afk?.updateSettings(settings);
+    if (!settings.enabled) return null;
+    return ensureAfKSession();
+  }
+
+  /// Ensure the AFK session exists and return its id (the arming action):
+  /// create it in the main checkout (model pinned from the `afkModel` setting,
+  /// empty = the service's default, agent `afk`, visible — never archived) or
+  /// reuse the stored one when the service still has it, and store its id.
+  /// Idempotent. Returns `null` when this bridge has no AFK component (no
+  /// shared opencode service) or the main checkout cannot be resolved yet
+  /// (safe to retry once it is).
+  Future<String?> ensureAfKSession() =>
+      _afk?.ensureSession() ?? Future<String?>.value(null);
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
   Uri get baseUri =>

@@ -8,6 +8,7 @@ import '../client/authenticated_http.dart';
 import '../client/tunnel_client.dart';
 import '../model/tunnel_report.dart';
 import '../notify/firebase_project.dart';
+import '../bridge/afk/afk_settings.dart';
 import '../settings/app_settings.dart';
 import '../tunnel_url.dart';
 import 'tunnel_setup_wizard.dart';
@@ -33,6 +34,7 @@ class SettingsTab extends StatefulWidget {
     this.onServiceAccountCommitted,
     this.onThemeModeChanged,
     this.serviceAccountPath,
+    this.onAfkChanged,
   });
 
   final AppSettings settings;
@@ -77,6 +79,12 @@ class SettingsTab extends StatefulWidget {
   /// Where the service account file lives ([FirebaseServiceAccount.defaultPath]
   /// by default; tests point it at a temp dir).
   final String? serviceAccountPath;
+
+  /// Called on every AFK setting change (spec #376, T1), so the app can hand
+  /// the updated values to the in-process bridge (server mode): the next orb
+  /// spawn reads the new cap, the next AFK session creation the new model.
+  /// `null` in client mode (the bridge runs on the host, not here).
+  final VoidCallback? onAfkChanged;
 
   @override
   State<SettingsTab> createState() => _SettingsTabState();
@@ -136,6 +144,16 @@ class _SettingsTabState extends State<SettingsTab> {
           child: Text('Local bridge: ${widget.localBridgeUri}'),
         ),
       const SizedBox(height: 8),
+      // The AFK agent (spec #376, T1): a server-mode-only section (the AFK
+      // system runs on the host that owns the bridge; client mode has no
+      // bridge to arm it on). It sits after "Host connection" and holds the
+      // arming toggle (default off), the parallel-orbs cap (1–10, default 5),
+      // and the model (free text; empty = inherit the service's default).
+      if (widget.mode == AppMode.server) ...[
+        const _SectionLabel('AFK agent'),
+        _AfkSection(settings: widget.settings, onChanged: widget.onAfkChanged),
+        const SizedBox(height: 8),
+      ],
       if (widget.mode == AppMode.client) ...[
         const _SectionLabel('Access login'),
         _AccessSection(session: widget.access),
@@ -966,5 +984,167 @@ class _SectionLabel extends StatelessWidget {
       style: Theme.of(context).textTheme.labelLarge
           ?.copyWith(color: Theme.of(context).colorScheme.primary),
     ),
+  );
+}
+
+/// The AFK agent section (spec #376, T1): the arming toggle (default off —
+/// off is the inert state), the parallel-orbs cap (numeric, 1–10, default 5),
+/// and the model (free text `provider/model[#variant]`; empty = no pin = the
+/// service's default). Server mode only — the AFK system runs on the host
+/// that owns the bridge. Every change persists to [AppSettings] and calls
+/// [onChanged] so the app hands the updated values to the in-process bridge
+/// (the next spawn reads the new cap; the next session creation the new
+/// model).
+class _AfkSection extends StatefulWidget {
+  const _AfkSection({required this.settings, this.onChanged});
+
+  final AppSettings settings;
+
+  /// Called on every AFK setting change so the app can notify the in-process
+  /// bridge; `null` in client mode.
+  final VoidCallback? onChanged;
+
+  @override
+  State<_AfkSection> createState() => _AfkSectionState();
+}
+
+class _AfkSectionState extends State<_AfkSection> {
+  late final TextEditingController _capController = TextEditingController(
+    text: '${widget.settings.afkParallelOrbs}',
+  );
+  late final TextEditingController _modelController = TextEditingController(
+    text: widget.settings.afkModel,
+  );
+
+  /// The cap's last commit problem (an out-of-bounds / non-numeric value).
+  String? _capProblem;
+
+  /// The model's last commit problem (a malformed `provider/model`).
+  String? _modelProblem;
+
+  @override
+  void dispose() {
+    _capController.dispose();
+    _modelController.dispose();
+    super.dispose();
+  }
+
+  void _commitCap() {
+    final raw = _capController.text.trim();
+    final value = int.tryParse(raw);
+    if (value == null) {
+      setState(() => _capProblem = 'The cap is a whole number, 1 to 10.');
+      return;
+    }
+    if (value < AfkSettings.minParallelOrbs ||
+        value > AfkSettings.maxParallelOrbs) {
+      setState(
+        () => _capProblem =
+            'The cap is between ${AfkSettings.minParallelOrbs} '
+            'and ${AfkSettings.maxParallelOrbs}.',
+      );
+      return;
+    }
+    final changed = widget.settings.afkParallelOrbs != value;
+    widget.settings.afkParallelOrbs = value;
+    setState(() => _capProblem = null);
+    if (changed) widget.onChanged?.call();
+  }
+
+  void _commitModel() {
+    final raw = _modelController.text.trim();
+    if (!isValidAfkModel(raw)) {
+      setState(
+        () => _modelProblem =
+            'A model is "provider/model" (optionally with "#variant"), '
+            'or empty to inherit the default.',
+      );
+      return;
+    }
+    final changed = widget.settings.afkModel != raw;
+    widget.settings.afkModel = raw;
+    setState(() => _modelProblem = null);
+    if (changed) widget.onChanged?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      SwitchListTile(
+        key: const ValueKey('afk-enabled'),
+        title: const Text('Arm the AFK agent'),
+        subtitle: const Text(
+          'Off is inert: no polling, no feed, no admission.',
+        ),
+        value: widget.settings.afkEnabled,
+        onChanged: (value) {
+          setState(() => widget.settings.afkEnabled = value);
+          widget.onChanged?.call();
+        },
+      ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Parallel orbs',
+                style: const TextStyle(fontSize: 14),
+              ),
+            ),
+            SizedBox(
+              width: 96,
+              child: TextField(
+                key: const ValueKey('afk-parallel-orbs'),
+                controller: _capController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  isDense: true,
+                  labelText: '1–10',
+                ),
+                onSubmitted: (_) => _commitCap(),
+                onEditingComplete: _commitCap,
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (_capProblem != null)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          child: Text(
+            _capProblem!,
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.error,
+            ),
+          ),
+        ),
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        child: TextField(
+          key: const ValueKey('afk-model'),
+          controller: _modelController,
+          decoration: const InputDecoration(
+            labelText: 'Model',
+            hintText: 'provider/model[#variant] (empty = inherit)',
+            helperText: 'Empty leaves the service default in place.',
+          ),
+          onSubmitted: (_) => _commitModel(),
+          onEditingComplete: _commitModel,
+        ),
+      ),
+      if (_modelProblem != null)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          child: Text(
+            _modelProblem!,
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.error,
+            ),
+          ),
+        ),
+    ],
   );
 }

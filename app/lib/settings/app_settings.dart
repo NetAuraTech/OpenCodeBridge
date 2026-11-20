@@ -2,13 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_mode.dart';
+import '../bridge/afk/afk_settings.dart';
 
 /// Persisted app settings, backed by [SharedPreferences].
 ///
 /// The scaffold persists: the last launch mode (so it is preselected at the
 /// next desktop launch), the client-mode tunnel URL, the theme choice
-/// (issue #49), the sessions sidebar's collapsed choice (issue #132), and
-/// the three push-event toggles (which become live with the push ticket).
+/// (issue #49), the sessions sidebar's collapsed choice (issue #132), the
+/// push-event toggles (which become live with the push ticket), and the
+/// AFK agent's settings (spec #376, T1: the arming toggle, the parallel-orbs
+/// cap, and the model).
 class AppSettings {
   AppSettings._(this._prefs);
 
@@ -22,6 +25,9 @@ class AppSettings {
   static const String _keyNotifyDocker = 'notify.dockerContainer';
   static const String _keyFirebaseProject = 'notify.firebaseProject';
   static const String _keySoundEvents = 'sound.events';
+  static const String _keyAfkEnabled = 'afk.enabled';
+  static const String _keyAfkParallelOrbs = 'afk.parallelOrbs';
+  static const String _keyAfkModel = 'afk.model';
 
   final SharedPreferences _prefs;
 
@@ -95,6 +101,56 @@ class AppSettings {
   bool get soundEvents => _prefs.getBool(_keySoundEvents) ?? true;
 
   set soundEvents(bool value) => _prefs.setBool(_keySoundEvents, value);
+
+  // --- The AFK agent (spec #376, T1) --------------------------------------
+  //
+  // The server-mode "AFK agent" section: the arming toggle (default off —
+  // off is the inert state), the parallel-orbs cap (1–10, default 5), and the
+  // model (free text `provider/model[#variant]`, empty = no pin = the
+  // service's default). All persisted in this store under the `afk.`
+  // namespace and restored at launch; the in-process bridge is handed them at
+  // startup and on change.
+
+  /// The AFK arming toggle: off by default (a fresh install is inert — no
+  /// polling, no feed, no admission until the user arms it).
+  bool get afkEnabled => _prefs.getBool(_keyAfkEnabled) ?? false;
+
+  set afkEnabled(bool value) => _prefs.setBool(_keyAfkEnabled, value);
+
+  /// The AFK parallel-orbs cap (1–10, default 5). Validated at the bounds; a
+  /// stored value outside the range degrades to the default.
+  int get afkParallelOrbs {
+    final value =
+        _prefs.getInt(_keyAfkParallelOrbs) ?? AfkSettings.defaultParallelOrbs;
+    if (value < AfkSettings.minParallelOrbs ||
+        value > AfkSettings.maxParallelOrbs) {
+      return AfkSettings.defaultParallelOrbs;
+    }
+    return value;
+  }
+
+  set afkParallelOrbs(int value) => _prefs.setInt(_keyAfkParallelOrbs, value);
+
+  /// The AFK model: free text `provider/model[#variant]`, empty = no pin =
+  /// the service's default. A blank value is stored as empty.
+  String get afkModel => _prefs.getString(_keyAfkModel) ?? '';
+
+  set afkModel(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
+      _prefs.remove(_keyAfkModel);
+    } else {
+      _prefs.setString(_keyAfkModel, trimmed);
+    }
+  }
+
+  /// The AFK settings composed for the bridge (the value handed in-process at
+  /// startup and on change).
+  AfkSettings get afk => AfkSettings(
+    enabled: afkEnabled,
+    parallelOrbs: afkParallelOrbs,
+    model: afkModel,
+  );
 
   /// The Firebase project's `google-services.json` (issue #24, pasted in
   /// Settings): the FCM token's setup step. `''` when not set yet.
