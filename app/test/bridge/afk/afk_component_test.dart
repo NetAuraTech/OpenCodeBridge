@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -109,21 +110,22 @@ void main() {
     await dir.delete(recursive: true);
   });
 
-  /// A component over the backend with the main checkout injected (so the
-  /// component does not need a real project list). [repo] is the armed repo
-  /// identity (the component's single session lives under it); `null` disarms.
-  AfkComponent mkComponent({String? repo, String model = ''}) {
+  /// A component over the backend with the repo's checkout directory injected
+  /// (so the component does not need a real project list). [repos] is the set
+  /// of armed repo identities; the injected directory answers the given
+  /// [directory] for every repo. `repos` empty (or `null`) disarms.
+  AfkComponent mkComponent({
+    Set<String>? repos,
+    String model = '',
+    String directory = '/main-checkout',
+  }) {
     final component = AfkComponent(
       backend: backend,
       store: AfkStore(file: storeFile),
-      directoryOf: (_) async => '/main-checkout',
+      directoryOf: (_, __) async => directory,
     );
     component.updateSettings(
-      AfkSettings(
-        armedRepos: repo == null ? const {} : {repo},
-        parallelOrbs: 5,
-        model: model,
-      ),
+      AfkSettings(armedRepos: repos ?? const {}, parallelOrbs: 5, model: model),
     );
     return component;
   }
@@ -193,27 +195,52 @@ void main() {
   });
 
   group('AfkComponent', () {
-    test('arming creates exactly one session and stores its id', () async {
-      final component = mkComponent(repo: 'o/r');
-      expect(component.sessionId, isNull);
-      final id = await component.ensureSession();
-      expect(id, 'ses_afk_1');
-      expect(component.sessionId, 'ses_afk_1');
-      expect(service.createdCount, 1);
-      // The id is persisted in the store (the bridge's own fact), under the
-      // repo.
-      expect(AfkStore(file: storeFile).sessionIdFor('o/r'), 'ses_afk_1');
+    test(
+      'arming a repo creates exactly one session and stores its id',
+      () async {
+        final component = mkComponent(repos: {'o/r'});
+        expect(component.sessionIdFor('o/r'), isNull);
+        final id = await component.ensureSession('o/r');
+        expect(id, 'ses_afk_1');
+        expect(component.sessionIdFor('o/r'), 'ses_afk_1');
+        expect(service.createdCount, 1);
+        // The id is persisted in the store (the bridge's own fact), under the
+        // repo.
+        expect(AfkStore(file: storeFile).sessionIdFor('o/r'), 'ses_afk_1');
+      },
+    );
+
+    test('arming a second repo creates a second, independent session (two '
+        'independent sessions, spec #407)', () async {
+      final component = mkComponent(repos: {'o/a', 'o/b'});
+      final a = await component.ensureSession('o/a');
+      final b = await component.ensureSession('o/b');
+      expect(a, 'ses_afk_1');
+      expect(b, 'ses_afk_2');
+      expect(service.createdCount, 2);
+      // Two independent stored ids, one per repo.
+      expect(AfkStore(file: storeFile).sessionIdFor('o/a'), 'ses_afk_1');
+      expect(AfkStore(file: storeFile).sessionIdFor('o/b'), 'ses_afk_2');
     });
 
     test('a re-arm reuses the existing session (no duplicate) — the session '
         'outlives a disarm', () async {
-      final component = mkComponent(repo: 'o/r');
-      final first = await component.ensureSession();
+      final component = mkComponent(repos: {'o/r'});
+      final first = await component.ensureSession('o/r');
       expect(first, 'ses_afk_1');
 
-      // The session is still there (a disarm leaves it alone). A second
-      // arm reuses it instead of creating a duplicate.
-      final second = await component.ensureSession();
+      // A disarm (the repo leaves armedRepos) holds everything: the session
+      // and its stored id stay. A re-arm reuses the live session through the
+      // stored id — no duplicate.
+      component.updateSettings(const AfkSettings(armedRepos: {}));
+      expect(component.isArmed('o/r'), isFalse);
+      expect(
+        component.sessionIdFor('o/r'),
+        'ses_afk_1',
+        reason: 'the stored id outlives the disarm',
+      );
+      component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));
+      final second = await component.ensureSession('o/r');
       expect(second, first);
       expect(service.createdCount, 1);
     });
@@ -221,13 +248,15 @@ void main() {
     test(
       'a restarted bridge (fresh component) reuses the persisted session',
       () async {
-        final component = mkComponent(repo: 'o/r');
-        await component.ensureSession(); // Persists ses_afk_1 in the store.
+        final component = mkComponent(repos: {'o/r'});
+        await component.ensureSession(
+          'o/r',
+        ); // Persists ses_afk_1 in the store.
 
         // A fresh component over the same store (a bridge restart) is seeded
         // with the persisted id and reuses it — no second create.
-        final restarted = mkComponent(repo: 'o/r');
-        final id = await restarted.ensureSession();
+        final restarted = mkComponent(repos: {'o/r'});
+        final id = await restarted.ensureSession('o/r');
         expect(id, 'ses_afk_1');
         expect(service.createdCount, 1);
       },
@@ -236,8 +265,8 @@ void main() {
     test(
       'a changed model is effective from the next session creation',
       () async {
-        final component = mkComponent(repo: 'o/r');
-        await component.ensureSession(); // No model (empty default).
+        final component = mkComponent(repos: {'o/r'});
+        await component.ensureSession('o/r'); // No model (empty default).
         expect(service.createModel, isNull);
 
         // The session was lost (a restart that dropped it): the next creation
@@ -250,7 +279,7 @@ void main() {
             model: 'a/b#v',
           ),
         );
-        await component.ensureSession();
+        await component.ensureSession('o/r');
         expect(
           service.createModel,
           const ModelRef(providerId: 'a', id: 'b', variant: 'v'),
@@ -258,47 +287,60 @@ void main() {
       },
     );
 
-    test('the live cap is exposed for the spawn boundary to read', () {
-      final component = mkComponent(repo: 'o/r');
+    test('the live cap is exposed for the spawn boundary to read; isArmed is '
+        'per repo (reads armedRepos live)', () {
+      final component = mkComponent(repos: {'o/r'});
       component.updateSettings(
         const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 7, model: ''),
       );
       expect(component.settings.parallelOrbs, 7);
-      expect(component.enabled, isTrue);
+      expect(component.isArmed('o/r'), isTrue);
+      expect(component.isArmed('o/other'), isFalse);
+      // A disarm of the repo is picked up live (no restart).
+      component.updateSettings(const AfkSettings(armedRepos: {}));
+      expect(component.isArmed('o/r'), isFalse);
     });
 
     test(
       'spawnGate is null with no stored AFK session (no AFK orbs to cap)',
       () {
-        final component = mkComponent(repo: 'o/r');
+        final component = mkComponent(repos: {'o/r'});
         expect(component.spawnGate(), isNull);
       },
     );
 
-    test(
-      'spawnGate carries the AFK session id (the attribution anchor) and the '
-      'live cap, read fresh on every call',
-      () async {
-        final component = mkComponent(repo: 'o/r');
-        await component.ensureSession(); // Persists the AFK session id.
+    test('spawnGate is null when no repo is armed (the cap never applies)', () {
+      final component = mkComponent(repos: {});
+      expect(component.spawnGate(), isNull);
+    });
 
-        final gate = component.spawnGate();
-        expect(gate, isNotNull);
-        expect(gate!.afkSessionId, 'ses_afk_1');
-        expect(gate.cap, 5);
-        // The attribution fact: only the AFK session's spawns are AFK orbs.
-        expect(gate.isAfk('ses_afk_1'), isTrue);
-        expect(gate.isAfk('ses_other'), isFalse);
-        expect(gate.isAfk(null), isFalse);
+    test('spawnGate carries the set of the armed repos stored AFK session ids '
+        'and the live cap, read fresh on every call', () async {
+      final component = mkComponent(repos: {'o/a', 'o/b'});
+      await component.ensureSession('o/a'); // Persists o/a's session id.
+      // o/b is armed but has no session yet: it is not in the set.
+      final gate = component.spawnGate();
+      expect(gate, isNotNull);
+      expect(gate!.afkSessionIds, {'ses_afk_1'});
+      expect(gate.cap, 5);
+      // The attribution fact: a spawn of any AFK session is an AFK orb.
+      expect(gate.isAfk('ses_afk_1'), isTrue);
+      expect(gate.isAfk('ses_other'), isFalse);
+      expect(gate.isAfk(null), isFalse);
 
-        // A changed cap is effective from the next read (the next spawn): the
-        // gate re-reads the live settings, no restart.
-        component.updateSettings(
-          const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 2, model: ''),
-        );
-        expect(component.spawnGate()!.cap, 2);
-      },
-    );
+      // A changed cap is effective from the next read (the next spawn): the
+      // gate re-reads the live settings, no restart.
+      component.updateSettings(
+        const AfkSettings(armedRepos: {'o/a', 'o/b'}, parallelOrbs: 2),
+      );
+      expect(component.spawnGate()!.cap, 2);
+
+      // The second repo's session is created: its id joins the set (a spawn
+      // of either repo's session is AFK-attributed).
+      await component.ensureSession('o/b');
+      expect(component.spawnGate()!.afkSessionIds, {'ses_afk_1', 'ses_afk_2'});
+      expect(component.spawnGate()!.isAfk('ses_afk_2'), isTrue);
+    });
 
     test(
       'no backend: no AFK session can be created (degrades to null)',
@@ -306,33 +348,106 @@ void main() {
         final component = AfkComponent(
           backend: null,
           store: AfkStore(file: storeFile),
-          directoryOf: (_) async => '/main-checkout',
+          directoryOf: (_, __) async => '/main-checkout',
         );
         // Armed, but with no backend there is no host to create the session on.
         component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));
-        expect(await component.ensureSession(), isNull);
-        expect(component.sessionId, isNull);
+        expect(await component.ensureSession('o/r'), isNull);
+        expect(component.sessionIdFor('o/r'), isNull);
       },
     );
 
-    test(
-      'the default directoryOf resolves the first project canonical dir',
-      () async {
-        service.projectList = [
-          const OpencodeProject(
-            id: 'p1',
-            name: 'proj',
-            canonical: '/repo/main',
-          ),
-        ];
-        final component = AfkComponent(
-          backend: backend,
-          store: AfkStore(file: storeFile),
-        );
-        component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));
-        await component.ensureSession();
-        expect(service.createDirectory, '/repo/main');
-      },
-    );
+    test('the default directoryOf resolves the first list-order project whose '
+        'repo identity equals the armed repo (the session lands in that '
+        'checkout, spec #407)', () async {
+      // Two checkouts of two repos (real temp git dirs, so repoIdentityOf
+      // resolves them), in list order o/a then o/b.
+      final checkoutA = await _checkoutWithOrigin(
+        dir,
+        'https://github.com/o/a',
+      );
+      final checkoutB = await _checkoutWithOrigin(
+        dir,
+        'https://github.com/o/b',
+      );
+      service.projectList = [
+        OpencodeProject(id: 'p1', name: 'a', canonical: checkoutA.path),
+        OpencodeProject(id: 'p2', name: 'b', canonical: checkoutB.path),
+      ];
+      final component = AfkComponent(
+        backend: backend,
+        store: AfkStore(file: storeFile),
+      );
+      component.updateSettings(const AfkSettings(armedRepos: {'o/b'}));
+      // The session lands in o/b's checkout (the second project in list
+      // order — the first one does not carry the identity o/b).
+      await component.ensureSession('o/b');
+      expect(service.createDirectory, checkoutB.path);
+    });
+
+    test('two checkouts of the same repo share one session, in the first '
+        'list-order checkout (spec #407, AC4)', () async {
+      // Two checkouts of the same repo, in list order (both resolve to
+      // o/r), plus a different repo's checkout last.
+      final firstCheckout = await _checkoutWithOrigin(
+        dir,
+        'https://github.com/o/r',
+      );
+      final secondCheckout = await _checkoutWithOrigin(
+        dir,
+        'git@github.com:o/r.git',
+      );
+      final otherCheckout = await _checkoutWithOrigin(
+        dir,
+        'https://github.com/o/other',
+      );
+      service.projectList = [
+        OpencodeProject(id: 'p1', name: 'first', canonical: firstCheckout.path),
+        OpencodeProject(
+          id: 'p2',
+          name: 'second',
+          canonical: secondCheckout.path,
+        ),
+        OpencodeProject(id: 'p3', name: 'other', canonical: otherCheckout.path),
+      ];
+      final component = AfkComponent(
+        backend: backend,
+        store: AfkStore(file: storeFile),
+      );
+      component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));
+      // One session for the shared identity, in the first list-order
+      // checkout carrying it.
+      final id = await component.ensureSession('o/r');
+      expect(id, 'ses_afk_1');
+      expect(service.createdCount, 1);
+      expect(service.createDirectory, firstCheckout.path);
+    });
   });
+}
+
+/// A temp git checkout tracking [remoteUrl] on its `origin` (so T1's
+/// [repoIdentityOf] resolves it): `git init` + `git remote add origin` in a
+/// temp dir under [parent]. The dir is cleaned up with [parent].
+Future<Directory> _checkoutWithOrigin(
+  Directory parent,
+  String remoteUrl,
+) async {
+  final checkout = await Directory(
+    '${parent.path}/checkout-${remoteUrl.hashCode.abs()}-${DateTime.now().microsecondsSinceEpoch}',
+  ).create(recursive: true);
+  Future<void> git(List<String> args) async {
+    final result = await Process.run(
+      'git',
+      ['-C', checkout.path, ...args],
+      stdoutEncoding: utf8,
+      stderrEncoding: utf8,
+    );
+    if (result.exitCode != 0) {
+      throw StateError('git ${args.join(' ')} failed: ${result.stderr}');
+    }
+  }
+
+  await git(['init', '-q']);
+  await git(['remote', 'add', 'origin', remoteUrl]);
+  return checkout;
 }

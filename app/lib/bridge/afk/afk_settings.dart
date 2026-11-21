@@ -17,8 +17,9 @@ import '../../model/command.dart';
 /// The arming is a *set* of repo identities, not a single toggle: two
 /// checkouts of the same repo share one identity and thus one armed state.
 /// [armedRepos] is an [LinkedHashSet] (const-constructible) that preserves
-/// the persisted order, so [firstArmedRepo] is deterministic (the first
-/// list-order armed repo).
+/// the persisted order, so the consumers that iterate it (the spawn gate's
+/// session-id set, the arming diff, [firstArmedRepo]) see a deterministic
+/// order (the persisted order, first list-order first).
 class AfkSettings {
   const AfkSettings({
     this.armedRepos = const {},
@@ -42,11 +43,12 @@ class AfkSettings {
   /// the inert state — no armed repo means no AFK work at all.
   final Set<String> armedRepos;
 
-  /// The first armed repo in list order, or `null` when none is armed. The
-  /// bridge's single-repo consumers (until the per-project poller and
-  /// session land in later tickets) read the arming through this; it is the
-  /// deterministic anchor for "which repo's checkout does the one resident
-  /// session live in?".
+  /// The first armed repo in list order, or `null` when none is armed (spec
+  /// #407). The **transitional single anchor**: the per-project poller
+  /// (T2) and the run service's liveness (T4) still read the arming through
+  /// this one repo until they are reshaped per repo — the session layer
+  /// (T3: the session port, the spawn gate, the failure-push deep-link) is
+  /// already per repo. Deterministic (first list-order armed repo).
   String? get firstArmedRepo => armedRepos.isEmpty ? null : armedRepos.first;
 
   /// How many AFK orbs may run in parallel (1–10). Effective from the next

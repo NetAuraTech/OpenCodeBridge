@@ -7,35 +7,39 @@ import 'afk_run_state.dart';
 import 'afk_store.dart';
 import 'github_reader.dart';
 
-/// The session operations the AFK run service rides (spec #376, T3): the
-/// feed through the host shared service's existing prompt path, and the
-/// session's idle-wait (the long-poll that is the trigger — not the
-/// signal). All injected, all faked in the tests.
+/// The session operations the AFK run service rides (spec #376, T3;
+/// per repo by spec #407): the feed through the host shared service's
+/// existing prompt path, and the session's idle-wait (the long-poll that is
+/// the trigger — not the signal). All injected, all faked in the tests.
 ///
-/// - [sessionId] reads the **resident** AFK session's id (the bridge's
-///   stored id — created by the **arming** action, never by this service):
-///   `null` when no session is armed yet (no shared opencode service, not
-///   armed, or the main checkout unresolved) — the service then feeds
-///   nothing on this pass and asks again on the next.
+/// - [sessionId] reads the **repo's** AFK session id — the bridge's stored
+///   id for that repo (created by the **arming** action, never by this
+///   service): `null` when the repo has no session yet (no shared opencode
+///   service, not armed, or the repo's checkout unresolved) — the service
+///   then feeds nothing on this pass and asks again on the next.
 /// - [prompt] is the feed: a prompt admitted while the agent is busy parks
 ///   in the service's durable inbox and runs in order — the service's
 ///   inbox is the queue, the bridge keeps no feed queue of its own.
 /// - [waitIdle] is the wait: `true` when the session's agent loop is idle
 ///   (the turn is over — go read the issue), `false` when it is still
 ///   running (or the wait timed out while it ran — ask again next pass).
+///
+/// The feed and the wait are scoped to [repo]'s session (spec #407): a run
+/// of repo A is fed and waited on through A's session, never B's.
 abstract class AfkSessionPort {
-  /// The AFK session's id, or `null` when no session is (yet) armed —
-  /// read-only: the run service never creates the session (the arming
-  /// action does).
-  Future<String?> sessionId();
+  /// The AFK session's id **for [repo]** (spec #407), or `null` when that
+  /// repo's session is not (yet) armed — read-only: the run service never
+  /// creates the session (the arming action does).
+  Future<String?> sessionId(String repo);
 
-  /// Feed [text] to the AFK session (the existing prompt path on the host
-  /// shared service).
-  Future<void> prompt(String text);
+  /// Feed [text] to [repo]'s AFK session (the existing prompt path on the
+  /// host shared service).
+  Future<void> prompt(String repo, String text);
 
-  /// The idle-wait (long-poll, 204 at idle): `true` when the session is
-  /// idle, `false` when it is still running (the hold timed out).
-  Future<bool> waitIdle({Duration? timeout});
+  /// The idle-wait (long-poll, 204 at idle) for [repo]'s AFK session:
+  /// `true` when the session is idle, `false` when it is still running (the
+  /// hold timed out).
+  Future<bool> waitIdle(String repo, {Duration? timeout});
 }
 
 /// The AFK run's liveness facts (spec #376, T6): the two bridge-side facts
@@ -88,15 +92,20 @@ class AfkLiveness {
 }
 
 /// The run service's one port implementation: the composite session
-/// service's prompt path + idle-wait, over the AFK session the
-/// [AfkComponent] owns (its **stored** id — the one the arming action
-/// created and persisted). The bridge wires this at startup (the
-/// poller-style wiring). The session id is read, never created, here: a
-/// disarmed pass must not create the session as a side effect.
+/// service's prompt path + idle-wait, over **a repo's** AFK session the
+/// [AfkComponent] owns (its **stored** id for that repo — the one the
+/// arming action created and persisted). The bridge wires this at startup
+/// (the poller-style wiring). The session id is read, never created, here:
+/// a disarmed pass must not create the session as a side effect.
+///
+/// Every operation is scoped to [repo] (the run's own repo — a run of repo A
+/// is fed and waited on through A's session, never B's): the row the run
+/// service drives carries its [AfkRun.ownerRepo], and the pass passes it to
+/// the port.
 class CompositeAfkSessions implements AfkSessionPort {
   CompositeAfkSessions({required this.component, required this.backend});
 
-  /// The AFK subsystem (the stored session id).
+  /// The AFK subsystem (the stored per-repo session ids).
   final AfkComponent component;
 
   /// The composite sessions backend (host + running orbs; the AFK session
@@ -106,11 +115,11 @@ class CompositeAfkSessions implements AfkSessionPort {
   final SessionsBackend? backend;
 
   @override
-  Future<String?> sessionId() async => component.sessionId;
+  Future<String?> sessionId(String repo) async => component.sessionIdFor(repo);
 
   @override
-  Future<void> prompt(String text) async {
-    final id = component.sessionId;
+  Future<void> prompt(String repo, String text) async {
+    final id = component.sessionIdFor(repo);
     if (id == null) {
       throw StateError('the AFK session is not armed to feed');
     }
@@ -122,10 +131,10 @@ class CompositeAfkSessions implements AfkSessionPort {
   }
 
   @override
-  Future<bool> waitIdle({Duration? timeout}) async {
+  Future<bool> waitIdle(String repo, {Duration? timeout}) async {
     final backend = this.backend;
     if (backend == null) return false; // No host: never "idle" here.
-    final id = component.sessionId;
+    final id = component.sessionIdFor(repo);
     if (id == null) return false; // Not armed: nothing to wait on.
     return backend.service.waitIdle(
       id,
@@ -422,28 +431,33 @@ class AfkRunService {
   }
 
   // ------------------------------------------------------------------------
-  // The fresh-agent handoff (spec #376, T6): when the stored AFK session does
-  // not exist (first arm on a wiped store, or a lost session), the bridge
-  // creates it (checkout directory, pinned model, agent `afk` — the arming
-  // action, the [AfkComponent]'s) and the **first feed is a bootstrap**: the
-  // in-flight runs (number, state, retry count, last failure reason) from the
-  // store, so the recreated agent reconciles with the tracker itself. A plain
-  // host-service restart does not lose the session (ids and full state
-  // persist), so a normal restart reuses it — no recreation, no re-bootstrap.
-  // The bridge triggers [bootstrap] from the arming, after it has ensured the
-  // session and learned that it was just created.
+  // The fresh-agent handoff (spec #376, T6; scoped per repo by spec #407):
+  // when a repo's stored AFK session does not exist (first arm on a wiped
+  // store, or a lost session), the bridge creates it (the repo's checkout
+  // directory, pinned model, agent `afk` — the arming action, the
+  // [AfkComponent]'s) and the **first feed is a bootstrap**: *that repo's*
+  // in-flight runs (number, state, retry count, last failure reason) from
+  // the store, so the recreated agent reconciles with its own tracker. A run
+  // of another repo never appears in this repo's bootstrap (the store is
+  // keyed per repo). A plain host-service restart does not lose the session
+  // (ids and full state persist), so a normal restart reuses it — no
+  // recreation, no re-bootstrap. The bridge triggers [bootstrap] from the
+  // arming, after it has ensured the repo's session and learned that it was
+  // just created.
 
-  /// Send the bootstrap feed (the fresh-agent handoff's first feed): the
-  /// in-flight runs from the store — the runs in `dispatched` or `pr-open`
-  /// (the ones with work in motion; `idle` runs get their ordinary feed from
-  /// the ready gate, `failed` and `done` runs are terminal) — as one prompt
-  /// to the AFK session. Inert when there is no session to feed, or no
-  /// in-flight run to reconcile (a wiped store: nothing to hand over).
-  Future<void> bootstrap() async {
-    final sessionId = await sessions.sessionId();
+  /// Send the bootstrap feed for [repo] (the fresh-agent handoff's first
+  /// feed, spec #407): *that repo's* in-flight runs from the store — the
+  /// runs in `dispatched` or `pr-open` (the ones with work in motion; `idle`
+  /// runs get their ordinary feed from the ready gate, `failed` and `done`
+  /// runs are terminal) — as one prompt to **the repo's** AFK session (a run
+  /// of another repo never appears: the store is keyed per repo). Inert when
+  /// the repo has no session to feed, or no in-flight run to reconcile (a
+  /// wiped store: nothing to hand over).
+  Future<void> bootstrap(String repo) async {
+    final sessionId = await sessions.sessionId(repo);
     if (sessionId == null) return; // No session to feed: nothing to boot.
     final inFlight = store
-        .allRuns()
+        .runsFor(repo)
         .where((run) {
           final kind = AfkRunState.parse(run.state).kind;
           return kind == AfkRunStateKind.dispatched ||
@@ -451,7 +465,7 @@ class AfkRunService {
         })
         .toList(growable: false);
     if (inFlight.isEmpty) return; // Nothing in flight to reconcile.
-    await sessions.prompt(bootstrapFeed(inFlight));
+    await sessions.prompt(repo, bootstrapFeed(inFlight));
   }
 
   // ------------------------------------------------------------------------
@@ -518,8 +532,9 @@ class AfkRunService {
     }
     // The wait (the idle-wait long-poll, the **trigger**): while the
     // session is still running the service reads nothing — the narration
-    // is not yet the run's signal.
-    final idle = await sessions.waitIdle(timeout: pollInterval);
+    // is not yet the run's signal. The wait is the run's repo's session
+    // (spec #407): a run of repo A is waited on through A's session.
+    final idle = await sessions.waitIdle(run.ownerRepo, timeout: pollInterval);
     if (!idle) return;
     // Idle: go read the issue's last comment — the agent's **terminal
     // narration** (the signal).
@@ -622,6 +637,12 @@ class AfkRunService {
         bridgeEvent(
           type: BridgeEventType.afkFailed,
           data: {
+            // The repo identity (spec #407, T3): the failure push's deep-link
+            // resolves the **failed repo's** AFK session from this — the
+            // event carries its own home so the dispatcher never guesses the
+            // repo. (afk.pr_open / afk.ready_admitted gain their repo in
+            // T4/T2.)
+            'repo': run.ownerRepo,
             'issueNumber': run.issueNumber,
             'title': run.title,
             'reason': reason,
@@ -718,9 +739,14 @@ class AfkRunService {
   /// session is not (yet) available — the caller then leaves the row as it
   /// stands and asks again on the next pass.
   Future<bool> _feed(AfkRun run) async {
-    final sessionId = await sessions.sessionId();
+    final sessionId = await sessions.sessionId(run.ownerRepo);
     if (sessionId == null) return false; // Not ready: the next pass asks.
-    await sessions.prompt(availabilityNotice(run.issueNumber, run.title));
+    // The feed goes to the run's own repo's session (spec #407): a run of
+    // repo A is never fed through B's session.
+    await sessions.prompt(
+      run.ownerRepo,
+      availabilityNotice(run.issueNumber, run.title),
+    );
     return true;
   }
 
