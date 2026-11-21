@@ -236,6 +236,24 @@ class AfkStore {
   /// The legacy flat `afk.sessionId` key is not read (no migration).
   String? sessionIdFor(String repo) => load()[keySession(repo)];
 
+  /// Every stored AFK session id (all `afk.session.<owner/repo>` values),
+  /// deduplicated, empty strings dropped. This is the **disarming-stable**
+  /// set (spec #407 T5): a disarm never deletes a stored session id (the
+  /// session outlives a disarm — spec #376, user story #24), so a repo
+  /// disarmed while its orb is in flight keeps its id in the set until the
+  /// orb settles. It is the set the spawn gate's attribution and the
+  /// in-flight counter are held against — the in-flight fact is the creating
+  /// task's caller, not the current arming. The legacy flat `afk.sessionId`
+  /// key is not read (no migration).
+  Set<String> allSessionIds() {
+    final ids = <String>{};
+    for (final entry in load().entries) {
+      if (!_isSessionKey(entry.key)) continue;
+      if (entry.value.isNotEmpty) ids.add(entry.value);
+    }
+    return ids;
+  }
+
   /// Store the AFK session id for [repo] (the session the bridge created
   /// under that repo's checkout). `null` clears it. Other stored values are
   /// kept.
@@ -376,6 +394,16 @@ class AfkStore {
     const runPrefix = 'afk.run.';
     if (!key.startsWith(runPrefix)) return false;
     return key.substring(runPrefix.length).contains('/');
+  }
+
+  /// Whether [key] is a per-repo session-id key: `afk.session.<owner/repo>`,
+  /// where the repo identity always contains exactly one `/`. The legacy flat
+  /// `afk.sessionId` key has no repo identity, so it is never mistaken for a
+  /// per-repo key (it is not read, no migration — spec #407).
+  static bool _isSessionKey(String key) {
+    const sessionPrefix = 'afk.session.';
+    if (!key.startsWith(sessionPrefix)) return false;
+    return key.substring(sessionPrefix.length).contains('/');
   }
 
   /// Whether [key] is a pre-scoping flat key (spec #407, "no migration"): the

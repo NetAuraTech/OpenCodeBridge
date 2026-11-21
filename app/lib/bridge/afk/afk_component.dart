@@ -98,19 +98,28 @@ class AfkComponent {
   /// `afk.sessionId` is not read (no migration, spec #407).
   String? get sessionId => repo == null ? null : store.sessionIdFor(repo!);
 
-  /// The spawn-boundary view of the AFK attribution (spec #376, T4): the AFK
-  /// session id (a spawn is AFK-attributed when its caller session is this
-  /// one) and the parallel-orbs cap, **read live** — the cap from the current
-  /// settings (effective from the next spawn, no restart), the session id
-  /// fresh from the store (a restart, or a fresh arming, is picked up).
-  /// `null` when no repo is armed or no AFK session id is persisted: there is
-  /// no AFK session, so no spawn is AFK-attributed and the cap never applies.
+  /// The spawn-boundary view of the AFK attribution (spec #407, T5 —
+  /// reshaped from #376 T4): the **set of AFK session ids** and the
+  /// parallel-orbs cap, **read live** — the cap from the current settings
+  /// (effective from the next spawn, no restart), the ids fresh from the
+  /// store (a restart, or a fresh arming, is picked up).
+  ///
+  /// The set is the store's **disarming-stable** one
+  /// ([AfkStore.allSessionIds] — every stored `afk.session.<owner/repo>`
+  /// id): a disarm never deletes a stored session id (the session outlives
+  /// a disarm — spec #376, user story #24), so a repo disarmed while its
+  /// orb is in flight keeps counting that orb until it settles (the
+  /// in-flight fact is the creating task's caller, not the current arming).
+  /// Arming decides only whether the cap is engaged at all, never the
+  /// count: `null` when no repo is armed (no AFK attribution, cap
+  /// disengaged — unchanged posture) or the store holds no AFK session id
+  /// yet (the session is not created — nothing to attribute, nothing to
+  /// cap).
   AfkSpawnGate? spawnGate() {
-    final repo = this.repo;
-    if (repo == null) return null;
-    final id = store.sessionIdFor(repo);
-    if (id == null || id.isEmpty) return null;
-    return AfkSpawnGate(afkSessionId: id, cap: _settings.parallelOrbs);
+    if (!_settings.armedRepos.isNotEmpty) return null;
+    final ids = store.allSessionIds();
+    if (ids.isEmpty) return null;
+    return AfkSpawnGate(sessionIds: ids, cap: _settings.parallelOrbs);
   }
 
   /// Ensure the AFK session exists and return its id (the **arming** action).

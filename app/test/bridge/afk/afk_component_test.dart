@@ -268,37 +268,103 @@ void main() {
     });
 
     test(
-      'spawnGate is null with no stored AFK session (no AFK orbs to cap)',
+      'spawnGate is null with no armed repo (no AFK session, cap disengaged)',
       () {
-        final component = mkComponent(repo: 'o/r');
+        final component = mkComponent(repo: null);
         expect(component.spawnGate(), isNull);
       },
     );
 
-    test(
-      'spawnGate carries the AFK session id (the attribution anchor) and the '
-      'live cap, read fresh on every call',
-      () async {
-        final component = mkComponent(repo: 'o/r');
-        await component.ensureSession(); // Persists the AFK session id.
+    test('spawnGate is null when an armed repo has no stored AFK session', () {
+      final component = mkComponent(repo: 'o/r');
+      expect(component.spawnGate(), isNull);
+    });
 
-        final gate = component.spawnGate();
-        expect(gate, isNotNull);
-        expect(gate!.afkSessionId, 'ses_afk_1');
-        expect(gate.cap, 5);
-        // The attribution fact: only the AFK session's spawns are AFK orbs.
-        expect(gate.isAfk('ses_afk_1'), isTrue);
-        expect(gate.isAfk('ses_other'), isFalse);
-        expect(gate.isAfk(null), isFalse);
+    test('spawnGate carries the set of AFK session ids (the attribution set) '
+        'and the live cap, read fresh on every call', () async {
+      final component = mkComponent(repo: 'o/r');
+      await component.ensureSession(); // Persists the AFK session id.
 
-        // A changed cap is effective from the next read (the next spawn): the
-        // gate re-reads the live settings, no restart.
-        component.updateSettings(
-          const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 2, model: ''),
-        );
-        expect(component.spawnGate()!.cap, 2);
-      },
-    );
+      final gate = component.spawnGate();
+      expect(gate, isNotNull);
+      expect(gate!.sessionIds, {'ses_afk_1'});
+      expect(gate.cap, 5);
+      // The attribution fact: a spawn is AFK when its caller session is
+      // any armed repo's AFK session.
+      expect(gate.isAfk('ses_afk_1'), isTrue);
+      expect(gate.isAfk('ses_other'), isFalse);
+      expect(gate.isAfk(null), isFalse);
+
+      // A changed cap is effective from the next read (the next spawn): the
+      // gate re-reads the live settings, no restart.
+      component.updateSettings(
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 2, model: ''),
+      );
+      expect(component.spawnGate()!.cap, 2);
+    });
+
+    test('two armed repos: the gate carries both stored session ids; a repo '
+        'without a stored id drops out; disarming everything disengages the '
+        'cap (null gate)', () async {
+      final component = mkComponent(repo: 'o/r');
+      await component.ensureSession(); // ses_afk_1 under o/r.
+      component.updateSettings(
+        const AfkSettings(
+          armedRepos: {'o/r', 'o/r2'},
+          parallelOrbs: 5,
+          model: '',
+        ),
+      );
+      final gate = component.spawnGate();
+      expect(gate, isNotNull);
+      // o/r2 has no stored session yet (T3 creates it): it drops out of
+      // the set, o/r's id stays.
+      expect(gate!.sessionIds, {'ses_afk_1'});
+      expect(gate.isAfk('ses_afk_1'), isTrue);
+
+      // A second repo with its own stored session: the set carries both —
+      // either AFK session's spawns are AFK-attributed.
+      await AfkStore(file: storeFile).setSessionId('o/r2', 'ses_afk_r2');
+      final both = component.spawnGate()!;
+      expect(both.sessionIds, {'ses_afk_1', 'ses_afk_r2'});
+      expect(both.isAfk('ses_afk_1'), isTrue);
+      expect(both.isAfk('ses_afk_r2'), isTrue);
+      expect(both.isAfk('ses_other'), isFalse);
+
+      // Disarming everything holds the stored ids but disengages the cap:
+      // no armed repo, no AFK session at the spawn boundary.
+      component.updateSettings(const AfkSettings());
+      expect(component.spawnGate(), isNull);
+    });
+
+    test('disarming one repo while its orb is in flight: its session id '
+        'stays in the set (the in-flight fact is the creating task\'s '
+        'caller, not the current arming)', () async {
+      // Two repos armed, each with its own stored session.
+      final component = mkComponent(repo: 'o/r');
+      await component.ensureSession(); // ses_afk_1 under o/r.
+      await AfkStore(file: storeFile).setSessionId('o/r2', 'ses_afk_r2');
+      component.updateSettings(
+        const AfkSettings(
+          armedRepos: {'o/r', 'o/r2'},
+          parallelOrbs: 5,
+          model: '',
+        ),
+      );
+      expect(component.spawnGate()!.sessionIds, {'ses_afk_1', 'ses_afk_r2'});
+
+      // Disarm o/r while its orb is in flight: the disarm never deletes the
+      // stored session id (the session outlives a disarm), so its id stays in
+      // the set until the orb settles. Only o/r2 is armed now.
+      component.updateSettings(
+        const AfkSettings(armedRepos: {'o/r2'}, parallelOrbs: 5, model: ''),
+      );
+      final gate = component.spawnGate();
+      expect(gate, isNotNull);
+      expect(gate!.sessionIds, {'ses_afk_1', 'ses_afk_r2'});
+      expect(gate.isAfk('ses_afk_1'), isTrue);
+      expect(gate.isAfk('ses_afk_r2'), isTrue);
+    });
 
     test(
       'no backend: no AFK session can be created (degrades to null)',

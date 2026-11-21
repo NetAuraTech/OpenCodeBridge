@@ -717,11 +717,12 @@ class BridgeServer {
         file: File('${homeDirectory()}/.config/opencodebridge/tasks.json'),
         notifyProvider: () => bridge._notify,
         upstreams: orbUpstreams,
-        // The AFK parallel-orbs cap (issue #379, spec #376 T4): the spawn
-        // boundary reads the AFK attribution live — the AFK session id (the
-        // bridge's own persisted fact) and the current cap — so a Settings
-        // change is effective from the next spawn, and a spawn is AFK-attributed
-        // when its caller session is the AFK session.
+        // The AFK parallel-orbs cap (issue #379, reshaped by spec #407 T5):
+        // the spawn boundary reads the AFK attribution live — the set of
+        // AFK session ids (every armed repo's stored session — the bridge's
+        // own persisted facts) and the current cap — so a Settings change is
+        // effective from the next spawn, and a spawn is AFK-attributed when
+        // its caller session is any armed repo's AFK session.
         afkGate: () => afkComponent.spawnGate(),
       );
     }
@@ -806,31 +807,35 @@ class BridgeServer {
     }
   }
 
-  /// The AFK liveness facts (spec #376, T6), read live at reconciliation
-  /// time: the **AFK-attributed orbs in flight** (the task service's
-  /// persisted fact — the creating task's caller session held against the
-  /// AFK store's session id) plus the **AFK session's active state** (the
-  /// sessions backend's active set). The run service's startup
-  /// reconciliation ORs the two ([AfkLiveness.any]); a `dispatched` run is
-  /// live while either holds, non-live + no narration + no PR is lost.
+  /// The AFK liveness facts (spec #376, T6; reshaped by #407 T5), read live
+  /// at reconciliation time: the **AFK-attributed orbs in flight** (the task
+  /// service's persisted fact — the creating task's caller session held
+  /// against the armed repos' AFK session ids, the attribution set) plus
+  /// the **AFK session's active state** (the sessions backend's active set).
+  /// The run service's startup reconciliation ORs the two
+  /// ([AfkLiveness.any]); a `dispatched` run is live while either holds,
+  /// non-live + no narration + no PR is lost.
   ///
   /// Not the service inbox (spec #376, T6): the two bridge-side facts only.
-  /// Inert on a failed read (no task service, no backend, no AFK session id):
-  /// the answer degrades to no-liveness (the reconciliation then reads the
-  /// run's narration/PR to decide lost vs. on-its-way), never a throw.
+  /// Inert on a failed read (no task service, no backend, no armed repo's
+  /// stored session id): the answer degrades to no-liveness (the
+  /// reconciliation then reads the run's narration/PR to decide lost vs.
+  /// on-its-way), never a throw.
   static Future<AfkLiveness> _afkLiveness(
     AfkComponent afk,
     OrbTaskService? tasks,
     SessionsBackend? backend,
   ) async {
-    // The AFK session's id (the first armed repo's, spec #407 T1; per-repo
-    // liveness lands with the per-repo run service in T4).
-    final id = afk.sessionId;
-    if (id == null || id.isEmpty) return const AfkLiveness.none();
+    // The AFK session ids (the store's disarming-stable set, spec #407 T5:
+    // a disarm never deletes a stored session id, so a disarmed repo's
+    // in-flight orb still counts until it settles). The per-repo liveness
+    // lands with the per-repo run service in T4.
+    final ids = afk.store.allSessionIds();
+    if (ids.isEmpty) return const AfkLiveness.none();
     var orbsInFlight = 0;
     if (tasks != null) {
       try {
-        orbsInFlight = tasks.afkOrbsInFlight(id);
+        orbsInFlight = tasks.afkOrbsInFlight(ids);
       } catch (_) {
         orbsInFlight = 0; // A failed read degrades to no orbs in flight.
       }
@@ -838,7 +843,9 @@ class BridgeServer {
     var sessionActive = false;
     if (backend != null) {
       try {
-        sessionActive = (await backend.service.activeSessionIds()).contains(id);
+        sessionActive = (await backend.service.activeSessionIds()).any(
+          ids.contains,
+        );
       } catch (_) {
         sessionActive = false; // A failed read degrades to inactive.
       }

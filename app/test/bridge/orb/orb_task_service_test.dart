@@ -371,10 +371,11 @@ void main() {
   late _FakePushSender pushSender;
 
   /// The AFK attribution the spawn boundary reads live (issue #379, spec
-  /// #376 T4): the AFK session id (`null` = the cap is disengaged) and the
-  /// parallel-orbs cap. Mutable, so a test can change the cap mid-run (a
-  /// Settings change, effective from the next spawn).
-  late String? afkSessionId;
+  /// #407 T5): the set of AFK session ids (`null` = the cap is disengaged —
+  /// no repo armed) and the parallel-orbs cap. Mutable, so a test can arm
+  /// the cap (arming a repo's session), disarm it (disarming), and change
+  /// the cap mid-run (a Settings change, effective from the next spawn).
+  late Set<String>? afkSessionIds;
   late int afkCap;
 
   /// Every service a test builds (the completion watcher polls on its own):
@@ -417,12 +418,13 @@ void main() {
       settleIdleWindow: settleIdleWindow,
       settleMissingWindow: settleMissingWindow,
       notifyProvider: holder.provider,
-      // The AFK spawn-boundary gate (issue #379): read live from the mutable
-      // test fields, so a test can arm the cap and change it mid-run.
+      // The AFK spawn-boundary gate (issue #379, reshaped to the set by
+      // spec #407 T5): read live from the mutable test fields, so a test can
+      // arm the cap, disarm it, and change the cap mid-run.
       afkGate: () {
-        final id = afkSessionId;
-        if (id == null || id.isEmpty) return null;
-        return AfkSpawnGate(afkSessionId: id, cap: afkCap);
+        final ids = afkSessionIds;
+        if (ids == null || ids.isEmpty) return null;
+        return AfkSpawnGate(sessionIds: ids, cap: afkCap);
       },
     );
     notifyHolders[created] = holder;
@@ -439,7 +441,7 @@ void main() {
     waitGrace = const Duration(seconds: 1);
     settleIdleWindow = const Duration(seconds: 30);
     settleMissingWindow = const Duration(seconds: 30);
-    afkSessionId = null; // The cap is disengaged unless a test arms it.
+    afkSessionIds = null; // The cap is disengaged unless a test arms it.
     afkCap = 5;
     service = newService();
   });
@@ -1888,13 +1890,19 @@ void main() {
     });
   });
 
-  group('the AFK parallel-orbs cap at the spawn boundary (issue #379)', () {
+  group('the AFK parallel-orbs cap at the spawn boundary (issue #379, '
+      'per-project by spec #407 T5)', () {
     const afk = 'ses_afk';
 
     /// Spawn one AFK-attributed task [n] onto a fresh orb, leaving the AFK
     /// orb in flight (the creating task records the AFK caller session — the
-    /// attribution fact).
-    Future<OrbTask> spawnAfk(String task, {required String orb}) async {
+    /// attribution fact). [callerSession] is the AFK session that spawns it
+    /// (per-project: each armed repo's AFK session, spec #407).
+    Future<OrbTask> spawnAfk(
+      String task, {
+      required String orb,
+      String callerSession = afk,
+    }) async {
       final id = 'orb_$orb';
       orbs.createResult = _runningOrb(id: id, name: orb);
       scriptDispatch();
@@ -1902,58 +1910,99 @@ void main() {
         task: task,
         wait: false,
         orb: orb,
-        callerSession: afk,
+        callerSession: callerSession,
         callerDirectory: '/home/dev/shop',
       );
     }
 
-    test('a second AFK spawn at the cap is refused with the counter and the '
-        'positive path (AC1)', () async {
-      afkSessionId = afk;
-      afkCap = 1;
-      orbs.listResult = const [];
-      final first = await spawnAfk('implement ticket one', orb: 'one');
-      expect(first.status, 'running');
-      expect(first.createdOrb, isTrue);
-
-      // The AFK cap is reached (1 in flight of 1): the second AFK-attributed
-      // spawn is refused up front, the answer carrying the counter and the
-      // positive path (wait, then re-dispatch). The refusal is a named
-      // refusal, not a dead end.
-      await expectLater(
-        service.spawn(
-          task: 'implement ticket two',
-          wait: false,
+    test(
+      'a third AFK spawn at the cap is refused with the counter and the '
+      'positive path — the cap is the host total across repos (AC1)',
+      () async {
+        // Two repos armed, two AFK sessions, cap 2: one AFK orb in flight
+        // from each session → a third AFK-attributed spawn (from either
+        // session) is refused, naming the host-total counter.
+        afkSessionIds = {afk, 'ses_afk_2'};
+        afkCap = 2;
+        orbs.listResult = const [];
+        final first = await spawnAfk('implement ticket one', orb: 'one');
+        final second = await spawnAfk(
+          'implement ticket two',
           orb: 'two',
-          callerSession: afk,
-          callerDirectory: '/home/dev/shop',
-        ),
-        throwsA(
-          isA<OrbRefusalError>()
-              .having((e) => e.code, 'code', OrbRefusalError.afkCap)
-              .having(
-                (e) => e.message,
-                'message',
-                allOf(
-                  contains('1 in flight of 1'),
-                  contains('Wait for a slot'),
-                  contains('re-dispatch'),
+          callerSession: 'ses_afk_2',
+        );
+        expect(first.status, 'running');
+        expect(second.status, 'running');
+        expect(first.createdOrb, isTrue);
+        expect(second.createdOrb, isTrue);
+        // The orbs no longer need listing: the refused spawn targets a new
+        // name (which would create), not an existing one.
+        orbs.listResult = const [];
+
+        // The AFK cap is reached (2 in flight of 2): the third AFK-attributed
+        // spawn is refused up front, the answer carrying the counter and the
+        // positive path (wait, then re-dispatch). The refusal is a named
+        // refusal, not a dead end.
+        await expectLater(
+          service.spawn(
+            task: 'implement ticket three',
+            wait: false,
+            orb: 'three',
+            callerSession: afk,
+            callerDirectory: '/home/dev/shop',
+          ),
+          throwsA(
+            isA<OrbRefusalError>()
+                .having((e) => e.code, 'code', OrbRefusalError.afkCap)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  allOf(
+                    contains('2 in flight of 2'),
+                    contains('Wait for a slot'),
+                    contains('re-dispatch'),
+                  ),
                 ),
-              ),
-        ),
-      );
+          ),
+        );
 
-      // The refusal dispatches nothing and leaks no orb: one session, one
-      // task, one prompt, and the create for the refused orb never ran.
-      expect(orbs.createSessionCalls, 1);
-      expect(orbs.createName, 'one');
-      expect(service.tasks, hasLength(1));
-      expect(backend.opencode.prompts, hasLength(1));
-    });
+        // The refusal dispatches nothing and leaks no orb: two sessions, two
+        // tasks, two prompts, and the create for the refused orb never ran
+        // (the last create stayed the second AFK orb's).
+        expect(orbs.createSessionCalls, 2);
+        expect(orbs.createName, 'two');
+        expect(service.tasks, hasLength(2));
+        expect(backend.opencode.prompts, hasLength(2));
 
-    test('after the first AFK orb settles the next AFK spawn is admitted '
-        '(in flight, not cumulative) (AC2)', () async {
-      afkSessionId = afk;
+        // The refusal holds for a spawn from the other AFK session too — the
+        // cap is the host total, not a per-repo one.
+        await expectLater(
+          service.spawn(
+            task: 'implement ticket four',
+            wait: false,
+            orb: 'four',
+            callerSession: 'ses_afk_2',
+            callerDirectory: '/home/dev/shop',
+          ),
+          throwsA(
+            isA<OrbRefusalError>()
+                .having((e) => e.code, 'code', OrbRefusalError.afkCap)
+                .having(
+                  (e) => e.message,
+                  'message',
+                  contains('2 in flight of 2'),
+                ),
+          ),
+        );
+        expect(orbs.createSessionCalls, 2);
+        expect(service.tasks, hasLength(2));
+      },
+    );
+
+    test('after one AFK orb settles the next AFK spawn from the other repo '
+        'session is admitted — the counter is in-flight across repos, not '
+        'cumulative (AC2)', () async {
+      afkSessionIds = {afk, 'ses_afk_2'};
       afkCap = 1;
       orbs.listResult = const [];
       final first = await spawnAfk('implement ticket one', orb: 'one');
@@ -1968,24 +2017,29 @@ void main() {
       orbs.listResult = [_runningOrb(id: 'orb_one', name: 'one')];
       await until(() => first.isDone);
 
-      // The next AFK spawn is admitted — not refused as a second cumulative
-      // spawn of the same capped system.
-      final second = await spawnAfk('implement ticket two', orb: 'two');
+      // The next AFK spawn — from the other repo's AFK session — is
+      // admitted: the counter is in-flight across repos, not a per-repo or
+      // cumulative one.
+      final second = await spawnAfk(
+        'implement ticket two',
+        orb: 'two',
+        callerSession: 'ses_afk_2',
+      );
       expect(second.status, 'running');
       expect(second.id, isNot(first.id));
       expect(service.tasks, hasLength(2));
     });
 
-    test('a developer spawn is admitted even at the AFK cap (scoped to AFK '
-        'orbs only) (AC3)', () async {
-      afkSessionId = afk;
+    test('a developer spawn is admitted even at the AFK cap (a caller '
+        'outside the set is never capped) (AC3)', () async {
+      afkSessionIds = {afk, 'ses_afk_2'};
       afkCap = 1;
       orbs.listResult = const [];
       await spawnAfk('implement ticket one', orb: 'one');
 
-      // A developer spawn (a different caller session) is never capped by the
-      // AFK rule, even with the AFK cap reached: the cap is scoped to AFK
-      // orbs only.
+      // A developer spawn (a caller session in neither AFK session) is never
+      // capped by the AFK rule, even with the AFK cap reached: the cap is
+      // scoped to AFK orbs only.
       orbs.createResult = _runningOrb(id: 'orb_dev', name: 'dev');
       final dev = await service.spawn(
         task: 'developer ticket',
@@ -1996,13 +2050,13 @@ void main() {
       );
       expect(dev.status, 'running');
 
-      // ...and the AFK cap still holds for the AFK agent.
+      // ...and the AFK cap still holds for either AFK session.
       await expectLater(
         service.spawn(
           task: 'implement ticket two',
           wait: false,
           orb: 'two',
-          callerSession: afk,
+          callerSession: 'ses_afk_2',
           callerDirectory: '/home/dev/shop',
         ),
         throwsA(
@@ -2015,9 +2069,10 @@ void main() {
       );
     });
 
-    test('a re-send of the same AFK task returns the running task, not a cap '
-        'refusal (AC4, the idempotency rule is preserved)', () async {
-      afkSessionId = afk;
+    test('a re-send of the same AFK task onto a busy AFK orb returns the '
+        'running task, not a cap refusal (AC4, the idempotency rule is '
+        'preserved)', () async {
+      afkSessionIds = {afk};
       afkCap = 1;
       orbs.listResult = const [];
       final first = await spawnAfk('implement ticket one', orb: 'one');
@@ -2040,7 +2095,7 @@ void main() {
 
     test('lowering the cap is effective from the next spawn; in-flight orbs '
         'are untouched (AC5)', () async {
-      afkSessionId = afk;
+      afkSessionIds = {afk};
       afkCap = 5;
       orbs.listResult = const [];
       final first = await spawnAfk('implement ticket one', orb: 'one');
@@ -2071,9 +2126,11 @@ void main() {
       expect(first.isDone, isFalse);
     });
 
-    test('the cap is disengaged without an AFK session (the default)', () async {
-      // afkSessionId is null (the setUp default): even at the cap, no spawn is
-      // AFK-attributed, so nothing is refused by the AFK rule.
+    test('no repo armed (null gate): no spawn is AFK-attributed, the cap '
+        'never applies', () async {
+      // afkSessionIds is null (the setUp default — no repo armed): even at
+      // the cap, no spawn is AFK-attributed, so nothing is refused by the
+      // AFK rule.
       afkCap = 1;
       orbs.listResult = const [];
       orbs.createResult = _runningOrb(id: 'orb_one', name: 'one');
@@ -2096,6 +2153,131 @@ void main() {
       expect(first.status, 'running');
       expect(second.status, 'running');
     });
+
+    test('disarming one repo while its orb is in flight: the counter still '
+        'includes that orb until it settles (the in-flight fact is the '
+        'creating task\'s caller, not the current arming)', () async {
+      // Two repos armed, both AFK sessions spawn one orb each: 2 in flight
+      // of 2.
+      afkSessionIds = {afk, 'ses_afk_2'};
+      afkCap = 2;
+      orbs.listResult = const [];
+      final first = await spawnAfk('implement ticket one', orb: 'one');
+      final second = await spawnAfk(
+        'implement ticket two',
+        orb: 'two',
+        callerSession: 'ses_afk_2',
+      );
+      // The refused spawns target new names (which would create), so the
+      // orb list no longer needs to be set.
+      orbs.listResult = const [];
+
+      // A third AFK spawn is refused (2 in flight of 2).
+      await expectLater(
+        service.spawn(
+          task: 'implement ticket three',
+          wait: false,
+          orb: 'three',
+          callerSession: afk,
+          callerDirectory: '/home/dev/shop',
+        ),
+        throwsA(
+          isA<OrbRefusalError>()
+              .having((e) => e.code, 'code', OrbRefusalError.afkCap)
+              .having(
+                (e) => e.message,
+                'message',
+                contains('2 in flight of 2'),
+              ),
+        ),
+      );
+
+      // Disarm the first repo: the store never deletes a stored session id
+      // on a disarm (the session outlives a disarm), so the gate's set is
+      // unchanged (still {afk, ses_afk_2}) and the counter keeps the first
+      // repo's in-flight orb — the in-flight fact is the creating task's
+      // caller, not the current arming. A new AFK spawn is still refused
+      // (2 in flight of 2, unchanged).
+      await expectLater(
+        service.spawn(
+          task: 'implement ticket four',
+          wait: false,
+          orb: 'four',
+          callerSession: 'ses_afk_2',
+          callerDirectory: '/home/dev/shop',
+        ),
+        throwsA(
+          isA<OrbRefusalError>()
+              .having((e) => e.code, 'code', OrbRefusalError.afkCap)
+              .having(
+                (e) => e.message,
+                'message',
+                contains('2 in flight of 2'),
+              ),
+        ),
+      );
+
+      // The first repo's orb settles: it stops counting, and a new AFK spawn
+      // from the still-armed repo is admitted (1 in flight of 2).
+      backend.opencode.detailOf = (id) {
+        // Only the first orb's session reports a settled turn; the second
+        // stays running.
+        return first.session == id
+            ? _detail(id, outcome: 'succeeded')
+            : _detail(id);
+      };
+      backend.opencode.messagesResult = [
+        const SessionMessage(id: 'm1', role: 'user', text: 'do the thing'),
+        const SessionMessage(id: 'm2', role: 'assistant', text: 'All done.'),
+      ];
+      orbs.listResult = [
+        _runningOrb(id: 'orb_one', name: 'one'),
+        _runningOrb(id: 'orb_two', name: 'two'),
+      ];
+      await until(() => first.isDone);
+
+      final third = await spawnAfk(
+        'implement ticket four',
+        orb: 'four',
+        callerSession: 'ses_afk_2',
+      );
+      expect(third.status, 'running');
+      expect(third.id, isNot(second.id));
+    });
+
+    test(
+      'the host-total AFK counter counts in-flight orbs created by any '
+      'AFK session, and 0 for nothing AFK (the liveness counter T4 reads)',
+      () async {
+        afkSessionIds = {afk, 'ses_afk_2'};
+        afkCap = 5;
+        orbs.listResult = const [];
+        final first = await spawnAfk('implement ticket one', orb: 'one');
+        final second = await spawnAfk(
+          'implement ticket two',
+          orb: 'two',
+          callerSession: 'ses_afk_2',
+        );
+        // A developer orb: it never counts, whatever the set.
+        orbs.createResult = _runningOrb(id: 'orb_dev', name: 'dev');
+        await service.spawn(
+          task: 'developer ticket',
+          wait: false,
+          orb: 'dev',
+          callerSession: 'ses_dev',
+          callerDirectory: '/home/dev/shop',
+        );
+        expect(first.status, 'running');
+        expect(second.status, 'running');
+
+        // Both AFK orbs (created by either AFK session) count — one counter
+        // across all repos; the developer orb does not.
+        expect(service.afkOrbsInFlight({afk, 'ses_afk_2'}), 2);
+        expect(service.afkOrbsInFlight({afk}), 1);
+        expect(service.afkOrbsInFlight({}), 0);
+        expect(service.afkOrbsInFlight({'ses_someone_else'}), 0);
+      },
+    );
   });
 
   group('dispatch identity by raw text (issue #147)', () {
