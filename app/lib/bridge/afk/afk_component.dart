@@ -104,27 +104,28 @@ class AfkComponent {
   /// `afk.sessionId` is not read (no migration, spec #407).
   String? sessionIdFor(String repo) => store.sessionIdFor(repo);
 
-  /// The spawn-boundary view of the AFK attribution (spec #376, T4; reshaped
-  /// by spec #407): the **set** of AFK session ids (every armed repo's stored
-  /// session id — a spawn is AFK-attributed when its caller session is any
-  /// one of them) and the parallel-orbs cap (the host total), **read live**
-  /// — the cap from the current settings (effective from the next spawn, no
-  /// restart), the ids fresh from the store (a restart, or a fresh arming,
-  /// is picked up). `null` when no repo is armed: there is no AFK session,
-  /// so no spawn is AFK-attributed and the cap never applies.
+  /// The spawn-boundary view of the AFK attribution (spec #407, T5 —
+  /// reshaped from #376 T4): the **set of AFK session ids** and the
+  /// parallel-orbs cap, **read live** — the cap from the current settings
+  /// (effective from the next spawn, no restart), the ids fresh from the
+  /// store (a restart, or a fresh arming, is picked up).
   ///
-  /// (The set's counter logic — counting all AFK orbs in flight across repos
-  /// against the host cap — is the spawn gate's job, T5; this ticket hands
-  /// it the set of the armed repos' stored ids.)
+  /// The set is the store's **disarming-stable** one
+  /// ([AfkStore.allSessionIds] — every stored `afk.session.<owner/repo>`
+  /// id): a disarm never deletes a stored session id (the session outlives
+  /// a disarm — spec #376, user story #24), so a repo disarmed while its
+  /// orb is in flight keeps counting that orb until it settles (the
+  /// in-flight fact is the creating task's caller, not the current arming).
+  /// Arming decides only whether the cap is engaged at all, never the
+  /// count: `null` when no repo is armed (no AFK attribution, cap
+  /// disengaged — unchanged posture) or the store holds no AFK session id
+  /// yet (the session is not created — nothing to attribute, nothing to
+  /// cap).
   AfkSpawnGate? spawnGate() {
-    if (_settings.armedRepos.isEmpty) return null;
-    final ids = _settings.armedRepos
-        .map((repo) => store.sessionIdFor(repo))
-        .whereType<String>()
-        .where((id) => id.isNotEmpty)
-        .toSet();
+    if (!_settings.armedRepos.isNotEmpty) return null;
+    final ids = store.allSessionIds();
     if (ids.isEmpty) return null;
-    return AfkSpawnGate(afkSessionIds: ids, cap: _settings.parallelOrbs);
+    return AfkSpawnGate(sessionIds: ids, cap: _settings.parallelOrbs);
   }
 
   /// Ensure [repo]'s AFK session exists and return its id (the **arming**

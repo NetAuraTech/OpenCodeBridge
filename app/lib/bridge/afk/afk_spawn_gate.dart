@@ -1,35 +1,39 @@
-/// The AFK spawn-boundary state (spec #376, T4; reshaped by spec #407, T3):
-/// what the orb-spawn boundary reads live at the moment an orb is spawned, to
-/// enforce the parallel-orbs cap. It is the bridge's **own** attribution fact
-/// — not the generic spawn-tree record — so it lives in the AFK subsystem,
-/// not on the task record.
+/// The AFK spawn-boundary state (spec #407, T5 — reshaped from #376): what
+/// the orb-spawn boundary reads live at the moment an orb is spawned, to
+/// enforce the parallel-orbs cap. It is the bridge's **own** attribution
+/// fact — not the generic spawn-tree record — so it lives in the AFK
+/// subsystem, not on the task record.
 ///
-/// A spawn is **AFK-attributed** when its caller session is *any* armed
-/// repo's AFK session: the gate holds the **set** of AFK session ids
-/// (every armed repo's stored session id, spec #407 — the session is per
-/// repo) and the attribution is membership in the set. The cap is the host
-/// total, scoped to AFK orbs only: orbs the developer spawns (any other
-/// caller session) are never capped, and with no AFK session (an empty set)
-/// there are no AFK orbs to count.
+/// A spawn is **AFK-attributed** when its caller session is **any** AFK
+/// session (the session ids the bridge created for the armed agents,
+/// persisted in the AFK store per repo). The cap is the **host total**
+/// (spec #407): it counts all AFK-attributed orbs in flight across all
+/// repos — arming two repos never doubles orbs in flight. Orbs the
+/// developer spawns (a caller session not in the set) are never capped,
+/// and with no AFK session there are no AFK orbs to count.
 class AfkSpawnGate {
-  const AfkSpawnGate({required this.afkSessionIds, required this.cap});
+  const AfkSpawnGate({required this.sessionIds, required this.cap});
 
-  /// The set of AFK session ids (every armed repo's stored session id — the
-  /// bridge's own persisted facts, from the AFK store). An empty set (no repo
-  /// armed, or no stored id) attributes nothing: no spawn is AFK-attributed
-  /// and the cap never applies. Read live on every spawn (the bridge's
-  /// closure re-builds the gate from the store per spawn).
-  final Set<String> afkSessionIds;
+  /// The set of AFK session ids (the store's **disarming-stable** set —
+  /// every stored `afk.session.<owner/repo>` id, fresh from the AFK store
+  /// on every gate read). A disarm never deletes a stored session id (the
+  /// session outlives a disarm), so a repo disarmed while its orb is in
+  /// flight keeps its id in the set until that orb settles: the in-flight
+  /// fact is the creating task's caller, not the current arming. An empty
+  /// set is equivalent to no gate — nothing is AFK-attributed, so the cap
+  /// never applies. The caller is [isAfk] by **membership**.
+  final Set<String> sessionIds;
 
   /// The parallel-orbs cap, read live from Settings (effective from the next
-  /// spawn, spec #376 "Settings"): the host total — AFK orbs in flight
-  /// across **all** armed repos, not per repo.
+  /// spawn, spec #376 "Settings"): the host-wide total across all repos.
   final int cap;
 
-  /// Whether [callerSession] is one of the AFK sessions — the attribution
-  /// fact: a spawn with this caller session is an AFK-attributed orb, the
-  /// one the parallel-orbs cap is scoped to and counted. An empty AFK
-  /// session set (unarmed) attributes nothing.
+  /// Whether [callerSession] is any armed repo's AFK session — the
+  /// attribution fact: a spawn with this caller session is an
+  /// AFK-attributed orb, the one the parallel-orbs cap is scoped to and
+  /// counted. An empty set attributes nothing.
   bool isAfk(String? callerSession) =>
-      callerSession != null && afkSessionIds.contains(callerSession);
+      callerSession != null &&
+      callerSession.isNotEmpty &&
+      sessionIds.contains(callerSession);
 }

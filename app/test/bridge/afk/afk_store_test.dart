@@ -69,6 +69,29 @@ void main() {
       expect(file.existsSync(), isFalse);
     });
 
+    test(
+      'allSessionIds enumerates the stored per-repo ids, ignoring the '
+      'legacy flat key and the run rows (disarming-stable set, T5)',
+      () async {
+        final store = AfkStore(file: file);
+        await store.setSessionId('a/r', 'ses_a');
+        await store.setSessionId('b/r', 'ses_b');
+        await store.addRun('a/r', 7, 'Add a README');
+        // A legacy flat key a pre-scoping file still carries: ignored on read
+        // (no migration), so it is not mistaken for a per-repo session id.
+        final map = store.load();
+        map['afk.sessionId'] = 'ses_legacy';
+        file.writeAsStringSync(jsonEncode(map));
+
+        final reloaded = AfkStore(file: file);
+        expect(reloaded.allSessionIds(), {'ses_a', 'ses_b'});
+
+        // A cleared id drops out of the set (the key is removed on write).
+        await reloaded.setSessionId('a/r', null);
+        expect(AfkStore(file: file).allSessionIds(), {'ses_b'});
+      },
+    );
+
     test('a repo session id coexists with run rows and other repos', () async {
       final store = AfkStore(file: file);
       await store.setSessionId('o/r', 'ses_afk_1');
