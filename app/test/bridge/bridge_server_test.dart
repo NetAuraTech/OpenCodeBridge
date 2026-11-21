@@ -3,6 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/afk/afk_component.dart';
+import 'package:opencodebridge/bridge/afk/afk_settings.dart';
+import 'package:opencodebridge/bridge/afk/afk_store.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
@@ -3780,6 +3783,117 @@ void main() {
       },
     );
   });
+
+  // ------------------------------------------------------------------------
+  // The fresh-agent handoff's bridge wiring (spec #376, T6): the arming
+  // ensures the AFK session (create or reuse) and the **first feed is a
+  // bootstrap** when the session was just created (a wiped store's first arm,
+  // or a lost session). A normal restart — the session the service still has —
+  // reuses the id, so `id == before` and no bootstrap is sent. The run rows
+  // are seeded AFTER [BridgeServer.start] (the startup reconciliation ran on
+  // the then-empty store), so these tests make no real `gh` reads.
+  group('BridgeServer AFK fresh-agent handoff (spec #376, T6)', () {
+    late BridgeServer server;
+    late _AfkHandoffService service;
+    late AfkStore store;
+    late Directory dir;
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    Future<void> build() async {
+      dir = await Directory.systemTemp.createTemp('oc-afk-handoff');
+      store = AfkStore(file: File('${dir.path}/afk.json'));
+      service = _AfkHandoffService(dir.path);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
+      final component = AfkComponent(backend: backend, store: store);
+      final hub = EventHub(service: _FakeEventUpstream());
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        events: hub,
+        afk: component,
+      );
+    }
+
+    test('a wiped store arms a fresh AFK session and the first feed is the '
+        'bootstrap listing the in-flight runs', () async {
+      await build();
+      // An in-flight run in the store (seeded after start: the startup
+      // reconciliation ran on the empty store, so no GitHub read here).
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+          retryCount: 1,
+          lastFailureReason: 'model under load',
+        ),
+      );
+      final id = await server.updateAfKSettings(
+        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+      );
+      expect(id, 'ses_afk_1', reason: 'a fresh session is created');
+      expect(service.createdCount, 1, reason: 'the agent is recreated');
+      // The first feed is the bootstrap (the in-flight runs from the store),
+      // sent to the recreated session.
+      expect(service.prompts, hasLength(1));
+      expect(service.prompts.single.$1, id);
+      expect(
+        service.prompts.single.$2,
+        allOf(
+          contains('#7'),
+          contains('dispatched'),
+          contains('retry 1'),
+          contains('last failure: model under load'),
+        ),
+      );
+    });
+
+    test('a normal restart reuses the session the service still has: no '
+        'recreation, no re-bootstrap (ids and full state persist)', () async {
+      // The persisted session the service still has, seeded BEFORE the
+      // component is built (so its manager is seeded with it: reuse, not
+      // create).
+      dir = await Directory.systemTemp.createTemp('oc-afk-handoff-reuse');
+      store = AfkStore(file: File('${dir.path}/afk.json'));
+      service = _AfkHandoffService(dir.path);
+      service.present.add('ses_persisted');
+      await store.setSessionId('ses_persisted');
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
+      final component = AfkComponent(backend: backend, store: store);
+      final hub = EventHub(service: _FakeEventUpstream());
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        events: hub,
+        afk: component,
+      );
+      // An in-flight run (seeded after start: the reconciliation ran on a
+      // store with no run rows).
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      final id = await server.updateAfKSettings(
+        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+      );
+      expect(id, 'ses_persisted', reason: 'the stored session is reused');
+      expect(service.createdCount, 0, reason: 'no new session is created');
+      expect(service.prompts, isEmpty, reason: 'no re-bootstrap on reuse');
+    });
+  });
 }
 
 /// A recording [HttpResponse] for the shared-writer tests: it records what is
@@ -3943,6 +4057,96 @@ class _InMemoryOrderStore implements SessionOrderStore {
   Future<void> clear(String id) async {
     _positions.remove(id);
   }
+}
+
+/// A minimal [OpencodeService] for the AFK fresh-agent handoff's bridge test
+/// (spec #376, T6): it records the session create and the feeds (prompts) and
+/// answers create/probe/projects/active from scripted state. Only the handoff
+/// path's operations are implemented (the bridge wires only the sessions
+/// backend + the AFK component here); an unexpected call throws, so a test
+/// drift is loud, not silent.
+class _AfkHandoffService implements OpencodeService {
+  _AfkHandoffService(this.directory);
+
+  /// The main checkout's directory (the session is created in it).
+  final String directory;
+
+  /// The ids the service still has (probe answers present for these; the
+  /// reuse case seeds the persisted id here).
+  final Set<String> present = {};
+
+  int createdCount = 0;
+  final List<
+    (String, String, List<Map<String, Object?>>?, List<Map<String, Object?>>?)
+  >
+  prompts = [];
+
+  @override
+  Future<List<OpencodeProject>> projects() async => const [
+    OpencodeProject(id: 'p1', name: 'proj', canonical: '/repo/main'),
+  ];
+
+  @override
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
+    createdCount++;
+    final id = 'ses_afk_$createdCount';
+    present.add(id);
+    return OpencodeSession(
+      id: id,
+      title: 'AFK',
+      projectId: 'p1',
+      created: createdCount,
+      location: directory,
+    );
+  }
+
+  @override
+  Future<OpencodeSession> probe(String id) async {
+    if (!present.contains(id)) {
+      throw const OpencodeServiceError(404, 'no such session');
+    }
+    return OpencodeSession(
+      id: id,
+      title: 'AFK',
+      projectId: 'p1',
+      created: 0,
+      location: directory,
+    );
+  }
+
+  @override
+  Future<Set<String>> activeSessionIds() async => const {};
+
+  @override
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
+    prompts.add((id, text, files, skills));
+  }
+
+  @override
+  Future<List<OpencodeSession>> listSessions() async => const [];
+
+  @override
+  Future<Map<String, String>> projectNames() async => const {'p1': 'proj'};
+
+  @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async => true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError(
+    'not in the AFK handoff fake: ${invocation.memberName}',
+  );
 }
 
 /// A scripted service for the sessions-endpoint tests.

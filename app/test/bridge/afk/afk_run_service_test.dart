@@ -86,6 +86,17 @@ class _FakeSessions implements AfkSessionPort {
   }
 }
 
+/// A fake liveness (spec #376, T6): scripted AFK-attributed orbs in flight and
+/// AFK-session-active answers, so the reconciliation's liveness check is
+/// deterministic.
+class _FakeLiveness {
+  int orbsInFlight = 0;
+  bool sessionActive = false;
+
+  Future<AfkLiveness> get value async =>
+      AfkLiveness(afkOrbsInFlight: orbsInFlight, sessionActive: sessionActive);
+}
+
 Map<String, dynamic> _decode(String payload) =>
     jsonDecode(payload) as Map<String, dynamic>;
 
@@ -106,6 +117,7 @@ void main() {
   late AfkStore store;
   late _FakeReader reader;
   late _FakeSessions sessions;
+  late _FakeLiveness liveness;
   late List<String> payloads;
   late bool armed;
   late DateTime clock;
@@ -119,6 +131,7 @@ void main() {
     store = AfkStore(file: file);
     reader = _FakeReader();
     sessions = _FakeSessions();
+    liveness = _FakeLiveness(); // No liveness by default (the reconciliation's non-live case).
     payloads = [];
     armed = true;
     clock = base;
@@ -128,6 +141,7 @@ void main() {
       sessions: sessions,
       emitEvent: payloads.add,
       isArmed: () => armed,
+      liveness: () => liveness.value,
       pollInterval: const Duration(milliseconds: 5),
       now: () => clock,
     );
@@ -705,6 +719,364 @@ void main() {
       expect(parsePrNumber('https://github.com/o/r/issues/41'), isNull);
       expect(parsePrNumber('https://github.com/o/r/pull/'), isNull);
       expect(parsePrNumber(null), isNull);
+    });
+
+    test('bootstrapFeed lists the in-flight runs (number, state, retry count, '
+        'last failure reason); a fresh run lists only its state', () {
+      final feed = bootstrapFeed(const [
+        AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+          retryCount: 1,
+          lastFailureReason: 'model under load',
+        ),
+        AfkRun(issueNumber: 9, title: 'Ship the widget', state: 'pr-open'),
+      ]);
+      expect(feed, contains('#7'));
+      expect(feed, contains('Add a README'));
+      expect(feed, contains('dispatched'));
+      expect(feed, contains('retry 1'));
+      expect(feed, contains('last failure: model under load'));
+      expect(feed, contains('#9'));
+      expect(feed, contains('Ship the widget'));
+      expect(feed, contains('pr-open'));
+      // A fresh run (no retry, no failure) carries no detail parentheses —
+      // its line is the bare "- #N title: state" (it is the feed's last line).
+      expect(feed, endsWith('- #9 Ship the widget: pr-open'));
+      expect(feed, isNot(contains('pr-open (')));
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // The startup reconciliation (spec #376, T6): "a restart never strands a
+  // run". One pass over every stored run at startup: a lost run is detected
+  // and routed to the failure path, a pr-open run is settled to its closure,
+  // a live dispatched run is left alone, and failed/idle/done are left to
+  // their owners (the human, the ready gate, the end).
+
+  group('the startup reconciliation (spec #376, T6)', () {
+    test('a dispatched run with a live AFK orb survives a restart: no re-feed, '
+        'no state change (the run continues on its own)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      liveness.orbsInFlight = 2; // An AFK-attributed orb is in flight.
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'dispatched', reason: 'no state change');
+      expect(store.runFor(7)!.retryCount, 0, reason: 'no retry counted');
+      expect(store.runFor(7)!.retryAt, isNull);
+      expect(sessions.prompts, isEmpty, reason: 'no re-feed');
+      expect(payloads, isEmpty, reason: 'no event');
+    });
+
+    test('a dispatched run that is live because the session is active (no orb) '
+        'survives a restart: no re-feed, no state change', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      liveness.sessionActive = true; // The AFK session's agent loop is active.
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'dispatched');
+      expect(sessions.prompts, isEmpty);
+    });
+
+    test(
+      'a dispatched run whose orb is gone and whose session is inactive, with '
+      'no narration and no PR, is lost: routed to the failure path (the retry '
+      'counter increments, the backoff is scheduled)',
+      () async {
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'dispatched',
+          ),
+        );
+        // No liveness (orbsInFlight 0, sessionActive false — the default), no
+        // terminal narration, no PR.
+        await service.reconcile();
+        final run = store.runFor(7)!;
+        expect(
+          run.state,
+          'dispatched',
+          reason: 'still in flight, being retried',
+        );
+        expect(run.retryCount, 1, reason: 'counted in the retry');
+        expect(
+          run.retryAt,
+          base.millisecondsSinceEpoch + 5 * _min,
+          reason: 'the 1st retry backoff',
+        );
+        expect(run.lastFailureReason, AfkRunService.lostRunReason);
+        expect(payloads, isEmpty, reason: 'no event on a retry');
+      },
+    );
+
+    test('a lost run that keeps dying across restarts hits the cap of 3 and is '
+        'handed to the human (the terminal failure: failed + the afk.failed '
+        'event)', () async {
+      // The run has already burned its 3 retries (a prior FAILED + retries);
+      // this restart finds it lost again → terminal failure.
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+          retryCount: 3,
+        ),
+      );
+      await service.reconcile();
+      final run = store.runFor(7)!;
+      expect(run.state, 'failed');
+      expect(run.lastFailureReason, AfkRunService.lostRunReason);
+      final failedData =
+          _eventsOfType(payloads, 'afk.failed').single['data'] as Map;
+      expect(failedData['issueNumber'], 7);
+      expect(failedData['reason'], AfkRunService.lostRunReason);
+    });
+
+    test('a dispatched run with no liveness but a terminal FAILED narration is '
+        'not lost (the periodic pass will process the narration)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      reader.lastComments[7] = IssueComment(
+        id: 'IC1',
+        body: 'FAILED: model under load',
+      );
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'dispatched', reason: 'left for the pass');
+      expect(
+        store.runFor(7)!.retryCount,
+        0,
+        reason: 'the reconciliation does not double-count',
+      );
+    });
+
+    test('a dispatched run with no liveness but a recorded PR is not lost (the '
+        'periodic pass will follow the PR)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+          prNumber: 41,
+          prUrl: 'https://github.com/o/r/pull/41',
+        ),
+      );
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'dispatched');
+      expect(store.runFor(7)!.retryCount, 0);
+    });
+
+    test('an idle run is left alone at startup (the first poll admits it as '
+        'usual — no special handling)', () async {
+      await store.addRun(7, 'Add a README');
+      reader.labels[7] = {'ready-for-agent'};
+      await service.reconcile();
+      expect(
+        store.runFor(7)!.state,
+        'idle',
+        reason: 'reconciliation does not feed idle',
+      );
+      expect(sessions.prompts, isEmpty);
+    });
+
+    test('a failed run is left alone at startup (no re-feed until the label is '
+        're-added)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'failed',
+          retryCount: 3,
+        ),
+      );
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'failed');
+      expect(sessions.prompts, isEmpty, reason: 'no re-feed at startup');
+    });
+
+    test(
+      'a pr-open run whose issue is closed is settled to done at startup',
+      () async {
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'pr-open',
+            prNumber: 41,
+            prUrl: 'https://github.com/o/r/pull/41',
+          ),
+        );
+        reader.prs[41] = PrInfo(
+          number: 41,
+          url: 'https://github.com/o/r/pull/41',
+          state: 'MERGED',
+        );
+        reader.issueStates[7] = 'CLOSED';
+        await service.reconcile();
+        expect(store.runFor(7)!.state, 'done');
+      },
+    );
+
+    test('a pr-open run whose PR was closed unmerged is settled to done, '
+        'recorded as closed unmerged', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'pr-open',
+          prNumber: 41,
+          prUrl: 'https://github.com/o/r/pull/41',
+        ),
+      );
+      reader.prs[41] = PrInfo(
+        number: 41,
+        url: 'https://github.com/o/r/pull/41',
+        state: 'CLOSED',
+      );
+      reader.issueStates[7] = 'OPEN';
+      await service.reconcile();
+      final run = store.runFor(7)!;
+      expect(run.state, 'done');
+      expect(run.closedUnmerged, isTrue);
+    });
+
+    test('a pr-open run whose PR is still open and the issue is open is left '
+        'pr-open at startup (the human has not closed it yet)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'pr-open',
+          prNumber: 41,
+          prUrl: 'https://github.com/o/r/pull/41',
+        ),
+      );
+      reader.prs[41] = PrInfo(
+        number: 41,
+        url: 'https://github.com/o/r/pull/41',
+        state: 'OPEN',
+      );
+      reader.issueStates[7] = 'OPEN';
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'pr-open');
+    });
+
+    test('a corrupted state string is left alone (the refusal, never an '
+        'admission)', () async {
+      await store.updateRun(
+        const AfkRun(issueNumber: 7, title: 'Add a README', state: 'garbage'),
+      );
+      await service.reconcile();
+      expect(store.runFor(7)!.state, 'garbage');
+      expect(sessions.prompts, isEmpty);
+    });
+  });
+
+  // ------------------------------------------------------------------------
+  // The fresh-agent handoff (spec #376, T6): a wiped/lost AFK session is
+  // recreated (the arming) and the first feed is a bootstrap — the in-flight
+  // runs from the store. A normal restart (the session still present) reuses
+  // the session — no recreation, no re-bootstrap.
+
+  group('the fresh-agent handoff (bootstrap, spec #376, T6)', () {
+    test(
+      'a recreated session is booted with the bootstrap: the in-flight runs '
+      '(number, state, retry count, last failure reason) from the store',
+      () async {
+        // The in-flight runs: a dispatched run mid-retry and a pr-open run.
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'dispatched',
+            retryCount: 1,
+            lastFailureReason: 'model under load',
+          ),
+        );
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 9,
+            title: 'Ship the widget',
+            state: 'pr-open',
+            prNumber: 41,
+            prUrl: 'https://github.com/o/r/pull/41',
+          ),
+        );
+        sessions.sessionIdValue = 'ses_afk_new'; // The recreated session.
+        await service.bootstrap();
+        // One feed, the bootstrap, listing both in-flight runs.
+        expect(sessions.prompts, hasLength(1));
+        final feed = sessions.prompts.single;
+        expect(feed, contains('#7'));
+        expect(feed, contains('dispatched'));
+        expect(feed, contains('retry 1'));
+        expect(feed, contains('last failure: model under load'));
+        expect(feed, contains('#9'));
+        expect(feed, contains('pr-open'));
+        // The terminal runs are not in-flight: not listed.
+        expect(feed, isNot(contains('#10')));
+      },
+    );
+
+    test('a recreated session with no in-flight runs gets no bootstrap feed '
+        '(a wiped store: nothing to hand over)', () async {
+      sessions.sessionIdValue = 'ses_afk_new';
+      await service.bootstrap();
+      expect(sessions.prompts, isEmpty);
+    });
+
+    test('idle and failed runs are not in-flight: the bootstrap lists only '
+        'dispatched and pr-open runs', () async {
+      await store.addRun(7, 'Idle issue'); // idle
+      await store.updateRun(
+        const AfkRun(issueNumber: 8, title: 'Failed issue', state: 'failed'),
+      );
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 9,
+          title: 'Ship the widget',
+          state: 'pr-open',
+          prNumber: 41,
+          prUrl: 'https://github.com/o/r/pull/41',
+        ),
+      );
+      sessions.sessionIdValue = 'ses_afk_new';
+      await service.bootstrap();
+      expect(sessions.prompts, hasLength(1));
+      final feed = sessions.prompts.single;
+      expect(feed, isNot(contains('#7')), reason: 'idle is not in-flight');
+      expect(feed, isNot(contains('#8')), reason: 'failed is not in-flight');
+      expect(feed, contains('#9'), reason: 'pr-open is in-flight');
+    });
+
+    test('a recreated session with no (yet) session id is not booted (nothing '
+        'to feed)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      sessions.sessionIdValue = null; // No session to feed.
+      await service.bootstrap();
+      expect(sessions.prompts, isEmpty);
     });
   });
 }
