@@ -633,15 +633,20 @@ class AfkRunService {
 
   /// The `failed` state's pass (spec #376): the terminal failure's
   /// hand-back — the issue is labelled `needs-triage` with a comment
-  /// naming the failure. Re-attempted on every pass until the label lands
-  /// (a failed `gh` write is inert — the next pass retries); the comment
-  /// is posted with the label, so it is never duplicated. The failure's
+  /// naming the failure. Re-attempted on every pass until it **fully
+  /// lands** (a failed `gh` write is inert — the next pass retries): the
+  /// hand-back's durability is recorded on the row ([AfkRun.handbackLanded])
+  /// — a partial pass (the label landed, the comment write failed) is
+  /// retried, so the label alone never short-circuits the missing comment.
+  /// The comment is posted once the hand-back has not yet landed, even when
+  /// the label is already present (the partial from a previous pass), and
+  /// is never duplicated once the row says it landed. The failure's
   /// reason is re-read from the issue (the `FAILED` narration is still its
   /// last comment; a re-read that finds none names the failure without a
-  /// reason).
+  /// reason; a failed read is inert — the next pass retries).
   Future<void> _labelNeedsTriage(AfkRun run) async {
+    if (run.handbackLanded) return; // Fully landed: the hand-back stands.
     final labelled = await reader.hasLabel(run.issueNumber, needsTriageLabel);
-    if (labelled) return;
     final comment = await reader.readLastComment(run.issueNumber);
     final narration = comment == null
         ? null
@@ -653,8 +658,11 @@ class AfkRunService {
         narration.reason != null) {
       reason = narration.reason!;
     }
-    await reader.addLabel(run.issueNumber, needsTriageLabel);
+    if (!labelled) {
+      await reader.addLabel(run.issueNumber, needsTriageLabel);
+    }
     await reader.addComment(run.issueNumber, _failureComment(run, reason));
+    await store.updateRun(run.copyWith(handbackLanded: true));
   }
 
   // -- pr-open → done (the bridge follows the PR to the run's end) -------

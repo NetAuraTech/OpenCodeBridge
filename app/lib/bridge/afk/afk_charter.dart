@@ -8,8 +8,8 @@ import '../sessions/paths.dart';
 /// defines the `afk` primary agent: its identity, the `implement-spec`
 /// discipline it operates under from creation, its wiki discipline, its hard
 /// rules, and the **permissions** that enforce the hard rules as `deny` rules
-/// (force-push and push-to-the-default-branch denied — enforced by the
-/// service, not obeyed from words). The model is deliberately **not** in the
+/// (merge, force-push, and push-to-the-default-branch denied — enforced by
+/// the service, not obeyed from words). The model is deliberately **not** in the
 /// file: the bridge pins it at session creation from the `afkModel` setting
 /// (empty = the service's default).
 ///
@@ -71,6 +71,18 @@ permissions:
     effect: deny
   - action: shell
     resource: "git push origin master"
+    effect: deny
+  - action: shell
+    resource: "gh pr merge *"
+    effect: deny
+  - action: shell
+    resource: "gh pr merge"
+    effect: deny
+  - action: shell
+    resource: "gh merge *"
+    effect: deny
+  - action: shell
+    resource: "gh merge"
     effect: deny
 ---
 

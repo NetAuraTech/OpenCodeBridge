@@ -25,6 +25,7 @@ class AfkRun {
     this.retryAt,
     this.narrationId,
     this.lastFailureReason,
+    this.handbackLanded = false,
   });
 
   /// The admitted issue's number.
@@ -75,6 +76,16 @@ class AfkRun {
   /// feed lists it so a recreated agent sees why a run is retrying.
   final String? lastFailureReason;
 
+  /// Whether the terminal failure's hand-back (the `needs-triage` label
+  /// **and** the comment) has fully landed (spec #376, review fixup): the
+  /// run service posts the label and the comment, and records the
+  /// hand-back's durability here, so a partial failure (the label landed, the comment
+  /// write failed) is retried on the next pass — the label alone never
+  /// short-circuits the missing comment. A row written before this field
+  /// existed reads back `false` (a tolerant decode: the hand-back is
+  /// re-checked and re-attempted).
+  final bool handbackLanded;
+
   @override
   bool operator ==(Object other) =>
       other is AfkRun &&
@@ -87,7 +98,8 @@ class AfkRun {
       other.closedUnmerged == closedUnmerged &&
       other.retryAt == retryAt &&
       other.narrationId == narrationId &&
-      other.lastFailureReason == lastFailureReason;
+      other.lastFailureReason == lastFailureReason &&
+      other.handbackLanded == handbackLanded;
 
   @override
   int get hashCode => Object.hashAll([
@@ -101,6 +113,7 @@ class AfkRun {
     retryAt,
     narrationId,
     lastFailureReason,
+    handbackLanded,
   ]);
 
   /// The row with the given run-state fields replaced (the run service
@@ -117,6 +130,7 @@ class AfkRun {
     Object? retryAt = absent,
     Object? narrationId = absent,
     Object? lastFailureReason = absent,
+    Object? handbackLanded = absent,
   }) => AfkRun(
     issueNumber: issueNumber,
     title: title,
@@ -134,6 +148,9 @@ class AfkRun {
     lastFailureReason: lastFailureReason == absent
         ? this.lastFailureReason
         : lastFailureReason as String?,
+    handbackLanded: handbackLanded == absent
+        ? this.handbackLanded
+        : handbackLanded as bool,
   );
 
   /// The [copyWith] "field left unset" sentinel (distinct from a `null`
@@ -263,6 +280,7 @@ class AfkStore {
       'retryAt': run.retryAt,
       'narrationId': run.narrationId,
       'lastFailureReason': run.lastFailureReason,
+      'handbackLanded': run.handbackLanded,
     });
     await _write(map);
   }
@@ -290,6 +308,7 @@ class AfkStore {
       final retryAt = decoded['retryAt'];
       final narrationId = decoded['narrationId'];
       final lastFailureReason = decoded['lastFailureReason'];
+      final handbackLanded = decoded['handbackLanded'];
       return AfkRun(
         issueNumber: number,
         title: title,
@@ -303,6 +322,7 @@ class AfkStore {
         lastFailureReason: lastFailureReason is String
             ? lastFailureReason
             : null,
+        handbackLanded: handbackLanded is bool ? handbackLanded : false,
       );
     } catch (_) {
       return null;

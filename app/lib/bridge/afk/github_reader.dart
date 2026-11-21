@@ -97,7 +97,10 @@ class PrInfo {
 /// - [readIssueState]: the issue's state as gh reports it ("OPEN" /
 ///   "CLOSED"); `''` when the read fails or the field is missing.
 /// - [readLastComment]: the issue's last comment (id + body) — the agent's
-///   terminal narration rides on it; `null` when there are none.
+///   terminal narration rides on it; `null` only when the issue genuinely
+///   has no comments. A failed/unreadable `gh` read **throws** (the same
+///   posture as [addLabel] and [addComment]) — a `gh` outage must not be
+///   read as "no terminal narration".
 /// - [hasLabel]: whether the issue carries [label] (the run service's
 ///   ready-check on a run's issue, and the deliberate retry's).
 /// - [readPr]: the PR's number, URL, and state — the run service's
@@ -120,7 +123,10 @@ abstract class GitHubReader {
   /// The issue's state ("OPEN" / "CLOSED") or `''` when unreadable.
   Future<String> readIssueState(int issueNumber);
 
-  /// The issue's last comment (id + body), or `null` when there are none.
+  /// The issue's last comment (id + body), or `null` only when the issue
+  /// genuinely has no comments. A failed or unreadable `gh` read throws
+  /// (the same posture as [addLabel] and [addComment]): a non-zero `gh` exit
+  /// code, non-JSON output, or a malformed comment row.
   Future<IssueComment?> readLastComment(int issueNumber);
 
   /// Whether the issue carries [label].
@@ -222,21 +228,46 @@ class GhGitHubReader implements GitHubReader {
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
-    if (result.exitCode != 0) return null;
+    // A failed `gh` read throws (the same posture as [addLabel] /
+    // [addComment]): `null` is reserved for the genuine "no comments" case,
+    // so a startup reconciliation during a `gh` outage never reads a failure
+    // as a missing terminal narration.
+    if (result.exitCode != 0) {
+      throw Exception(
+        'gh issue view failed: ${(result.stderr as String).trim()}',
+      );
+    }
     final Object? decoded;
     try {
       decoded = jsonDecode(result.stdout as String);
     } catch (_) {
-      return null;
+      throw Exception('gh issue view returned non-JSON for issue $issueNumber');
     }
-    if (decoded is! Map) return null;
+    if (decoded is! Map) {
+      throw Exception(
+        'gh issue view returned a malformed issue for $issueNumber',
+      );
+    }
     final comments = decoded['comments'];
-    if (comments is! List || comments.isEmpty) return null;
+    if (comments is! List) {
+      throw Exception(
+        'gh issue view returned a malformed comment list for $issueNumber',
+      );
+    }
+    if (comments.isEmpty) return null; // Genuinely no comments.
     final last = comments.last;
-    if (last is! Map) return null;
+    if (last is! Map) {
+      throw Exception(
+        'gh issue view returned a malformed last comment for $issueNumber',
+      );
+    }
     final id = last['id'];
     final body = last['body'];
-    if (id is! String || body is! String) return null;
+    if (id is! String || body is! String) {
+      throw Exception(
+        'gh issue view returned a malformed last comment for $issueNumber',
+      );
+    }
     return IssueComment(id: id, body: body);
   }
 

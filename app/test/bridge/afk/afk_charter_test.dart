@@ -63,6 +63,18 @@ void main() {
       expect(AfkCharter.canonical, contains('git push origin master *'));
     });
 
+    test('denies merging a PR (the "never merge" hard rule enforced as a '
+        'permission)', () {
+      // The body's "You never merge it." is words; the permission is the
+      // enforcement — the `gh pr merge` command and the classic `gh merge`
+      // alias, each with and without its arguments (the same last-matching-
+      // wins posture as the other denials).
+      expect(AfkCharter.canonical, contains('gh pr merge *'));
+      expect(AfkCharter.canonical, contains('gh pr merge'));
+      expect(AfkCharter.canonical, contains('gh merge *'));
+      expect(AfkCharter.canonical, contains('gh merge'));
+    });
+
     test('carries no model (the bridge pins it at creation)', () {
       // The model is deliberately absent from the charter file: the bridge
       // pins it from the afkModel setting, and an empty pin inherits the
