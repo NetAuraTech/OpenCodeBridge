@@ -17,7 +17,7 @@ class DiffLine {
 /// computes for the edit tools, the same one the terminal renders) with the
 /// terminal's own diff colors: the line numbers, the `-`/`+` gutter, and
 /// the added/removed/context backgrounds.
-class DiffView extends StatelessWidget {
+class DiffView extends StatefulWidget {
   const DiffView({super.key, required this.patch});
 
   /// The unified diff: `Index:`/`---`/`+++` file headers, the
@@ -75,9 +75,32 @@ class DiffView extends StatelessWidget {
   }
 
   @override
+  State<DiffView> createState() => _DiffViewState();
+}
+
+class _DiffViewState extends State<DiffView> {
+  /// The last patch [parse] was run on and its result (issue #415): a tool
+  /// card's diff is re-laid out on every rebuild of the session panel, and
+  /// `parse` re-splits the whole patch into [DiffLine]s each time. A
+  /// multi-thousand-line patch is then re-walked on every rebuild even though
+  /// the patch does not change until the tool call settles. Re-parsing only
+  /// when the patch actually changed makes the steady state free.
+  String? _parsedFor;
+  List<DiffLine>? _parsedLines;
+
+  List<DiffLine> _lines() {
+    final patch = widget.patch;
+    if (_parsedFor != patch || _parsedLines == null) {
+      _parsedLines = DiffView.parse(patch);
+      _parsedFor = patch;
+    }
+    return _parsedLines!;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final colors = _TuiDiffColors.resolve(Theme.of(context).brightness);
-    final lines = DiffView.parse(patch);
+    final lines = _lines();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [for (final line in lines) _buildLine(line, colors)],

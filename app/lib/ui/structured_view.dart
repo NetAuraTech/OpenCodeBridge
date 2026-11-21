@@ -635,13 +635,15 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// prompt).
   int? _contextUsed;
 
-  /// The local llama.cpp server's live prefill throughput (tok/s), from the
-  /// last `llama.speed` bridge event; `null` while idle or decoding.
-  double? _prefill;
-
-  /// The live decode throughput (tok/s); `null` while idle or prefilling. At
-  /// most one of [_prefill] / [_decode] is set at a time.
-  double? _decode;
+  /// The local llama.cpp server's live prefill/decode throughput (tok/s), from
+  /// the last `llama.speed` bridge event (issue #415). A [ValueNotifier] the
+  /// header's speed chip listens to, so a `llama.speed` event re-renders the
+  /// chip ALONE and not the whole panel: the feed re-emits ~2.5/s while the
+  /// model decodes (phase changes are never throttled), and each of those used
+  /// to rebuild the panel — re-deriving the row projections over the loaded
+  /// history. `null`/`null` while idle or between phases.
+  final ValueNotifier<({double? prefill, double? decode})> _speed =
+      ValueNotifier(const (prefill: null, decode: null));
 
   /// Assistant message id -> its index in [_messages]. Seeded with the loaded
   /// history, so a turn already running when the view opens streams into the
@@ -887,8 +889,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _turnFacts = const (active: false, tick: false, poll: false, live: false);
     _stopBusy = false;
     _contextUsed = null;
-    _prefill = null;
-    _decode = null;
+    _speed.value = const (prefill: null, decode: null);
     _stick = true;
     _atBottom = true;
     _normalizing = false;
@@ -928,6 +929,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _prompt.dispose();
     _scroll.dispose();
     _selectionFocus.dispose();
+    _speed.dispose();
     super.dispose();
   }
 
@@ -1340,17 +1342,17 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     return event.sessionId == widget.sessionId;
   }
 
-  /// A `llama.speed` payload moves the header's prefill/decode throughput.
+  /// A `llama.speed` payload moves the header's prefill/decode throughput
+  /// (issue #415): the chip alone listens to [_speed], so this never rebuilds
+  /// the panel. A no-op read (the values did not change) leaves the notifier
+  /// untouched, so the chip does not re-render either.
   void _applySpeed(Map<String, Object?> data) {
+    if (!mounted) return;
     final prefill = (data['prefill'] as num?)?.toDouble();
     final decode = (data['decode'] as num?)?.toDouble();
-    if (prefill == _prefill && decode == _decode) return;
-    if (mounted) {
-      setState(() {
-        _prefill = prefill;
-        _decode = decode;
-      });
-    }
+    final current = _speed.value;
+    if (prefill == current.prefill && decode == current.decode) return;
+    _speed.value = (prefill: prefill, decode: decode);
   }
 
   /// A durable-seq gap for this session (events were missed, typically
@@ -3043,8 +3045,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
                       _CostBar(
                         detail: _detail,
                         contextUsed: _contextUsed,
-                        prefill: _prefill,
-                        decode: _decode,
+                        speed: _speed,
                         outcome: chipOutcome,
                       ),
                       Expanded(
@@ -3370,8 +3371,7 @@ class _CostBar extends StatelessWidget {
   const _CostBar({
     required this.detail,
     required this.contextUsed,
-    this.prefill,
-    this.decode,
+    required this.speed,
     this.outcome,
   });
 
@@ -3379,11 +3379,11 @@ class _CostBar extends StatelessWidget {
 
   final int? contextUsed;
 
-  /// The local llama.cpp server's live prefill/decode throughput (tok/s), or
-  /// `null` while idle. At most one is set at a time.
-  final double? prefill;
-
-  final double? decode;
+  /// The local llama.cpp server's live prefill/decode throughput (tok/s)
+  /// (issue #415): a [ValueNotifier] the panel owns and the speed chip
+  /// listens to, so a `llama.speed` event re-renders the chip alone — never
+  /// the whole bar or the panel. `null`/`null` while idle or between phases.
+  final ValueNotifier<({double? prefill, double? decode})> speed;
 
   /// The header outcome chip's verdict (issue #157): the newest closing
   /// `idle` marker's outcome (the authoritative per-turn verdict), falling
@@ -3403,9 +3403,6 @@ class _CostBar extends StatelessWidget {
     final fraction = used != null && limit != null && limit > 0
         ? used / limit
         : null;
-    final speed = _speedText(prefill, decode);
-    final speedColor = _TuiSpeedColors.resolve(Theme.of(context).brightness)
-        .forPhase(prefill, decode);
     // The outcome chip reads the panel's per-turn verdict (the newest closing
     // idle marker, issue #157), not the raw detail.outcome, which can lag the
     // last turn's verdict across a turn boundary.
@@ -3458,24 +3455,38 @@ class _CostBar extends StatelessWidget {
                   const ValueKey('structured-outcome'),
                   chipOutcome,
                 ),
-              if (speed != null)
-                Container(
-                  key: const ValueKey('structured-speed'),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 6,
-                    vertical: 2,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(4),
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainerHighest,
-                  ),
-                  child: Text(
-                    speed,
-                    style: TextStyle(fontSize: 12, color: speedColor),
-                  ),
-                ),
+              // The speed chip listens to the panel's [_speed] notifier
+              // (issue #415) so a `llama.speed` event re-renders ONLY this
+              // chip, not the whole bar or panel. The chip itself (the
+              // `structured-speed` key, the text, its TUI color) is unchanged
+              // — only its rebuild scope is narrower.
+              ValueListenableBuilder<({double? prefill, double? decode})>(
+                valueListenable: speed,
+                builder: (context, value, _) {
+                  final text = _speedText(value.prefill, value.decode);
+                  if (text == null) return const SizedBox.shrink();
+                  final color = _TuiSpeedColors.resolve(
+                    Theme.of(context).brightness,
+                  ).forPhase(value.prefill, value.decode);
+                  return Container(
+                    key: const ValueKey('structured-speed'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(4),
+                      color: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHighest,
+                    ),
+                    child: Text(
+                      text,
+                      style: TextStyle(fontSize: 12, color: color),
+                    ),
+                  );
+                },
+              ),
             ],
           ),
           if (fraction != null)
@@ -4204,7 +4215,7 @@ class _TuiSpeedColors {
 /// ([_TuiMarkdownColors]). With no [base] the theme's text styles apply
 /// (regular message text); a [base] carries the size of the small panes or
 /// the flat gray of the dimmed one (the thinking text, like the terminal's).
-class _Markdown extends StatelessWidget {
+class _Markdown extends StatefulWidget {
   const _Markdown({required this.data, this.base, this.dim = false});
 
   final String data;
@@ -4218,15 +4229,70 @@ class _Markdown extends StatelessWidget {
   final bool dim;
 
   @override
-  Widget build(BuildContext context) {
-    final palette = _TuiMarkdownColors.resolve(Theme.of(context).brightness);
-    final b = base ?? const TextStyle();
-    // The body size the paragraph text actually renders in: the base when the
-    // pane sets one, else the theme's body size (the markdown fallback
-    // stylesheet merges under ours, so the code size must be set explicitly
-    // to win over its shrunken default).
-    final size =
-        b.fontSize ?? Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14;
+  State<_Markdown> createState() => _MarkdownState();
+}
+
+class _MarkdownState extends State<_Markdown> {
+  /// The cached markdown style sheet and the inputs it was built from
+  /// (issue #415).
+  ///
+  /// `MarkdownBody` re-parses the message's markdown into its AST whenever its
+  /// `data` **or** its `styleSheet` changes — and `MarkdownStyleSheet` defines
+  /// no `operator ==`/`hashCode`, so `flutter_markdown` compares it by
+  /// **identity**. The previous build constructed a fresh `MarkdownStyleSheet`
+  /// on every build, so the identity changed on every rebuild and the whole
+  /// message re-parsed on every rebuild of every visible row — even for
+  /// settled, immutable messages. Caching one stable instance per
+  /// (palette, base, dim, size) keeps the identity stable across rebuilds, so
+  /// a message re-parses only when its text actually changes (the in-flight
+  /// message), and a settled message re-parses never again.
+  MarkdownStyleSheet? _sheet;
+  _TuiMarkdownColors? _sheetPalette;
+  TextStyle? _sheetBase;
+  bool? _sheetDim;
+  double? _sheetSize;
+  Color? _sheetSurface;
+
+  /// The style sheet for [palette]/[b]/[dim]/[size]/[surface], cached: returns
+  /// the previous instance unchanged when its inputs did not (so
+  /// `MarkdownBody` sees the same identity and does not reparse), building a
+  /// fresh one only when any input moved.
+  MarkdownStyleSheet _styleSheetFor(
+    _TuiMarkdownColors palette,
+    TextStyle b,
+    bool dim,
+    double size,
+    Color? surface,
+  ) {
+    final current = _sheet;
+    if (current != null &&
+        identical(palette, _sheetPalette) &&
+        b == _sheetBase &&
+        dim == _sheetDim &&
+        size == _sheetSize &&
+        surface == _sheetSurface) {
+      return current;
+    }
+    final sheet = _buildSheet(palette, b, dim, size, surface);
+    _sheet = sheet;
+    _sheetPalette = palette;
+    _sheetBase = b;
+    _sheetDim = dim;
+    _sheetSize = size;
+    _sheetSurface = surface;
+    return sheet;
+  }
+
+  /// Builds the TUI-theme markdown style sheet: the one place its content is
+  /// derived from the palette, the base style, the dim flag, the body size,
+  /// and the surface the quote/code boxes paint on.
+  MarkdownStyleSheet _buildSheet(
+    _TuiMarkdownColors palette,
+    TextStyle b,
+    bool dim,
+    double size,
+    Color? surface,
+  ) {
     TextStyle style({
       Color? color,
       double? fontSize,
@@ -4245,52 +4311,64 @@ class _Markdown extends StatelessWidget {
           : style.copyWith(color: dim ? b.color : color);
     }
 
-    return MarkdownBody(
-      data: data,
-      styleSheet: MarkdownStyleSheet(
-        p: b,
-        h1: style(
-          fontSize: size * 1.3,
-          fontWeight: FontWeight.w700,
-          color: palette.heading,
-        ),
-        h2: style(
-          fontSize: size * 1.15,
-          fontWeight: FontWeight.w700,
-          color: palette.heading,
-        ),
-        h3: style(fontWeight: FontWeight.w600, color: palette.heading),
-        h4: style(fontWeight: FontWeight.w600, color: palette.heading),
-        h5: style(fontWeight: FontWeight.w600, color: palette.heading),
-        h6: style(fontWeight: FontWeight.w600, color: palette.heading),
-        em: style(fontStyle: FontStyle.italic, color: palette.em),
-        strong: style(fontWeight: FontWeight.bold, color: palette.strong),
-        code: style(
-          fontFamily: 'monospace',
-          fontSize: size,
-          color: palette.code,
-        ),
-        a: style(
-          color: palette.link,
-        ).copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
-        listBullet: style(color: palette.listBullet),
-        blockquote: style(color: palette.blockQuote),
-        // The quote's box: the theme's surface, like the code blocks — the
-        // markdown default is a fixed light box the light quote color is
-        // unreadable on in dark mode.
-        blockquoteDecoration: BoxDecoration(
-          color: dim
-              ? null
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(4),
-        ),
-        codeblockDecoration: BoxDecoration(
-          color: dim
-              ? null
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(4),
-        ),
+    // The quote/code box's surface: the theme's surface (passed in so the
+    // cache is a pure function of its inputs, not of the build context),
+    // `null` when dimmed (the dimmed pane paints no box).
+    final boxColor = dim ? null : surface;
+    return MarkdownStyleSheet(
+      p: b,
+      h1: style(
+        fontSize: size * 1.3,
+        fontWeight: FontWeight.w700,
+        color: palette.heading,
       ),
+      h2: style(
+        fontSize: size * 1.15,
+        fontWeight: FontWeight.w700,
+        color: palette.heading,
+      ),
+      h3: style(fontWeight: FontWeight.w600, color: palette.heading),
+      h4: style(fontWeight: FontWeight.w600, color: palette.heading),
+      h5: style(fontWeight: FontWeight.w600, color: palette.heading),
+      h6: style(fontWeight: FontWeight.w600, color: palette.heading),
+      em: style(fontStyle: FontStyle.italic, color: palette.em),
+      strong: style(fontWeight: FontWeight.bold, color: palette.strong),
+      code: style(fontFamily: 'monospace', fontSize: size, color: palette.code),
+      a: style(color: palette.link)
+          .copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
+      listBullet: style(color: palette.listBullet),
+      blockquote: style(color: palette.blockQuote),
+      // The quote's box: the theme's surface, like the code blocks — the
+      // markdown default is a fixed light box the light quote color is
+      // unreadable on in dark mode.
+      blockquoteDecoration: BoxDecoration(
+        color: boxColor,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: boxColor,
+        borderRadius: BorderRadius.circular(4),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _TuiMarkdownColors.resolve(Theme.of(context).brightness);
+    final b = widget.base ?? const TextStyle();
+    // The body size the paragraph text actually renders in: the base when the
+    // pane sets one, else the theme's body size (the markdown fallback
+    // stylesheet merges under ours, so the code size must be set explicitly
+    // to win over its shrunken default).
+    final size =
+        b.fontSize ?? Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14;
+    // The surface the quote/code boxes paint on, part of the cache key so a
+    // theme swap (a new surface) rebuilds the sheet rather than reusing a
+    // sheet that painted the previous surface.
+    final surface = Theme.of(context).colorScheme.surfaceContainerHighest;
+    return MarkdownBody(
+      data: widget.data,
+      styleSheet: _styleSheetFor(palette, b, widget.dim, size, surface),
     );
   }
 }
