@@ -9,6 +9,12 @@ import '../model/permission.dart';
 import '../model/question.dart';
 import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
+import 'afk/afk_charter.dart';
+import 'afk/afk_component.dart';
+import 'afk/afk_ready_gate_poller.dart';
+import 'afk/afk_run_service.dart';
+import 'afk/afk_settings.dart';
+import 'afk/github_reader.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/composite_event_service.dart';
@@ -74,6 +80,7 @@ class BridgeServer {
     this._pushDispatcher,
     this._lifecycle,
     this._opencodeBoot,
+    this._afk,
   );
 
   /// The fixed port the bridge listens on. It is pinned so the tunnel
@@ -316,6 +323,34 @@ class BridgeServer {
   /// `not_configured`.
   final OpencodeServiceBooter? _opencodeBoot;
 
+  /// The AFK subsystem (spec #376, T1): the arming toggle, the parallel-orbs
+  /// cap, the model, and the AFK session's create/reuse + stored id. Built on
+  /// the backend when one exists (a machine without a shared opencode service
+  /// has no host to place the AFK session on). The app hands it the persisted
+  /// settings at startup and on every change ([updateAfKSettings]) — in
+  /// process, no HTTP endpoint (the bridge runs in the app's process in
+  /// server mode).
+  final AfkComponent? _afk;
+
+  /// The AFK Ready gate's admission poller (spec #376, "The Ready gate and
+  /// the feed", T2): the bridge's GitHub-reading admission loop. Built in
+  /// [start] when this bridge has an AFK component and the unified event
+  /// hub; the admission events ride the same fan-out the app's SSE sees.
+  /// Re-synced with the arming state by [updateAfKSettings]; stopped by
+  /// [stop].
+  AfkReadyGatePoller? _afkPoller;
+
+  /// The AFK run service (spec #376, "The per-issue state machine
+  /// (bridge-owned)", T3): the bridge's loop that drives every admitted run
+  /// through its state machine (feed, wait, narration, transitions, retry,
+  /// terminal failure). Built and started in [start] when this bridge has an
+  /// AFK component and the unified event hub; the run's `afk.pr_open` /
+  /// `afk.failed` events ride the same fan-out the app's SSE sees. Its pass
+  /// runs for the life of the bridge — the arming gates only its new-work
+  /// steps (read live through [AfkRunService.isArmed], so a disarm lets
+  /// in-flight runs finish, user story #24) — and it is stopped by [stop].
+  AfkRunService? _afkRuns;
+
   /// The route dispatch table (issue #253, C3): the ordered method→path→
   /// closure the HTTP server listens on. Built by [_buildRoutes] once at start
   /// (the composition root's route wiring), before the port is listened on.
@@ -411,6 +446,7 @@ class BridgeServer {
     bool autoLifecyclePass = false,
     Duration? lifecyclePassInterval,
     OpencodeServiceBooter? bootstrapOpencode,
+    AfkComponent? afk,
   }) async {
     final server = await HttpServer.bind(host, port);
     // The host opencode service boot (issue #153, ADR-0002/ADR-0008): it runs
@@ -442,6 +478,19 @@ class BridgeServer {
     try {
       await OrbAgentTools.materialize();
     } catch (_) {}
+    // The AFK agent's charter (spec #376, T1): the canonical markdown agent
+    // file for the `afk` agent, installed into the global opencode config's
+    // agents dir **only if absent** — an existing (hand-edited) file is never
+    // rewritten, the developer's edit wins. Server mode only: [bootstrapOpencode]
+    // is the on-switch the app passes only there (client mode and the default
+    // start pass nothing), which is exactly "the bridge's startup, server
+    // mode". A failure degrades: the AFK session simply cannot be created on
+    // a host that has no writable config dir.
+    if (bootstrapOpencode != null) {
+      try {
+        await AfkCharter.install();
+      } catch (_) {}
+    }
     final orbBuilder =
         orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
     // The backend the orb service's PR repo resolver (issue #96) reaches:
@@ -535,6 +584,15 @@ class BridgeServer {
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
+    // The AFK subsystem (spec #376, T1): the arming toggle, the parallel-orbs
+    // cap, the model, and the AFK session's create/reuse + stored id. Built on
+    // the backend (a machine without a shared opencode service has no host to
+    // place the AFK session on, so the component degrades to `null`); the app
+    // hands it the persisted settings at startup and on every change
+    // (in-process, no HTTP endpoint). Built here — before the push dispatch,
+    // whose terminal-failure push deep-links to the AFK session through it
+    // (spec #376, T5) — so the dispatch's resolver reads it live.
+    final afkComponent = afk ?? AfkComponent(backend: backend);
     NotifyService? notifyService;
     PushDispatcher? pushDispatcher;
     if (notify != null) {
@@ -545,6 +603,11 @@ class BridgeServer {
         eventHub,
         path: notifyCredential,
         senderFactory: notifySenderFactory,
+        // The AFK session's id, read live (spec #376, T5): the terminal-
+        // failure push's deep-link — resolved at push time, so a (re-)arming
+        // is picked up without a rebuild. `null` (no AFK session stored) ⇒
+        // the failure push is not sent (there is nowhere to go).
+        afkSession: () async => afkComponent.sessionId,
       );
     }
     final tunnelSupervisor = tunnel;
@@ -556,6 +619,49 @@ class BridgeServer {
           cli: TunnelCli(binary: supervisor.binary),
           credentialsDir: Directory('${homeDirectory()}/.cloudflared'),
         );
+    // The task service is declared here (before the AFK run service) so the
+    // run service's liveness closure can read it live at reconciliation time
+    // (the AFK-attributed orbs in flight); it is assigned further below once
+    // the orbs + backend exist (issue #260). A test injecting [tasks] keeps
+    // its own; the default is built conditionally, then assigned.
+    OrbTaskService? taskService = tasks;
+    // The AFK Ready gate's admission poller (spec #376, "The Ready gate and
+    // the feed", T2): the real `gh` reader, the component's run store, and
+    // the unified event hub's emit — the admission events ride the same
+    // fan-out the app's SSE sees. Armed ⇒ the schedule starts via
+    // [updateAfKSettings]; the system is inert when disarmed or when there
+    // is no event hub (no SSE surface for the events).
+    final afkPoller = eventHub == null
+        ? null
+        : AfkReadyGatePoller(
+            reader: GhGitHubReader(),
+            store: afkComponent.store,
+            isArmed: () => afkComponent.enabled,
+            emitEvent: eventHub.emit,
+          );
+    // The AFK run service (spec #376, T3): the real `gh` reader, the
+    // component's run store, and the session operations over the composite
+    // backend + component — the run's `afk.pr_open` / `afk.failed` events
+    // ride the same fan-out the app's SSE sees. Its pass runs for the life
+    // of the bridge (in-flight runs must finish through a disarm, user
+    // story #24); the arming gates only its new-work steps. Its startup
+    // reconciliation (T6) reads liveness — the AFK-attributed orbs in flight
+    // (the task service's persisted fact) + the AFK session's active state
+    // (the sessions backend) — through this closure; not the service inbox.
+    // Built only when there is an event hub (no SSE surface otherwise).
+    final afkRuns = eventHub == null
+        ? null
+        : AfkRunService(
+            reader: GhGitHubReader(),
+            store: afkComponent.store,
+            sessions: CompositeAfkSessions(
+              component: afkComponent,
+              backend: backend,
+            ),
+            emitEvent: eventHub.emit,
+            isArmed: () => afkComponent.enabled,
+            liveness: () => _afkLiveness(afkComponent, taskService, backend),
+          );
     final bridge = BridgeServer._(
       server,
       health ?? BridgeServer._defaultHealth(bootstrapOpencode),
@@ -574,7 +680,10 @@ class BridgeServer {
       pushDispatcher,
       lifecycle,
       bootstrapOpencode,
+      afkComponent,
     );
+    bridge._afkPoller = afkPoller;
+    bridge._afkRuns = afkRuns;
     // The route dispatch table (issue #253, C3): the composition root's route
     // wiring. It is built here — at start, not in the request path — so a
     // wiring change (a new component, a re-tied closure) re-builds the table
@@ -596,7 +705,6 @@ class BridgeServer {
     // the table built above picks it up). Both the orbs and the backend are
     // required, and both are only built by the bridge itself (a test faking
     // either one injects [tasks], or the spawn endpoints answer 503).
-    OrbTaskService? taskService = tasks;
     if (taskService == null &&
         orbService != null &&
         backend != null &&
@@ -608,10 +716,21 @@ class BridgeServer {
         file: File('${homeDirectory()}/.config/opencodebridge/tasks.json'),
         notifyProvider: () => bridge._notify,
         upstreams: orbUpstreams,
+        // The AFK parallel-orbs cap (issue #379, spec #376 T4): the spawn
+        // boundary reads the AFK attribution live — the AFK session id (the
+        // bridge's own persisted fact) and the current cap — so a Settings
+        // change is effective from the next spawn, and a spawn is AFK-attributed
+        // when its caller session is the AFK session.
+        afkGate: () => afkComponent.spawnGate(),
       );
     }
     bridge._tasks = taskService;
     speed?.start();
+    // The AFK run service's pass (spec #376, T3): it runs for the life of
+    // the bridge, armed or not — the arming gates only its new-work steps,
+    // so a disarm mid-run lets the in-flight runs finish (user story #24).
+    // Stopped by [stop], below.
+    afkRuns?.start();
     // The automated lifecycle pass (issue #101, spec §2.10): the bridge is
     // the single actor of orb automation — bridge down = no automation
     // (accepted by construction). Tests arm it explicitly; the pass keeps
@@ -686,6 +805,47 @@ class BridgeServer {
     }
   }
 
+  /// The AFK liveness facts (spec #376, T6), read live at reconciliation
+  /// time: the **AFK-attributed orbs in flight** (the task service's
+  /// persisted fact — the creating task's caller session held against the
+  /// AFK store's session id) plus the **AFK session's active state** (the
+  /// sessions backend's active set). The run service's startup
+  /// reconciliation ORs the two ([AfkLiveness.any]); a `dispatched` run is
+  /// live while either holds, non-live + no narration + no PR is lost.
+  ///
+  /// Not the service inbox (spec #376, T6): the two bridge-side facts only.
+  /// Inert on a failed read (no task service, no backend, no AFK session id):
+  /// the answer degrades to no-liveness (the reconciliation then reads the
+  /// run's narration/PR to decide lost vs. on-its-way), never a throw.
+  static Future<AfkLiveness> _afkLiveness(
+    AfkComponent afk,
+    OrbTaskService? tasks,
+    SessionsBackend? backend,
+  ) async {
+    final id = afk.store.sessionId();
+    if (id == null || id.isEmpty) return const AfkLiveness.none();
+    var orbsInFlight = 0;
+    if (tasks != null) {
+      try {
+        orbsInFlight = tasks.afkOrbsInFlight(id);
+      } catch (_) {
+        orbsInFlight = 0; // A failed read degrades to no orbs in flight.
+      }
+    }
+    var sessionActive = false;
+    if (backend != null) {
+      try {
+        sessionActive = (await backend.service.activeSessionIds()).contains(id);
+      } catch (_) {
+        sessionActive = false; // A failed read degrades to inactive.
+      }
+    }
+    return AfkLiveness(
+      afkOrbsInFlight: orbsInFlight,
+      sessionActive: sessionActive,
+    );
+  }
+
   /// The default push dispatch (issue #24): the Firebase service account
   /// from the app-owned config (or `GOOGLE_APPLICATION_CREDENTIALS`), the
   /// Admin-SDK sender (the raw FCM HTTP v1 API stays the fallback,
@@ -703,6 +863,10 @@ class BridgeServer {
     EventHub? hub, {
     String? path,
     Future<FcmSender> Function(FirebaseServiceAccount)? senderFactory,
+    // The AFK session's id, read live (spec #376, T5): the terminal-failure
+    // push's deep-link — the dispatcher resolves it at push time so a
+    // (re-)arming is picked up without a rebuild. `null` ⇒ no AFK session.
+    Future<String?> Function()? afkSession,
   }) async {
     final account = FirebaseServiceAccount.tryLoad(path: path);
     if (account == null) return (null, null);
@@ -729,8 +893,15 @@ class BridgeServer {
     }
 
     // The hub fans the push events out like any other downstream; with no
-    // hub there is no event stream and no push to send.
-    final dispatcher = PushDispatcher(service, sessionLabel: label);
+    // hub there is no event stream and no push to send. The dispatcher maps
+    // the AFK run's two "look now" events (spec #376, T5) to the `afkRun`
+    // push kind; the failure push deep-links to the AFK session, resolved
+    // live through [afkSession].
+    final dispatcher = PushDispatcher(
+      service,
+      sessionLabel: label,
+      afkSession: afkSession,
+    );
     hub?.add(dispatcher);
     return (service, dispatcher);
   }
@@ -765,11 +936,14 @@ class BridgeServer {
       await dispatcher.close();
     }
     await _notify?.close();
+    final afk = _afk;
     final (service, newDispatcher) = await BridgeServer._defaultNotify(
       _sessions,
       _events,
       path: path,
       senderFactory: senderFactory,
+      // The failure push's deep-link (spec #376, T5): read live, as at start.
+      afkSession: afk == null ? null : () async => afk.sessionId,
     );
     _notify = service;
     _pushDispatcher = newDispatcher;
@@ -778,6 +952,72 @@ class BridgeServer {
     // this reload pushes through the new sender automatically — the bridge
     // no longer re-points a mutable field on the task service.
   }
+
+  // --------------------------------------------------------------------------
+  // The AFK subsystem's in-process surface (spec #376, T1).
+  //
+  // The bridge runs in the app's process in server mode, so the app talks to
+  // this surface directly — there is no HTTP endpoint for AFK. The app hands
+  // the current persisted settings to the bridge at startup and on every
+  // change ([updateAfKSettings]); a changed cap is effective from the next
+  // orb spawn and a changed model from the next AFK session creation.
+  //
+  // [updateAfKSettings] is the whole surface: it holds the values live and,
+  // when the arming toggle is on, ensures the AFK session exists (create or
+  // reuse, idempotent) and stores its id. Arming is therefore idempotent —
+  // startup with the persisted arm reuses the session the service still has,
+  // a re-arm after a disarm reuses it (no duplicate), and a toggle-on creates
+  // it. Disarming (the toggle off) holds the values but leaves the session
+  // alone — it outlives a disarm.
+
+  /// The AFK subsystem's live settings (the values the app last handed the
+  /// bridge). The arming toggle, the parallel-orbs cap, and the model.
+  AfkSettings get afkSettings => _afk?.settings ?? const AfkSettings();
+
+  /// The in-process notification the app calls at startup and on every AFK
+  /// setting change in Settings: the new values are held live, so the next
+  /// orb spawn reads the new cap and the next AFK session creation reads the
+  /// new model (no restart). When the arming toggle is on, the AFK session is
+  /// ensured (create or reuse, idempotent) and its id stored; when it is off
+  /// the values are held and the session is left alone. Returns the session id
+  /// when armed, else `null`. A no-op session-wise when this bridge has no AFK
+  /// component (no shared opencode service).
+  Future<String?> updateAfKSettings(AfkSettings settings) async {
+    _afk?.updateSettings(settings);
+    // The Ready gate's admission poller follows the arming toggle live
+    // (spec #376, T2): start on arm, stop on disarm.
+    _afkPoller?.syncArmed(settings.enabled);
+    // The run service does not follow the toggle live (spec #376, user
+    // story #24): its pass runs for the life of the bridge and its
+    // new-work steps read the arming live through [isArmed] — a disarm
+    // gates new feeds and re-dispatches while the in-flight runs finish to
+    // their PR or failure. No destructive stop here.
+    if (!settings.enabled) return null;
+    // The fresh-agent handoff (spec #376, T6): the arming ensures the session
+    // (create or reuse, idempotent). When it was **just created** — a wiped
+    // store's first arm, or a session the service lost (a normal host-service
+    // restart reuses it: ids and full state persist, so `id == before`) — the
+    // run service sends the **bootstrap** feed (the in-flight runs from the
+    // store) so the recreated agent reconciles with the tracker itself. A
+    // reused session sends no bootstrap (no recreation, no re-bootstrap).
+    final before = _afk?.store.sessionId();
+    final id = await ensureAfKSession();
+    final runs = _afkRuns;
+    if (id != null && id != before && runs != null) {
+      await runs.bootstrap();
+    }
+    return id;
+  }
+
+  /// Ensure the AFK session exists and return its id (the arming action):
+  /// create it in the main checkout (model pinned from the `afkModel` setting,
+  /// empty = the service's default, agent `afk`, visible — never archived) or
+  /// reuse the stored one when the service still has it, and store its id.
+  /// Idempotent. Returns `null` when this bridge has no AFK component (no
+  /// shared opencode service) or the main checkout cannot be resolved yet
+  /// (safe to retry once it is).
+  Future<String?> ensureAfKSession() =>
+      _afk?.ensureSession() ?? Future<String?>.value(null);
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
   Uri get baseUri =>
@@ -791,6 +1031,8 @@ class BridgeServer {
     _tasksArmTimer?.cancel();
     _tasksArmTimer = null;
     _orbs?.stopLifecyclePass();
+    _afkPoller?.stop();
+    _afkRuns?.stop();
     _tasks?.close();
     await _server.close(force: true);
     await _hostServer?.close(force: true);
@@ -852,6 +1094,9 @@ class BridgeServer {
               // The shared live-upstream module (issue #278): the re-arm's
               // task service asks the same module the composites read.
               upstreams: upstreams,
+              // The AFK parallel-orbs cap (issue #379, spec #376 T4): read
+              // live at each spawn, like the push fallback reads [_notify].
+              afkGate: () => _afk?.spawnGate(),
             );
           },
           onError: (Object _) {

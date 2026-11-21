@@ -152,8 +152,17 @@ class NotificationService {
     if (_settings.notifyDockerContainer) {
       kinds.add(NotifyKind.dockerContainer);
     }
+    // The AFK run's own push toggle (spec #376, T5) — distinct from the AFK
+    // arming toggle: a device arms the agent (no registration change) and
+    // independently silences its two "look now" pushes.
+    if (_settings.notifyAfkRun) kinds.add(NotifyKind.afkRun);
     return kinds;
   }
+
+  /// The current enabled push kinds, exposed so the registration's content
+  /// can be tested without a live FCM token flow (the [openForTest] pattern).
+  @visibleForTesting
+  Set<NotifyKind> enabledKindsForTest() => _enabledKinds();
 
   void _open(RemoteMessage message) {
     final link = message.data['link'];

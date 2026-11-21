@@ -10,6 +10,7 @@ import '../../model/orb.dart';
 import '../../model/session_detail.dart';
 import '../../notify/deep_link.dart';
 import '../../notify/notify_kind.dart';
+import '../afk/afk_spawn_gate.dart';
 import '../notify/delivery_policy.dart';
 import '../notify/notify_service.dart';
 import '../sessions/backend.dart';
@@ -127,6 +128,7 @@ class OrbTaskService {
     this.settleIdleWindow = defaultSettleIdleWindow,
     this.settleMissingWindow = defaultSettleMissingWindow,
     this.notifyProvider = _noNotify,
+    this.afkGate = _noAfkGate,
     OrbUpstreamSource? upstreams,
     Random? random,
   }) : _random = random ?? Random(),
@@ -179,6 +181,19 @@ class OrbTaskService {
   /// The default [notifyProvider]: push is not configured, so the closure
   /// returns `null` and the in-app retry owns the delivery alone.
   static NotifyService? _noNotify() => null;
+
+  /// The AFK spawn-boundary gate (issue #379, spec #376 T4): a closure the
+  /// bridge wires to the AFK subsystem. It is read **live** at each spawn —
+  /// returning the current [AfkSpawnGate] (the AFK session id, the
+  /// attribution anchor, and the cap from the current settings) or `null`
+  /// (no AFK session persisted — the cap never applies, so a library
+  /// consumer that does not wire the AFK subsystem, or a disarmed bridge,
+  /// caps nothing). The default [_noAfkGate] leaves the cap disengaged.
+  final AfkSpawnGate? Function() afkGate;
+
+  /// The default [afkGate]: the AFK subsystem is not wired, so the cap never
+  /// applies (no AFK orbs to count).
+  static AfkSpawnGate? _noAfkGate() => null;
 
   /// The completion poll pace; also the test seam (tests drive completion
   /// with a scripted session detail rather than wall time).
@@ -355,6 +370,53 @@ class OrbTaskService {
     String? callerDirectory,
     String? dispatchId,
   }) async {
+    // The AFK parallel-orbs cap (issue #379, spec #376 T4) is admitted
+    // **before** any orb is created — a refusal must not leak a container.
+    // The idempotent retry (issue #143, tightened by #147) is answered first,
+    // so a re-send of a running task returns that task, never a cap refusal:
+    // the retry needs the target orb, resolved here **without creating it**
+    // (a fresh clone has no running task, so a new-orb spawn is never a
+    // retry).
+    final gate = afkGate();
+    final existingOrbId = await _existingTargetOrbId(projectId, orb);
+    if (existingOrbId != null) {
+      // A retry of a dispatch that is already running on the target orb
+      // returns that task — a retried spawn (the caller's transport timed out
+      // or the agent repeats the same call) is not a second task. The identity
+      // is the raw caller text (exactly what was delivered) plus the calling
+      // session and, when the caller sends one, its dispatch id — never a
+      // lossy normalization. The per-project serialization above makes
+      // check-then-dispatch race-free.
+      final retried = _retriedTaskOn(
+        existingOrbId,
+        task,
+        callerSession,
+        dispatchId,
+      );
+      if (retried != null) return retried;
+    }
+
+    // The AFK cap itself (spec #376 T4): an AFK-attributed spawn (its caller
+    // session is the AFK session — the bridge's own persisted fact) that would
+    // put AFK orbs in flight above the cap is refused, the answer carrying the
+    // counter (in flight vs cap) and the positive path (wait for a slot, then
+    // re-dispatch). The refusal does not end the agent's turn: it has already
+    // read the issue and composed the orb prompt; it waits for a slot and
+    // re-dispatches. Scoped to AFK orbs only — a developer spawn (any other
+    // caller session) is never capped, and with no AFK session there are no
+    // AFK orbs to count.
+    if (gate != null && gate.isAfk(callerSession)) {
+      final inFlight = _afkOrbsInFlight(gate.afkSessionId!);
+      if (inFlight >= gate.cap) {
+        throw OrbRefusalError(
+          OrbRefusalError.afkCap,
+          'the AFK parallel-orbs cap is reached: $inFlight in flight of '
+          '${gate.cap}. Wait for a slot to free up, then re-dispatch this '
+          'task.',
+        );
+      }
+    }
+
     final (record, created) = await _targetOrCreateOrb(
       projectId,
       task,
@@ -362,18 +424,6 @@ class OrbTaskService {
       seed,
       branch: branch,
     );
-
-    // The idempotent dispatch (issue #143, tightened by #147): a retry of a
-    // dispatch that is already running on the target orb returns that task —
-    // a retried spawn (the caller's transport timed out or the agent repeat
-    // the same call) is not a second task. The identity is the raw caller text
-    // (exactly what was delivered) plus the calling session and, when the
-    // caller sends one, its dispatch id — never a lossy normalization, which
-    // bound a substring/superset/punctuation-stripped follow-up to the earlier
-    // task and ran the wrong work. The per-project serialization above makes
-    // check-then-dispatch race-free.
-    final retried = _retriedTaskOn(record.id, task, callerSession, dispatchId);
-    if (retried != null) return retried;
 
     // The orb's busy-orb refusal (issue #351): the target orb already runs a
     // task, and this dispatch is not its idempotent retry (checked above).
@@ -599,6 +649,69 @@ class OrbTaskService {
     }
     return null;
   }
+
+  /// The id of the target orb **if it already exists** (issue #379, spec
+  /// #376 T4): the idempotent-retry check runs before the AFK cap and before
+  /// any orb is created, so it resolves the target without creating it.
+  /// `null` when the spawn would create a new orb — a fresh clone has no
+  /// running task, so there is nothing to retry against. The resolution
+  /// mirrors [_targetOrCreateOrb]'s targeting (an explicit name, else the
+  /// project's single orb) minus the create; the ambiguous and the error
+  /// cases are left to [_targetOrCreateOrb] to answer.
+  Future<String?> _existingTargetOrbId(String projectId, String? orb) async {
+    final rows = await orbs.list();
+    final inProject = [
+      for (final row in rows)
+        if (row.project == projectId && !OrbState.parse(row.state).isOrphan)
+          row,
+    ];
+    if (orb != null && orb.isNotEmpty) {
+      final named = [
+        for (final row in inProject)
+          if (row.name == orb) row,
+      ];
+      if (named.length == 1) return named.single.id;
+      return null; // New name (would create) or ambiguous (let it throw).
+    }
+    if (inProject.length == 1) return inProject.single.id;
+    return null; // None (would create) or several (let it throw).
+  }
+
+  /// The number of **AFK-attributed orbs in flight** (issue #379, spec #376
+  /// T4): the counter the parallel-orbs cap is enforced against.
+  ///
+  /// An orb is AFK-attributed when the task that **created** it was dispatched
+  /// by the AFK session (the bridge's own persisted fact — the creating task
+  /// record's caller session, held against the AFK store's session id); it is
+  /// **in flight** while it runs a task (a settled orb is free again — the
+  /// cap counts orbs in flight, not cumulative spawns). Developer orbs (a
+  /// different creating caller) never count.
+  int _afkOrbsInFlight(String afkSessionId) {
+    final afkOrbs = <String>{
+      for (final task in _tasks)
+        if (task.createdOrb && task.callerSession == afkSessionId) task.orb,
+    };
+    var inFlight = 0;
+    for (final orb in afkOrbs) {
+      for (final task in _tasks) {
+        if (task.orb == orb && !task.isDone) {
+          inFlight++;
+          break;
+        }
+      }
+    }
+    return inFlight;
+  }
+
+  /// The number of **AFK-attributed orbs in flight** (spec #376, T6): the
+  /// liveness fact the startup reconciliation reads (a `dispatched` run is
+  /// live while an AFK-attributed orb it can attribute is running a task) —
+  /// and the same counter the parallel-orbs cap is enforced against (T4).
+  ///
+  /// The bridge's composition root reads this live at reconciliation time;
+  /// with no AFK session id (a `''`/empty id), nothing is attributed, so the
+  /// answer is `0`.
+  int afkOrbsInFlight(String afkSessionId) => _afkOrbsInFlight(afkSessionId);
 
   /// The dispatch text's identity in the tasks file: a SHA-256 of the raw
   /// caller text (exactly what was delivered, issue #147), so the file

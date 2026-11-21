@@ -4,6 +4,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/notify/deep_link.dart';
 import 'package:opencodebridge/notify/notification_service.dart';
+import 'package:opencodebridge/notify/notify_kind.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -46,6 +47,38 @@ void main() {
         got.future,
         completion(DeepLink.session('ses_live')),
       ).then((_) => sub.cancel());
+    });
+
+    test('the enabled kinds follow the push toggles (the afkRun toggle is its '
+        'own, distinct from the arming toggle — spec #376, T5)', () {
+      final service = makeService();
+      // Off by default: nothing enabled.
+      expect(service.enabledKindsForTest(), isEmpty);
+
+      // A fresh install with the afkRun toggle on registers only that kind.
+      settings.notifyAfkRun = true;
+      expect(service.enabledKindsForTest(), {NotifyKind.afkRun});
+
+      // Every push toggle on: all four kinds, afkRun alongside the others.
+      settings.notifyPermissionAsked = true;
+      settings.notifyTurnEnded = true;
+      settings.notifyDockerContainer = true;
+      expect(service.enabledKindsForTest(), {
+        NotifyKind.permissionAsked,
+        NotifyKind.turnEnded,
+        NotifyKind.dockerContainer,
+        NotifyKind.afkRun,
+      });
+
+      // Armed-but-silenced: arming the AFK system is not a push toggle, so
+      // the AFK push kind is gone when its own toggle is off.
+      settings.afkEnabled = true;
+      settings.notifyAfkRun = false;
+      expect(service.enabledKindsForTest(), {
+        NotifyKind.permissionAsked,
+        NotifyKind.turnEnded,
+        NotifyKind.dockerContainer,
+      });
     });
 
     test('remounts: a second listener attaches to the same stream after the '

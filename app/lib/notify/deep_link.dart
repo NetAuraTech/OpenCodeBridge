@@ -6,14 +6,17 @@
 ///
 /// - `opencodebridge://session/<id>` — a session (its structured view,
 ///   which shows the pending-permission banner);
-/// - `opencodebridge://container/<name>` — a container's detail.
+/// - `opencodebridge://container/<name>` — a container's detail;
+/// - an external URL (`https://…`) — opened in the **external browser**
+///   (spec #376, T5: an AFK run's PR deep-links to the PR's GitHub URL).
 class DeepLink {
   const DeepLink._(this.target, this.id);
 
-  /// The link target: `session` or `container`.
+  /// The link target: `session`, `container`, or `external`.
   final String target;
 
-  /// The target's id (the session id or the container name).
+  /// The target's id: the session id, the container name, or the external
+  /// URL's string form.
   final String id;
 
   /// A session link.
@@ -21,6 +24,9 @@ class DeepLink {
 
   /// A container link.
   factory DeepLink.container(String name) => DeepLink._('container', name);
+
+  /// An external link: a URL opened in the browser (the [id] is the URL).
+  factory DeepLink.external(String url) => DeepLink._('external', url);
 
   /// The URI form of a session link, e.g. `opencodebridge://session/ses_1`.
   static Uri sessionUri(String id) =>
@@ -31,15 +37,31 @@ class DeepLink {
   static Uri containerUri(String name) =>
       Uri(scheme: 'opencodebridge', host: 'container', path: name);
 
+  /// The URI form of an external link: the URL itself (an AFK run's PR is
+  /// deep-linked by its GitHub URL, opened in the external browser).
+  static Uri externalUri(String url) => Uri.parse(url);
+
   /// True when the link targets a session.
   bool get isSession => target == 'session';
 
   /// True when the link targets a container.
   bool get isContainer => target == 'container';
 
-  /// Parses [uri] into a deep link, or `null` when it is not one (wrong
-  /// scheme, unknown target, or no id).
+  /// True when the link is an external URL (opened in the browser).
+  bool get isExternal => target == 'external';
+
+  /// Parses [uri] into a deep link, or `null` when it is not one.
+  ///
+  /// An `opencodebridge://<target>/<id>` URI (the `session` and `container`
+  /// targets, a single non-empty path segment) parses to that target. An
+  /// `http`/`https` URI parses to an [external] link whose id is the URL —
+  /// the PR's GitHub URL, opened in the external browser (spec #376, T5).
+  /// Anything else (a wrong deep-link scheme, an unknown target, no id, a
+  /// scheme-less string, another scheme) is not a deep link.
   static DeepLink? tryParse(Uri uri) {
+    if (uri.scheme == 'http' || uri.scheme == 'https') {
+      return DeepLink._('external', uri.toString());
+    }
     if (uri.scheme != 'opencodebridge') return null;
     if (uri.host != 'session' && uri.host != 'container') return null;
     final segments = uri.pathSegments;

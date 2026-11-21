@@ -73,6 +73,15 @@ class FakeService implements OpencodeService {
   Future<Set<String>> activeSessionIds() async => Set.of(active);
 
   @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final active = await activeSessionIds();
+    return !active.contains(id);
+  }
+
+  @override
   Future<List<OpencodeProject>> projects() async {
     projectsCalls++;
     return const [];

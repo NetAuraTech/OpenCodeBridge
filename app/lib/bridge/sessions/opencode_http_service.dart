@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -424,6 +425,59 @@ class OpencodeHttpService implements OpencodeService {
       _base.replace(path: '/api/session/${Uri.encodeComponent(id)}/prompt'),
       jsonEncode(body),
     );
+  }
+
+  /// The session's idle-wait (the service's
+  /// `POST /api/experimental/session/{id}/wait`): a long-poll — the service
+  /// answers `204` at idle and **holds the request** while a turn runs
+  /// (`503` when it can answer running at once), so the hold is bounded
+  /// client-side by [timeout]. A timeout (the request aborted) and a `503`
+  /// both answer `false` — "still running, ask again later" (the default
+  /// seam's contract); only a `204` answers `true`.
+  @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final client = HttpClient();
+    try {
+      final request = await client.postUrl(
+        _base.replace(
+          path: '/api/experimental/session/${Uri.encodeComponent(id)}/wait',
+        ),
+      );
+      request.headers.set(HttpHeaders.authorizationHeader, _auth);
+      var timedOut = false;
+      final timer = Timer(timeout, () {
+        timedOut = true;
+        request.abort();
+      });
+      try {
+        final response = await request.close();
+        timer.cancel();
+        if (response.statusCode == HttpStatus.noContent) return true; // 204
+        if (response.statusCode == HttpStatus.serviceUnavailable) {
+          return false; // 503: still running.
+        }
+        await response.drain<void>();
+        throw OpencodeServiceError(
+          response.statusCode,
+          'unexpected idle-wait status',
+        );
+      } catch (error) {
+        // The abort's error (a timeout) reads as "still running"; a 404
+        // (a session the service no longer has) or any other failure
+        // propagates to the caller's error path.
+        if (timedOut) return false;
+        rethrow;
+      }
+    } on OpencodeServiceError {
+      rethrow;
+    } catch (error) {
+      throw OpencodeServiceError(0, '$error');
+    } finally {
+      client.close(force: true);
+    }
   }
 
   /// Endpoint 8 (spec §5): the session's pending permission requests. The

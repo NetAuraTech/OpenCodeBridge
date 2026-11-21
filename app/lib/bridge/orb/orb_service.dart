@@ -196,11 +196,18 @@ class OrbRefusalError implements Exception {
   /// positive path (a distinct `orb` name, or wait for completion).
   static const String orbBusy = 'orb_busy';
 
+  /// The AFK parallel-orbs cap is reached (issue #379, spec #376 T4): the
+  /// AFK-attributed spawn would put AFK orbs in flight above the
+  /// `afkParallelOrbs` cap. [message] carries the counter (in flight vs cap)
+  /// and the positive path (wait for a slot, then re-dispatch). The refusal
+  /// does not end the agent's turn: it waits for a slot and re-dispatches.
+  static const String afkCap = 'afk_cap';
+
   /// The refusal code (`no_remote`, `non_github_remote`,
   /// `missing_git_identity`, `not_wakeable`, `missing_checkout`,
   /// `not_running`, `not_updatable`, `update_busy`, `missing_workspace`,
   /// `seed_not_found`, `seed_not_pushed`, `seed_conflict`, `no_shell`,
-  /// `orb_busy`).
+  /// `orb_busy`, `afk_cap`).
   final String code;
 
   /// The clear message for the app.

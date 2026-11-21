@@ -3,6 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/afk/afk_component.dart';
+import 'package:opencodebridge/bridge/afk/afk_settings.dart';
+import 'package:opencodebridge/bridge/afk/afk_store.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
@@ -3675,6 +3678,208 @@ void main() {
     });
   });
 
+  group('BridgeServer AFK run push wiring (spec #376, T5)', () {
+    // The AFK run's two "look now" events (spec #376, T5) ride the bridge's
+    // real event hub and are mapped to the `afkRun` push kind by the bridge's
+    // real [PushDispatcher] — through the real [_defaultNotify] wiring, whose
+    // AFK-session resolver reads the bridge's **stored** AFK session (not the
+    // run's issue, which has no session). The push deep-links: the PR push to
+    // the PR's GitHub URL (external), the failure push to the AFK session
+    // (in-app). A device registered for `afkRun` receives them; the PR push
+    // is high priority. The dispatcher itself (titles, bodies, the per-kind
+    // toggle) is covered by the push-dispatcher tests; this closes the
+    // bridge-wiring loop the dispatcher test cannot (its resolver is a stub).
+
+    late BridgeServer server;
+    late Uri base;
+    late _FakeService service;
+    late _FakeEventUpstream upstream;
+    late EventHub hub;
+    late _NotifyFakeSender sender;
+    late Directory dir;
+    late AfkStore afkStore;
+    late AfkComponent afk;
+
+    Future<FcmSender> fakeSender(FirebaseServiceAccount account) async =>
+        sender;
+
+    /// Emits an `afk.pr_open` bridge event through the bridge's hub and waits
+    /// for the recording sender to receive the push.
+    Future<void> emitPrOpen() async {
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.afkPrOpen,
+          data: {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'prNumber': 41,
+            'prUrl': 'https://github.com/o/r/pull/41',
+          },
+        ),
+      );
+      await _until(() => sender.sent.isNotEmpty, message: 'the AFK push');
+    }
+
+    Future<void> emitFailed() async {
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.afkFailed,
+          data: {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'reason': 'model under load',
+          },
+        ),
+      );
+      await _until(() => sender.sent.isNotEmpty, message: 'the AFK push');
+    }
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('opencodebridge-afk-push');
+      final accountPath = '${dir.path}/service-account.json';
+      FirebaseServiceAccount.install(kAccountJson, path: accountPath);
+      service = _FakeService();
+      upstream = _FakeEventUpstream();
+      hub = EventHub(service: upstream);
+      sender = _NotifyFakeSender();
+      // The bridge's AFK component, on an app-owned store (the temp dir),
+      // seeded with a stored AFK session id — the failure push's deep-link.
+      afkStore = AfkStore(file: File('${dir.path}/afk.json'));
+      afk = AfkComponent(backend: null, store: afkStore);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: SessionOrderStore(
+            file: File('${dir.path}/session-order.json'),
+          ),
+        ),
+        events: hub,
+        notifyCredential: accountPath,
+        notifySenderFactory: fakeSender,
+        afk: afk,
+      );
+      base = server.baseUri;
+      // The AFK session is armed (a stored id): the failure push has a
+      // session to point at.
+      await afkStore.setSessionId('ses_afk');
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('the AFK PR-open push reaches an afkRun device: high priority, '
+        'deep-linking the PR URL (external)', () async {
+      final (status, _) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["afkRun"]}',
+      );
+      expect(status, 200);
+
+      await emitPrOpen();
+      expect(sender.sent, hasLength(1));
+      expect(sender.titles.single, 'AFK run : PR ouverte');
+      expect(sender.bodies.single, 'Add a README · #7');
+      expect(sender.links.single, 'https://github.com/o/r/pull/41');
+      expect(sender.priorities.single, isTrue);
+    });
+
+    test('the AFK failure push reaches an afkRun device: high priority, '
+        'deep-linking the bridge\'s stored AFK session (in-app)', () async {
+      final (status, _) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["afkRun"]}',
+      );
+      expect(status, 200);
+
+      await emitFailed();
+      expect(sender.sent, hasLength(1));
+      expect(sender.titles.single, 'AFK run : échec');
+      expect(sender.bodies.single, 'Add a README · #7 — needs-triage');
+      // The deep-link is the AFK session the bridge stored (the human reads
+      // the agent's FAILED narration in place), not the issue.
+      expect(sender.links.single, 'opencodebridge://session/ses_afk');
+      expect(sender.priorities.single, isTrue);
+    });
+
+    test(
+      'a device without the afkRun kind is silent for the AFK events',
+      () async {
+        // Registered for turnEnded only: the AFK event is not pushed to it.
+        await _postRaw(
+          base,
+          'api/notify/device-token',
+          '{"token":"tok_other","events":["turnEnded"]}',
+        );
+        hub.emit(
+          bridgeEvent(
+            type: BridgeEventType.afkPrOpen,
+            data: {
+              'issueNumber': 7,
+              'title': 'Add a README',
+              'prNumber': 41,
+              'prUrl': 'https://github.com/o/r/pull/41',
+            },
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(sender.sent, isEmpty);
+      },
+    );
+
+    test('a device with only afkRun is silent for the other push kinds '
+        '(the kinds are independent)', () async {
+      // Registered for afkRun only: a turn-ended event is not pushed to it.
+      await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_afk","events":["afkRun"]}',
+      );
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.turnCancelled,
+          data: {'sessionID': 'ses_afk'},
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(sender.sent, isEmpty);
+    });
+
+    test('with no AFK session stored (not armed), the failure push is not '
+        'sent (no session to point at); the PR push still is', () async {
+      // The PR push needs no AFK session (it deep-links to the PR).
+      await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["afkRun"]}',
+      );
+      await emitPrOpen();
+      expect(sender.sent, hasLength(1));
+      expect(sender.links.single, 'https://github.com/o/r/pull/41');
+
+      // Clear the stored AFK session (the system is not armed / has no
+      // session): the failure push has nowhere to point, so it is not sent.
+      await afkStore.setSessionId(null);
+      sender.sent.clear();
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.afkFailed,
+          data: {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'reason': 'model under load',
+          },
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(sender.sent, isEmpty);
+    });
+  });
+
   group('HttpEventConnection (the shared SSE writer)', () {
     test('the constructor owns the whole SSE response, set before the '
         '`: connected` flush', () async {
@@ -3779,6 +3984,117 @@ void main() {
         expect(response.writes.length, writesBefore);
       },
     );
+  });
+
+  // ------------------------------------------------------------------------
+  // The fresh-agent handoff's bridge wiring (spec #376, T6): the arming
+  // ensures the AFK session (create or reuse) and the **first feed is a
+  // bootstrap** when the session was just created (a wiped store's first arm,
+  // or a lost session). A normal restart — the session the service still has —
+  // reuses the id, so `id == before` and no bootstrap is sent. The run rows
+  // are seeded AFTER [BridgeServer.start] (the startup reconciliation ran on
+  // the then-empty store), so these tests make no real `gh` reads.
+  group('BridgeServer AFK fresh-agent handoff (spec #376, T6)', () {
+    late BridgeServer server;
+    late _AfkHandoffService service;
+    late AfkStore store;
+    late Directory dir;
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    Future<void> build() async {
+      dir = await Directory.systemTemp.createTemp('oc-afk-handoff');
+      store = AfkStore(file: File('${dir.path}/afk.json'));
+      service = _AfkHandoffService(dir.path);
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
+      final component = AfkComponent(backend: backend, store: store);
+      final hub = EventHub(service: _FakeEventUpstream());
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        events: hub,
+        afk: component,
+      );
+    }
+
+    test('a wiped store arms a fresh AFK session and the first feed is the '
+        'bootstrap listing the in-flight runs', () async {
+      await build();
+      // An in-flight run in the store (seeded after start: the startup
+      // reconciliation ran on the empty store, so no GitHub read here).
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+          retryCount: 1,
+          lastFailureReason: 'model under load',
+        ),
+      );
+      final id = await server.updateAfKSettings(
+        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+      );
+      expect(id, 'ses_afk_1', reason: 'a fresh session is created');
+      expect(service.createdCount, 1, reason: 'the agent is recreated');
+      // The first feed is the bootstrap (the in-flight runs from the store),
+      // sent to the recreated session.
+      expect(service.prompts, hasLength(1));
+      expect(service.prompts.single.$1, id);
+      expect(
+        service.prompts.single.$2,
+        allOf(
+          contains('#7'),
+          contains('dispatched'),
+          contains('retry 1'),
+          contains('last failure: model under load'),
+        ),
+      );
+    });
+
+    test('a normal restart reuses the session the service still has: no '
+        'recreation, no re-bootstrap (ids and full state persist)', () async {
+      // The persisted session the service still has, seeded BEFORE the
+      // component is built (so its manager is seeded with it: reuse, not
+      // create).
+      dir = await Directory.systemTemp.createTemp('oc-afk-handoff-reuse');
+      store = AfkStore(file: File('${dir.path}/afk.json'));
+      service = _AfkHandoffService(dir.path);
+      service.present.add('ses_persisted');
+      await store.setSessionId('ses_persisted');
+      final backend = SessionsBackend(
+        service: service,
+        orderStore: _InMemoryOrderStore(),
+      );
+      final component = AfkComponent(backend: backend, store: store);
+      final hub = EventHub(service: _FakeEventUpstream());
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: backend,
+        events: hub,
+        afk: component,
+      );
+      // An in-flight run (seeded after start: the reconciliation ran on a
+      // store with no run rows).
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      final id = await server.updateAfKSettings(
+        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+      );
+      expect(id, 'ses_persisted', reason: 'the stored session is reused');
+      expect(service.createdCount, 0, reason: 'no new session is created');
+      expect(service.prompts, isEmpty, reason: 'no re-bootstrap on reuse');
+    });
   });
 }
 
@@ -3945,6 +4261,96 @@ class _InMemoryOrderStore implements SessionOrderStore {
   }
 }
 
+/// A minimal [OpencodeService] for the AFK fresh-agent handoff's bridge test
+/// (spec #376, T6): it records the session create and the feeds (prompts) and
+/// answers create/probe/projects/active from scripted state. Only the handoff
+/// path's operations are implemented (the bridge wires only the sessions
+/// backend + the AFK component here); an unexpected call throws, so a test
+/// drift is loud, not silent.
+class _AfkHandoffService implements OpencodeService {
+  _AfkHandoffService(this.directory);
+
+  /// The main checkout's directory (the session is created in it).
+  final String directory;
+
+  /// The ids the service still has (probe answers present for these; the
+  /// reuse case seeds the persisted id here).
+  final Set<String> present = {};
+
+  int createdCount = 0;
+  final List<
+    (String, String, List<Map<String, Object?>>?, List<Map<String, Object?>>?)
+  >
+  prompts = [];
+
+  @override
+  Future<List<OpencodeProject>> projects() async => const [
+    OpencodeProject(id: 'p1', name: 'proj', canonical: '/repo/main'),
+  ];
+
+  @override
+  Future<OpencodeSession> createSessionInDirectory(
+    String directory, {
+    ModelRef? model,
+    String? agent,
+  }) async {
+    createdCount++;
+    final id = 'ses_afk_$createdCount';
+    present.add(id);
+    return OpencodeSession(
+      id: id,
+      title: 'AFK',
+      projectId: 'p1',
+      created: createdCount,
+      location: directory,
+    );
+  }
+
+  @override
+  Future<OpencodeSession> probe(String id) async {
+    if (!present.contains(id)) {
+      throw const OpencodeServiceError(404, 'no such session');
+    }
+    return OpencodeSession(
+      id: id,
+      title: 'AFK',
+      projectId: 'p1',
+      created: 0,
+      location: directory,
+    );
+  }
+
+  @override
+  Future<Set<String>> activeSessionIds() async => const {};
+
+  @override
+  Future<void> prompt(
+    String id,
+    String text, {
+    List<Map<String, Object?>>? files,
+    List<Map<String, Object?>>? skills,
+  }) async {
+    prompts.add((id, text, files, skills));
+  }
+
+  @override
+  Future<List<OpencodeSession>> listSessions() async => const [];
+
+  @override
+  Future<Map<String, String>> projectNames() async => const {'p1': 'proj'};
+
+  @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async => true;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError(
+    'not in the AFK handoff fake: ${invocation.memberName}',
+  );
+}
+
 /// A scripted service for the sessions-endpoint tests.
 class _FakeService implements OpencodeService {
   _FakeService({
@@ -4046,6 +4452,15 @@ class _FakeService implements OpencodeService {
 
   @override
   Future<Set<String>> activeSessionIds() async => const {'ses_three'};
+
+  @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    final active = await activeSessionIds();
+    return !active.contains(id);
+  }
 
   @override
   Future<List<OpencodeProject>> projects() async {
@@ -4849,6 +5264,9 @@ Future<void> _until(
 class _NotifyFakeSender extends FcmSender {
   final sent = <String>[];
   final bodies = <String>[];
+  final links = <String>[];
+  final titles = <String>[];
+  final priorities = <bool>[];
 
   @override
   Future<void> send({
@@ -4856,9 +5274,13 @@ class _NotifyFakeSender extends FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
     sent.add(token);
     bodies.add(body);
+    links.add(link);
+    titles.add(title);
+    priorities.add(highPriority);
   }
 }
 

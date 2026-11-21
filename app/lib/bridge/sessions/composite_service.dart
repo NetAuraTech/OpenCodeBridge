@@ -164,6 +164,12 @@ class CompositeOpencodeService implements OpencodeService {
   }) async => (await _route(id)).prompt(id, text, files: files, skills: skills);
 
   @override
+  Future<bool> waitIdle(
+    String id, {
+    Duration timeout = const Duration(seconds: 25),
+  }) async => (await _route(id)).waitIdle(id, timeout: timeout);
+
+  @override
   Future<List<PermissionRequest>> pendingPermissions(String id) async =>
       (await _route(id)).pendingPermissions(id);
 
