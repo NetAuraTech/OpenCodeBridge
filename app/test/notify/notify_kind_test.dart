@@ -18,6 +18,10 @@ void main() {
       );
     });
 
+    test('parses the afkRun wire value into its own kind (spec #376, T5)', () {
+      expect(NotifyKind.parseEvents(['afkRun']), {NotifyKind.afkRun});
+    });
+
     test('an empty list is the empty set (no push enabled)', () {
       expect(NotifyKind.parseEvents(const []), <NotifyKind>{});
     });

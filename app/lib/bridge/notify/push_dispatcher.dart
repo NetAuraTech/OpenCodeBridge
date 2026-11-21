@@ -23,13 +23,21 @@ import 'notify_service.dart';
 /// dispatcher decodes each frame with [parseEventFrame] and never re-derives
 /// the session id by hand (issue #256, S2c).
 class PushDispatcher implements EventConnection {
-  PushDispatcher(this._service, {this.sessionLabel});
+  PushDispatcher(this._service, {this.sessionLabel, this.afkSession});
 
   final NotifyService _service;
 
   /// Resolves a session id to its home-list title for the push body; the
   /// id itself is the fallback (a session the service no longer lists).
   final Future<String> Function(String sessionID)? sessionLabel;
+
+  /// Resolves the **AFK session's** id — the deep-link target of the
+  /// terminal-failure push (spec #376, T5): the failure deep-links to the
+  /// AFK session (in-app) so the human reads the agent's `FAILED` narration
+  /// in place. `null` when the bridge has no AFK session (not armed, no
+  /// shared opencode service) — the failure push is then not sent (there is
+  /// no session to point at).
+  final Future<String?> Function()? afkSession;
 
   final Completer<void> _done = Completer<void>();
 
@@ -54,6 +62,12 @@ class PushDispatcher implements EventConnection {
         break;
       case BridgeEventType.turnCancelled:
         await _reportCancel(event);
+        break;
+      case BridgeEventType.afkPrOpen:
+        await _afkPrOpen(event);
+        break;
+      case BridgeEventType.afkFailed:
+        await _afkFailed(event);
         break;
       case OpencodeEventType.sessionExecutionStarted:
         // A fresh turn: a stale cancel marker (a terminal missed across a
@@ -141,6 +155,67 @@ class PushDispatcher implements EventConnection {
       );
     }
   }
+
+  /// An AFK run reached `pr-open` (spec #376, T5): one high-priority
+  /// `afkRun` push — "look now", the human-review boundary. The deep-link is
+  /// the PR's GitHub URL, opened in the **external browser** (the app opens
+  /// an external deep link on tap, beside its in-app session/container links).
+  /// No push without the issue's identity or a PR url (the deep-link *is*
+  /// the PR).
+  Future<void> _afkPrOpen(BridgeEvent event) async {
+    final issue = _afkIssue(event);
+    if (issue == null) return;
+    final prUrl = event.data['prUrl'];
+    if (prUrl is! String || prUrl.isEmpty) return;
+    await _service.send(
+      NotifyKind.afkRun,
+      title: 'AFK run : PR ouverte',
+      body: _afkBody(issue.$1, issue.$2),
+      link: DeepLink.externalUri(prUrl).toString(),
+      highPriority: true,
+    );
+  }
+
+  /// An AFK run reached `failed` (spec #376, T5): one high-priority `afkRun`
+  /// push — "look now", a human decision is wanted. The deep-link is the
+  /// **AFK session** (in-app), so the human reads the agent's `FAILED`
+  /// narration in place. No push without an AFK session to point at (not
+  /// armed / no shared service): there is nowhere for the human to go.
+  Future<void> _afkFailed(BridgeEvent event) async {
+    final issue = _afkIssue(event);
+    if (issue == null) return;
+    final resolver = afkSession;
+    if (resolver == null) return;
+    String? sessionId;
+    try {
+      sessionId = await resolver();
+    } catch (_) {
+      // The resolution is best-effort: a failure is not a push.
+      return;
+    }
+    if (sessionId == null || sessionId.isEmpty) return;
+    await _service.send(
+      NotifyKind.afkRun,
+      title: 'AFK run : échec',
+      body: '${_afkBody(issue.$1, issue.$2)} — needs-triage',
+      link: DeepLink.sessionUri(sessionId).toString(),
+      highPriority: true,
+    );
+  }
+
+  /// The AFK push's issue identity `(title, number)`, or `null` when the
+  /// event names no issue (not a push): both must be present for the body's
+  /// `"<title> · #<n>"` to be meaningful.
+  (String title, int number)? _afkIssue(BridgeEvent event) {
+    final title = event.data['title'];
+    final number = event.data['issueNumber'];
+    if (title is! String || title.isEmpty) return null;
+    if (number is! int) return null;
+    return (title, number);
+  }
+
+  /// The AFK push's body: `"<issue title> · #<n>"`.
+  String _afkBody(String title, int number) => '$title · #$number';
 
   Future<String> _label(String sessionId) async {
     final labeler = sessionLabel;

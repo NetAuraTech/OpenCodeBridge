@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'access/access_session.dart';
+import 'access/browser_opener.dart';
 import 'access/token_store.dart';
 import 'app_mode.dart';
 import 'bridge/bridge_server.dart';
@@ -277,6 +278,12 @@ class OpenCodeBridgeAppState extends State<OpenCodeBridgeApp>
         auth: _mode == AppMode.client ? _access?.authorizationHeader : null,
         access: _mode == AppMode.client ? _access : null,
         deepLinks: _deepLinkTarget,
+        // An AFK run's PR push deep-links to the PR's GitHub URL (spec #376,
+        // T5): open it in the external browser — the device's browser on
+        // Android, the desktop's default opener elsewhere. The opener is
+        // built at tap time (external links are rare) so no platform channel
+        // is touched at build.
+        onExternalOpen: (url) => defaultBrowserOpener()(url),
         onNotifyToggled: () {
           unawaited(_notifications?.reregister());
         },

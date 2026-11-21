@@ -584,6 +584,15 @@ class BridgeServer {
         speedFeed ?? await BridgeServer._defaultSpeedFeed(eventHub?.emit);
     final dockerBackend =
         docker ?? await BridgeServer._defaultDocker(eventHub?.emit);
+    // The AFK subsystem (spec #376, T1): the arming toggle, the parallel-orbs
+    // cap, the model, and the AFK session's create/reuse + stored id. Built on
+    // the backend (a machine without a shared opencode service has no host to
+    // place the AFK session on, so the component degrades to `null`); the app
+    // hands it the persisted settings at startup and on every change
+    // (in-process, no HTTP endpoint). Built here — before the push dispatch,
+    // whose terminal-failure push deep-links to the AFK session through it
+    // (spec #376, T5) — so the dispatch's resolver reads it live.
+    final afkComponent = afk ?? AfkComponent(backend: backend);
     NotifyService? notifyService;
     PushDispatcher? pushDispatcher;
     if (notify != null) {
@@ -594,6 +603,11 @@ class BridgeServer {
         eventHub,
         path: notifyCredential,
         senderFactory: notifySenderFactory,
+        // The AFK session's id, read live (spec #376, T5): the terminal-
+        // failure push's deep-link — resolved at push time, so a (re-)arming
+        // is picked up without a rebuild. `null` (no AFK session stored) ⇒
+        // the failure push is not sent (there is nowhere to go).
+        afkSession: () async => afkComponent.sessionId,
       );
     }
     final tunnelSupervisor = tunnel;
@@ -605,13 +619,6 @@ class BridgeServer {
           cli: TunnelCli(binary: supervisor.binary),
           credentialsDir: Directory('${homeDirectory()}/.cloudflared'),
         );
-    // The AFK subsystem (spec #376, T1): the arming toggle, the parallel-orbs
-    // cap, the model, and the AFK session's create/reuse + stored id. Built on
-    // the backend (a machine without a shared opencode service has no host to
-    // place the AFK session on, so the component degrades to `null`); the app
-    // hands it the persisted settings at startup and on every change
-    // (in-process, no HTTP endpoint).
-    final afkComponent = afk ?? AfkComponent(backend: backend);
     // The AFK Ready gate's admission poller (spec #376, "The Ready gate and
     // the feed", T2): the real `gh` reader, the component's run store, and
     // the unified event hub's emit — the admission events ride the same
@@ -806,6 +813,10 @@ class BridgeServer {
     EventHub? hub, {
     String? path,
     Future<FcmSender> Function(FirebaseServiceAccount)? senderFactory,
+    // The AFK session's id, read live (spec #376, T5): the terminal-failure
+    // push's deep-link — the dispatcher resolves it at push time so a
+    // (re-)arming is picked up without a rebuild. `null` ⇒ no AFK session.
+    Future<String?> Function()? afkSession,
   }) async {
     final account = FirebaseServiceAccount.tryLoad(path: path);
     if (account == null) return (null, null);
@@ -832,8 +843,15 @@ class BridgeServer {
     }
 
     // The hub fans the push events out like any other downstream; with no
-    // hub there is no event stream and no push to send.
-    final dispatcher = PushDispatcher(service, sessionLabel: label);
+    // hub there is no event stream and no push to send. The dispatcher maps
+    // the AFK run's two "look now" events (spec #376, T5) to the `afkRun`
+    // push kind; the failure push deep-links to the AFK session, resolved
+    // live through [afkSession].
+    final dispatcher = PushDispatcher(
+      service,
+      sessionLabel: label,
+      afkSession: afkSession,
+    );
     hub?.add(dispatcher);
     return (service, dispatcher);
   }
@@ -868,11 +886,14 @@ class BridgeServer {
       await dispatcher.close();
     }
     await _notify?.close();
+    final afk = _afk;
     final (service, newDispatcher) = await BridgeServer._defaultNotify(
       _sessions,
       _events,
       path: path,
       senderFactory: senderFactory,
+      // The failure push's deep-link (spec #376, T5): read live, as at start.
+      afkSession: afk == null ? null : () async => afk.sessionId,
     );
     _notify = service;
     _pushDispatcher = newDispatcher;

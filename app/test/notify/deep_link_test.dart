@@ -24,8 +24,29 @@ void main() {
       expect(container.id, 'postgres');
     });
 
+    test('an external URL is a deep link to be opened in the browser '
+        '(spec #376, T5)', () {
+      const url = 'https://github.com/o/r/pull/41';
+      // The link form is the URL itself: the bridge puts the PR's GitHub URL
+      // straight in the push's `data.link`.
+      expect(DeepLink.externalUri(url).toString(), url);
+
+      final parsed = DeepLink.tryParse(DeepLink.externalUri(url));
+      expect(parsed, isNotNull);
+      expect(parsed!.isExternal, isTrue);
+      expect(parsed.isSession, isFalse);
+      expect(parsed.isContainer, isFalse);
+      expect(parsed.id, url);
+    });
+
+    test('an external link is distinct from a session link of the same id', () {
+      expect(
+        DeepLink.tryParse(DeepLink.externalUri('https://x/ses_1')),
+        isNot(DeepLink.tryParse(DeepLink.sessionUri('ses_1'))),
+      );
+    });
+
     test('tryParse rejects what is not a deep link', () {
-      expect(DeepLink.tryParse(Uri.parse('https://session/ses_1')), isNull);
       expect(
         DeepLink.tryParse(Uri.parse('opencodebridge://other/ses_1')),
         isNull,
@@ -35,6 +56,9 @@ void main() {
         DeepLink.tryParse(Uri.parse('opencodebridge://session/a/b')),
         isNull,
       );
+      // No scheme (and no recognized deep-link scheme): not a deep link.
+      expect(DeepLink.tryParse(Uri.parse('session/ses_1')), isNull);
+      expect(DeepLink.tryParse(Uri.parse('ftp://host/ses_1')), isNull);
     });
 
     test('links are equal on target and id', () {

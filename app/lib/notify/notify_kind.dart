@@ -9,7 +9,12 @@ enum NotifyKind {
   turnEnded('turnEnded'),
 
   /// A container stopped (clean exit) or crashed (non-zero exit).
-  dockerContainer('dockerContainer');
+  dockerContainer('dockerContainer'),
+
+  /// An AFK run reached one of its two "look now" moments (spec #376, T5): its
+  /// PR opened, or it failed terminally — high priority. Its own toggle,
+  /// distinct from the arming toggle (armed-but-silenced is legitimate).
+  afkRun('afkRun');
 
   const NotifyKind(this.wire);
 

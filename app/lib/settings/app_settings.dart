@@ -23,6 +23,7 @@ class AppSettings {
   static const String _keyNotifyPermission = 'notify.permissionAsked';
   static const String _keyNotifyTurnEnded = 'notify.turnEnded';
   static const String _keyNotifyDocker = 'notify.dockerContainer';
+  static const String _keyNotifyAfkRun = 'notify.afkRun';
   static const String _keyFirebaseProject = 'notify.firebaseProject';
   static const String _keySoundEvents = 'sound.events';
   static const String _keyAfkEnabled = 'afk.enabled';
@@ -93,6 +94,15 @@ class AppSettings {
 
   set notifyDockerContainer(bool value) =>
       _prefs.setBool(_keyNotifyDocker, value);
+
+  /// Push toggle: an AFK run reached one of its two "look now" moments (its
+  /// PR opened, or it failed terminally — spec #376, T5). Off by default,
+  /// like the other push kinds, and **distinct from the AFK arming toggle**:
+  /// an armed-but-silenced system is a legitimate state (you can arm the
+  /// agent and still switch off its pings while you watch the Orbs tab).
+  bool get notifyAfkRun => _prefs.getBool(_keyNotifyAfkRun) ?? false;
+
+  set notifyAfkRun(bool value) => _prefs.setBool(_keyNotifyAfkRun, value);
 
   /// The desktop session-sound toggle (issue #246): on by default, so a
   /// fresh install plays the sounds until the user turns them off. Desktop

@@ -184,6 +184,80 @@ void main() {
       monitor.dispose();
     });
 
+    testWidgets('an external deep link opens the URL in the browser and '
+        'clears the one-shot (spec #376, T5)', (tester) async {
+      // The AFK run's PR push deep-links to the PR's GitHub URL — an external
+      // link opened in the browser, not a tab. The shell (the deep-link
+      // target's tab-switching owner) hands the URL to the injected opener
+      // and clears the one-shot so a later identical link is a new event.
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
+      final deepLinks = DeepLinkTarget();
+      final opened = <Uri>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: HomeShell(
+            monitor: monitor,
+            settings: settings,
+            mode: AppMode.client,
+            deepLinks: deepLinks,
+            onExternalOpen: (url) async => opened.add(url),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // No target yet: nothing opened.
+      expect(opened, isEmpty);
+
+      // A tapped PR push: an external link (the PR's GitHub URL).
+      const pr = 'https://github.com/o/r/pull/41';
+      deepLinks.apply(DeepLink.external(pr));
+      await tester.pump();
+
+      // The URL was handed to the external opener, and the one-shot is
+      // cleared (so a later identical link is a new event).
+      expect(opened, [Uri.parse(pr)]);
+      expect(deepLinks.target, isNull);
+
+      await tester.pumpWidget(const SizedBox());
+      monitor.dispose();
+    });
+
+    testWidgets('an external deep link without an opener is ignored (no '
+        'throw)', (tester) async {
+      // No external opener wired (a build path without one): the external
+      // target is still consumed, but the open is a no-op.
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      final monitor = ConnectionMonitor(probe: (Uri uri) async => false);
+      monitor.connect(() => Uri.parse('http://127.0.0.1:1/api/health'));
+      final deepLinks = DeepLinkTarget();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: HomeShell(
+            monitor: monitor,
+            settings: settings,
+            mode: AppMode.client,
+            deepLinks: deepLinks,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      deepLinks.apply(DeepLink.external('https://github.com/o/r/pull/41'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(deepLinks.target, isNull);
+
+      await tester.pumpWidget(const SizedBox());
+      monitor.dispose();
+    });
+
     testWidgets('a deep link survives a shell remount with the same '
         'service', (tester) async {
       // The one-shot lives on a [DeepLinkTarget] the app holds across

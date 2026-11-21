@@ -16,11 +16,33 @@ void main() {
       expect(settings.notifyPermissionAsked, isFalse);
       expect(settings.notifyTurnEnded, isFalse);
       expect(settings.notifyDockerContainer, isFalse);
+      // The AFK run's own push toggle (spec #376, T5) defaults off, like the
+      // other push kinds.
+      expect(settings.notifyAfkRun, isFalse);
       // The desktop session-sound toggle (issue #246) defaults on: a fresh
       // install plays the sounds until the user turns them off.
       expect(settings.soundEvents, isTrue);
     },
   );
+
+  test('the AFK run push toggle (spec #376, T5) defaults off and persists, '
+      'distinct from the arming toggle', () async {
+    SharedPreferences.setMockInitialValues({});
+    final settings = await AppSettings.load();
+    expect(settings.notifyAfkRun, isFalse);
+
+    settings.notifyAfkRun = true;
+    final reloaded = await AppSettings.load();
+    expect(reloaded.notifyAfkRun, isTrue);
+
+    // Armed-but-silenced is legitimate: the arming toggle and the push
+    // toggle are independent.
+    reloaded.afkEnabled = true;
+    reloaded.notifyAfkRun = false;
+    final again = await AppSettings.load();
+    expect(again.afkEnabled, isTrue);
+    expect(again.notifyAfkRun, isFalse);
+  });
 
   test(
     'the desktop sound toggle defaults on and persists (issue #246)',
