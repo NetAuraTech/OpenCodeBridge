@@ -15,6 +15,7 @@ import 'afk/afk_ready_gate_poller.dart';
 import 'afk/afk_run_service.dart';
 import 'afk/afk_settings.dart';
 import 'afk/github_reader.dart';
+import 'afk/repo_identity.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/composite_event_service.dart';
@@ -625,19 +626,29 @@ class BridgeServer {
     // the orbs + backend exist (issue #260). A test injecting [tasks] keeps
     // its own; the default is built conditionally, then assigned.
     OrbTaskService? taskService = tasks;
-    // The AFK Ready gate's admission poller (spec #376, "The Ready gate and
-    // the feed", T2): the real `gh` reader, the component's run store, and
-    // the unified event hub's emit — the admission events ride the same
-    // fan-out the app's SSE sees. Armed ⇒ the schedule starts via
-    // [updateAfKSettings]; the system is inert when disarmed or when there
-    // is no event hub (no SSE surface for the events).
+    // The AFK Ready gate's admission poller (spec #407, T2, per-project): it
+    // iterates the armed repo identities each pass, admitting each newly ready
+    // issue through that repo's own `gh` reader (built from that repo's
+    // checkout directory). The per-repo checkout directory is resolved from the
+    // project list + [repoIdentityOf] (the first list-order project carrying
+    // that repo identity — the same fact the session's home reads), and is
+    // re-read on each pass (a closed checkout simply drops out until it
+    // reappears; a repo with no resolvable directory is inert for the tick).
+    // The admission events ride the same fan-out the app's SSE sees; the
+    // schedule is driven by [updateAfKSettings] (start when any repo is armed,
+    // stop when none is), and the pass is inert without an event hub (no SSE
+    // surface for the events).
     final afkPoller = eventHub == null
         ? null
         : AfkReadyGatePoller(
-            reader: GhGitHubReader(),
             store: afkComponent.store,
-            isArmed: () => afkComponent.enabled,
-            repo: () => afkComponent.repo,
+            armedRepos: () => afkComponent.settings.armedRepos,
+            repoDirectories: () => BridgeServer._afkRepoDirectories(
+              afkComponent.settings.armedRepos,
+              backend,
+            ),
+            readerFor: (repo, directory) =>
+                GhGitHubReader(workingDirectory: Directory(directory)),
             emitEvent: eventHub.emit,
           );
     // The AFK run service (spec #376, T3): the real `gh` reader, the
@@ -650,10 +661,18 @@ class BridgeServer {
     // (the task service's persisted fact) + the AFK session's active state
     // (the sessions backend) — through this closure; not the service inbox.
     // Built only when there is an event hub (no SSE surface otherwise).
+    //
+    // The reader's working directory: the reader now requires one (spec #407,
+    // T2 — no more implicit app-cwd), but per-repo routing (each row read
+    // through *its own* repo's reader) is T4's work. Until then the run
+    // service keeps its single reader on the bridge process's cwd — exactly
+    // the pre-T2 behavior, so nothing about the run service's reads changes
+    // here (T4 will replace this with the per-repo reader from the row's own
+    // repo directory).
     final afkRuns = eventHub == null
         ? null
         : AfkRunService(
-            reader: GhGitHubReader(),
+            reader: GhGitHubReader(workingDirectory: Directory.current),
             store: afkComponent.store,
             sessions: CompositeAfkSessions(
               component: afkComponent,
@@ -806,6 +825,43 @@ class BridgeServer {
     }
   }
 
+  /// The per-repo checkout directories the Ready-gate poller reads from (spec
+  /// #407, T2): for each [armedRepos] identity, the **first list-order
+  /// project** whose checkout resolves to that identity (via [repoIdentityOf],
+  /// the one fact that also pins the session's home), mapped to its canonical
+  /// directory. A repo identity with no matching project (a closed checkout)
+  /// is simply absent from the map — the poller then leaves that repo's poll
+  /// inert for the tick, and the next pass picks it up again once the project
+  /// reappears. `backend == null` (no shared opencode service) means no
+  /// project list, hence no resolvable directories (all repos inert). The
+  /// resolution is re-run on each armed pass (the project list is cheap and a
+  /// checkout can be closed/reopened at runtime), so a closed checkout drops
+  /// out until it returns.
+  static Future<Map<String, String>> _afkRepoDirectories(
+    Set<String> armedRepos,
+    SessionsBackend? backend,
+  ) async {
+    if (backend == null || armedRepos.isEmpty) return const {};
+    final List<OpencodeProject> projects;
+    try {
+      projects = await backend.service.projects();
+    } catch (_) {
+      return const {}; // No project list: no resolvable directories this tick.
+    }
+    final out = <String, String>{};
+    for (final repo in armedRepos) {
+      for (final project in projects) {
+        if (project.canonical.isEmpty) continue;
+        final identity = await repoIdentityOf(Directory(project.canonical));
+        if (identity != null && identity == repo) {
+          out[repo] = project.canonical;
+          break; // The first list-order project carrying this identity.
+        }
+      }
+    }
+    return out;
+  }
+
   /// The AFK liveness facts (spec #376, T6), read live at reconciliation
   /// time: the **AFK-attributed orbs in flight** (the task service's
   /// persisted fact — the creating task's caller session held against the
@@ -816,8 +872,8 @@ class BridgeServer {
   ///
   /// Not the service inbox (spec #376, T6): the two bridge-side facts only.
   /// Inert on a failed read (no task service, no backend, no AFK session id):
-  /// the answer degrades to no-liveness (the reconciliation then reads the
-  /// run's narration/PR to decide lost vs. on-its-way), never a throw.
+  /// the answer degrades to no-liveness — a `gh`/service failure is read as
+  /// "no liveness", never a throw.
   static Future<AfkLiveness> _afkLiveness(
     AfkComponent afk,
     OrbTaskService? tasks,
