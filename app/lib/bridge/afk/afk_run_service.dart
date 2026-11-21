@@ -38,6 +38,55 @@ abstract class AfkSessionPort {
   Future<bool> waitIdle({Duration? timeout});
 }
 
+/// The AFK run's liveness facts (spec #376, T6): the two bridge-side facts
+/// that keep a run from being a **lost** one — an AFK-attributed orb in
+/// flight (the bridge's own persisted fact: the task record that created the
+/// orb was dispatched by the AFK session, and that orb runs a task), and the
+/// AFK session's agent loop being active (the session's active state). A run
+/// is **live** while either holds; the startup reconciliation reads both and
+/// ORs them ([any]) — a live `dispatched` run survives a restart untouched,
+/// a `dispatched` run with no liveness and no terminal narration and no PR is
+/// lost (routed to the failure path, a silent death is never silent).
+///
+/// These are the bridge's persisted facts + the session's active state, read
+/// at a seam and injected into the run service — **not** the service inbox
+/// (spec #376, T6: liveness is "computed from the bridge's own persisted
+/// facts … plus the AFK session's active state — not from the service
+/// inbox").
+class AfkLiveness {
+  const AfkLiveness({
+    required this.afkOrbsInFlight,
+    required this.sessionActive,
+  });
+
+  /// A liveness with neither fact (no AFK session armed, or a bridge without
+  /// a task service / sessions backend): every run is non-live.
+  const AfkLiveness.none() : this(afkOrbsInFlight: 0, sessionActive: false);
+
+  /// The number of AFK-attributed orbs in flight (running a task).
+  final int afkOrbsInFlight;
+
+  /// Whether the AFK session's agent loop is active (its id is in the
+  /// service's active set).
+  final bool sessionActive;
+
+  /// Whether a run is live (an AFK orb in flight, or the session active).
+  bool get any => afkOrbsInFlight > 0 || sessionActive;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AfkLiveness &&
+      other.afkOrbsInFlight == afkOrbsInFlight &&
+      other.sessionActive == sessionActive;
+
+  @override
+  int get hashCode => Object.hash(afkOrbsInFlight, sessionActive);
+
+  @override
+  String toString() =>
+      'AfkLiveness(afkOrbsInFlight: $afkOrbsInFlight, sessionActive: $sessionActive)';
+}
+
 /// The run service's one port implementation: the composite session
 /// service's prompt path + idle-wait, over the AFK session the
 /// [AfkComponent] owns (its **stored** id — the one the arming action
@@ -154,6 +203,7 @@ class AfkRunService {
     required this.sessions,
     required this.emitEvent,
     required this.isArmed,
+    required this.liveness,
     this.pollInterval = defaultPollInterval,
     DateTime Function()? now,
     this.maxRetries = defaultMaxRetries,
@@ -209,6 +259,14 @@ class AfkRunService {
   /// a run in flight (it finishes to its PR or failure).
   final bool Function() isArmed;
 
+  /// The liveness facts the startup reconciliation reads (spec #376, T6):
+  /// the AFK-attributed orbs in flight (the bridge's own persisted fact) and
+  /// the AFK session's active state, injected as a closure the bridge wires
+  /// (it owns the task service + sessions backend the facts are read from).
+  /// A run is live while either holds; the reconciliation ORs them via
+  /// [AfkLiveness.any]. Injected, faked in the tests.
+  final Future<AfkLiveness> Function() liveness;
+
   /// The pass pace (tests inject milliseconds).
   final Duration pollInterval;
 
@@ -231,10 +289,17 @@ class AfkRunService {
   /// Start the periodic pass (the bridge calls it once, at startup). The
   /// pass runs from here to [stop] **regardless of the arming state** — the
   /// arming is a gate for the new-work steps, not a switch for the loop
-  /// (user story #24: a disarm must let in-flight runs finish). Idempotent
-  /// — a start replaces any running schedule.
+  /// (user story #24: a disarm must let in-flight runs finish). It also runs
+  /// the **startup reconciliation** ([reconcile], spec #376, T6) once, before
+  /// the periodic pass begins ticking — a lost run is detected and routed to
+  /// the failure path, a `pr-open` run is settled to its closure, and a live
+  /// `dispatched` run is left alone (it continues on its own). Idempotent —
+  /// a start replaces any running schedule.
   void start() {
     stop();
+    _runGuarded(
+      reconcile,
+    ); // The startup reconciliation (guarded with the pass).
     _timer = Timer.periodic(pollInterval, (_) => _tick());
   }
 
@@ -259,9 +324,134 @@ class AfkRunService {
   }
 
   void _tick() {
+    _runGuarded(pollOnce);
+  }
+
+  /// Run [body] once, guarded: a previous pass (or the startup
+  /// reconciliation) still running skips this one. The guard is shared with
+  /// the [start] reconciliation, so the two never walk the store concurrently.
+  void _runGuarded(Future<void> Function() body) {
     if (_inFlight) return; // The previous pass still runs.
     _inFlight = true;
-    unawaited(pollOnce().whenComplete(() => _inFlight = false));
+    unawaited(body().catchError((_) {}).whenComplete(() => _inFlight = false));
+  }
+
+  // ------------------------------------------------------------------------
+  // The startup reconciliation (spec #376, T6): "a restart never strands a
+  // run". One pass over every stored run at startup (before the periodic
+  // pass ticks): a lost run is detected and routed to the failure path, a
+  // `pr-open` run is settled to its closure, and a live `dispatched` run is
+  // left alone (it continues on its own — the orb-completion injection
+  // re-wakes the agent, which produces the narration).
+
+  /// The reason a run was detected lost at a startup reconciliation (no
+  /// liveness, no terminal narration, no PR): what the fresh agent's
+  /// bootstrap and the terminal-failure hand-back name.
+  static const String lostRunReason =
+      'the run was lost across a restart (no liveness, no terminal '
+      'narration, no PR)';
+
+  /// The startup reconciliation: every stored run is driven by its state —
+  /// `idle`, `failed`, and `done` are left alone (the first regular pass
+  /// feeds the idle run, the failed run waits for the human's re-label, and
+  /// `done` is the end); `dispatched` is checked for liveness (live → left
+  /// alone, non-live with no progress → the lost run's failure path); and
+  /// `pr-open` is settled to its closure. **Not armed-gated** — a disarm
+  /// never strands an in-flight run (user story #24); the reconciliation
+  /// finishes a lost run to its failure regardless of the arming. A failed
+  /// read, or a failed store write, changes nothing (the periodic pass — or
+  /// the next startup — retries).
+  Future<void> reconcile() async {
+    for (final run in store.runs()) {
+      try {
+        await _reconcileRun(run);
+      } catch (_) {
+        // A transient failure: the row is unchanged, the next pass retries.
+      }
+    }
+  }
+
+  /// Drive [run] one step in the startup reconciliation, by its state.
+  Future<void> _reconcileRun(AfkRun run) async {
+    switch (AfkRunState.parse(run.state).kind) {
+      case AfkRunStateKind.dispatched:
+        await _reconcileDispatched(run);
+        break;
+      case AfkRunStateKind.prOpen:
+        // Follow the PR to the run's closure (the periodic pass does the
+        // same; at startup the closure is settled immediately, spec #376's
+        // "pr-open → follow the issue to closure").
+        await _complete(run, AfkRunState.parse(run.state));
+        break;
+      case AfkRunStateKind.idle:
+      case AfkRunStateKind.failed:
+      case AfkRunStateKind.done:
+        // Left alone: the idle run is admitted as usual by the first regular
+        // pass (the gate's entry), the failed run waits for the human (the
+        // re-label is the only way out), and done is the end.
+        break;
+      case null:
+        // A corrupted state string: left alone — the refusal, never an
+        // implicit admission.
+        break;
+    }
+  }
+
+  /// The `dispatched` run's reconciliation: a live run (an AFK-attributed orb
+  /// in flight, or the AFK session active) is left alone — the run continues
+  /// on its own and the orb-completion injection re-wakes the agent. A run
+  /// with **no liveness, no terminal narration, and no PR** is **lost** and
+  /// is routed to the failure path (counted in the retry; a run that keeps
+  /// dying across restarts eventually hits the cap and is handed to the
+  /// human — a silent death is never silent). Liveness is the bridge's own
+  /// persisted facts + the session's active state, read via [liveness] —
+  /// **not** the service inbox.
+  Future<void> _reconcileDispatched(AfkRun run) async {
+    final liveness = await this.liveness();
+    if (liveness.any) return; // Live: the run continues on its own (AC1).
+    // No liveness: is there a sign of progress — a terminal narration the
+    // periodic pass will process, or a PR the periodic pass will follow?
+    final comment = await reader.readLastComment(run.issueNumber);
+    final narration = comment == null
+        ? null
+        : parseTerminalNarration(comment.body);
+    if (narration != null) return; // On its way: the periodic pass handles it.
+    if (run.prNumber != null) return; // A PR exists: the pass follows it.
+    // Lost run: no liveness, no terminal narration, no PR → the failure path.
+    await _routeToFailure(run, lostRunReason);
+  }
+
+  // ------------------------------------------------------------------------
+  // The fresh-agent handoff (spec #376, T6): when the stored AFK session does
+  // not exist (first arm on a wiped store, or a lost session), the bridge
+  // creates it (checkout directory, pinned model, agent `afk` — the arming
+  // action, the [AfkComponent]'s) and the **first feed is a bootstrap**: the
+  // in-flight runs (number, state, retry count, last failure reason) from the
+  // store, so the recreated agent reconciles with the tracker itself. A plain
+  // host-service restart does not lose the session (ids and full state
+  // persist), so a normal restart reuses it — no recreation, no re-bootstrap.
+  // The bridge triggers [bootstrap] from the arming, after it has ensured the
+  // session and learned that it was just created.
+
+  /// Send the bootstrap feed (the fresh-agent handoff's first feed): the
+  /// in-flight runs from the store — the runs in `dispatched` or `pr-open`
+  /// (the ones with work in motion; `idle` runs get their ordinary feed from
+  /// the ready gate, `failed` and `done` runs are terminal) — as one prompt
+  /// to the AFK session. Inert when there is no session to feed, or no
+  /// in-flight run to reconcile (a wiped store: nothing to hand over).
+  Future<void> bootstrap() async {
+    final sessionId = await sessions.sessionId();
+    if (sessionId == null) return; // No session to feed: nothing to boot.
+    final inFlight = store
+        .runs()
+        .where((run) {
+          final kind = AfkRunState.parse(run.state).kind;
+          return kind == AfkRunStateKind.dispatched ||
+              kind == AfkRunStateKind.prOpen;
+        })
+        .toList(growable: false);
+    if (inFlight.isEmpty) return; // Nothing in flight to reconcile.
+    await sessions.prompt(bootstrapFeed(inFlight));
   }
 
   // ------------------------------------------------------------------------
@@ -378,43 +568,66 @@ class AfkRunService {
         break;
       case TerminalNarrationKind.failed:
         if (!state.canRetry && !state.canFail) return;
-        if (run.retryCount < maxRetries) {
-          // The retry: the count increments and the re-feed is scheduled at
-          // the backoff deadline — an ordinary FIFO feed when it fires (no
-          // event: a retry is not a "look now" moment).
-          final retryNumber = run.retryCount + 1;
-          await store.updateRun(
-            run.copyWith(
-              retryCount: retryNumber,
-              retryAt:
-                  _now().millisecondsSinceEpoch +
-                  retryBackoff(retryNumber).inMilliseconds,
-              narrationId: comment.id,
-            ),
-          );
-        } else {
-          // The terminal failure (retries exhausted): the hand-back to the
-          // human — `failed`, and one `afk.failed` event on the hub (the
-          // push mapping is the push ticket, T5). The issue's
-          // `needs-triage` label + comment ride the `failed` state's pass
-          // (re-attempted there until they land — see [_labelNeedsTriage]).
-          await store.updateRun(
-            run.copyWith(
-              state: AfkRunState.failedWire,
-              narrationId: comment.id,
-            ),
-          );
-          emitEvent(
-            bridgeEvent(
-              type: BridgeEventType.afkFailed,
-              data: {
-                'issueNumber': run.issueNumber,
-                'title': run.title,
-                'reason': narration.reason ?? '',
-              },
-            ),
-          );
-        }
+        // The failure path (the retry, or the terminal failure at the cap) —
+        // shared with the startup reconciliation's lost-run detection (T6).
+        await _routeToFailure(
+          run,
+          narration.reason ?? 'the agent reported a failure',
+          narrationId: comment.id,
+        );
+    }
+  }
+
+  /// The failure path (spec #376, T3's bounded retry + T6's lost run): a run
+  /// that failed is either **retried** (the count increments and the re-feed
+  /// is scheduled at the backoff deadline — an ordinary FIFO feed when it
+  /// fires, no event: a retry is not a "look now" moment) or, at the retry
+  /// cap, **terminally failed** (the hand-back to the human — `failed`, and
+  /// one `afk.failed` event on the hub; the issue's `needs-triage` label +
+  /// comment ride the `failed` state's pass, re-attempted there until they
+  /// land — see [_labelNeedsTriage]).
+  ///
+  /// [reason] is recorded on the row ([AfkRun.lastFailureReason]) so the
+  /// fresh-agent handoff's bootstrap lists why a run is retrying.
+  /// [narrationId] is the `FAILED` narration's comment id (the dedup key,
+  /// kept — the old narration is still the last comment); the lost-run path
+  /// passes none (there is no narration) and leaves the dedup key as it was.
+  Future<void> _routeToFailure(
+    AfkRun run,
+    String reason, {
+    String? narrationId,
+  }) async {
+    if (run.retryCount < maxRetries) {
+      // The retry: the count increments and the re-feed is scheduled at the
+      // backoff deadline.
+      final retryNumber = run.retryCount + 1;
+      var next = run.copyWith(
+        retryCount: retryNumber,
+        retryAt:
+            _now().millisecondsSinceEpoch +
+            retryBackoff(retryNumber).inMilliseconds,
+        lastFailureReason: reason,
+      );
+      if (narrationId != null) next = next.copyWith(narrationId: narrationId);
+      await store.updateRun(next);
+    } else {
+      // The terminal failure (retries exhausted): the hand-back to the human.
+      var next = run.copyWith(
+        state: AfkRunState.failedWire,
+        lastFailureReason: reason,
+      );
+      if (narrationId != null) next = next.copyWith(narrationId: narrationId);
+      await store.updateRun(next);
+      emitEvent(
+        bridgeEvent(
+          type: BridgeEventType.afkFailed,
+          data: {
+            'issueNumber': run.issueNumber,
+            'title': run.title,
+            'reason': reason,
+          },
+        ),
+      );
     }
   }
 
@@ -526,6 +739,33 @@ class AfkRunService {
 /// is"); the bridge hands over no details.
 String availabilityNotice(int issueNumber, String title) =>
     'Issue #$issueNumber: $title';
+
+/// The fresh-agent handoff's **bootstrap feed** (spec #376, T6): the first
+/// feed a recreated AFK session receives — the in-flight runs (number, state,
+/// retry count, last failure reason) from the store, so the agent reconciles
+/// with the tracker itself (a restart of the agent loses no work and no
+/// state). One line per run; the retry count and last failure reason are
+/// listed only when the run carries them (a fresh dispatch has neither, a
+/// run at its PR has no failure). Pure, no I/O.
+String bootstrapFeed(List<AfkRun> inFlight) {
+  final lines = <String>[
+    'Bootstrap — the AFK agent session was just recreated. These runs are '
+        'in flight (from the bridge\'s store); reconcile with the tracker before '
+        'continuing, so the restart loses no work:',
+  ];
+  for (final run in inFlight) {
+    final detail = <String>[
+      if (run.retryCount > 0) 'retry ${run.retryCount}',
+      if (run.lastFailureReason != null)
+        'last failure: ${run.lastFailureReason}',
+    ];
+    lines.add(
+      '- #${run.issueNumber} ${run.title}: ${run.state}'
+      '${detail.isEmpty ? '' : ' (${detail.join(', ')})'}',
+    );
+  }
+  return lines.join('\n');
+}
 
 /// The shape of the agent's terminal narration on the issue (spec #376:
 /// "`PR opened: <url>` or `FAILED: <reason>`"): the run's signal.

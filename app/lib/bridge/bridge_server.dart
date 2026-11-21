@@ -619,6 +619,12 @@ class BridgeServer {
           cli: TunnelCli(binary: supervisor.binary),
           credentialsDir: Directory('${homeDirectory()}/.cloudflared'),
         );
+    // The task service is declared here (before the AFK run service) so the
+    // run service's liveness closure can read it live at reconciliation time
+    // (the AFK-attributed orbs in flight); it is assigned further below once
+    // the orbs + backend exist (issue #260). A test injecting [tasks] keeps
+    // its own; the default is built conditionally, then assigned.
+    OrbTaskService? taskService = tasks;
     // The AFK Ready gate's admission poller (spec #376, "The Ready gate and
     // the feed", T2): the real `gh` reader, the component's run store, and
     // the unified event hub's emit — the admission events ride the same
@@ -638,8 +644,11 @@ class BridgeServer {
     // backend + component — the run's `afk.pr_open` / `afk.failed` events
     // ride the same fan-out the app's SSE sees. Its pass runs for the life
     // of the bridge (in-flight runs must finish through a disarm, user
-    // story #24); the arming gates only its new-work steps. Built only
-    // when there is an event hub (no SSE surface for the events otherwise).
+    // story #24); the arming gates only its new-work steps. Its startup
+    // reconciliation (T6) reads liveness — the AFK-attributed orbs in flight
+    // (the task service's persisted fact) + the AFK session's active state
+    // (the sessions backend) — through this closure; not the service inbox.
+    // Built only when there is an event hub (no SSE surface otherwise).
     final afkRuns = eventHub == null
         ? null
         : AfkRunService(
@@ -651,6 +660,7 @@ class BridgeServer {
             ),
             emitEvent: eventHub.emit,
             isArmed: () => afkComponent.enabled,
+            liveness: () => _afkLiveness(afkComponent, taskService, backend),
           );
     final bridge = BridgeServer._(
       server,
@@ -695,7 +705,6 @@ class BridgeServer {
     // the table built above picks it up). Both the orbs and the backend are
     // required, and both are only built by the bridge itself (a test faking
     // either one injects [tasks], or the spawn endpoints answer 503).
-    OrbTaskService? taskService = tasks;
     if (taskService == null &&
         orbService != null &&
         backend != null &&
@@ -794,6 +803,47 @@ class BridgeServer {
     } catch (_) {
       // Degraded mode: the loopback listener serves the app as usual.
     }
+  }
+
+  /// The AFK liveness facts (spec #376, T6), read live at reconciliation
+  /// time: the **AFK-attributed orbs in flight** (the task service's
+  /// persisted fact — the creating task's caller session held against the
+  /// AFK store's session id) plus the **AFK session's active state** (the
+  /// sessions backend's active set). The run service's startup
+  /// reconciliation ORs the two ([AfkLiveness.any]); a `dispatched` run is
+  /// live while either holds, non-live + no narration + no PR is lost.
+  ///
+  /// Not the service inbox (spec #376, T6): the two bridge-side facts only.
+  /// Inert on a failed read (no task service, no backend, no AFK session id):
+  /// the answer degrades to no-liveness (the reconciliation then reads the
+  /// run's narration/PR to decide lost vs. on-its-way), never a throw.
+  static Future<AfkLiveness> _afkLiveness(
+    AfkComponent afk,
+    OrbTaskService? tasks,
+    SessionsBackend? backend,
+  ) async {
+    final id = afk.store.sessionId();
+    if (id == null || id.isEmpty) return const AfkLiveness.none();
+    var orbsInFlight = 0;
+    if (tasks != null) {
+      try {
+        orbsInFlight = tasks.afkOrbsInFlight(id);
+      } catch (_) {
+        orbsInFlight = 0; // A failed read degrades to no orbs in flight.
+      }
+    }
+    var sessionActive = false;
+    if (backend != null) {
+      try {
+        sessionActive = (await backend.service.activeSessionIds()).contains(id);
+      } catch (_) {
+        sessionActive = false; // A failed read degrades to inactive.
+      }
+    }
+    return AfkLiveness(
+      afkOrbsInFlight: orbsInFlight,
+      sessionActive: sessionActive,
+    );
   }
 
   /// The default push dispatch (issue #24): the Firebase service account
@@ -943,7 +993,20 @@ class BridgeServer {
     // gates new feeds and re-dispatches while the in-flight runs finish to
     // their PR or failure. No destructive stop here.
     if (!settings.enabled) return null;
-    return ensureAfKSession();
+    // The fresh-agent handoff (spec #376, T6): the arming ensures the session
+    // (create or reuse, idempotent). When it was **just created** — a wiped
+    // store's first arm, or a session the service lost (a normal host-service
+    // restart reuses it: ids and full state persist, so `id == before`) — the
+    // run service sends the **bootstrap** feed (the in-flight runs from the
+    // store) so the recreated agent reconciles with the tracker itself. A
+    // reused session sends no bootstrap (no recreation, no re-bootstrap).
+    final before = _afk?.store.sessionId();
+    final id = await ensureAfKSession();
+    final runs = _afkRuns;
+    if (id != null && id != before && runs != null) {
+      await runs.bootstrap();
+    }
+    return id;
   }
 
   /// Ensure the AFK session exists and return its id (the arming action):

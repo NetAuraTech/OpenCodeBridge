@@ -703,6 +703,16 @@ class OrbTaskService {
     return inFlight;
   }
 
+  /// The number of **AFK-attributed orbs in flight** (spec #376, T6): the
+  /// liveness fact the startup reconciliation reads (a `dispatched` run is
+  /// live while an AFK-attributed orb it can attribute is running a task) —
+  /// and the same counter the parallel-orbs cap is enforced against (T4).
+  ///
+  /// The bridge's composition root reads this live at reconciliation time;
+  /// with no AFK session id (a `''`/empty id), nothing is attributed, so the
+  /// answer is `0`.
+  int afkOrbsInFlight(String afkSessionId) => _afkOrbsInFlight(afkSessionId);
+
   /// The dispatch text's identity in the tasks file: a SHA-256 of the raw
   /// caller text (exactly what was delivered, issue #147), so the file
   /// carries no instruction text twice and no lossy comparison can make two

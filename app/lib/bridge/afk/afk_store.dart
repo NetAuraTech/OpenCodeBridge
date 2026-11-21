@@ -24,6 +24,7 @@ class AfkRun {
     this.closedUnmerged = false,
     this.retryAt,
     this.narrationId,
+    this.lastFailureReason,
   });
 
   /// The admitted issue's number.
@@ -65,6 +66,15 @@ class AfkRun {
   /// last comment; the id is what keeps it from being re-processed).
   final String? narrationId;
 
+  /// The last failure's reason, as the run service recorded it when the
+  /// run's failure was routed to the retry/terminal path (spec #376, T6):
+  /// a `FAILED` narration's reason, or the lost-run reason (the run was
+  /// detected lost at a startup reconciliation — no liveness, no terminal
+  /// narration, no PR). `null` when the run has not failed yet (a fresh
+  /// dispatch, or a run at its PR). The fresh-agent handoff's bootstrap
+  /// feed lists it so a recreated agent sees why a run is retrying.
+  final String? lastFailureReason;
+
   @override
   bool operator ==(Object other) =>
       other is AfkRun &&
@@ -76,10 +86,11 @@ class AfkRun {
       other.prUrl == prUrl &&
       other.closedUnmerged == closedUnmerged &&
       other.retryAt == retryAt &&
-      other.narrationId == narrationId;
+      other.narrationId == narrationId &&
+      other.lastFailureReason == lastFailureReason;
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     issueNumber,
     title,
     state,
@@ -89,7 +100,8 @@ class AfkRun {
     closedUnmerged,
     retryAt,
     narrationId,
-  );
+    lastFailureReason,
+  ]);
 
   /// The row with the given run-state fields replaced (the run service
   /// writes the row back after every state-machine step it takes). A field
@@ -104,6 +116,7 @@ class AfkRun {
     Object? closedUnmerged = absent,
     Object? retryAt = absent,
     Object? narrationId = absent,
+    Object? lastFailureReason = absent,
   }) => AfkRun(
     issueNumber: issueNumber,
     title: title,
@@ -118,6 +131,9 @@ class AfkRun {
     narrationId: narrationId == absent
         ? this.narrationId
         : narrationId as String?,
+    lastFailureReason: lastFailureReason == absent
+        ? this.lastFailureReason
+        : lastFailureReason as String?,
   );
 
   /// The [copyWith] "field left unset" sentinel (distinct from a `null`
@@ -246,6 +262,7 @@ class AfkStore {
       'closedUnmerged': run.closedUnmerged,
       'retryAt': run.retryAt,
       'narrationId': run.narrationId,
+      'lastFailureReason': run.lastFailureReason,
     });
     await _write(map);
   }
@@ -272,6 +289,7 @@ class AfkStore {
       final closedUnmerged = decoded['closedUnmerged'];
       final retryAt = decoded['retryAt'];
       final narrationId = decoded['narrationId'];
+      final lastFailureReason = decoded['lastFailureReason'];
       return AfkRun(
         issueNumber: number,
         title: title,
@@ -282,6 +300,9 @@ class AfkStore {
         closedUnmerged: closedUnmerged is bool ? closedUnmerged : false,
         retryAt: retryAt is int ? retryAt : null,
         narrationId: narrationId is String ? narrationId : null,
+        lastFailureReason: lastFailureReason is String
+            ? lastFailureReason
+            : null,
       );
     } catch (_) {
       return null;

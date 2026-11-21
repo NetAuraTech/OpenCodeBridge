@@ -239,4 +239,62 @@ void main() {
       expect(run.retryCount, 0);
     });
   });
+
+  group('the run row grows with the failure reason (spec #376, T6: the '
+      'fresh-agent handoff\'s bootstrap lists why a run is retrying)', () {
+    test(
+      'updateRun persists lastFailureReason; runFor reads it back; a row '
+      'without it (a T2/T3-era row) reads back null (tolerant decode)',
+      () async {
+        final store = AfkStore(file: file);
+        await store.addRun(7, 'Add a README');
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'dispatched',
+            retryCount: 1,
+            lastFailureReason: 'model under load',
+          ),
+        );
+        expect(
+          AfkStore(file: file).runFor(7)!.lastFailureReason,
+          'model under load',
+        );
+
+        // A row written before the field existed (no lastFailureReason key)
+        // reads back null, never a throw.
+        await file.writeAsString(
+          jsonEncode({
+            'afk.run.8': '{"state":"dispatched","issueNumber":8,"title":"B"}',
+          }),
+        );
+        expect(AfkStore(file: file).runFor(8)!.lastFailureReason, isNull);
+      },
+    );
+
+    test(
+      'a wrong-typed lastFailureReason degrades to null (never a throw)',
+      () async {
+        await file.writeAsString(
+          jsonEncode({
+            'afk.run.7': '{"state":"dispatched","issueNumber":7,"title":"A","lastFailureReason":42}',
+          }),
+        );
+        expect(AfkStore(file: file).runFor(7)!.lastFailureReason, isNull);
+      },
+    );
+
+    test('copyWith clears lastFailureReason by an explicit null (the '
+        'unset/cleared distinction)', () {
+      const run = AfkRun(
+        issueNumber: 7,
+        title: 'Add a README',
+        state: 'dispatched',
+        lastFailureReason: 'model under load',
+      );
+      expect(run.copyWith().lastFailureReason, 'model under load');
+      expect(run.copyWith(lastFailureReason: null).lastFailureReason, isNull);
+    });
+  });
 }
