@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/afk/afk_component.dart';
+import 'package:opencodebridge/bridge/afk/afk_store.dart';
 import 'package:opencodebridge/bridge/bridge_server.dart';
 import 'package:opencodebridge/bridge/docker/docker_backend.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
@@ -3675,6 +3677,208 @@ void main() {
     });
   });
 
+  group('BridgeServer AFK run push wiring (spec #376, T5)', () {
+    // The AFK run's two "look now" events (spec #376, T5) ride the bridge's
+    // real event hub and are mapped to the `afkRun` push kind by the bridge's
+    // real [PushDispatcher] — through the real [_defaultNotify] wiring, whose
+    // AFK-session resolver reads the bridge's **stored** AFK session (not the
+    // run's issue, which has no session). The push deep-links: the PR push to
+    // the PR's GitHub URL (external), the failure push to the AFK session
+    // (in-app). A device registered for `afkRun` receives them; the PR push
+    // is high priority. The dispatcher itself (titles, bodies, the per-kind
+    // toggle) is covered by the push-dispatcher tests; this closes the
+    // bridge-wiring loop the dispatcher test cannot (its resolver is a stub).
+
+    late BridgeServer server;
+    late Uri base;
+    late _FakeService service;
+    late _FakeEventUpstream upstream;
+    late EventHub hub;
+    late _NotifyFakeSender sender;
+    late Directory dir;
+    late AfkStore afkStore;
+    late AfkComponent afk;
+
+    Future<FcmSender> fakeSender(FirebaseServiceAccount account) async =>
+        sender;
+
+    /// Emits an `afk.pr_open` bridge event through the bridge's hub and waits
+    /// for the recording sender to receive the push.
+    Future<void> emitPrOpen() async {
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.afkPrOpen,
+          data: {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'prNumber': 41,
+            'prUrl': 'https://github.com/o/r/pull/41',
+          },
+        ),
+      );
+      await _until(() => sender.sent.isNotEmpty, message: 'the AFK push');
+    }
+
+    Future<void> emitFailed() async {
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.afkFailed,
+          data: {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'reason': 'model under load',
+          },
+        ),
+      );
+      await _until(() => sender.sent.isNotEmpty, message: 'the AFK push');
+    }
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('opencodebridge-afk-push');
+      final accountPath = '${dir.path}/service-account.json';
+      FirebaseServiceAccount.install(kAccountJson, path: accountPath);
+      service = _FakeService();
+      upstream = _FakeEventUpstream();
+      hub = EventHub(service: upstream);
+      sender = _NotifyFakeSender();
+      // The bridge's AFK component, on an app-owned store (the temp dir),
+      // seeded with a stored AFK session id — the failure push's deep-link.
+      afkStore = AfkStore(file: File('${dir.path}/afk.json'));
+      afk = AfkComponent(backend: null, store: afkStore);
+      server = await BridgeServer.start(
+        port: 0,
+        sessions: SessionsBackend(
+          service: service,
+          orderStore: SessionOrderStore(
+            file: File('${dir.path}/session-order.json'),
+          ),
+        ),
+        events: hub,
+        notifyCredential: accountPath,
+        notifySenderFactory: fakeSender,
+        afk: afk,
+      );
+      base = server.baseUri;
+      // The AFK session is armed (a stored id): the failure push has a
+      // session to point at.
+      await afkStore.setSessionId('ses_afk');
+    });
+
+    tearDown(() async {
+      await server.stop();
+      await dir.delete(recursive: true);
+    });
+
+    test('the AFK PR-open push reaches an afkRun device: high priority, '
+        'deep-linking the PR URL (external)', () async {
+      final (status, _) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["afkRun"]}',
+      );
+      expect(status, 200);
+
+      await emitPrOpen();
+      expect(sender.sent, hasLength(1));
+      expect(sender.titles.single, 'AFK run : PR ouverte');
+      expect(sender.bodies.single, 'Add a README · #7');
+      expect(sender.links.single, 'https://github.com/o/r/pull/41');
+      expect(sender.priorities.single, isTrue);
+    });
+
+    test('the AFK failure push reaches an afkRun device: high priority, '
+        'deep-linking the bridge\'s stored AFK session (in-app)', () async {
+      final (status, _) = await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["afkRun"]}',
+      );
+      expect(status, 200);
+
+      await emitFailed();
+      expect(sender.sent, hasLength(1));
+      expect(sender.titles.single, 'AFK run : échec');
+      expect(sender.bodies.single, 'Add a README · #7 — needs-triage');
+      // The deep-link is the AFK session the bridge stored (the human reads
+      // the agent's FAILED narration in place), not the issue.
+      expect(sender.links.single, 'opencodebridge://session/ses_afk');
+      expect(sender.priorities.single, isTrue);
+    });
+
+    test(
+      'a device without the afkRun kind is silent for the AFK events',
+      () async {
+        // Registered for turnEnded only: the AFK event is not pushed to it.
+        await _postRaw(
+          base,
+          'api/notify/device-token',
+          '{"token":"tok_other","events":["turnEnded"]}',
+        );
+        hub.emit(
+          bridgeEvent(
+            type: BridgeEventType.afkPrOpen,
+            data: {
+              'issueNumber': 7,
+              'title': 'Add a README',
+              'prNumber': 41,
+              'prUrl': 'https://github.com/o/r/pull/41',
+            },
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(sender.sent, isEmpty);
+      },
+    );
+
+    test('a device with only afkRun is silent for the other push kinds '
+        '(the kinds are independent)', () async {
+      // Registered for afkRun only: a turn-ended event is not pushed to it.
+      await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_afk","events":["afkRun"]}',
+      );
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.turnCancelled,
+          data: {'sessionID': 'ses_afk'},
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(sender.sent, isEmpty);
+    });
+
+    test('with no AFK session stored (not armed), the failure push is not '
+        'sent (no session to point at); the PR push still is', () async {
+      // The PR push needs no AFK session (it deep-links to the PR).
+      await _postRaw(
+        base,
+        'api/notify/device-token',
+        '{"token":"tok_1","events":["afkRun"]}',
+      );
+      await emitPrOpen();
+      expect(sender.sent, hasLength(1));
+      expect(sender.links.single, 'https://github.com/o/r/pull/41');
+
+      // Clear the stored AFK session (the system is not armed / has no
+      // session): the failure push has nowhere to point, so it is not sent.
+      await afkStore.setSessionId(null);
+      sender.sent.clear();
+      hub.emit(
+        bridgeEvent(
+          type: BridgeEventType.afkFailed,
+          data: {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'reason': 'model under load',
+          },
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(sender.sent, isEmpty);
+    });
+  });
+
   group('HttpEventConnection (the shared SSE writer)', () {
     test('the constructor owns the whole SSE response, set before the '
         '`: connected` flush', () async {
@@ -4858,6 +5062,9 @@ Future<void> _until(
 class _NotifyFakeSender extends FcmSender {
   final sent = <String>[];
   final bodies = <String>[];
+  final links = <String>[];
+  final titles = <String>[];
+  final priorities = <bool>[];
 
   @override
   Future<void> send({
@@ -4865,9 +5072,13 @@ class _NotifyFakeSender extends FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
     sent.add(token);
     bodies.add(body);
+    links.add(link);
+    titles.add(title);
+    priorities.add(highPriority);
   }
 }
 

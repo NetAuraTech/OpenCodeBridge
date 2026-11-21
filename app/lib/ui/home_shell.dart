@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
@@ -5,6 +7,7 @@ import '../app_mode.dart';
 import '../client/authenticated_http.dart';
 import '../client/connection_monitor.dart';
 import '../client/events_client.dart';
+import '../notify/deep_link.dart';
 import '../settings/app_settings.dart';
 import 'connection_indicator.dart';
 import 'deep_link_target.dart';
@@ -27,6 +30,7 @@ class HomeShell extends StatefulWidget {
     this.auth,
     this.access,
     this.deepLinks,
+    this.onExternalOpen,
     this.onNotifyToggled,
     this.onPushProjectCommitted,
     this.onServiceAccountCommitted,
@@ -60,6 +64,15 @@ class HomeShell extends StatefulWidget {
   /// push registration (server mode, no tunnel URL yet, or the flow never
   /// started).
   final DeepLinkTarget? deepLinks;
+
+  /// Opens an **external** deep link's URL in the browser (spec #376, T5):
+  /// an AFK run's PR push deep-links to the PR's GitHub URL, opened outside
+  /// the app. The shell (the deep-link target's tab-switching owner) calls
+  /// it with the URL when the tapped target is external, and consumes the
+  /// one-shot so a later identical link is a new event. `null` ⇒ the open is
+  /// a no-op (the target is still consumed); the app backs it with a browser
+  /// opener (the device's browser on Android, the default opener elsewhere).
+  final Future<void> Function(Uri url)? onExternalOpen;
 
   /// Re-registers this device's push with the Settings toggles as they are
   /// now (issue #24); the Settings tab calls it on every toggle change.
@@ -114,8 +127,25 @@ class _HomeShellState extends State<HomeShell> {
   void _onDeepLinkTarget() {
     final target = widget.deepLinks?.target;
     if (target == null) return;
+    // An external link (an AFK run's PR, spec #376, T5): open it in the
+    // browser and clear the one-shot — there is no in-app tab to switch to.
+    if (target.isExternal) {
+      _openExternal(target);
+      return;
+    }
     // Docker sits behind the Orbs tab.
     setState(() => _tab = target.isSession ? 0 : 2);
+  }
+
+  /// Opens an external deep link's URL in the browser and clears the one-shot
+  /// (the target stays on the model only until it is opened). With no opener
+  /// wired the open is a no-op (the one-shot is still consumed).
+  void _openExternal(DeepLink target) {
+    final opener = widget.onExternalOpen;
+    if (opener != null) {
+      unawaited(opener(Uri.parse(target.id)).catchError((_) {}));
+    }
+    widget.deepLinks?.consume();
   }
 
   @override
@@ -130,7 +160,12 @@ class _HomeShellState extends State<HomeShell> {
     // model once here and lands on the right tab.
     final target = widget.deepLinks?.target;
     if (target != null) {
-      _tab = target.isSession ? 0 : 2; // Docker sits behind the Orbs tab.
+      if (target.isExternal) {
+        // A cold-start tap on an external link: open it, not switch a tab.
+        _openExternal(target);
+      } else {
+        _tab = target.isSession ? 0 : 2; // Docker sits behind the Orbs tab.
+      }
     }
     widget.deepLinks?.addListener(_onDeepLinkTarget);
   }

@@ -167,16 +167,37 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final settings = await pumpSettings(tester, mode: AppMode.client);
 
+      // Tap each switch by its key (not by position — the Notifications
+      // section's switch set grew with the AFK run's own push toggle,
+      // spec #376, T5, so positional indexing is no longer stable).
       await scrollSettings(
         tester,
-        find.byKey(const ValueKey('notify-turn-ended')),
+        find.byKey(const ValueKey('notify-permission-asked')),
       );
-      await tester.tap(find.byType(Switch).first);
+      final permission = find.byKey(const ValueKey('notify-permission-asked'));
+      for (var i = 0; i < 10; i++) {
+        final center = tester.getCenter(permission, warnIfMissed: false);
+        if (center.dy > 80 && center.dy < 520) break;
+        await tester.drag(find.byType(ListView), const Offset(0, -200));
+        await tester.pump();
+      }
+      await tester.tap(permission);
       await tester.pump();
       expect(settings.notifyPermissionAsked, isTrue);
       expect(settings.notifyTurnEnded, isFalse);
 
-      await tester.tap(find.byType(Switch).at(1));
+      await scrollSettings(
+        tester,
+        find.byKey(const ValueKey('notify-turn-ended')),
+      );
+      final turnEnded = find.byKey(const ValueKey('notify-turn-ended'));
+      for (var i = 0; i < 10; i++) {
+        final center = tester.getCenter(turnEnded, warnIfMissed: false);
+        if (center.dy > 80 && center.dy < 520) break;
+        await tester.drag(find.byType(ListView), const Offset(0, -200));
+        await tester.pump();
+      }
+      await tester.tap(turnEnded);
       await tester.pump();
       expect(settings.notifyTurnEnded, isTrue);
     });
@@ -285,6 +306,47 @@ void main() {
       expect(settings.notifyTurnEnded, isTrue);
       expect(toggles, 1);
     });
+
+    testWidgets(
+      'the AFK run push toggle defaults off, persists, and re-registers '
+      '(spec #376, T5), independent of the arming toggle',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        var toggles = 0;
+        final settings = await pumpSettings(
+          tester,
+          onNotifyToggled: () => toggles++,
+        );
+        expect(settings.notifyAfkRun, isFalse); // Off by default.
+
+        // The AFK run's switch sits with the push toggles (above the sound
+        // one). The generic scroll helper stops as soon as the tile is *any*
+        // amount in view, which leaves its centre (the tap target) below the
+        // viewport: drag a few more steps until the centre is comfortably on
+        // screen (the sound-events test's pattern).
+        await scrollSettings(
+          tester,
+          find.byKey(const ValueKey('notify-afk-run')),
+        );
+        final switchFinder = find.byKey(const ValueKey('notify-afk-run'));
+        for (var i = 0; i < 10; i++) {
+          final center = tester.getCenter(switchFinder, warnIfMissed: false);
+          if (center.dy > 80 && center.dy < 520) break;
+          await tester.drag(find.byType(ListView), const Offset(0, -200));
+          await tester.pump();
+        }
+        await tester.tap(switchFinder);
+        await tester.pump();
+        expect(settings.notifyAfkRun, isTrue);
+        expect(toggles, 1); // Re-registers the device's push.
+        expect((await AppSettings.load()).notifyAfkRun, isTrue); // Persisted.
+
+        // Armed-but-silenced is legitimate: the AFK arming toggle (the AFK
+        // agent section) is a separate setting; toggling the push does not
+        // touch it.
+        expect(settings.afkEnabled, isFalse);
+      },
+    );
 
     testWidgets('an invalid paste shows the problem and saves nothing', (
       tester,

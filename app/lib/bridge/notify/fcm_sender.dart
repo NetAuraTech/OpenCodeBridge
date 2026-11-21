@@ -9,12 +9,16 @@ import 'firebase_service_account.dart';
 /// payload.
 abstract class FcmSender {
   /// Sends one push to [token], titled [title] with body [body].
-  /// Implementations throw on a delivery failure.
+  /// [highPriority] marks a "look now" push (spec #376, T5: the AFK run's
+  /// two moments) — the sender raises the platform's delivery priority so
+  /// the notification is not deferred. Implementations throw on a delivery
+  /// failure.
   Future<void> send({
     required String token,
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   });
 
   /// Releases the sender's resources (the bridge's `close`); a no-op by
@@ -71,6 +75,7 @@ class FirebaseAdminFcmSender extends FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
     final messaging = _app.messaging();
     await messaging.send(
@@ -79,6 +84,12 @@ class FirebaseAdminFcmSender extends FcmSender {
         notification: Notification(title: title, body: body),
         // The tap target: the app opens this deep link on notification tap.
         data: {'link': link},
+        // A "look now" push (spec #376, T5) is delivered at high priority —
+        // the platform's high-priority delivery, not deferred. Absent for a
+        // normal push (the platform's default priority).
+        android: highPriority
+            ? AndroidConfig(priority: AndroidConfigPriority.high)
+            : null,
       ),
     );
   }

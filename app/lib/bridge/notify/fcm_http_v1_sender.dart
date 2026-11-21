@@ -63,18 +63,23 @@ class FcmHttpV1Sender implements FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
+    final message = <String, Object?>{
+      'token': token,
+      'notification': {'title': title, 'body': body},
+      // The tap target, as on the Admin-SDK sender.
+      'data': {'link': link},
+    };
+    // A "look now" push (spec #376, T5) is delivered at high priority, as on
+    // the Admin-SDK sender: the FCM v1 API's `android.priority`.
+    if (highPriority) {
+      message['android'] = {'priority': 'high'};
+    }
     final response = await _client.post(
       _endpoint.replace(path: '/v1/projects/$projectId/messages:send'),
       headers: const {'content-type': 'application/json'},
-      body: jsonEncode({
-        'message': {
-          'token': token,
-          'notification': {'title': title, 'body': body},
-          // The tap target, as on the Admin-SDK sender.
-          'data': {'link': link},
-        },
-      }),
+      body: jsonEncode({'message': message}),
     );
     if (response.statusCode != 200) {
       throw FcmSendError(response.statusCode, response.body);

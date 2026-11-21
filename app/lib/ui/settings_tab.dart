@@ -196,6 +196,19 @@ class _SettingsTabState extends State<SettingsTab> {
           widget.onNotifyToggled?.call();
         },
       ),
+      // The AFK run's own push toggle (spec #376, T5): its two "look now"
+      // moments (PR opened, terminal failure), high priority. Distinct from
+      // the AFK arming toggle (the AFK agent section) — armed-but-silenced
+      // is a legitimate state.
+      SwitchListTile(
+        key: const ValueKey('notify-afk-run'),
+        title: const Text('AFK run: PR opened or failed'),
+        value: widget.settings.notifyAfkRun,
+        onChanged: (value) {
+          setState(() => widget.settings.notifyAfkRun = value);
+          widget.onNotifyToggled?.call();
+        },
+      ),
       // The desktop session-sound toggle (issue #246): on by default. It is
       // in the Notifications family like the push toggles above it, but it
       // drives the local sounds only — the change needs no push

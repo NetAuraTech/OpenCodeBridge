@@ -83,11 +83,18 @@ class NotifyService {
     required String title,
     required String body,
     required String link,
+    required bool highPriority,
   }) {
     return DeliveryPlan(
       channels: _deliveryChannels(),
-      send: (channel) =>
-          _sendOn(channel, token, title: title, body: body, link: link),
+      send: (channel) => _sendOn(
+        channel,
+        token,
+        title: title,
+        body: body,
+        link: link,
+        highPriority: highPriority,
+      ),
       durable: false,
     );
   }
@@ -105,9 +112,16 @@ class NotifyService {
     required String title,
     required String body,
     required String link,
+    required bool highPriority,
   }) async {
     try {
-      await sender.send(token: token, title: title, body: body, link: link);
+      await sender.send(
+        token: token,
+        title: title,
+        body: body,
+        link: link,
+        highPriority: highPriority,
+      );
       return SendOutcome.landed;
     } catch (_) {
       return SendOutcome.failed;
@@ -117,12 +131,14 @@ class NotifyService {
   /// Sends the push to every device that has [kind] enabled, one device's
   /// delivery going through its own non-durable single-primary [DeliveryPlan];
   /// a delivery failure on one device does not stop the rest. Returns how
-  /// many devices' sends **landed**.
+  /// many devices' sends **landed**. [highPriority] marks a "look now" push
+  /// (spec #376, T5: the AFK run's two moments).
   Future<int> send(
     NotifyKind kind, {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
     var landed = 0;
     for (final entry in _devices.entries) {
@@ -132,7 +148,13 @@ class NotifyService {
       // to the same device), attempted once (fire-and-forget, the policy's
       // named decision). One device's failed attempt is isolated to its own
       // plan — the rest of the fan-out is independent of it.
-      final plan = _newPlan(entry.key, title: title, body: body, link: link);
+      final plan = _newPlan(
+        entry.key,
+        title: title,
+        body: body,
+        link: link,
+        highPriority: highPriority,
+      );
       final attempt = await plan.attempt();
       // The plan's own sends: exactly one (the non-durable primary), landed or
       // failed. A landing is counted; a failure is not (it is not re-attempted

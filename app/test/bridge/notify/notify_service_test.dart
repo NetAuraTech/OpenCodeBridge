@@ -167,10 +167,11 @@ class _FakeSender extends FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
     attempts.update(token, (n) => n + 1, ifAbsent: () => 1);
     if (failTokens.contains(token)) throw StateError('delivery failed');
-    sent.add(_Sent(token, title, body, link));
+    sent.add(_Sent(token, title, body, link, highPriority));
   }
 
   @override
@@ -178,10 +179,11 @@ class _FakeSender extends FcmSender {
 }
 
 class _Sent {
-  const _Sent(this.token, this.title, this.body, this.link);
+  const _Sent(this.token, this.title, this.body, this.link, this.highPriority);
 
   final String token;
   final String title;
   final String body;
   final String link;
+  final bool highPriority;
 }

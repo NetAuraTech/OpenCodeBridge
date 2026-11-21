@@ -332,6 +332,7 @@ class _FakePushSender extends FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
     sent.add(_Push(token, title, body, link));
   }

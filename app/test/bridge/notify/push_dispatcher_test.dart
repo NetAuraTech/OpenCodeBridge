@@ -209,6 +209,158 @@ void main() {
     expect(sender.sent, isEmpty);
   });
 
+  group('the AFK runs (spec #376, T5): the two "look now" moments', () {
+    late PushDispatcher dispatcher;
+
+    setUp(() {
+      dispatcher = PushDispatcher(
+        service,
+        sessionLabel: (id) async => 'label-$id',
+        // The AFK session the failure push deep-links to (in-app, to read the
+        // agent's FAILED narration).
+        afkSession: () async => 'ses_afk',
+      );
+    });
+
+    tearDown(() async {
+      await dispatcher.close();
+    });
+
+    test('afk.pr_open pushes one high-priority afkRun, deep-linking the PR '
+        'in the external browser', () async {
+      await dispatcher.write(
+        jsonEncode({
+          'type': 'afk.pr_open',
+          'data': {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'prNumber': 41,
+            'prUrl': 'https://github.com/o/r/pull/41',
+          },
+        }),
+      );
+      expect(sender.sent, hasLength(1));
+      final sent = sender.sent.single;
+      expect(sent.title, 'AFK run : PR ouverte');
+      expect(sent.body, 'Add a README · #7');
+      expect(sent.link, 'https://github.com/o/r/pull/41');
+      expect(sent.highPriority, isTrue);
+    });
+
+    test('afk.failed pushes one high-priority afkRun, deep-linking the AFK '
+        'session in the app', () async {
+      await dispatcher.write(
+        jsonEncode({
+          'type': 'afk.failed',
+          'data': {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'reason': 'model under load',
+          },
+        }),
+      );
+      expect(sender.sent, hasLength(1));
+      final sent = sender.sent.single;
+      expect(sent.title, 'AFK run : échec');
+      expect(sent.body, 'Add a README · #7 — needs-triage');
+      expect(sent.link, 'opencodebridge://session/ses_afk');
+      expect(sent.highPriority, isTrue);
+    });
+
+    test('a retry emits no event, so the dispatcher sends nothing '
+        '(a retried run posts no afk event)', () async {
+      // The run service emits no event on a retry — only on pr-open and
+      // terminal failure. The dispatcher has no retry arm: the only AFK
+      // event types it maps are the two "look now" ones. A feed / a
+      // re-dispatch (a retry) is not an event at all, so nothing reaches the
+      // dispatcher to push.
+      await dispatcher.write(opencode('session.updated'));
+      expect(sender.sent, isEmpty);
+    });
+
+    test('the afkRun kind is delivered to devices that have it enabled, and '
+        'silenced for those that have not (armed-but-silenced)', () async {
+      // This dispatcher's service has a device with every kind enabled (the
+      // file's setUp), so it receives the push. A device registered with only
+      // the other kinds is silent for the AFK event (the per-kind toggle
+      // filtering lives in the NotifyService).
+      final silentSender = _FakeSender();
+      final silentService = NotifyService(sender: silentSender);
+      silentService.registerDevice('silent', {
+        NotifyKind.permissionAsked,
+        NotifyKind.turnEnded,
+        NotifyKind.dockerContainer,
+      });
+      final silent = PushDispatcher(
+        silentService,
+        afkSession: () async => 'ses_afk',
+      );
+      await silent.write(
+        jsonEncode({
+          'type': 'afk.pr_open',
+          'data': {
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'prNumber': 41,
+            'prUrl': 'https://github.com/o/r/pull/41',
+          },
+        }),
+      );
+      expect(silentSender.sent, isEmpty);
+    });
+
+    test('an afk.pr_open with no PR url is not a push (the deep-link is the '
+        'PR)', () async {
+      await dispatcher.write(
+        jsonEncode({
+          'type': 'afk.pr_open',
+          'data': {'issueNumber': 7, 'title': 'Add a README'},
+        }),
+      );
+      expect(sender.sent, isEmpty);
+    });
+
+    test('an afk event with no title or issue number is not a push', () async {
+      await dispatcher.write(
+        jsonEncode({
+          'type': 'afk.pr_open',
+          'data': {'prUrl': 'https://github.com/o/r/pull/41'},
+        }),
+      );
+      expect(sender.sent, isEmpty);
+    });
+
+    test('the pushes ride the event hub: a raw SSE consumer of the same '
+        'event sees it too (no direct send from the state machine)', () async {
+      final upstream = _FakeUpstream();
+      final hub = EventHub(service: upstream);
+      hub.add(dispatcher);
+      final sse = _RecordingSse();
+      hub.add(sse);
+      upstream.add(
+        OpencodeEvent(
+          raw: jsonEncode({
+            'type': 'afk.pr_open',
+            'data': {
+              'issueNumber': 7,
+              'title': 'Add a README',
+              'prNumber': 41,
+              'prUrl': 'https://github.com/o/r/pull/41',
+            },
+          }),
+          type: 'afk.pr_open',
+        ),
+      );
+      await _until(() => sender.sent.length == 1);
+      // The push went out …
+      expect(sender.sent.single.title, 'AFK run : PR ouverte');
+      // … and the same frame fanned out to the SSE consumer verbatim.
+      expect(sse.payloads, hasLength(1));
+      expect(sse.payloads.single, contains('afk.pr_open'));
+      await hub.close();
+    });
+  });
+
   test('every other event on the stream is not a push', () async {
     await dispatcher.write(opencode('session.updated'));
     await dispatcher.write(jsonEncode({'type': 'message.part.updated'}));
@@ -274,18 +426,36 @@ class _FakeSender extends FcmSender {
     required String title,
     required String body,
     required String link,
+    bool highPriority = false,
   }) async {
-    sent.add(_Sent(token, title, body, link));
+    sent.add(_Sent(token, title, body, link, highPriority));
   }
 }
 
 class _Sent {
-  const _Sent(this.token, this.title, this.body, this.link);
+  const _Sent(this.token, this.title, this.body, this.link, this.highPriority);
 
   final String token;
   final String title;
   final String body;
   final String link;
+  final bool highPriority;
+}
+
+/// A raw SSE consumer of the hub: records every verbatim `data:` payload the
+/// hub fans out (the app's event-stream connection, for the "the pushes ride
+/// the event hub" assertion — an SSE consumer of the same event sees it too).
+class _RecordingSse implements EventConnection {
+  final payloads = <String>[];
+
+  @override
+  Future<void> write(String rawPayload) async => payloads.add(rawPayload);
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  Future<void> get done => Completer<void>().future;
 }
 
 /// A scripted upstream event service: one broadcast controller.
