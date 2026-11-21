@@ -110,16 +110,20 @@ void main() {
   });
 
   /// A component over the backend with the main checkout injected (so the
-  /// component does not need a real project list). [armed] sets the arming
-  /// toggle as the Settings tab would persist it.
-  AfkComponent mkComponent({bool armed = false, String model = ''}) {
+  /// component does not need a real project list). [repo] is the armed repo
+  /// identity (the component's single session lives under it); `null` disarms.
+  AfkComponent mkComponent({String? repo, String model = ''}) {
     final component = AfkComponent(
       backend: backend,
       store: AfkStore(file: storeFile),
       directoryOf: (_) async => '/main-checkout',
     );
     component.updateSettings(
-      AfkSettings(enabled: armed, parallelOrbs: 5, model: model),
+      AfkSettings(
+        armedRepos: repo == null ? const {} : {repo},
+        parallelOrbs: 5,
+        model: model,
+      ),
     );
     return component;
   }
@@ -190,19 +194,20 @@ void main() {
 
   group('AfkComponent', () {
     test('arming creates exactly one session and stores its id', () async {
-      final component = mkComponent(armed: true);
+      final component = mkComponent(repo: 'o/r');
       expect(component.sessionId, isNull);
       final id = await component.ensureSession();
       expect(id, 'ses_afk_1');
       expect(component.sessionId, 'ses_afk_1');
       expect(service.createdCount, 1);
-      // The id is persisted in the store (the bridge's own fact).
-      expect(AfkStore(file: storeFile).sessionId(), 'ses_afk_1');
+      // The id is persisted in the store (the bridge's own fact), under the
+      // repo.
+      expect(AfkStore(file: storeFile).sessionIdFor('o/r'), 'ses_afk_1');
     });
 
     test('a re-arm reuses the existing session (no duplicate) — the session '
         'outlives a disarm', () async {
-      final component = mkComponent(armed: true);
+      final component = mkComponent(repo: 'o/r');
       final first = await component.ensureSession();
       expect(first, 'ses_afk_1');
 
@@ -216,12 +221,12 @@ void main() {
     test(
       'a restarted bridge (fresh component) reuses the persisted session',
       () async {
-        final component = mkComponent(armed: true);
+        final component = mkComponent(repo: 'o/r');
         await component.ensureSession(); // Persists ses_afk_1 in the store.
 
         // A fresh component over the same store (a bridge restart) is seeded
         // with the persisted id and reuses it — no second create.
-        final restarted = mkComponent(armed: true);
+        final restarted = mkComponent(repo: 'o/r');
         final id = await restarted.ensureSession();
         expect(id, 'ses_afk_1');
         expect(service.createdCount, 1);
@@ -231,7 +236,7 @@ void main() {
     test(
       'a changed model is effective from the next session creation',
       () async {
-        final component = mkComponent(armed: true);
+        final component = mkComponent(repo: 'o/r');
         await component.ensureSession(); // No model (empty default).
         expect(service.createModel, isNull);
 
@@ -239,7 +244,11 @@ void main() {
         // uses the newly-pinned model.
         service.present.clear();
         component.updateSettings(
-          const AfkSettings(enabled: true, parallelOrbs: 5, model: 'a/b#v'),
+          const AfkSettings(
+            armedRepos: {'o/r'},
+            parallelOrbs: 5,
+            model: 'a/b#v',
+          ),
         );
         await component.ensureSession();
         expect(
@@ -250,9 +259,9 @@ void main() {
     );
 
     test('the live cap is exposed for the spawn boundary to read', () {
-      final component = mkComponent(armed: true);
+      final component = mkComponent(repo: 'o/r');
       component.updateSettings(
-        const AfkSettings(enabled: true, parallelOrbs: 7, model: ''),
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 7, model: ''),
       );
       expect(component.settings.parallelOrbs, 7);
       expect(component.enabled, isTrue);
@@ -261,7 +270,7 @@ void main() {
     test(
       'spawnGate is null with no stored AFK session (no AFK orbs to cap)',
       () {
-        final component = mkComponent(armed: true);
+        final component = mkComponent(repo: 'o/r');
         expect(component.spawnGate(), isNull);
       },
     );
@@ -270,7 +279,7 @@ void main() {
       'spawnGate carries the AFK session id (the attribution anchor) and the '
       'live cap, read fresh on every call',
       () async {
-        final component = mkComponent(armed: true);
+        final component = mkComponent(repo: 'o/r');
         await component.ensureSession(); // Persists the AFK session id.
 
         final gate = component.spawnGate();
@@ -285,7 +294,7 @@ void main() {
         // A changed cap is effective from the next read (the next spawn): the
         // gate re-reads the live settings, no restart.
         component.updateSettings(
-          const AfkSettings(enabled: true, parallelOrbs: 2, model: ''),
+          const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 2, model: ''),
         );
         expect(component.spawnGate()!.cap, 2);
       },
@@ -299,6 +308,8 @@ void main() {
           store: AfkStore(file: storeFile),
           directoryOf: (_) async => '/main-checkout',
         );
+        // Armed, but with no backend there is no host to create the session on.
+        component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));
         expect(await component.ensureSession(), isNull);
         expect(component.sessionId, isNull);
       },
@@ -318,6 +329,7 @@ void main() {
           backend: backend,
           store: AfkStore(file: storeFile),
         );
+        component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));
         await component.ensureSession();
         expect(service.createDirectory, '/repo/main');
       },

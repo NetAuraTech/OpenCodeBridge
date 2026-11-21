@@ -51,6 +51,7 @@ class _ThrowingStore extends AfkStore {
 
   @override
   Future<void> addRun(
+    String repo,
     int issueNumber,
     String title, {
     String state = 'idle',
@@ -70,6 +71,7 @@ void main() {
   late _FakeReader reader;
   late List<String> payloads;
   late bool armed;
+  late String? repo;
   late AfkReadyGatePoller? poller;
 
   setUp(() async {
@@ -79,6 +81,7 @@ void main() {
     reader = _FakeReader();
     payloads = [];
     armed = false;
+    repo = null;
     poller = null;
   });
 
@@ -92,6 +95,7 @@ void main() {
       reader: reader,
       store: store,
       isArmed: () => armed,
+      repo: () => repo,
       emitEvent: payloads.add,
       pollInterval: const Duration(milliseconds: 5),
     );
@@ -113,14 +117,15 @@ void main() {
         'ready-admission event', () async {
       reader.ready = [const ReadyIssue(number: 7, title: 'Add a README')];
       armed = true;
+      repo = 'o/r';
       final p = newPoller();
       await p.pollOnce();
-      final run = store.runFor(7);
+      final run = store.runFor('o/r', 7);
       expect(run, isNotNull);
       expect(run!.issueNumber, 7);
       expect(run.title, 'Add a README');
       expect(run.state, 'idle');
-      expect(store.runs().map((r) => r.issueNumber).toSet(), {7});
+      expect(store.runsFor('o/r').map((r) => r.issueNumber).toSet(), {7});
       expect(payloads, hasLength(1));
       final decoded = jsonDecode(payloads.single) as Map<String, dynamic>;
       expect(decoded['type'], BridgeEventType.afkReadyAdmitted);
@@ -135,12 +140,13 @@ void main() {
           const ReadyIssue(number: 9, title: 'B'),
         ];
         armed = true;
+        repo = 'o/r';
         final p = newPoller();
         await p.pollOnce();
-        expect(store.runs(), hasLength(2));
+        expect(store.runsFor('o/r'), hasLength(2));
         expect(payloads, hasLength(2));
         await p.pollOnce(); // Unchanged: no duplicate rows, no new events.
-        expect(store.runs(), hasLength(2));
+        expect(store.runsFor('o/r'), hasLength(2));
         expect(payloads, hasLength(2));
       },
     );
@@ -149,14 +155,15 @@ void main() {
         'stored row', () async {
       reader.ready = [const ReadyIssue(number: 7, title: 'A')];
       armed = true;
+      repo = 'o/r';
       final p = newPoller();
       await p.pollOnce();
-      expect(store.runFor(7), isNotNull);
+      expect(store.runFor('o/r', 7), isNotNull);
       // The label is gone: the reader lists open issues with the label, so 7
       // is absent now.
       reader.ready = [];
       await p.pollOnce();
-      final run = store.runFor(7);
+      final run = store.runFor('o/r', 7);
       expect(run, isNotNull);
       expect(run!.state, 'idle');
       expect(run.title, 'A');
@@ -175,7 +182,7 @@ void main() {
         expect(p.isPolling, isFalse);
         await p.pollOnce();
         expect(reader.calls, 0);
-        expect(store.runs(), isEmpty);
+        expect(store.runsFor('o/r'), isEmpty);
         expect(payloads, isEmpty);
       },
     );
@@ -183,17 +190,19 @@ void main() {
     test('the timer admits while armed; stop ends the schedule', () async {
       reader.ready = [const ReadyIssue(number: 7, title: 'A')];
       armed = true;
+      repo = 'o/r';
       final p = newPoller();
       p.start();
       expect(p.isPolling, isTrue);
       await until(() => reader.calls > 0);
-      await until(() => store.runs().isNotEmpty);
+      await until(() => store.runsFor('o/r').isNotEmpty);
       p.stop();
       expect(p.isPolling, isFalse);
     });
 
     test('syncArmed: disarmed stops, armed schedules', () {
       armed = true;
+      repo = 'o/r';
       final p = newPoller();
       p.syncArmed(true);
       expect(p.isPolling, isTrue);
@@ -209,10 +218,11 @@ void main() {
     test('a failed read admits nothing and emits nothing', () async {
       reader.listThrows = true;
       armed = true;
+      repo = 'o/r';
       final p = newPoller();
       await p.pollOnce();
       expect(reader.calls, 1);
-      expect(store.runs(), isEmpty);
+      expect(store.runsFor('o/r'), isEmpty);
       expect(payloads, isEmpty);
     });
 
@@ -220,15 +230,17 @@ void main() {
       final throwing = _ThrowingStore(file);
       reader.ready = [const ReadyIssue(number: 7, title: 'A')];
       armed = true;
+      repo = 'o/r';
       poller = AfkReadyGatePoller(
         reader: reader,
         store: throwing,
         isArmed: () => armed,
+        repo: () => repo,
         emitEvent: payloads.add,
         pollInterval: const Duration(milliseconds: 5),
       );
       await poller!.pollOnce();
-      expect(throwing.runFor(7), isNull);
+      expect(throwing.runFor('o/r', 7), isNull);
       expect(payloads, isEmpty);
     });
   });

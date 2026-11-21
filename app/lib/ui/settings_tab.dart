@@ -1000,14 +1000,18 @@ class _SectionLabel extends StatelessWidget {
   );
 }
 
-/// The AFK agent section (spec #376, T1): the arming toggle (default off —
-/// off is the inert state), the parallel-orbs cap (numeric, 1–10, default 5),
-/// and the model (free text `provider/model[#variant]`; empty = no pin = the
-/// service's default). Server mode only — the AFK system runs on the host
-/// that owns the bridge. Every change persists to [AppSettings] and calls
-/// [onChanged] so the app hands the updated values to the in-process bridge
-/// (the next spawn reads the new cap; the next session creation the new
-/// model).
+/// The AFK agent section (spec #407, T1): the parallel-orbs cap (numeric,
+/// 1–10, default 5) and the model (free text `provider/model[#variant]`;
+/// empty = no pin = the service's default). Server mode only — the AFK system
+/// runs on the host that owns the bridge. Every change persists to
+/// [AppSettings] and calls [onChanged] so the app hands the updated values to
+/// the in-process bridge (the next spawn reads the new cap; the next session
+/// creation the new model).
+///
+/// The global arming toggle is gone (spec #407): arming is now **per repo
+/// identity** — a project arms from its own row (a later ticket, T6), and the
+/// shared settings keep only the host-wide cap and the model. The push
+/// toggle for the AFK run lives in the Notifications group (unchanged).
 class _AfkSection extends StatefulWidget {
   const _AfkSection({required this.settings, this.onChanged});
 
@@ -1083,18 +1087,6 @@ class _AfkSectionState extends State<_AfkSection> {
   @override
   Widget build(BuildContext context) => Column(
     children: [
-      SwitchListTile(
-        key: const ValueKey('afk-enabled'),
-        title: const Text('Arm the AFK agent'),
-        subtitle: const Text(
-          'Off is inert: no polling, no feed, no admission.',
-        ),
-        value: widget.settings.afkEnabled,
-        onChanged: (value) {
-          setState(() => widget.settings.afkEnabled = value);
-          widget.onChanged?.call();
-        },
-      ),
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Row(

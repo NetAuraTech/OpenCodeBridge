@@ -3760,9 +3760,12 @@ void main() {
         afk: afk,
       );
       base = server.baseUri;
-      // The AFK session is armed (a stored id): the failure push has a
-      // session to point at.
-      await afkStore.setSessionId('ses_afk');
+      // The AFK session is armed (a repo armed, its id stored): the failure
+      // push has a session to point at.
+      afk.updateSettings(
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 5, model: ''),
+      );
+      await afkStore.setSessionId('o/r', 'ses_afk');
     });
 
     tearDown(() async {
@@ -3861,9 +3864,9 @@ void main() {
       expect(sender.sent, hasLength(1));
       expect(sender.links.single, 'https://github.com/o/r/pull/41');
 
-      // Clear the stored AFK session (the system is not armed / has no
+      // Clear the stored AFK session (the repo is still armed but has no
       // session): the failure push has nowhere to point, so it is not sent.
-      await afkStore.setSessionId(null);
+      await afkStore.setSessionId('o/r', null);
       sender.sent.clear();
       hub.emit(
         bridgeEvent(
@@ -4030,6 +4033,7 @@ void main() {
       // reconciliation ran on the empty store, so no GitHub read here).
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -4038,7 +4042,7 @@ void main() {
         ),
       );
       final id = await server.updateAfKSettings(
-        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 5, model: ''),
       );
       expect(id, 'ses_afk_1', reason: 'a fresh session is created');
       expect(service.createdCount, 1, reason: 'the agent is recreated');
@@ -4066,7 +4070,7 @@ void main() {
       store = AfkStore(file: File('${dir.path}/afk.json'));
       service = _AfkHandoffService(dir.path);
       service.present.add('ses_persisted');
-      await store.setSessionId('ses_persisted');
+      await store.setSessionId('o/r', 'ses_persisted');
       final backend = SessionsBackend(
         service: service,
         orderStore: _InMemoryOrderStore(),
@@ -4083,13 +4087,14 @@ void main() {
       // store with no run rows).
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
         ),
       );
       final id = await server.updateAfKSettings(
-        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 5, model: ''),
       );
       expect(id, 'ses_persisted', reason: 'the stored session is reused');
       expect(service.createdCount, 0, reason: 'no new session is created');

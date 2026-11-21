@@ -4,9 +4,10 @@ import 'afk_spawn_gate.dart';
 import 'afk_store.dart';
 import '../sessions/backend.dart';
 
-/// The bridge's AFK subsystem (spec #376, T1): the arming toggle, the
-/// parallel-orbs cap, the model, the stored AFK session id, and the
-/// create/reuse of the AFK session.
+/// The bridge's AFK subsystem (spec #407, reshaped from #376, T1): the
+/// per-repo arming (the set of armed repo identities), the parallel-orbs
+/// cap, the model, the stored AFK session id, and the create/reuse of the
+/// AFK session.
 ///
 /// The app hands the component the current settings at bridge startup and
 /// notifies it in-process on change ([updateSettings]) — the bridge runs in
@@ -17,6 +18,15 @@ import '../sessions/backend.dart';
 /// reads it at creation time, so a changed model is picked up without a
 /// restart).
 ///
+/// Arming is now **per repo identity** (a set of `owner/repo`, spec #407).
+/// This ticket keeps the single resident session but re-keys it: the session
+/// lives under the first armed repo ([repo] = [AfkSettings.firstArmedRepo]),
+/// and the store is read/written through that repo. A disarm (no armed repos)
+/// holds the settings values but leaves the session and the stored id alone —
+/// the session outlives a disarm — so a re-arm reuses the live session through
+/// the stored id that is still present (no duplicate). The per-project poller,
+/// session, and routing land in later tickets (T2–T5).
+///
 /// The component rides the composite session service through the backend's
 /// [SessionsBackend.service] (the seam already faked in the bridge's session
 /// tests), and persists the AFK session id in the bridge's state area
@@ -25,10 +35,6 @@ import '../sessions/backend.dart';
 /// The [AfkSessionManager] is the component's state: it is created once the
 /// backend exists (seeded with the id persisted in the store at startup, so
 /// a restart reuses the session), and it is what [ensureSession] drives.
-/// A disarm (the arming toggle off) holds the settings values but leaves
-/// the session **and** the stored id alone — the session outlives a
-/// disarm — so a re-arm reuses the live session through the stored id
-/// that is still present (no duplicate).
 class AfkComponent {
   AfkComponent({
     required SessionsBackend? backend,
@@ -37,7 +43,6 @@ class AfkComponent {
   }) : store = store ?? AfkStore(),
        _directoryOf = directoryOf ?? _defaultDirectoryOf {
     _backend = backend;
-    _manager = _buildManager();
   }
 
   /// The bridge's sessions backend (the composite service); `null` on a
@@ -46,8 +51,12 @@ class AfkComponent {
   /// construction.
   SessionsBackend? _backend;
 
-  /// The component's stateful session manager (the seeded id + create/reuse);
-  /// `null` when the backend is absent (no manager to drive).
+  /// The repo the cached manager belongs to, and the manager itself (built
+  /// lazily on the first [ensureSession] once a repo is armed, seeded with
+  /// that repo's stored id). `null` until the first arming. A change of
+  /// armed repo rebuilds it, re-seeding from the store (a normal restart or a
+  /// repo swap reuses the stored session instead of creating a duplicate).
+  String? _managerRepo;
   AfkSessionManager? _manager;
 
   /// The bridge's persisted AFK state (the session id lives here).
@@ -66,63 +75,83 @@ class AfkComponent {
   /// the next session creation.
   AfkSettings get settings => _settings;
 
-  /// The arming toggle. Off is the inert state (no polling, no feed, no
-  /// admission); it is restored at launch from the persisted settings.
-  bool get enabled => _settings.enabled;
+  /// The repo the single resident session lives under (spec #407): the first
+  /// armed repo in list order, or `null` when no repo is armed. The per-
+  /// project session (one manager per armed repo) lands in a later ticket
+  /// (T3); until then this is the deterministic anchor for the one session.
+  String? get repo => _settings.firstArmedRepo;
+
+  /// Whether any repo is armed. Armed is the active state (polling, feed,
+  /// admission); an empty armed set is inert. This is the live predicate the
+  /// poller and run service read (spec #407, T1's minimal path, until the
+  /// per-project poller lands in T2).
+  bool get enabled => _settings.armedRepos.isNotEmpty;
 
   /// The in-process notification the app calls when an AFK setting changes in
   /// Settings: the new values are held live, so the next spawn reads the new
-  /// cap and the next session creation reads the new model (no restart).
+  /// cap, the next session creation reads the new model, and the arming
+  /// (which repos are armed) from the next poll (no restart).
   void updateSettings(AfkSettings next) => _settings = next;
 
-  /// The stored AFK session id (the bridge's own persisted fact), or `null`
-  /// when the system is not armed (no id persisted).
-  String? get sessionId => store.sessionId();
+  /// The stored AFK session id for [repo] (the bridge's own persisted fact),
+  /// or `null` when none is stored under that repo. The legacy flat
+  /// `afk.sessionId` is not read (no migration, spec #407).
+  String? get sessionId => repo == null ? null : store.sessionIdFor(repo!);
 
   /// The spawn-boundary view of the AFK attribution (spec #376, T4): the AFK
   /// session id (a spawn is AFK-attributed when its caller session is this
   /// one) and the parallel-orbs cap, **read live** — the cap from the current
   /// settings (effective from the next spawn, no restart), the session id
   /// fresh from the store (a restart, or a fresh arming, is picked up).
-  /// `null` when no AFK session id is persisted: there is no AFK session, so
-  /// no spawn is AFK-attributed and the cap never applies.
+  /// `null` when no repo is armed or no AFK session id is persisted: there is
+  /// no AFK session, so no spawn is AFK-attributed and the cap never applies.
   AfkSpawnGate? spawnGate() {
-    final id = store.sessionId();
+    final repo = this.repo;
+    if (repo == null) return null;
+    final id = store.sessionIdFor(repo);
     if (id == null || id.isEmpty) return null;
     return AfkSpawnGate(afkSessionId: id, cap: _settings.parallelOrbs);
   }
 
   /// Ensure the AFK session exists and return its id (the **arming** action).
   ///
-  /// Reuses the session the manager holds — the id persisted at startup (a
-  /// restart) or created earlier this bridge life (a re-arm after a disarm,
-  /// which the session outlives) — when the service still has it; otherwise
-  /// creates it in the main checkout with the model pinned from the current
-  /// `afkModel` setting (empty = the service's default) and the agent `afk`,
-  /// and stores its id. Idempotent: an already-armed system returns the same
-  /// id without a second create.
+  /// The session is the first armed repo's ([repo]): reuses the session the
+  /// manager holds — the id persisted at startup (a restart) or created
+  /// earlier this bridge life (a re-arm after a disarm, which the session
+  /// outlives) — when the service still has it; otherwise creates it in the
+  /// main checkout with the model pinned from the current `afkModel` setting
+  /// (empty = the service's default) and the agent `afk`, and stores its id
+  /// under [repo]. Idempotent: an already-armed system returns the same id
+  /// without a second create.
   ///
-  /// Returns `null` when the backend is not ready (no shared opencode
-  /// service) or the main checkout cannot be resolved: the call is safe to
-  /// retry once the backend resolves.
+  /// Returns `null` when no repo is armed, the backend is not ready (no
+  /// shared opencode service), or the main checkout cannot be resolved: the
+  /// call is safe to retry once the backend resolves.
   Future<String?> ensureSession() async {
-    final manager = _manager;
+    final repo = this.repo;
+    if (repo == null) return null;
+    final manager = _managerFor(repo);
     if (manager == null) return null;
     final id = await manager.ensureSession(model: _settings.model);
-    await store.setSessionId(id);
+    await store.setSessionId(repo, id);
     return id;
   }
 
-  /// Builds the stateful manager from the backend (seeded with the persisted
-  /// id), or `null` when the backend is absent.
-  AfkSessionManager? _buildManager() {
+  /// The manager for [repo], built lazily and cached: a normal restart (same
+  /// repo) reuses the seeded id, a swap to a different armed repo rebuilds it
+  /// re-seeded from that repo's stored id. `null` when the backend is absent.
+  AfkSessionManager? _managerFor(String repo) {
     final backend = _backend;
     if (backend == null) return null;
-    return AfkSessionManager(
+    if (_managerRepo == repo && _manager != null) return _manager;
+    final manager = AfkSessionManager(
       sessions: backend.service,
       directory: () => _directoryOf(backend),
-      initialSessionId: store.sessionId(),
+      initialSessionId: store.sessionIdFor(repo),
     );
+    _managerRepo = repo;
+    _manager = manager;
+    return manager;
   }
 
   /// The default main-checkout resolution: the first project's canonical

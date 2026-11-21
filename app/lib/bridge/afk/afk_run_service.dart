@@ -314,7 +314,7 @@ class AfkRunService {
   /// [isArmed], the in-flight steps ungated — and a failed read, feed, or
   /// store write changes nothing (the next pass retries).
   Future<void> pollOnce() async {
-    for (final run in store.runs()) {
+    for (final run in store.allRuns()) {
       try {
         await _advance(run);
       } catch (_) {
@@ -362,7 +362,7 @@ class AfkRunService {
   /// read, or a failed store write, changes nothing (the periodic pass — or
   /// the next startup — retries).
   Future<void> reconcile() async {
-    for (final run in store.runs()) {
+    for (final run in store.allRuns()) {
       try {
         await _reconcileRun(run);
       } catch (_) {
@@ -443,7 +443,7 @@ class AfkRunService {
     final sessionId = await sessions.sessionId();
     if (sessionId == null) return; // No session to feed: nothing to boot.
     final inFlight = store
-        .runs()
+        .allRuns()
         .where((run) {
           final kind = AfkRunState.parse(run.state).kind;
           return kind == AfkRunStateKind.dispatched ||
