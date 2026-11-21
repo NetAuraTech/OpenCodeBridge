@@ -422,7 +422,7 @@ void main() {
       afkGate: () {
         final id = afkSessionId;
         if (id == null || id.isEmpty) return null;
-        return AfkSpawnGate(afkSessionId: id, cap: afkCap);
+        return AfkSpawnGate(afkSessionIds: {id}, cap: afkCap);
       },
     );
     notifyHolders[created] = holder;

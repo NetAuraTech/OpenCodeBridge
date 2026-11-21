@@ -603,11 +603,13 @@ class BridgeServer {
         eventHub,
         path: notifyCredential,
         senderFactory: notifySenderFactory,
-        // The AFK session's id, read live (spec #376, T5): the terminal-
-        // failure push's deep-link — resolved at push time, so a (re-)arming
-        // is picked up without a rebuild. `null` (no AFK session stored) ⇒
-        // the failure push is not sent (there is nowhere to go).
-        afkSession: () async => afkComponent.sessionId,
+        // The AFK session's id, read live (spec #376, T5; per repo by
+        // spec #407, T3): the terminal-failure push's deep-link — the event
+        // carries the repo identity, and the resolver reads **that repo's**
+        // stored session at push time, so a (re-)arming is picked up without
+        // a rebuild. `null` (no AFK session stored for the repo) ⇒ the
+        // failure push is not sent (there is nowhere to go).
+        afkSession: (repo) async => afkComponent.sessionIdFor(repo),
       );
     }
     final tunnelSupervisor = tunnel;
@@ -631,13 +633,18 @@ class BridgeServer {
     // fan-out the app's SSE sees. Armed ⇒ the schedule starts via
     // [updateAfKSettings]; the system is inert when disarmed or when there
     // is no event hub (no SSE surface for the events).
+    // The poller keeps the transitional single anchor ([AfkSettings.
+    // firstArmedRepo]) until the per-project poller lands in T2 (the task
+    // graph: T2 owns the poller's repo iteration; T3, this ticket, reshapes
+    // only the session layer — the session port, the spawn gate, and the
+    // failure-push deep-link — plus the per-repo arming diff below).
     final afkPoller = eventHub == null
         ? null
         : AfkReadyGatePoller(
             reader: GhGitHubReader(),
             store: afkComponent.store,
-            isArmed: () => afkComponent.enabled,
-            repo: () => afkComponent.repo,
+            isArmed: () => afkComponent.settings.armedRepos.isNotEmpty,
+            repo: () => afkComponent.settings.firstArmedRepo,
             emitEvent: eventHub.emit,
           );
     // The AFK run service (spec #376, T3): the real `gh` reader, the
@@ -660,7 +667,10 @@ class BridgeServer {
               backend: backend,
             ),
             emitEvent: eventHub.emit,
-            isArmed: () => afkComponent.enabled,
+            // The run service's global new-work gate (the per-repo isArmed
+            // lands in T4, which owns the run service's per-repo routing):
+            // true while any repo is armed.
+            isArmed: () => afkComponent.settings.armedRepos.isNotEmpty,
             liveness: () => _afkLiveness(afkComponent, taskService, backend),
           );
     final bridge = BridgeServer._(
@@ -806,6 +816,17 @@ class BridgeServer {
     }
   }
 
+  /// The failure push's deep-link resolver (spec #376, T5; per repo by
+  /// spec #407, T3): the closure hands [AfkComponent.sessionIdFor] the repo
+  /// identity carried by the `afk.failed` event's data, so the push
+  /// deep-links the **failed run's repo's** AFK session, read live (a
+  /// (re-)arming is picked up without a rebuild). `null` for the repo ⇒ no
+  /// stored session ⇒ the failure push is not sent (there is nowhere to go).
+  static Future<String?> Function(String repo) _afkSessionResolver(
+    AfkComponent afk,
+  ) =>
+      (repo) => Future<String?>.value(afk.sessionIdFor(repo));
+
   /// The AFK liveness facts (spec #376, T6), read live at reconciliation
   /// time: the **AFK-attributed orbs in flight** (the task service's
   /// persisted fact — the creating task's caller session held against the
@@ -823,14 +844,20 @@ class BridgeServer {
     OrbTaskService? tasks,
     SessionsBackend? backend,
   ) async {
-    // The AFK session's id (the first armed repo's, spec #407 T1; per-repo
-    // liveness lands with the per-repo run service in T4).
-    final id = afk.sessionId;
+    // The AFK session's id (the transitional single anchor — the first armed
+    // repo's stored id, spec #407 T1; per-repo liveness lands with the
+    // per-repo run service in T4, which reads the run's own repo).
+    final anchor = afk.settings.firstArmedRepo;
+    if (anchor == null) return const AfkLiveness.none();
+    final id = afk.sessionIdFor(anchor);
     if (id == null || id.isEmpty) return const AfkLiveness.none();
     var orbsInFlight = 0;
     if (tasks != null) {
       try {
-        orbsInFlight = tasks.afkOrbsInFlight(id);
+        // The anchor session's own AFK orbs in flight (the single-repo
+        // liveness; T4 reads the run's own repo). The set API counts the
+        // orbs whose creating caller is the anchor's id.
+        orbsInFlight = tasks.afkOrbsInFlight({id});
       } catch (_) {
         orbsInFlight = 0; // A failed read degrades to no orbs in flight.
       }
@@ -866,10 +893,12 @@ class BridgeServer {
     EventHub? hub, {
     String? path,
     Future<FcmSender> Function(FirebaseServiceAccount)? senderFactory,
-    // The AFK session's id, read live (spec #376, T5): the terminal-failure
-    // push's deep-link — the dispatcher resolves it at push time so a
-    // (re-)arming is picked up without a rebuild. `null` ⇒ no AFK session.
-    Future<String?> Function()? afkSession,
+    // A repo's AFK session id, read live (spec #376, T5; per repo by
+    // spec #407, T3): the terminal-failure push's deep-link — the dispatcher
+    // resolves it at push time from the event's repo identity, so a
+    // (re-)arming is picked up without a rebuild. `null` for the repo ⇒ no
+    // AFK session to point at.
+    Future<String?> Function(String repo)? afkSession,
   }) async {
     final account = FirebaseServiceAccount.tryLoad(path: path);
     if (account == null) return (null, null);
@@ -898,8 +927,8 @@ class BridgeServer {
     // The hub fans the push events out like any other downstream; with no
     // hub there is no event stream and no push to send. The dispatcher maps
     // the AFK run's two "look now" events (spec #376, T5) to the `afkRun`
-    // push kind; the failure push deep-links to the AFK session, resolved
-    // live through [afkSession].
+    // push kind; the failure push deep-links to **the failed repo's** AFK
+    // session (spec #407, T3), resolved live through [afkSession].
     final dispatcher = PushDispatcher(
       service,
       sessionLabel: label,
@@ -945,8 +974,9 @@ class BridgeServer {
       _events,
       path: path,
       senderFactory: senderFactory,
-      // The failure push's deep-link (spec #376, T5): read live, as at start.
-      afkSession: afk == null ? null : () async => afk.sessionId,
+      // The failure push's deep-link (spec #376, T5; per repo by
+      // spec #407, T3): read live, as at start.
+      afkSession: afk == null ? null : _afkSessionResolver(afk),
     );
     _notify = service;
     _pushDispatcher = newDispatcher;
@@ -957,7 +987,8 @@ class BridgeServer {
   }
 
   // --------------------------------------------------------------------------
-  // The AFK subsystem's in-process surface (spec #376, T1).
+  // The AFK subsystem's in-process surface (spec #376, T1; per repo by
+  // spec #407, T3).
   //
   // The bridge runs in the app's process in server mode, so the app talks to
   // this surface directly — there is no HTTP endpoint for AFK. The app hands
@@ -965,30 +996,44 @@ class BridgeServer {
   // change ([updateAfKSettings]); a changed cap is effective from the next
   // orb spawn and a changed model from the next AFK session creation.
   //
-  // [updateAfKSettings] is the whole surface: it holds the values live and,
-  // when the arming toggle is on, ensures the AFK session exists (create or
-  // reuse, idempotent) and stores its id. Arming is therefore idempotent —
-  // startup with the persisted arm reuses the session the service still has,
-  // a re-arm after a disarm reuses it (no duplicate), and a toggle-on creates
-  // it. Disarming (the toggle off) holds the values but leaves the session
-  // alone — it outlives a disarm.
+  // [updateAfKSettings] is the whole surface: it holds the values live and
+  // arms the **newly armed** repos — the diff of the old and new `armedRepos`
+  // sets, so each repo that entered the set gets its session ensured
+  // (create or reuse, idempotent) and its id stored, while the repos that
+  // leave it are left alone (their session and stored id outlive a disarm —
+  // a re-arm reuses them, no duplicate). The in-process handoff shape is
+  // unchanged (one call on startup and on change).
 
   /// The AFK subsystem's live settings (the values the app last handed the
-  /// bridge). The arming toggle, the parallel-orbs cap, and the model.
+  /// bridge). The per-repo arming (the set of armed repo identities), the
+  /// parallel-orbs cap, and the model.
   AfkSettings get afkSettings => _afk?.settings ?? const AfkSettings();
 
   /// The in-process notification the app calls at startup and on every AFK
   /// setting change in Settings: the new values are held live, so the next
   /// orb spawn reads the new cap and the next AFK session creation reads the
-  /// new model (no restart). When the arming toggle is on, the AFK session is
-  /// ensured (create or reuse, idempotent) and its id stored; when it is off
-  /// the values are held and the session is left alone. Returns the session id
-  /// when armed, else `null`. A no-op session-wise when this bridge has no AFK
-  /// component (no shared opencode service).
-  Future<String?> updateAfKSettings(AfkSettings settings) async {
-    _afk?.updateSettings(settings);
+  /// new model (no restart). The **newly armed** repos (those the new
+  /// `armedRepos` set adds over the old one) have their sessions ensured
+  /// (create or reuse, idempotent — the fresh-agent handoff) and their ids
+  /// stored; the repos that leave the set are left alone (the session and
+  /// the stored id outlive a disarm, so a re-arm reuses them — no duplicate).
+  /// A no-op session-wise when this bridge has no AFK component (no shared
+  /// opencode service). Returns the ensured session ids, one per newly armed
+  /// repo in the new set's order (empty when nothing was newly armed, and
+  /// `null` ids where a repo's checkout could not be resolved yet).
+  Future<List<String?>> updateAfKSettings(AfkSettings settings) async {
+    final component = _afk;
+    if (component == null) return const [];
+    // The arming diff: the repos the new set adds over the old one, in the
+    // new set's (persisted) order. Repos that leave the set are left alone —
+    // their session and stored id outlive a disarm.
+    final oldRepos = component.settings.armedRepos;
+    final newlyArmed = settings.armedRepos
+        .where((repo) => !oldRepos.contains(repo))
+        .toList(growable: false);
+    component.updateSettings(settings);
     // The Ready gate's admission poller follows the arming live (spec #376,
-    // T2; reshaped to per-repo by #407, T1): start when a repo is armed, stop
+    // T2; per-repo arming by #407, T1): start when a repo is armed, stop
     // when none is.
     _afkPoller?.syncArmed(settings.armedRepos.isNotEmpty);
     // The run service does not follow the arming live (spec #376, user
@@ -996,33 +1041,27 @@ class BridgeServer {
     // new-work steps read the arming live through [isArmed] — a disarm
     // gates new feeds and re-dispatches while the in-flight runs finish to
     // their PR or failure. No destructive stop here.
-    if (settings.armedRepos.isEmpty) return null;
-    // The fresh-agent handoff (spec #376, T6): the arming ensures the session
-    // (create or reuse, idempotent). When it was **just created** — a wiped
-    // store's first arm, or a session the service lost (a normal host-service
-    // restart reuses it: ids and full state persist, so `id == before`) — the
-    // run service sends the **bootstrap** feed (the in-flight runs from the
-    // store) so the recreated agent reconciles with the tracker itself. A
-    // reused session sends no bootstrap (no recreation, no re-bootstrap).
-    final repo = _afk?.repo;
-    final before = repo == null ? null : _afk?.store.sessionIdFor(repo);
-    final id = await ensureAfKSession();
     final runs = _afkRuns;
-    if (id != null && id != before && runs != null) {
-      await runs.bootstrap();
+    final ids = <String?>[];
+    for (final repo in newlyArmed) {
+      // The fresh-agent handoff, per repo (spec #376, T6; scoped by
+      // spec #407, T3): the arming ensures the repo's session (create or
+      // reuse, idempotent). When it was **just created** — a wiped store's
+      // first arm of the repo, or a session the service lost (a normal
+      // host-service restart reuses the stored id: `id == before`) — the
+      // run service sends **the repo's** bootstrap feed (that repo's
+      // in-flight runs from the store) so the recreated agent reconciles
+      // with its own tracker. A reused session sends no bootstrap (no
+      // recreation, no re-bootstrap).
+      final before = component.store.sessionIdFor(repo);
+      final id = await component.ensureSession(repo);
+      if (id != null && id != before && runs != null) {
+        await runs.bootstrap(repo);
+      }
+      ids.add(id);
     }
-    return id;
+    return ids;
   }
-
-  /// Ensure the AFK session exists and return its id (the arming action):
-  /// create it in the main checkout (model pinned from the `afkModel` setting,
-  /// empty = the service's default, agent `afk`, visible — never archived) or
-  /// reuse the stored one when the service still has it, and store its id.
-  /// Idempotent. Returns `null` when this bridge has no AFK component (no
-  /// shared opencode service) or the main checkout cannot be resolved yet
-  /// (safe to retry once it is).
-  Future<String?> ensureAfKSession() =>
-      _afk?.ensureSession() ?? Future<String?>.value(null);
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
   Uri get baseUri =>

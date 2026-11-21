@@ -80,24 +80,36 @@ class _FakeReader implements GitHubReader {
   }
 }
 
-/// A fake [AfkSessionPort] — the service's session seam: a scripted session
-/// id, recorded feeds (prompts), and a scripted idle-wait answer.
+/// A fake [AfkSessionPort] — the service's session seam (spec #407: scoped
+/// per repo): a scripted session id (per repo), recorded feeds keyed by repo
+/// (a run of repo A is fed through A's session, never B's), and a scripted
+/// idle-wait answer.
 class _FakeSessions implements AfkSessionPort {
-  String? sessionIdValue = 'ses_afk';
-  final List<String> prompts = [];
+  /// The session id per repo (`null` for a repo without a scripted id).
+  final Map<String, String?> idsByRepo = {'o/r': 'ses_afk'};
+
+  /// The recorded feeds, `(repo, text)` — the repo the feed went to.
+  final List<(String, String)> prompts = [];
+
   bool idle = true;
   int waitCalls = 0;
 
-  @override
-  Future<String?> sessionId() async => sessionIdValue;
+  /// The feeds' text only (the service's tests assert on the notice text).
+  List<String> get promptTexts =>
+      prompts.map((p) => p.$2).toList(growable: false);
+
+  String? idFor(String repo) => idsByRepo[repo];
 
   @override
-  Future<void> prompt(String text) async {
-    prompts.add(text);
+  Future<String?> sessionId(String repo) async => idFor(repo);
+
+  @override
+  Future<void> prompt(String repo, String text) async {
+    prompts.add((repo, text));
   }
 
   @override
-  Future<bool> waitIdle({Duration? timeout}) async {
+  Future<bool> waitIdle(String repo, {Duration? timeout}) async {
     waitCalls++;
     return idle;
   }
@@ -187,8 +199,8 @@ void main() {
       await service.pollOnce();
       expect(store.runFor('o/r', 7)!.state, 'dispatched');
       // The feed is the pure availability notice (number + title, nothing
-      // more) — and it is the only thing sent.
-      expect(sessions.prompts, ['Issue #7: Add a README']);
+      // more) — and it is the only thing sent (to o/r's session).
+      expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
     });
 
     test('an idle issue without the ready label is not fed (the gate is the '
@@ -203,15 +215,15 @@ void main() {
         'again next pass)', () async {
       await store.addRun('o/r', 7, 'Add a README');
       reader.labels[7] = {'ready-for-agent'};
-      sessions.sessionIdValue = null;
+      sessions.idsByRepo['o/r'] = null;
       await service.pollOnce();
       expect(store.runFor('o/r', 7)!.state, 'idle');
       expect(sessions.prompts, isEmpty);
       // The session becomes available: the next pass feeds it.
-      sessions.sessionIdValue = 'ses_afk';
+      sessions.idsByRepo['o/r'] = 'ses_afk';
       await service.pollOnce();
       expect(store.runFor('o/r', 7)!.state, 'dispatched');
-      expect(sessions.prompts, ['Issue #7: Add a README']);
+      expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
     });
   });
 
@@ -388,7 +400,7 @@ void main() {
       clock = base.add(const Duration(minutes: 5));
       await service.pollOnce();
       expect(sessions.prompts, [
-        'Issue #7: Add a README',
+        ('o/r', 'Issue #7: Add a README'),
       ], reason: 're-feed #1');
       expect(store.runFor('o/r', 7)!.retryAt, isNull);
 
@@ -435,6 +447,9 @@ void main() {
       expect(failedData['issueNumber'], 7);
       expect(failedData['title'], 'Add a README');
       expect(failedData['reason'], 'model under load');
+      // The repo identity (spec #407, T3): the failure push's deep-link
+      // resolves the failed repo's AFK session from this.
+      expect(failedData['repo'], 'o/r');
 
       // The hand-back rides the failed state's pass: needs-triage label +
       // a comment naming the failure.
@@ -465,7 +480,7 @@ void main() {
         // The backoff elapses: the re-feed goes out (retryAt cleared).
         clock = clock.add(const Duration(minutes: 5));
         await service.pollOnce();
-        expect(sessions.prompts, ['Issue #7: Add a README']);
+        expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
         expect(store.runFor('o/r', 7)!.retryAt, isNull);
 
         // The agent goes idle again but posts no new narration (the last
@@ -597,7 +612,7 @@ void main() {
       final run = store.runFor('o/r', 7)!;
       expect(run.state, 'dispatched');
       expect(run.retryCount, 0, reason: 'the counter is reset');
-      expect(sessions.prompts, ['Issue #7: Add a README']);
+      expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
     });
   });
 
@@ -1197,12 +1212,14 @@ void main() {
   });
 
   // ------------------------------------------------------------------------
-  // The fresh-agent handoff (spec #376, T6): a wiped/lost AFK session is
-  // recreated (the arming) and the first feed is a bootstrap — the in-flight
-  // runs from the store. A normal restart (the session still present) reuses
-  // the session — no recreation, no re-bootstrap.
+  // The fresh-agent handoff (spec #376, T6; scoped per repo by spec #407,
+  // T3): a wiped/lost AFK session is recreated (the arming) and the first
+  // feed is a bootstrap — *that repo's* in-flight runs from the store. A run
+  // of another repo never appears in this repo's bootstrap (the store is
+  // keyed per repo). A normal restart (the session still present) reuses the
+  // session — no recreation, no re-bootstrap.
 
-  group('the fresh-agent handoff (bootstrap, spec #376, T6)', () {
+  group('the fresh-agent handoff (bootstrap, spec #376, T6; per repo, T3)', () {
     test(
       'a recreated session is booted with the bootstrap: the in-flight runs '
       '(number, state, retry count, last failure reason) from the store',
@@ -1228,11 +1245,17 @@ void main() {
             prUrl: 'https://github.com/o/r/pull/41',
           ),
         );
-        sessions.sessionIdValue = 'ses_afk_new'; // The recreated session.
-        await service.bootstrap();
-        // One feed, the bootstrap, listing both in-flight runs.
+        sessions.idsByRepo['o/r'] = 'ses_afk_new'; // The recreated session.
+        await service.bootstrap('o/r');
+        // One feed, the bootstrap, to o/r's session, listing both in-flight
+        // runs.
         expect(sessions.prompts, hasLength(1));
-        final feed = sessions.prompts.single;
+        expect(
+          sessions.prompts.single.$1,
+          'o/r',
+          reason: 'the feed goes to the repo own session',
+        );
+        final feed = sessions.prompts.single.$2;
         expect(feed, contains('#7'));
         expect(feed, contains('dispatched'));
         expect(feed, contains('retry 1'));
@@ -1246,9 +1269,48 @@ void main() {
 
     test('a recreated session with no in-flight runs gets no bootstrap feed '
         '(a wiped store: nothing to hand over)', () async {
-      sessions.sessionIdValue = 'ses_afk_new';
-      await service.bootstrap();
+      sessions.idsByRepo['o/r'] = 'ses_afk_new';
+      await service.bootstrap('o/r');
       expect(sessions.prompts, isEmpty);
+    });
+
+    test('a run of another repo never appears in this repo bootstrap '
+        '(the store is keyed per repo, spec #407, AC3)', () async {
+      // In-flight runs in two repos.
+      await store.updateRun(
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      await store.updateRun(
+        const AfkRun(
+          ownerRepo: 'o/other',
+          issueNumber: 55,
+          title: 'Other repo run',
+          state: 'dispatched',
+        ),
+      );
+      sessions.idsByRepo['o/r'] = 'ses_afk_a';
+      sessions.idsByRepo['o/other'] = 'ses_afk_b';
+      // o/r bootstrap lists only o/r runs (never o/other).
+      await service.bootstrap('o/r');
+      expect(sessions.prompts, hasLength(1));
+      expect(sessions.prompts.single.$1, 'o/r');
+      expect(sessions.prompts.single.$2, contains('#7'));
+      expect(
+        sessions.prompts.single.$2,
+        isNot(contains('#55')),
+        reason: 'a run of another repo never appears',
+      );
+      // o/other bootstrap lists only o/other runs (never o/r).
+      await service.bootstrap('o/other');
+      expect(sessions.prompts, hasLength(2));
+      expect(sessions.prompts[1].$1, 'o/other');
+      expect(sessions.prompts[1].$2, contains('#55'));
+      expect(sessions.prompts[1].$2, isNot(contains('#7')));
     });
 
     test('idle and failed runs are not in-flight: the bootstrap lists only '
@@ -1272,10 +1334,10 @@ void main() {
           prUrl: 'https://github.com/o/r/pull/41',
         ),
       );
-      sessions.sessionIdValue = 'ses_afk_new';
-      await service.bootstrap();
+      sessions.idsByRepo['o/r'] = 'ses_afk_new';
+      await service.bootstrap('o/r');
       expect(sessions.prompts, hasLength(1));
-      final feed = sessions.prompts.single;
+      final feed = sessions.prompts.single.$2;
       expect(feed, isNot(contains('#7')), reason: 'idle is not in-flight');
       expect(feed, isNot(contains('#8')), reason: 'failed is not in-flight');
       expect(feed, contains('#9'), reason: 'pr-open is in-flight');
@@ -1291,8 +1353,8 @@ void main() {
           state: 'dispatched',
         ),
       );
-      sessions.sessionIdValue = null; // No session to feed.
-      await service.bootstrap();
+      sessions.idsByRepo['o/r'] = null; // No session to feed.
+      await service.bootstrap('o/r');
       expect(sessions.prompts, isEmpty);
     });
   });

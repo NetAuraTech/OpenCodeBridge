@@ -396,17 +396,20 @@ class OrbTaskService {
       if (retried != null) return retried;
     }
 
-    // The AFK cap itself (spec #376 T4): an AFK-attributed spawn (its caller
-    // session is the AFK session — the bridge's own persisted fact) that would
-    // put AFK orbs in flight above the cap is refused, the answer carrying the
+    // The AFK cap itself (spec #376 T4; the set by spec #407, T3): an
+    // AFK-attributed spawn (its caller session is any AFK session — the
+    // bridge's own persisted facts, in the gate's set) that would put AFK orbs
+    // in flight above the host-total cap is refused, the answer carrying the
     // counter (in flight vs cap) and the positive path (wait for a slot, then
     // re-dispatch). The refusal does not end the agent's turn: it has already
     // read the issue and composed the orb prompt; it waits for a slot and
     // re-dispatches. Scoped to AFK orbs only — a developer spawn (any other
-    // caller session) is never capped, and with no AFK session there are no
-    // AFK orbs to count.
+    // caller session) is never capped, and with no AFK session (an empty set)
+    // there are no AFK orbs to count. The counter is the host total across all
+    // AFK sessions (the set), so arming two repos never doubles orbs in
+    // flight (spec #407, T5's counter is exactly this).
     if (gate != null && gate.isAfk(callerSession)) {
-      final inFlight = _afkOrbsInFlight(gate.afkSessionId!);
+      final inFlight = _afkOrbsInFlight(gate.afkSessionIds);
       if (inFlight >= gate.cap) {
         throw OrbRefusalError(
           OrbRefusalError.afkCap,
@@ -678,18 +681,25 @@ class OrbTaskService {
   }
 
   /// The number of **AFK-attributed orbs in flight** (issue #379, spec #376
-  /// T4): the counter the parallel-orbs cap is enforced against.
+  /// T4; the host total across all AFK sessions by spec #407, T3): the counter
+  /// the parallel-orbs cap is enforced against.
   ///
   /// An orb is AFK-attributed when the task that **created** it was dispatched
-  /// by the AFK session (the bridge's own persisted fact — the creating task
-  /// record's caller session, held against the AFK store's session id); it is
+  /// by *any* AFK session (the bridge's own persisted facts — the creating
+  /// task record's caller session, held against the AFK store's per-repo
+  /// session ids, the gate's [AfkSpawnGate.afkSessionIds] set); it is
   /// **in flight** while it runs a task (a settled orb is free again — the
-  /// cap counts orbs in flight, not cumulative spawns). Developer orbs (a
-  /// different creating caller) never count.
-  int _afkOrbsInFlight(String afkSessionId) {
+  /// cap counts orbs in flight, not cumulative spawns). The counter is the
+  /// host total across all AFK sessions, so arming two repos never doubles
+  /// orbs in flight (spec #407). Developer orbs (a creating caller in neither
+  /// AFK session) never count.
+  int _afkOrbsInFlight(Set<String> afkSessionIds) {
     final afkOrbs = <String>{
       for (final task in _tasks)
-        if (task.createdOrb && task.callerSession == afkSessionId) task.orb,
+        if (task.createdOrb &&
+            task.callerSession != null &&
+            afkSessionIds.contains(task.callerSession))
+          task.orb,
     };
     var inFlight = 0;
     for (final orb in afkOrbs) {
@@ -703,15 +713,17 @@ class OrbTaskService {
     return inFlight;
   }
 
-  /// The number of **AFK-attributed orbs in flight** (spec #376, T6): the
-  /// liveness fact the startup reconciliation reads (a `dispatched` run is
-  /// live while an AFK-attributed orb it can attribute is running a task) —
-  /// and the same counter the parallel-orbs cap is enforced against (T4).
+  /// The number of **AFK-attributed orbs in flight** (spec #376, T6; the host
+  /// total by spec #407, T3): the liveness fact the startup reconciliation
+  /// reads (a `dispatched` run is live while an AFK-attributed orb it can
+  /// attribute is running a task) — and the same counter the parallel-orbs
+  /// cap is enforced against (T4).
   ///
   /// The bridge's composition root reads this live at reconciliation time;
-  /// with no AFK session id (a `''`/empty id), nothing is attributed, so the
-  /// answer is `0`.
-  int afkOrbsInFlight(String afkSessionId) => _afkOrbsInFlight(afkSessionId);
+  /// with an empty AFK session set, nothing is attributed, so the answer is
+  /// `0`.
+  int afkOrbsInFlight(Set<String> afkSessionIds) =>
+      _afkOrbsInFlight(afkSessionIds);
 
   /// The dispatch text's identity in the tasks file: a SHA-256 of the raw
   /// caller text (exactly what was delivered, issue #147), so the file
