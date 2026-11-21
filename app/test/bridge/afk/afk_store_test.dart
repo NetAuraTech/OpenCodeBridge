@@ -297,4 +297,49 @@ void main() {
       expect(run.copyWith(lastFailureReason: null).lastFailureReason, isNull);
     });
   });
+
+  group('the run row grows with the hand-back durability (spec #376, review '
+      'fixup: the terminal failure hand-back is retried until it fully '
+      'lands)', () {
+    test(
+      'updateRun persists handbackLanded; runFor reads it back; a row '
+      'without it (a pre-fixup row) reads back false (tolerant decode)',
+      () async {
+        final store = AfkStore(file: file);
+        await store.addRun(7, 'Add a README');
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'failed',
+            retryCount: 3,
+            handbackLanded: true,
+          ),
+        );
+        expect(AfkStore(file: file).runFor(7)!.handbackLanded, isTrue);
+
+        // A row written before the field existed (no handbackLanded key)
+        // reads back false, never a throw.
+        await file.writeAsString(
+          jsonEncode({
+            'afk.run.8':
+                '{"state":"failed","issueNumber":8,"title":"B","retryCount":3}',
+          }),
+        );
+        expect(AfkStore(file: file).runFor(8)!.handbackLanded, isFalse);
+      },
+    );
+
+    test(
+      'a wrong-typed handbackLanded degrades to false (never a throw)',
+      () async {
+        await file.writeAsString(
+          jsonEncode({
+            'afk.run.7': '{"state":"failed","issueNumber":7,"title":"A","handbackLanded":"yes"}',
+          }),
+        );
+        expect(AfkStore(file: file).runFor(7)!.handbackLanded, isFalse);
+      },
+    );
+  });
 }

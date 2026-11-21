@@ -26,6 +26,14 @@ class _FakeReader implements GitHubReader {
   final Map<int, PrInfo?> prs = {};
   final List<(int, String)> addLabelCalls = [];
   final List<(int, String)> addCommentCalls = [];
+  // A scripted `gh` read failure (a failed/unreadable read THROWS — the
+  // reader's contract, the same posture as the writes; an absent entry
+  // models the genuine "no comments" case and answers null).
+  final Set<int> lastCommentReadFails = {};
+  // A scripted `gh` write failure for the hand-back (the comment write
+  // fails while the label write lands, unless the label write fails too).
+  bool addCommentFails = false;
+  bool addLabelFails = false;
   int lastCommentCalls = 0;
   int hasLabelCalls = 0;
 
@@ -39,6 +47,9 @@ class _FakeReader implements GitHubReader {
   @override
   Future<IssueComment?> readLastComment(int issueNumber) async {
     lastCommentCalls++;
+    if (lastCommentReadFails.contains(issueNumber)) {
+      throw StateError('gh issue view failed (simulated gh outage)');
+    }
     return lastComments[issueNumber];
   }
 
@@ -53,12 +64,18 @@ class _FakeReader implements GitHubReader {
 
   @override
   Future<void> addLabel(int issueNumber, String label) async {
+    if (addLabelFails) {
+      throw StateError('gh issue edit failed (simulated)');
+    }
     addLabelCalls.add((issueNumber, label));
     labels[issueNumber] = {...?labels[issueNumber], label};
   }
 
   @override
   Future<void> addComment(int issueNumber, String body) async {
+    if (addCommentFails) {
+      throw StateError('gh issue comment failed (simulated)');
+    }
     addCommentCalls.add((issueNumber, body));
   }
 }
@@ -567,6 +584,85 @@ void main() {
     });
   });
 
+  group('the terminal failure hand-back (retried until it fully lands)', () {
+    test('a partial hand-back (label landed, comment write failed) is '
+        'retried: the next pass posts the comment and marks the row landed '
+        '(no duplicate label, exactly one comment across passes)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'failed',
+          retryCount: 3,
+        ),
+      );
+      // The label write lands; the comment write fails once.
+      reader.addCommentFails = true;
+      await service.pollOnce();
+      expect(reader.addLabelCalls, [
+        (7, 'needs-triage'),
+      ], reason: 'the label was posted');
+      expect(reader.addCommentCalls, isEmpty, reason: 'the comment failed');
+      expect(
+        store.runFor(7)!.handbackLanded,
+        isFalse,
+        reason: 'the hand-back is not recorded as landed',
+      );
+      expect(store.runFor(7)!.state, 'failed');
+
+      // The comment write recovers: the next pass sees the label is present
+      // but the row says not landed, so it posts the comment and marks the
+      // hand-back landed — without a second label.
+      reader.addCommentFails = false;
+      await service.pollOnce();
+      expect(reader.addCommentCalls, hasLength(1));
+      expect(
+        reader.addCommentCalls.single.$2,
+        contains('the agent reported a failure'),
+      );
+      expect(reader.addLabelCalls, [
+        (7, 'needs-triage'),
+      ], reason: 'no duplicate label');
+      expect(store.runFor(7)!.handbackLanded, isTrue);
+
+      // The hand-back stands: a further pass posts nothing (the landed row
+      // short-circuits the hand-back).
+      await service.pollOnce();
+      expect(reader.addCommentCalls, hasLength(1));
+      expect(reader.addLabelCalls, hasLength(1));
+      expect(store.runFor(7)!.handbackLanded, isTrue);
+    });
+
+    test(
+      'a failed label write posts nothing, marks nothing, and is retried',
+      () async {
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'failed',
+            retryCount: 3,
+          ),
+        );
+        // The label write fails: the comment is never attempted.
+        reader.addLabelFails = true;
+        await service.pollOnce();
+        expect(reader.addLabelCalls, isEmpty);
+        expect(reader.addCommentCalls, isEmpty);
+        expect(store.runFor(7)!.handbackLanded, isFalse);
+        expect(store.runFor(7)!.state, 'failed');
+
+        // The write recovers: the next pass posts label + comment and marks
+        // the hand-back landed.
+        reader.addLabelFails = false;
+        await service.pollOnce();
+        expect(reader.addLabelCalls, [(7, 'needs-triage')]);
+        expect(reader.addCommentCalls, hasLength(1));
+        expect(store.runFor(7)!.handbackLanded, isTrue);
+      },
+    );
+  });
+
   group('the failure posture (inert, never a throw)', () {
     test('a run in an unknown state is left alone (the refusal, not an '
         'admission)', () async {
@@ -985,6 +1081,57 @@ void main() {
       await service.reconcile();
       expect(store.runFor(7)!.state, 'garbage');
       expect(sessions.prompts, isEmpty);
+    });
+
+    test(
+      'a dispatched run whose comment READ FAILS is left unchanged (a gh '
+      'outage is not a lost verdict; the next startup retries the read)',
+      () async {
+        await store.updateRun(
+          const AfkRun(
+            issueNumber: 7,
+            title: 'Add a README',
+            state: 'dispatched',
+          ),
+        );
+        // No liveness, and the `gh` read fails (a simulated gh outage: the
+        // reader throws on a failed/unreadable read).
+        reader.lastCommentReadFails.add(7);
+        await service.reconcile();
+        final run = store.runFor(7)!;
+        expect(run.state, 'dispatched', reason: 'the read failure is inert');
+        expect(run.retryCount, 0, reason: 'no retry burned by the outage');
+        expect(run.retryAt, isNull);
+        expect(run.lastFailureReason, isNull);
+        expect(sessions.prompts, isEmpty);
+        expect(payloads, isEmpty);
+      },
+    );
+
+    test('a dispatched run whose comment read returns null (genuinely no '
+        'comments), with no liveness and no PR, is still lost (the lost '
+        'verdict is preserved for the real case)', () async {
+      await store.updateRun(
+        const AfkRun(
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      // No liveness, no PR, and a readable issue with no comments at all
+      // (the genuine "none" answer, distinct from a failed read).
+      reader.lastComments[7] = null;
+      await service.reconcile();
+      final run = store.runFor(7)!;
+      expect(run.state, 'dispatched', reason: 'still in flight, being retried');
+      expect(run.retryCount, 1, reason: 'counted in the retry');
+      expect(
+        run.retryAt,
+        base.millisecondsSinceEpoch + 5 * _min,
+        reason: 'the 1st retry backoff',
+      );
+      expect(run.lastFailureReason, AfkRunService.lostRunReason);
+      expect(payloads, isEmpty, reason: 'no event on a retry');
     });
   });
 

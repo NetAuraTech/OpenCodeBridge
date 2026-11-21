@@ -24,10 +24,11 @@ import '../sessions/backend.dart';
 ///
 /// The [AfkSessionManager] is the component's state: it is created once the
 /// backend exists (seeded with the id persisted in the store at startup, so
-/// a restart reuses the session), and it is what [ensureSession] drives. A
-/// disarm ([forgetSession]) drops the id from the manager and the store —
-/// but not the service — so a re-arm on the same bridge reuses the live
-/// session (no duplicate) even though the stored id is gone.
+/// a restart reuses the session), and it is what [ensureSession] drives.
+/// A disarm (the arming toggle off) holds the settings values but leaves
+/// the session **and** the stored id alone — the session outlives a
+/// disarm — so a re-arm reuses the live session through the stored id
+/// that is still present (no duplicate).
 class AfkComponent {
   AfkComponent({
     required SessionsBackend? backend,
