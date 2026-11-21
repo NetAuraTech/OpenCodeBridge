@@ -182,10 +182,10 @@ void main() {
   group('the feed (idle → dispatched)', () {
     test('a ready issue is fed with the availability notice only and becomes '
         'dispatched', () async {
-      await store.addRun(7, 'Add a README');
+      await store.addRun('o/r', 7, 'Add a README');
       reader.labels[7] = {'ready-for-agent'};
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
       // The feed is the pure availability notice (number + title, nothing
       // more) — and it is the only thing sent.
       expect(sessions.prompts, ['Issue #7: Add a README']);
@@ -193,24 +193,24 @@ void main() {
 
     test('an idle issue without the ready label is not fed (the gate is the '
         'entry)', () async {
-      await store.addRun(7, 'Add a README');
+      await store.addRun('o/r', 7, 'Add a README');
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'idle');
+      expect(store.runFor('o/r', 7)!.state, 'idle');
       expect(sessions.prompts, isEmpty);
     });
 
     test('an idle issue with no (yet) available session is not fed (asked '
         'again next pass)', () async {
-      await store.addRun(7, 'Add a README');
+      await store.addRun('o/r', 7, 'Add a README');
       reader.labels[7] = {'ready-for-agent'};
       sessions.sessionIdValue = null;
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'idle');
+      expect(store.runFor('o/r', 7)!.state, 'idle');
       expect(sessions.prompts, isEmpty);
       // The session becomes available: the next pass feeds it.
       sessions.sessionIdValue = 'ses_afk';
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
       expect(sessions.prompts, ['Issue #7: Add a README']);
     });
   });
@@ -220,10 +220,10 @@ void main() {
       'a ready issue is fed; the PR opened narration + an open PR moves it '
       'to pr-open (PR recorded); closing the issue moves it to done',
       () async {
-        await store.addRun(7, 'Add a README');
+        await store.addRun('o/r', 7, 'Add a README');
         reader.labels[7] = {'ready-for-agent'};
         await service.pollOnce(); // dispatch
-        expect(store.runFor(7)!.state, 'dispatched');
+        expect(store.runFor('o/r', 7)!.state, 'dispatched');
 
         // The agent posts its terminal narration; the PR is open; the
         // session is idle.
@@ -238,7 +238,7 @@ void main() {
         );
         sessions.idle = true;
         await service.pollOnce();
-        final prOpen = store.runFor(7)!;
+        final prOpen = store.runFor('o/r', 7)!;
         expect(prOpen.state, 'pr-open');
         expect(prOpen.prNumber, 41);
         expect(prOpen.prUrl, 'https://github.com/o/r/pull/41');
@@ -248,7 +248,7 @@ void main() {
         // The human's review is the exit: the issue closes.
         reader.issueStates[7] = 'CLOSED';
         await service.pollOnce();
-        expect(store.runFor(7)!.state, 'done');
+        expect(store.runFor('o/r', 7)!.state, 'done');
       },
     );
   });
@@ -258,6 +258,7 @@ void main() {
         'idle it reads the narration', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -279,14 +280,14 @@ void main() {
         0,
         reason: 'the wait did not return idle',
       );
-      expect(store.runFor(7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
       expect(sessions.waitCalls, 1);
 
       // The session goes idle: the service reads the narration.
       sessions.idle = true;
       await service.pollOnce();
       expect(reader.lastCommentCalls, 1);
-      expect(store.runFor(7)!.state, 'pr-open');
+      expect(store.runFor('o/r', 7)!.state, 'pr-open');
     });
   });
 
@@ -295,6 +296,7 @@ void main() {
         '(the run stays in flight; re-read next pass)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -311,7 +313,7 @@ void main() {
       );
       sessions.idle = true;
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
       expect(payloads, isEmpty);
 
       // The PR opens: the next pass confirms.
@@ -321,8 +323,8 @@ void main() {
         state: 'OPEN',
       );
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'pr-open');
-      expect(store.runFor(7)!.prNumber, 41);
+      expect(store.runFor('o/r', 7)!.state, 'pr-open');
+      expect(store.runFor('o/r', 7)!.prNumber, 41);
     });
 
     test(
@@ -330,6 +332,7 @@ void main() {
       () async {
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'dispatched',
@@ -341,7 +344,7 @@ void main() {
         );
         sessions.idle = true;
         await service.pollOnce();
-        expect(store.runFor(7)!.state, 'dispatched');
+        expect(store.runFor('o/r', 7)!.state, 'dispatched');
         expect(payloads, isEmpty);
       },
     );
@@ -353,6 +356,7 @@ void main() {
         'labels needs-triage, and emits the failure event', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -366,9 +370,12 @@ void main() {
         body: 'FAILED: model under load',
       );
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'dispatched');
-      expect(store.runFor(7)!.retryCount, 1);
-      expect(store.runFor(7)!.retryAt, base.millisecondsSinceEpoch + 5 * _min);
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.retryCount, 1);
+      expect(
+        store.runFor('o/r', 7)!.retryAt,
+        base.millisecondsSinceEpoch + 5 * _min,
+      );
       expect(payloads, isEmpty, reason: 'no push on a retry');
 
       // In backoff (before the deadline): no re-feed, no read.
@@ -383,7 +390,7 @@ void main() {
       expect(sessions.prompts, [
         'Issue #7: Add a README',
       ], reason: 're-feed #1');
-      expect(store.runFor(7)!.retryAt, isNull);
+      expect(store.runFor('o/r', 7)!.retryAt, isNull);
 
       // FAILED #2 → retry 2 (10 min).
       reader.lastComments[7] = IssueComment(
@@ -391,9 +398,9 @@ void main() {
         body: 'FAILED: model under load',
       );
       await service.pollOnce();
-      expect(store.runFor(7)!.retryCount, 2);
+      expect(store.runFor('o/r', 7)!.retryCount, 2);
       expect(
-        store.runFor(7)!.retryAt,
+        store.runFor('o/r', 7)!.retryAt,
         clock.millisecondsSinceEpoch + 10 * _min,
       );
 
@@ -408,7 +415,7 @@ void main() {
         body: 'FAILED: model under load',
       );
       await service.pollOnce();
-      expect(store.runFor(7)!.retryCount, 3);
+      expect(store.runFor('o/r', 7)!.retryCount, 3);
 
       // Backoff, then re-feed #3.
       clock = clock.add(const Duration(minutes: 10));
@@ -421,7 +428,7 @@ void main() {
         body: 'FAILED: model under load',
       );
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'failed');
+      expect(store.runFor('o/r', 7)!.state, 'failed');
       expect(_eventsOfType(payloads, 'afk.failed'), hasLength(1));
       final failedData =
           _eventsOfType(payloads, 'afk.failed').single['data'] as Map;
@@ -443,6 +450,7 @@ void main() {
       () async {
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'dispatched',
@@ -451,20 +459,20 @@ void main() {
         sessions.idle = true;
         reader.lastComments[7] = IssueComment(id: 'IC1', body: 'FAILED: boom');
         await service.pollOnce();
-        expect(store.runFor(7)!.retryCount, 1);
-        expect(store.runFor(7)!.narrationId, 'IC1');
+        expect(store.runFor('o/r', 7)!.retryCount, 1);
+        expect(store.runFor('o/r', 7)!.narrationId, 'IC1');
 
         // The backoff elapses: the re-feed goes out (retryAt cleared).
         clock = clock.add(const Duration(minutes: 5));
         await service.pollOnce();
         expect(sessions.prompts, ['Issue #7: Add a README']);
-        expect(store.runFor(7)!.retryAt, isNull);
+        expect(store.runFor('o/r', 7)!.retryAt, isNull);
 
         // The agent goes idle again but posts no new narration (the last
         // comment is still IC1): the old narration is not re-processed.
         await service.pollOnce();
-        expect(store.runFor(7)!.retryCount, 1, reason: 'no 2nd retry');
-        expect(store.runFor(7)!.retryAt, isNull);
+        expect(store.runFor('o/r', 7)!.retryCount, 1, reason: 'no 2nd retry');
+        expect(store.runFor('o/r', 7)!.retryAt, isNull);
         expect(sessions.prompts, hasLength(1), reason: 'no 2nd re-feed');
       },
     );
@@ -475,6 +483,7 @@ void main() {
         'pr-open)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'pr-open',
@@ -494,8 +503,8 @@ void main() {
       );
       sessions.idle = true;
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'pr-open', reason: 'never retried');
-      expect(store.runFor(7)!.retryCount, 0);
+      expect(store.runFor('o/r', 7)!.state, 'pr-open', reason: 'never retried');
+      expect(store.runFor('o/r', 7)!.retryCount, 0);
       expect(payloads, isEmpty);
       expect(sessions.prompts, isEmpty);
     });
@@ -506,6 +515,7 @@ void main() {
         'issue may still be open)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'pr-open',
@@ -520,7 +530,7 @@ void main() {
       );
       reader.issueStates[7] = 'OPEN';
       await service.pollOnce();
-      final run = store.runFor(7)!;
+      final run = store.runFor('o/r', 7)!;
       expect(run.state, 'done');
       expect(run.closedUnmerged, isTrue);
     });
@@ -529,6 +539,7 @@ void main() {
         'closes the issue)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'pr-open',
@@ -543,15 +554,20 @@ void main() {
       );
       reader.issueStates[7] = 'OPEN';
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'pr-open');
+      expect(store.runFor('o/r', 7)!.state, 'pr-open');
     });
 
     test('a done run is a no-op', () async {
       await store.updateRun(
-        const AfkRun(issueNumber: 7, title: 'Add a README', state: 'done'),
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'done',
+        ),
       );
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'done');
+      expect(store.runFor('o/r', 7)!.state, 'done');
       expect(payloads, isEmpty);
     });
   });
@@ -561,6 +577,7 @@ void main() {
         'the retry counter reset', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'failed',
@@ -571,13 +588,13 @@ void main() {
       reader.labels[7] = {'needs-triage'};
       // A failed pass with no ready label: the hand-back stands, no re-feed.
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'failed');
+      expect(store.runFor('o/r', 7)!.state, 'failed');
       expect(sessions.prompts, isEmpty);
 
       // The human re-adds the gate's label.
       reader.labels[7] = {'needs-triage', 'ready-for-agent'};
       await service.pollOnce();
-      final run = store.runFor(7)!;
+      final run = store.runFor('o/r', 7)!;
       expect(run.state, 'dispatched');
       expect(run.retryCount, 0, reason: 'the counter is reset');
       expect(sessions.prompts, ['Issue #7: Add a README']);
@@ -590,6 +607,7 @@ void main() {
         '(no duplicate label, exactly one comment across passes)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'failed',
@@ -604,11 +622,11 @@ void main() {
       ], reason: 'the label was posted');
       expect(reader.addCommentCalls, isEmpty, reason: 'the comment failed');
       expect(
-        store.runFor(7)!.handbackLanded,
+        store.runFor('o/r', 7)!.handbackLanded,
         isFalse,
         reason: 'the hand-back is not recorded as landed',
       );
-      expect(store.runFor(7)!.state, 'failed');
+      expect(store.runFor('o/r', 7)!.state, 'failed');
 
       // The comment write recovers: the next pass sees the label is present
       // but the row says not landed, so it posts the comment and marks the
@@ -623,14 +641,14 @@ void main() {
       expect(reader.addLabelCalls, [
         (7, 'needs-triage'),
       ], reason: 'no duplicate label');
-      expect(store.runFor(7)!.handbackLanded, isTrue);
+      expect(store.runFor('o/r', 7)!.handbackLanded, isTrue);
 
       // The hand-back stands: a further pass posts nothing (the landed row
       // short-circuits the hand-back).
       await service.pollOnce();
       expect(reader.addCommentCalls, hasLength(1));
       expect(reader.addLabelCalls, hasLength(1));
-      expect(store.runFor(7)!.handbackLanded, isTrue);
+      expect(store.runFor('o/r', 7)!.handbackLanded, isTrue);
     });
 
     test(
@@ -638,6 +656,7 @@ void main() {
       () async {
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'failed',
@@ -649,8 +668,8 @@ void main() {
         await service.pollOnce();
         expect(reader.addLabelCalls, isEmpty);
         expect(reader.addCommentCalls, isEmpty);
-        expect(store.runFor(7)!.handbackLanded, isFalse);
-        expect(store.runFor(7)!.state, 'failed');
+        expect(store.runFor('o/r', 7)!.handbackLanded, isFalse);
+        expect(store.runFor('o/r', 7)!.state, 'failed');
 
         // The write recovers: the next pass posts label + comment and marks
         // the hand-back landed.
@@ -658,7 +677,7 @@ void main() {
         await service.pollOnce();
         expect(reader.addLabelCalls, [(7, 'needs-triage')]);
         expect(reader.addCommentCalls, hasLength(1));
-        expect(store.runFor(7)!.handbackLanded, isTrue);
+        expect(store.runFor('o/r', 7)!.handbackLanded, isTrue);
       },
     );
   });
@@ -667,11 +686,16 @@ void main() {
     test('a run in an unknown state is left alone (the refusal, not an '
         'admission)', () async {
       await store.updateRun(
-        const AfkRun(issueNumber: 7, title: 'Add a README', state: 'garbage'),
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'garbage',
+        ),
       );
       reader.labels[7] = {'ready-for-agent'};
       await service.pollOnce();
-      expect(store.runFor(7)!.state, 'garbage');
+      expect(store.runFor('o/r', 7)!.state, 'garbage');
       expect(payloads, isEmpty);
     });
 
@@ -679,12 +703,12 @@ void main() {
         'in-flight runs (user story #24)', () async {
       // A ready-but-idle issue: disarmed ⇒ no feed, no label read, no state
       // change (the new-work gate reads no GitHub at all).
-      await store.addRun(7, 'Add a README');
+      await store.addRun('o/r', 7, 'Add a README');
       reader.labels[7] = {'ready-for-agent'};
       armed = false;
       await service.pollOnce();
       expect(reader.hasLabelCalls, 0);
-      expect(store.runFor(7)!.state, 'idle');
+      expect(store.runFor('o/r', 7)!.state, 'idle');
       expect(sessions.prompts, isEmpty);
 
       // An in-flight run in the same disarmed pass: the follow does not read
@@ -692,6 +716,7 @@ void main() {
       // transition still lands (a run finishes to its PR through a disarm).
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 9,
           title: 'Ship the widget',
           state: 'dispatched',
@@ -708,10 +733,10 @@ void main() {
       );
       sessions.idle = true;
       await service.pollOnce();
-      expect(store.runFor(9)!.state, 'pr-open');
+      expect(store.runFor('o/r', 9)!.state, 'pr-open');
       expect(_eventsOfType(payloads, 'afk.pr_open'), hasLength(1));
       // And the idle run stayed idle all along (the disarm gated it).
-      expect(store.runFor(7)!.state, 'idle');
+      expect(store.runFor('o/r', 7)!.state, 'idle');
     });
   });
 
@@ -722,7 +747,7 @@ void main() {
       () async {
         // Disarmed at start: the schedule still runs (a disarm is not a
         // stop), but the idle ready issue is not fed (the new-work gate).
-        await store.addRun(7, 'Add a README');
+        await store.addRun('o/r', 7, 'Add a README');
         reader.labels[7] = {'ready-for-agent'};
         armed = false;
         service.start();
@@ -732,12 +757,16 @@ void main() {
           reason: 'the pass is not armed-gated',
         );
         await Future<void>.delayed(const Duration(milliseconds: 15));
-        expect(store.runFor(7)!.state, 'idle', reason: 'disarmed: no feed');
+        expect(
+          store.runFor('o/r', 7)!.state,
+          'idle',
+          reason: 'disarmed: no feed',
+        );
         expect(sessions.prompts, isEmpty);
 
         // The arm arrives: the live read on the next tick feeds it.
         armed = true;
-        await until(() => store.runFor(7)!.state == 'dispatched');
+        await until(() => store.runFor('o/r', 7)!.state == 'dispatched');
 
         // A disarm mid-run stops nothing: the schedule keeps ticking and the
         // in-flight run is still driven (the follow is not armed-gated).
@@ -753,6 +782,7 @@ void main() {
     test('a disarm mid-run lets the in-flight run finish to its PR', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -770,7 +800,7 @@ void main() {
       sessions.idle = true;
       armed = false; // Disarmed mid-run.
       service.start();
-      await until(() => store.runFor(7)!.state == 'pr-open');
+      await until(() => store.runFor('o/r', 7)!.state == 'pr-open');
       service.stop();
     });
   });
@@ -821,13 +851,19 @@ void main() {
         'last failure reason); a fresh run lists only its state', () {
       final feed = bootstrapFeed(const [
         AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
           retryCount: 1,
           lastFailureReason: 'model under load',
         ),
-        AfkRun(issueNumber: 9, title: 'Ship the widget', state: 'pr-open'),
+        AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 9,
+          title: 'Ship the widget',
+          state: 'pr-open',
+        ),
       ]);
       expect(feed, contains('#7'));
       expect(feed, contains('Add a README'));
@@ -856,6 +892,7 @@ void main() {
         'no state change (the run continues on its own)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -863,9 +900,13 @@ void main() {
       );
       liveness.orbsInFlight = 2; // An AFK-attributed orb is in flight.
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'dispatched', reason: 'no state change');
-      expect(store.runFor(7)!.retryCount, 0, reason: 'no retry counted');
-      expect(store.runFor(7)!.retryAt, isNull);
+      expect(
+        store.runFor('o/r', 7)!.state,
+        'dispatched',
+        reason: 'no state change',
+      );
+      expect(store.runFor('o/r', 7)!.retryCount, 0, reason: 'no retry counted');
+      expect(store.runFor('o/r', 7)!.retryAt, isNull);
       expect(sessions.prompts, isEmpty, reason: 'no re-feed');
       expect(payloads, isEmpty, reason: 'no event');
     });
@@ -874,6 +915,7 @@ void main() {
         'survives a restart: no re-feed, no state change', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -881,7 +923,7 @@ void main() {
       );
       liveness.sessionActive = true; // The AFK session's agent loop is active.
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
       expect(sessions.prompts, isEmpty);
     });
 
@@ -892,6 +934,7 @@ void main() {
       () async {
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'dispatched',
@@ -900,7 +943,7 @@ void main() {
         // No liveness (orbsInFlight 0, sessionActive false — the default), no
         // terminal narration, no PR.
         await service.reconcile();
-        final run = store.runFor(7)!;
+        final run = store.runFor('o/r', 7)!;
         expect(
           run.state,
           'dispatched',
@@ -924,6 +967,7 @@ void main() {
       // this restart finds it lost again → terminal failure.
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -931,7 +975,7 @@ void main() {
         ),
       );
       await service.reconcile();
-      final run = store.runFor(7)!;
+      final run = store.runFor('o/r', 7)!;
       expect(run.state, 'failed');
       expect(run.lastFailureReason, AfkRunService.lostRunReason);
       final failedData =
@@ -944,6 +988,7 @@ void main() {
         'not lost (the periodic pass will process the narration)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -954,9 +999,13 @@ void main() {
         body: 'FAILED: model under load',
       );
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'dispatched', reason: 'left for the pass');
       expect(
-        store.runFor(7)!.retryCount,
+        store.runFor('o/r', 7)!.state,
+        'dispatched',
+        reason: 'left for the pass',
+      );
+      expect(
+        store.runFor('o/r', 7)!.retryCount,
         0,
         reason: 'the reconciliation does not double-count',
       );
@@ -966,6 +1015,7 @@ void main() {
         'periodic pass will follow the PR)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -974,17 +1024,17 @@ void main() {
         ),
       );
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'dispatched');
-      expect(store.runFor(7)!.retryCount, 0);
+      expect(store.runFor('o/r', 7)!.state, 'dispatched');
+      expect(store.runFor('o/r', 7)!.retryCount, 0);
     });
 
     test('an idle run is left alone at startup (the first poll admits it as '
         'usual — no special handling)', () async {
-      await store.addRun(7, 'Add a README');
+      await store.addRun('o/r', 7, 'Add a README');
       reader.labels[7] = {'ready-for-agent'};
       await service.reconcile();
       expect(
-        store.runFor(7)!.state,
+        store.runFor('o/r', 7)!.state,
         'idle',
         reason: 'reconciliation does not feed idle',
       );
@@ -995,6 +1045,7 @@ void main() {
         're-added)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'failed',
@@ -1002,7 +1053,7 @@ void main() {
         ),
       );
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'failed');
+      expect(store.runFor('o/r', 7)!.state, 'failed');
       expect(sessions.prompts, isEmpty, reason: 'no re-feed at startup');
     });
 
@@ -1011,6 +1062,7 @@ void main() {
       () async {
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'pr-open',
@@ -1025,7 +1077,7 @@ void main() {
         );
         reader.issueStates[7] = 'CLOSED';
         await service.reconcile();
-        expect(store.runFor(7)!.state, 'done');
+        expect(store.runFor('o/r', 7)!.state, 'done');
       },
     );
 
@@ -1033,6 +1085,7 @@ void main() {
         'recorded as closed unmerged', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'pr-open',
@@ -1047,7 +1100,7 @@ void main() {
       );
       reader.issueStates[7] = 'OPEN';
       await service.reconcile();
-      final run = store.runFor(7)!;
+      final run = store.runFor('o/r', 7)!;
       expect(run.state, 'done');
       expect(run.closedUnmerged, isTrue);
     });
@@ -1056,6 +1109,7 @@ void main() {
         'pr-open at startup (the human has not closed it yet)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'pr-open',
@@ -1070,16 +1124,21 @@ void main() {
       );
       reader.issueStates[7] = 'OPEN';
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'pr-open');
+      expect(store.runFor('o/r', 7)!.state, 'pr-open');
     });
 
     test('a corrupted state string is left alone (the refusal, never an '
         'admission)', () async {
       await store.updateRun(
-        const AfkRun(issueNumber: 7, title: 'Add a README', state: 'garbage'),
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'garbage',
+        ),
       );
       await service.reconcile();
-      expect(store.runFor(7)!.state, 'garbage');
+      expect(store.runFor('o/r', 7)!.state, 'garbage');
       expect(sessions.prompts, isEmpty);
     });
 
@@ -1089,6 +1148,7 @@ void main() {
       () async {
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'dispatched',
@@ -1098,7 +1158,7 @@ void main() {
         // reader throws on a failed/unreadable read).
         reader.lastCommentReadFails.add(7);
         await service.reconcile();
-        final run = store.runFor(7)!;
+        final run = store.runFor('o/r', 7)!;
         expect(run.state, 'dispatched', reason: 'the read failure is inert');
         expect(run.retryCount, 0, reason: 'no retry burned by the outage');
         expect(run.retryAt, isNull);
@@ -1113,6 +1173,7 @@ void main() {
         'verdict is preserved for the real case)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -1122,7 +1183,7 @@ void main() {
       // (the genuine "none" answer, distinct from a failed read).
       reader.lastComments[7] = null;
       await service.reconcile();
-      final run = store.runFor(7)!;
+      final run = store.runFor('o/r', 7)!;
       expect(run.state, 'dispatched', reason: 'still in flight, being retried');
       expect(run.retryCount, 1, reason: 'counted in the retry');
       expect(
@@ -1149,6 +1210,7 @@ void main() {
         // The in-flight runs: a dispatched run mid-retry and a pr-open run.
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'dispatched',
@@ -1158,6 +1220,7 @@ void main() {
         );
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 9,
             title: 'Ship the widget',
             state: 'pr-open',
@@ -1190,12 +1253,18 @@ void main() {
 
     test('idle and failed runs are not in-flight: the bootstrap lists only '
         'dispatched and pr-open runs', () async {
-      await store.addRun(7, 'Idle issue'); // idle
+      await store.addRun('o/r', 7, 'Idle issue'); // idle
       await store.updateRun(
-        const AfkRun(issueNumber: 8, title: 'Failed issue', state: 'failed'),
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 8,
+          title: 'Failed issue',
+          state: 'failed',
+        ),
       );
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 9,
           title: 'Ship the widget',
           state: 'pr-open',
@@ -1216,6 +1285,7 @@ void main() {
         'to feed)', () async {
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',

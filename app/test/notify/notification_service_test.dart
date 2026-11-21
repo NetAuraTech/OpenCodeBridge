@@ -70,9 +70,9 @@ void main() {
         NotifyKind.afkRun,
       });
 
-      // Armed-but-silenced: arming the AFK system is not a push toggle, so
-      // the AFK push kind is gone when its own toggle is off.
-      settings.afkEnabled = true;
+      // Armed-but-silenced: arming a repo is not a push toggle, so the AFK
+      // push kind is gone when its own toggle is off.
+      settings.afkArmedRepos = {'a/r'};
       settings.notifyAfkRun = false;
       expect(service.enabledKindsForTest(), {
         NotifyKind.permissionAsked,

@@ -131,8 +131,25 @@ void main() {
 
   /// The Theme section (issue #49) grew the tab: drag the list until
   /// [target] is built and visible.
-  Future<void> scrollSettings(WidgetTester tester, Finder target) => tester
-      .dragUntilVisible(target, find.byType(ListView), const Offset(0, -200));
+  ///
+  /// [dragUntilVisible] settles with [target] pinned to the viewport's
+  /// leading edge (its final `Scrollable.ensureVisible` uses the default
+  /// `alignment: 0.0`). The tab's height shifts with the AFK section — the
+  /// global arming toggle left it in spec #407, the per-repo arming arrives
+  /// per-project later — so a following tap on [target] or a sibling in its
+  /// row can end up below the fold and miss the hit-test. Re-center [target]
+  /// (`alignment: 0.5`) and settle so every scroll-then-interact call lands
+  /// comfortably.
+  Future<void> scrollSettings(WidgetTester tester, Finder target) async {
+    await tester.dragUntilVisible(
+      target,
+      find.byType(ListView),
+      const Offset(0, -200),
+    );
+    // Element is a BuildContext: re-center [target] in the scrollable.
+    await Scrollable.ensureVisible(tester.element(target), alignment: 0.5);
+    await tester.pumpAndSettle();
+  }
 
   group('SettingsTab', () {
     testWidgets('client mode: shows and persists the tunnel url', (
@@ -341,10 +358,9 @@ void main() {
         expect(toggles, 1); // Re-registers the device's push.
         expect((await AppSettings.load()).notifyAfkRun, isTrue); // Persisted.
 
-        // Armed-but-silenced is legitimate: the AFK arming toggle (the AFK
-        // agent section) is a separate setting; toggling the push does not
-        // touch it.
-        expect(settings.afkEnabled, isFalse);
+        // Armed-but-silenced is legitimate: the AFK arming (the per-repo
+        // set) is a separate setting; toggling the push does not touch it.
+        expect(settings.afkArmedRepos, isEmpty);
       },
     );
 
@@ -1054,26 +1070,27 @@ void main() {
   });
 
   group('SettingsTab AFK agent section (spec #376, T1)', () {
-    testWidgets('server mode shows the section with the three controls', (
-      tester,
-    ) async {
-      SharedPreferences.setMockInitialValues({});
-      await pumpSettings(
-        tester,
-        mode: AppMode.server,
-        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
-      );
+    testWidgets(
+      'server mode shows the section with the cap and the model, and no '
+      'global arming toggle (arming is per project, a later ticket)',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        );
 
-      await scrollSettings(tester, find.byKey(const ValueKey('afk-enabled')));
-      expect(find.byKey(const ValueKey('afk-enabled')), findsOneWidget);
-      expect(find.byKey(const ValueKey('afk-parallel-orbs')), findsOneWidget);
-      expect(find.byKey(const ValueKey('afk-model')), findsOneWidget);
-      // The arm toggle defaults off (a fresh install is inert).
-      final tile = tester
-          .widgetList<SwitchListTile>(find.byKey(const ValueKey('afk-enabled')))
-          .single;
-      expect(tile.value, isFalse);
-    });
+        await scrollSettings(
+          tester,
+          find.byKey(const ValueKey('afk-parallel-orbs')),
+        );
+        expect(find.byKey(const ValueKey('afk-parallel-orbs')), findsOneWidget);
+        expect(find.byKey(const ValueKey('afk-model')), findsOneWidget);
+        // The global arming toggle is gone (arming is per repo identity).
+        expect(find.byKey(const ValueKey('afk-enabled')), findsNothing);
+      },
+    );
 
     testWidgets('client mode shows no AFK section', (tester) async {
       SharedPreferences.setMockInitialValues({});
@@ -1082,28 +1099,6 @@ void main() {
       expect(find.byKey(const ValueKey('afk-enabled')), findsNothing);
       expect(find.byKey(const ValueKey('afk-parallel-orbs')), findsNothing);
       expect(find.byKey(const ValueKey('afk-model')), findsNothing);
-    });
-
-    testWidgets('arming toggles and notifies the in-process bridge', (
-      tester,
-    ) async {
-      SharedPreferences.setMockInitialValues({});
-      var changes = 0;
-      final settings = await pumpSettings(
-        tester,
-        mode: AppMode.server,
-        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
-        onAfkChanged: () => changes++,
-      );
-
-      await scrollSettings(tester, find.byKey(const ValueKey('afk-enabled')));
-      expect(settings.afkEnabled, isFalse);
-      await tester.tap(find.byKey(const ValueKey('afk-enabled')));
-      await tester.pump();
-      expect(settings.afkEnabled, isTrue);
-      expect(changes, 1);
-      // Persisted across launches.
-      expect((await AppSettings.load()).afkEnabled, isTrue);
     });
 
     testWidgets('the cap commits a valid value and notifies the bridge', (

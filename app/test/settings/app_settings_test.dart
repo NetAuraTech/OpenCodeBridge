@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/app_mode.dart';
@@ -35,12 +37,12 @@ void main() {
     final reloaded = await AppSettings.load();
     expect(reloaded.notifyAfkRun, isTrue);
 
-    // Armed-but-silenced is legitimate: the arming toggle and the push
-    // toggle are independent.
-    reloaded.afkEnabled = true;
+    // Armed-but-silenced is legitimate: the arming and the push are
+    // independent.
+    reloaded.afkArmedRepos = {'NetAuraTech/OpenCodeBridge'};
     reloaded.notifyAfkRun = false;
     final again = await AppSettings.load();
-    expect(again.afkEnabled, isTrue);
+    expect(again.afkArmedRepos, {'NetAuraTech/OpenCodeBridge'});
     expect(again.notifyAfkRun, isFalse);
   });
 
@@ -122,35 +124,61 @@ void main() {
     expect((await AppSettings.load()).themeMode, ThemeMode.system);
   });
 
-  group('AFK agent settings (spec #376, T1)', () {
-    test(
-      'defaults: off, cap 5, model empty (a fresh install is inert)',
-      () async {
-        SharedPreferences.setMockInitialValues({});
-        final settings = await AppSettings.load();
-        expect(settings.afkEnabled, isFalse);
-        expect(settings.afkParallelOrbs, 5);
-        expect(settings.afkModel, '');
-        expect(
-          settings.afk,
-          const afk.AfkSettings(enabled: false, parallelOrbs: 5, model: ''),
-        );
-      },
-    );
+  group('AFK agent settings (spec #407, T1: per-repo arming)', () {
+    test('defaults: no armed repos, cap 5, model empty (a fresh install is '
+        'inert)', () async {
+      SharedPreferences.setMockInitialValues({});
+      final settings = await AppSettings.load();
+      expect(settings.afkArmedRepos, isEmpty);
+      expect(settings.afkParallelOrbs, 5);
+      expect(settings.afkModel, '');
+      expect(settings.afk, const afk.AfkSettings(parallelOrbs: 5, model: ''));
+    });
 
     test(
       'each AFK setting persists across an app restart (round-trip)',
       () async {
         SharedPreferences.setMockInitialValues({});
         final settings = await AppSettings.load();
-        settings.afkEnabled = true;
+        settings.afkArmedRepos = {'NetAuraTech/OpenCodeBridge', 'o/other'};
         settings.afkParallelOrbs = 7;
         settings.afkModel = 'zhipu/glm-4.7';
 
         final reloaded = await AppSettings.load();
-        expect(reloaded.afkEnabled, isTrue);
+        expect(reloaded.afkArmedRepos, {
+          'NetAuraTech/OpenCodeBridge',
+          'o/other',
+        });
         expect(reloaded.afkParallelOrbs, 7);
         expect(reloaded.afkModel, 'zhipu/glm-4.7');
+      },
+    );
+
+    test(
+      'the armed repos persist as a JSON list under afk.armedRepos',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        (await AppSettings.load()).afkArmedRepos = {'a/r', 'b/s'};
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getString('afk.armedRepos'), jsonEncode(['a/r', 'b/s']));
+      },
+    );
+
+    test(
+      'a corrupt afk.armedRepos degrades to the empty set (never a throw)',
+      () async {
+        SharedPreferences.setMockInitialValues({'afk.armedRepos': 'not json'});
+        expect((await AppSettings.load()).afkArmedRepos, isEmpty);
+      },
+    );
+
+    test(
+      'an afk.armedRepos that is not a list of strings degrades to empty',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          'afk.armedRepos': jsonEncode([1, 2, 3]),
+        });
+        expect((await AppSettings.load()).afkArmedRepos, isEmpty);
       },
     );
 
@@ -186,12 +214,16 @@ void main() {
     test('the afk value composes the bridge settings', () async {
       SharedPreferences.setMockInitialValues({});
       final settings = await AppSettings.load();
-      settings.afkEnabled = true;
+      settings.afkArmedRepos = {'a/r'};
       settings.afkParallelOrbs = 3;
       settings.afkModel = 'a/b#v';
       expect(
         settings.afk,
-        const afk.AfkSettings(enabled: true, parallelOrbs: 3, model: 'a/b#v'),
+        const afk.AfkSettings(
+          armedRepos: {'a/r'},
+          parallelOrbs: 3,
+          model: 'a/b#v',
+        ),
       );
     });
   });

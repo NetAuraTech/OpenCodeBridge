@@ -637,6 +637,7 @@ class BridgeServer {
             reader: GhGitHubReader(),
             store: afkComponent.store,
             isArmed: () => afkComponent.enabled,
+            repo: () => afkComponent.repo,
             emitEvent: eventHub.emit,
           );
     // The AFK run service (spec #376, T3): the real `gh` reader, the
@@ -822,7 +823,9 @@ class BridgeServer {
     OrbTaskService? tasks,
     SessionsBackend? backend,
   ) async {
-    final id = afk.store.sessionId();
+    // The AFK session's id (the first armed repo's, spec #407 T1; per-repo
+    // liveness lands with the per-repo run service in T4).
+    final id = afk.sessionId;
     if (id == null || id.isEmpty) return const AfkLiveness.none();
     var orbsInFlight = 0;
     if (tasks != null) {
@@ -984,15 +987,16 @@ class BridgeServer {
   /// component (no shared opencode service).
   Future<String?> updateAfKSettings(AfkSettings settings) async {
     _afk?.updateSettings(settings);
-    // The Ready gate's admission poller follows the arming toggle live
-    // (spec #376, T2): start on arm, stop on disarm.
-    _afkPoller?.syncArmed(settings.enabled);
-    // The run service does not follow the toggle live (spec #376, user
+    // The Ready gate's admission poller follows the arming live (spec #376,
+    // T2; reshaped to per-repo by #407, T1): start when a repo is armed, stop
+    // when none is.
+    _afkPoller?.syncArmed(settings.armedRepos.isNotEmpty);
+    // The run service does not follow the arming live (spec #376, user
     // story #24): its pass runs for the life of the bridge and its
     // new-work steps read the arming live through [isArmed] — a disarm
     // gates new feeds and re-dispatches while the in-flight runs finish to
     // their PR or failure. No destructive stop here.
-    if (!settings.enabled) return null;
+    if (settings.armedRepos.isEmpty) return null;
     // The fresh-agent handoff (spec #376, T6): the arming ensures the session
     // (create or reuse, idempotent). When it was **just created** — a wiped
     // store's first arm, or a session the service lost (a normal host-service
@@ -1000,7 +1004,8 @@ class BridgeServer {
     // run service sends the **bootstrap** feed (the in-flight runs from the
     // store) so the recreated agent reconciles with the tracker itself. A
     // reused session sends no bootstrap (no recreation, no re-bootstrap).
-    final before = _afk?.store.sessionId();
+    final repo = _afk?.repo;
+    final before = repo == null ? null : _afk?.store.sessionIdFor(repo);
     final id = await ensureAfKSession();
     final runs = _afkRuns;
     if (id != null && id != before && runs != null) {

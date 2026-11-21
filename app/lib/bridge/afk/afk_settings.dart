@@ -1,18 +1,27 @@
 import '../../model/command.dart';
 
-/// The AFK agent's settings as the bridge holds them (spec #376, "Settings").
+/// The AFK agent's settings as the bridge holds them (spec #407, reshaped
+/// from #376, "Settings").
 ///
-/// These are the three values the "AFK agent" section of Settings persists
-/// (in the app's persisted settings, under the `afk.` namespace) and hands to
-/// the in-process bridge: the arming toggle (default off — off is the inert
-/// state: no polling, no feed, no admission), the parallel-orbs cap (1–10,
-/// default 5), and the model (free text `provider/model[#variant]`, empty =
-/// no pin = the service's default). The bridge is handed the values at
-/// startup and notified in-process on change: a changed cap is effective from
-/// the next orb spawn, a changed model from the next AFK session creation.
+/// These are the values the "AFK agent" section of Settings persists (in the
+/// app's persisted settings, under the `afk.` namespace) and hands to the
+/// in-process bridge: the **per-repo arming** ([armedRepos], a set of
+/// `owner/repo` identities — a project is armed from its own row in a later
+/// ticket, and an empty set is the inert state: no polling, no feed, no
+/// admission), the parallel-orbs cap (1–10, default 5), and the model (free
+/// text `provider/model[#variant]`, empty = no pin = the service's default).
+/// The bridge is handed the values at startup and notified in-process on
+/// change: a changed cap is effective from the next orb spawn, a changed model
+/// from the next AFK session creation.
+///
+/// The arming is a *set* of repo identities, not a single toggle: two
+/// checkouts of the same repo share one identity and thus one armed state.
+/// [armedRepos] is an [LinkedHashSet] (const-constructible) that preserves
+/// the persisted order, so [firstArmedRepo] is deterministic (the first
+/// list-order armed repo).
 class AfkSettings {
   const AfkSettings({
-    this.enabled = false,
+    this.armedRepos = const {},
     this.parallelOrbs = defaultParallelOrbs,
     this.model = defaultModel,
   });
@@ -29,8 +38,16 @@ class AfkSettings {
   /// The model's default: empty — no pin, the service's default is used.
   static const String defaultModel = '';
 
-  /// The arming toggle. Off is the inert state.
-  final bool enabled;
+  /// The armed repo identities (`owner/repo`), in persisted order. Empty is
+  /// the inert state — no armed repo means no AFK work at all.
+  final Set<String> armedRepos;
+
+  /// The first armed repo in list order, or `null` when none is armed. The
+  /// bridge's single-repo consumers (until the per-project poller and
+  /// session land in later tickets) read the arming through this; it is the
+  /// deterministic anchor for "which repo's checkout does the one resident
+  /// session live in?".
+  String? get firstArmedRepo => armedRepos.isEmpty ? null : armedRepos.first;
 
   /// How many AFK orbs may run in parallel (1–10). Effective from the next
   /// orb spawn (enforced at the spawn boundary by a later ticket).
@@ -40,26 +57,44 @@ class AfkSettings {
   /// Empty = no pin = the opencode config's default.
   final String model;
 
-  AfkSettings copyWith({bool? enabled, int? parallelOrbs, String? model}) =>
-      AfkSettings(
-        enabled: enabled ?? this.enabled,
-        parallelOrbs: parallelOrbs ?? this.parallelOrbs,
-        model: model ?? this.model,
-      );
+  /// Returns a copy with the given fields replaced. A field left `null` keeps
+  /// its value; [armedRepos] is replaced wholesale (pass an empty set to
+  /// clear it) — a set has no natural "unset" marker, so it is always an
+  /// explicit replacement.
+  AfkSettings copyWith({
+    Set<String>? armedRepos,
+    int? parallelOrbs,
+    String? model,
+  }) => AfkSettings(
+    armedRepos: armedRepos ?? this.armedRepos,
+    parallelOrbs: parallelOrbs ?? this.parallelOrbs,
+    model: model ?? this.model,
+  );
 
   @override
   bool operator ==(Object other) =>
       other is AfkSettings &&
-      other.enabled == enabled &&
+      _sameOrder(other.armedRepos, armedRepos) &&
       other.parallelOrbs == parallelOrbs &&
       other.model == model;
 
+  static bool _sameOrder(Set<String> a, Set<String> b) {
+    if (a.length != b.length) return false;
+    final ai = a.iterator;
+    final bi = b.iterator;
+    while (ai.moveNext()) {
+      if (!bi.moveNext() || ai.current != bi.current) return false;
+    }
+    return true;
+  }
+
   @override
-  int get hashCode => Object.hash(enabled, parallelOrbs, model);
+  int get hashCode =>
+      Object.hash(armedRepos.join('\u0000'), parallelOrbs, model);
 
   @override
   String toString() =>
-      'AfkSettings(enabled: $enabled, parallelOrbs: $parallelOrbs, '
+      'AfkSettings(armedRepos: $armedRepos, parallelOrbs: $parallelOrbs, '
       'model: $model)';
 }
 

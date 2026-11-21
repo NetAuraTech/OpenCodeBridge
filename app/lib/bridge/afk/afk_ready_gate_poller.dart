@@ -27,6 +27,7 @@ class AfkReadyGatePoller {
     required this.reader,
     required this.store,
     required this.isArmed,
+    required this.repo,
     required this.emitEvent,
     this.pollInterval = defaultPollInterval,
   });
@@ -42,6 +43,13 @@ class AfkReadyGatePoller {
 
   /// The live arming predicate — the poller runs only while this is true.
   final bool Function() isArmed;
+
+  /// The live repo the admissions are scoped to (spec #407, T1): the run rows
+  /// are keyed per repo identity, so the poller admits under this repo. Read
+  /// live each pass (a change of armed repo is picked up without a restart);
+  /// `null` when no repo is armed — the pass is inert (the per-project
+  /// poller, one reader per armed repo, lands in T2).
+  final String? Function() repo;
 
   /// The event hub's emit — the ready-admission events go out on it.
   final void Function(String rawPayload) emitEvent;
@@ -82,10 +90,13 @@ class AfkReadyGatePoller {
   }
 
   /// One pass over the ready issues (the timer's body, and the test seam):
-  /// inert when disarmed; a failed read, or a failed store write, admits
-  /// nothing and emits nothing — the next pass retries.
+  /// inert when disarmed or when no repo is armed (the rows are keyed per
+  /// repo identity); a failed read, or a failed store write, admits nothing
+  /// and emits nothing — the next pass retries.
   Future<void> pollOnce() async {
     if (!isArmed()) return;
+    final repo = this.repo();
+    if (repo == null) return; // No armed repo: nothing to admit under.
     final List<ReadyIssue> ready;
     try {
       ready = await reader.listReadyIssues();
@@ -93,10 +104,11 @@ class AfkReadyGatePoller {
       return;
     }
     for (final issue in ready) {
-      // No duplicates: a stored issue is not re-admitted or re-emitted.
-      if (store.runFor(issue.number) != null) continue;
+      // No duplicates: a stored (repo, issue) is not re-admitted or re-
+      // emitted.
+      if (store.runFor(repo, issue.number) != null) continue;
       try {
-        await store.addRun(issue.number, issue.title);
+        await store.addRun(repo, issue.number, issue.title);
       } catch (_) {
         continue;
       }
