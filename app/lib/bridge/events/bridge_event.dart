@@ -57,9 +57,11 @@ abstract class BridgeEventType {
 
   /// An issue newly became `ready-for-agent` and was admitted to the AFK run
   /// store by the Ready-gate poller (spec #376, "The Ready gate and the
-  /// feed", T2): the poller persists the run row (state `idle`, issue number,
-  /// title) and emits this on the unified stream; `data` carries
-  /// `issueNumber` and `title`.
+  /// feed", T2; reshaped per-project by #407, T2): the poller persists the
+  /// repo-scoped run row (state `idle`, the repo identity, the issue number,
+  /// the title) and emits this on the unified stream; `data` carries `repo`
+  /// (the armed repo identity `owner/repo` the issue was admitted under),
+  /// `issueNumber`, and `title`.
   static const String afkReadyAdmitted = 'afk.ready_admitted';
 
   /// An AFK run reached `pr-open` (spec #376, "Push", T3): the agent's

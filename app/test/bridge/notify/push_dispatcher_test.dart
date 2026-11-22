@@ -217,8 +217,9 @@ void main() {
         service,
         sessionLabel: (id) async => 'label-$id',
         // The AFK session the failure push deep-links to (in-app, to read the
-        // agent's FAILED narration).
-        afkSession: () async => 'ses_afk',
+        // agent's FAILED narration) — per repo (spec #407, T3): the resolver
+        // receives the failed run's repo identity.
+        afkSession: (repo) async => 'ses_afk',
       );
     });
 
@@ -267,6 +268,61 @@ void main() {
       expect(sent.highPriority, isTrue);
     });
 
+    test('afk.failed deep-links the failed repo session, not another repo (the '
+        'event carries the repo identity, spec #407, T3)', () async {
+      // The resolver is repo-sensitive: it answers a distinct session per
+      // repo, and `null` for a repo with no stored session.
+      final repoSensitive = PushDispatcher(
+        service,
+        sessionLabel: (id) async => 'label-$id',
+        afkSession: (repo) async {
+          const sessionsByRepo = {'o/a': 'ses_a', 'o/b': 'ses_b'};
+          return sessionsByRepo[repo];
+        },
+      );
+      await repoSensitive.write(
+        jsonEncode({
+          'type': 'afk.failed',
+          'data': {
+            'repo': 'o/b',
+            'issueNumber': 7,
+            'title': 'Add a README',
+            'reason': 'model under load',
+          },
+        }),
+      );
+      expect(sender.sent, hasLength(1));
+      // The deep-link is o/b session (not o/a).
+      expect(sender.sent.single.link, 'opencodebridge://session/ses_b');
+      await repoSensitive.close();
+
+      // A repo with no stored session: no push (there is nowhere to go).
+      final silentSender = _FakeSender();
+      final silentService = NotifyService(sender: silentSender);
+      silentService.registerDevice('t', {NotifyKind.afkRun});
+      final noSession = PushDispatcher(
+        silentService,
+        afkSession: (repo) async => null,
+      );
+      await noSession.write(
+        jsonEncode({
+          'type': 'afk.failed',
+          'data': {
+            'repo': 'o/c',
+            'issueNumber': 8,
+            'title': 'No session here',
+            'reason': 'boom',
+          },
+        }),
+      );
+      expect(
+        silentSender.sent,
+        isEmpty,
+        reason: 'no session for the repo: no push',
+      );
+      await noSession.close();
+    });
+
     test('a retry emits no event, so the dispatcher sends nothing '
         '(a retried run posts no afk event)', () async {
       // The run service emits no event on a retry — only on pr-open and
@@ -293,7 +349,7 @@ void main() {
       });
       final silent = PushDispatcher(
         silentService,
-        afkSession: () async => 'ses_afk',
+        afkSession: (repo) async => 'ses_afk',
       );
       await silent.write(
         jsonEncode({

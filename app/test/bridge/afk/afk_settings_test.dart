@@ -3,10 +3,11 @@ import 'package:opencodebridge/bridge/afk/afk_settings.dart';
 import 'package:opencodebridge/model/command.dart';
 
 void main() {
-  group('AfkSettings', () {
-    test('defaults: off, cap 5, model empty (a fresh install is inert)', () {
+  group('AfkSettings (spec #407, T1: per-repo arming)', () {
+    test('defaults: no armed repos, cap 5, model empty (a fresh install is '
+        'inert)', () {
       const settings = AfkSettings();
-      expect(settings.enabled, isFalse);
+      expect(settings.armedRepos, isEmpty);
       expect(settings.parallelOrbs, 5);
       expect(settings.model, '');
     });
@@ -16,15 +17,53 @@ void main() {
       expect(AfkSettings.maxParallelOrbs, 10);
     });
 
+    test('the arming set is order-preserving (the persisted order, first '
+        'list-order first)', () {
+      const settings = AfkSettings(armedRepos: {'b/repo', 'a/repo'});
+      // The set's iteration order is the persisted order: the first armed
+      // repo is the list's first element.
+      expect(settings.armedRepos.first, 'b/repo');
+      expect(settings.armedRepos, {'b/repo', 'a/repo'});
+    });
+
     test('copyWith overrides only the named fields', () {
-      const base = AfkSettings(enabled: true, parallelOrbs: 7, model: 'a/b');
+      const base = AfkSettings(
+        armedRepos: {'o/r'},
+        parallelOrbs: 7,
+        model: 'a/b',
+      );
       expect(
         base.copyWith(parallelOrbs: 3),
-        const AfkSettings(enabled: true, parallelOrbs: 3, model: 'a/b'),
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 3, model: 'a/b'),
       );
       expect(
         base.copyWith(model: ''),
-        const AfkSettings(enabled: true, parallelOrbs: 7, model: ''),
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 7, model: ''),
+      );
+      expect(
+        base.copyWith(armedRepos: {'x/y'}),
+        const AfkSettings(armedRepos: {'x/y'}, parallelOrbs: 7, model: 'a/b'),
+      );
+      // An explicit empty set clears the arming set.
+      expect(
+        base.copyWith(armedRepos: const {}),
+        const AfkSettings(parallelOrbs: 7, model: 'a/b'),
+      );
+      // Left null, the arming set is kept.
+      expect(
+        base.copyWith(parallelOrbs: 1),
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 1, model: 'a/b'),
+      );
+    });
+
+    test('equality compares the arming repos (and their order)', () {
+      expect(
+        const AfkSettings(armedRepos: {'a/r', 'b/s'}, parallelOrbs: 3),
+        const AfkSettings(armedRepos: {'a/r', 'b/s'}, parallelOrbs: 3),
+      );
+      expect(
+        const AfkSettings(armedRepos: {'a/r', 'b/s'}, parallelOrbs: 3),
+        isNot(const AfkSettings(armedRepos: {'b/s', 'a/r'}, parallelOrbs: 3)),
       );
     });
   });

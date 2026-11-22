@@ -4,8 +4,12 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/afk/afk_store.dart';
 
-/// The bridge's persisted AFK machine state (spec #376, T1): the app-owned
-/// file that holds the AFK session id (and, later, the per-issue run state).
+/// The bridge's persisted AFK machine state (spec #407, T1): the app-owned
+/// file, now keyed **per repo identity** — one AFK session id per repo
+/// (`afk.session.<owner/repo>`) and one run row per (repo, issue)
+/// (`afk.run.<owner/repo>.<issue>`, the row carrying `ownerRepo`). The
+/// pre-scoping flat keys (`afk.sessionId`, `afk.run.<issue>`) are ignored on
+/// read and never written back (no migration).
 void main() {
   late Directory dir;
   late File file;
@@ -19,10 +23,11 @@ void main() {
     await dir.delete(recursive: true);
   });
 
-  group('AfkStore', () {
+  group('AfkStore (per-repo session id)', () {
     test('reads empty when the file is missing (a fresh machine)', () {
       final store = AfkStore(file: file);
-      expect(store.sessionId(), isNull);
+      expect(store.sessionIdFor('o/r'), isNull);
+      expect(store.allRuns(), isEmpty);
       expect(store.load(), isEmpty);
     });
 
@@ -34,116 +39,157 @@ void main() {
     });
 
     test(
-      'stores and re-reads the AFK session id (survives a restart)',
+      'stores and re-reads a repo session id (survives a restart)',
       () async {
         final store = AfkStore(file: file);
-        await store.setSessionId('ses_afk_1');
-        expect(AfkStore(file: file).sessionId(), 'ses_afk_1');
+        await store.setSessionId('o/r', 'ses_afk_1');
+        expect(AfkStore(file: file).sessionIdFor('o/r'), 'ses_afk_1');
       },
     );
 
-    test('keeps other stored values when setting the session id (the store '
-        'grows with the per-issue run state)', () async {
-      // A future ticket's key already lives in the file alongside where the
-      // session id will go.
-      await file.writeAsString(jsonEncode({'afk.issue.7.state': 'dispatched'}));
-      await AfkStore(file: file).setSessionId('ses_afk_1');
-      final reloaded = AfkStore(file: file).load();
-      expect(reloaded[AfkStore.keySessionId], 'ses_afk_1');
-      expect(reloaded['afk.issue.7.state'], 'dispatched');
+    test('two repos hold two independent session ids', () async {
+      final store = AfkStore(file: file);
+      await store.setSessionId('a/r', 'ses_a');
+      await store.setSessionId('b/r', 'ses_b');
+      final reloaded = AfkStore(file: file);
+      expect(reloaded.sessionIdFor('a/r'), 'ses_a');
+      expect(reloaded.sessionIdFor('b/r'), 'ses_b');
+      // Clearing one repo leaves the other.
+      await reloaded.setSessionId('a/r', null);
+      final after = AfkStore(file: file);
+      expect(after.sessionIdFor('a/r'), isNull);
+      expect(after.sessionIdFor('b/r'), 'ses_b');
     });
 
-    test('clearing the session id removes the file when nothing else is stored '
-        '(no cruft in the app-owned dir)', () async {
-      await AfkStore(file: file).setSessionId('ses_afk_1');
+    test('clearing the only session id removes the file (no cruft)', () async {
+      await AfkStore(file: file).setSessionId('o/r', 'ses_afk_1');
       expect(file.existsSync(), isTrue);
-
-      await AfkStore(file: file).setSessionId(null);
-      expect(AfkStore(file: file).sessionId(), isNull);
+      await AfkStore(file: file).setSessionId('o/r', null);
+      expect(AfkStore(file: file).sessionIdFor('o/r'), isNull);
       expect(file.existsSync(), isFalse);
     });
 
     test(
-      'clearing the session id keeps the file when other values remain',
-      () async {
-        await file.writeAsString(
-          jsonEncode({
-            AfkStore.keySessionId: 'ses_afk_1',
-            'afk.issue.7.state': 'pr-open',
-          }),
-        );
-        await AfkStore(file: file).setSessionId(null);
-        expect(AfkStore(file: file).sessionId(), isNull);
-        expect(file.existsSync(), isTrue);
-        expect(AfkStore(file: file).load()['afk.issue.7.state'], 'pr-open');
-      },
-    );
-  });
-
-  group('run rows (spec #376, "The Ready gate and the feed", T2: the '
-      'poller\'s admissions, beside the session record)', () {
-    test(
-      'addRun persists + runFor reads back (state idle, number, title)',
+      'allSessionIds enumerates the stored per-repo ids, ignoring the '
+      'legacy flat key and the run rows (disarming-stable set, T5)',
       () async {
         final store = AfkStore(file: file);
-        await store.addRun(7, 'Add a README');
+        await store.setSessionId('a/r', 'ses_a');
+        await store.setSessionId('b/r', 'ses_b');
+        await store.addRun('a/r', 7, 'Add a README');
+        // A legacy flat key a pre-scoping file still carries: ignored on read
+        // (no migration), so it is not mistaken for a per-repo session id.
+        final map = store.load();
+        map['afk.sessionId'] = 'ses_legacy';
+        file.writeAsStringSync(jsonEncode(map));
+
         final reloaded = AfkStore(file: file);
-        final run = reloaded.runFor(7);
-        expect(run, isNotNull);
-        expect(run!.issueNumber, 7);
-        expect(run.title, 'Add a README');
-        expect(run.state, 'idle');
+        expect(reloaded.allSessionIds(), {'ses_a', 'ses_b'});
+
+        // A cleared id drops out of the set (the key is removed on write).
+        await reloaded.setSessionId('a/r', null);
+        expect(AfkStore(file: file).allSessionIds(), {'ses_b'});
       },
     );
 
-    test('runs() lists every row, sorted by issue number', () async {
+    test('a repo session id coexists with run rows and other repos', () async {
       final store = AfkStore(file: file);
-      await store.addRun(9, 'Nine');
-      await store.addRun(7, 'Seven');
-      expect(store.runs().map((run) => run.issueNumber).toList(), [7, 9]);
+      await store.setSessionId('o/r', 'ses_afk_1');
+      await store.addRun('o/r', 7, 'Add a README');
+      await store.addRun('other/r', 7, 'A different issue 7');
+      final reloaded = AfkStore(file: file);
+      expect(reloaded.sessionIdFor('o/r'), 'ses_afk_1');
+      expect(reloaded.runFor('o/r', 7)!.title, 'Add a README');
+      expect(reloaded.runFor('other/r', 7)!.title, 'A different issue 7');
+    });
+  });
+
+  group('run rows (keyed per repo, carrying ownerRepo)', () {
+    test('addRun persists + runFor reads back (ownerRepo, state idle, number, '
+        'title)', () async {
+      final store = AfkStore(file: file);
+      await store.addRun('o/r', 7, 'Add a README');
+      final run = AfkStore(file: file).runFor('o/r', 7);
+      expect(run, isNotNull);
+      expect(run!.ownerRepo, 'o/r');
+      expect(run.issueNumber, 7);
+      expect(run.title, 'Add a README');
+      expect(run.state, 'idle');
     });
 
-    test('a corrupt run row reads as absent', () async {
+    test('the same issue number in two repos is two distinct rows', () async {
+      final store = AfkStore(file: file);
+      await store.addRun('a/r', 7, 'A issue 7');
+      await store.addRun('b/r', 7, 'B issue 7');
+      final reloaded = AfkStore(file: file);
+      expect(reloaded.runFor('a/r', 7)!.title, 'A issue 7');
+      expect(reloaded.runFor('b/r', 7)!.title, 'B issue 7');
+      expect(reloaded.allRuns(), hasLength(2));
+    });
+
+    test(
+      'runsFor(repo) lists that repo rows, sorted by issue number',
+      () async {
+        final store = AfkStore(file: file);
+        await store.addRun('o/r', 9, 'Nine');
+        await store.addRun('o/r', 7, 'Seven');
+        await store.addRun('other/r', 1, 'One');
+        final reloaded = AfkStore(file: file);
+        expect(reloaded.runsFor('o/r').map((r) => r.issueNumber).toList(), [
+          7,
+          9,
+        ]);
+        expect(reloaded.runsFor('other/r').map((r) => r.issueNumber).toList(), [
+          1,
+        ]);
+        expect(
+          reloaded.runsFor('a/repo'),
+          isEmpty,
+          reason: 'no rows for a repo with none',
+        );
+      },
+    );
+
+    test('allRuns() lists every repo row, sorted by issue number', () async {
+      final store = AfkStore(file: file);
+      await store.addRun('b/r', 7, 'B7');
+      await store.addRun('a/r', 9, 'A9');
+      await store.addRun('a/r', 7, 'A7');
+      final rows = AfkStore(file: file).allRuns();
+      expect(rows.map((r) => r.issueNumber).toList(), [7, 7, 9]);
+    });
+
+    test('addRun upserts: re-adding (repo, issue) updates its row', () async {
+      final store = AfkStore(file: file);
+      await store.addRun('o/r', 7, 'Old title');
+      await store.addRun('o/r', 7, 'New title');
+      expect(AfkStore(file: file).runFor('o/r', 7)!.title, 'New title');
+      expect(AfkStore(file: file).allRuns(), hasLength(1));
+    });
+
+    test('a corrupt (repo, issue) row reads as absent', () async {
       await file.writeAsString(
         jsonEncode({
-          'afk.run.7': 'not json',
-          'afk.run.9': '{"state":"idle","issueNumber":9,"title":"Nine"}',
+          'afk.run.o/r.7': 'not json',
+          'afk.run.o/r.9': '{"ownerRepo":"o/r","state":"idle","issueNumber":9,"title":"Nine"}',
         }),
       );
       final store = AfkStore(file: file);
-      expect(store.runFor(7), isNull);
-      expect(store.runFor(8), isNull);
-      expect(store.runs().map((run) => run.issueNumber).toList(), [9]);
-    });
-
-    test('addRun upserts: re-adding an issue updates its row', () async {
-      final store = AfkStore(file: file);
-      await store.addRun(7, 'Old title');
-      await store.addRun(7, 'New title');
-      final run = store.runFor(7);
-      expect(run!.title, 'New title');
-      expect(store.runs(), hasLength(1));
-    });
-
-    test('run rows coexist with the session record', () async {
-      final store = AfkStore(file: file);
-      await store.setSessionId('ses_afk_1');
-      await store.addRun(7, 'Add a README');
-      final reloaded = AfkStore(file: file);
-      expect(reloaded.sessionId(), 'ses_afk_1');
-      expect(reloaded.runFor(7)!.issueNumber, 7);
+      expect(store.runFor('o/r', 7), isNull);
+      expect(store.runFor('o/r', 8), isNull);
+      expect(store.allRuns().map((r) => r.issueNumber).toList(), [9]);
     });
   });
 
-  group('the run row grows with the run state (spec #376, T3: the retry '
-      'count, the PR number/URL, the backoff deadline, the narration)', () {
+  group('the run row carries ownerRepo (the run-state fields round-trip)', () {
     test(
-      'updateRun persists the full row; runFor reads every field back',
+      'updateRun persists the full per-repo row; runFor reads every field back',
       () async {
         final store = AfkStore(file: file);
-        await store.addRun(7, 'Add a README');
+        await store.addRun('o/r', 7, 'Add a README');
         await store.updateRun(
           const AfkRun(
+            ownerRepo: 'o/r',
             issueNumber: 7,
             title: 'Add a README',
             state: 'pr-open',
@@ -152,8 +198,8 @@ void main() {
             narrationId: 'IC_1',
           ),
         );
-        final reloaded = AfkStore(file: file);
-        final run = reloaded.runFor(7)!;
+        final run = AfkStore(file: file).runFor('o/r', 7)!;
+        expect(run.ownerRepo, 'o/r');
         expect(run.state, 'pr-open');
         expect(run.retryCount, 0);
         expect(run.prNumber, 41);
@@ -164,181 +210,95 @@ void main() {
       },
     );
 
-    test('the retry fields: the count, the backoff deadline, the '
-        'processed-narration id', () async {
+    test('updateRun keys the row by the run own ownerRepo (a repo mismatch in '
+        'the key and the row would be a bug)', () async {
       final store = AfkStore(file: file);
-      await store.addRun(7, 'Add a README');
+      await store.addRun('o/r', 7, 'Add a README');
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
-          state: 'dispatched',
-          retryCount: 2,
-          retryAt: 1761000000000,
-          narrationId: 'IC_9',
+          state: 'failed',
+          retryCount: 3,
+          lastFailureReason: 'model under load',
         ),
       );
-      final run = AfkStore(file: file).runFor(7)!;
-      expect(run.retryCount, 2);
-      expect(run.retryAt, 1761000000000);
-      expect(run.narrationId, 'IC_9');
-    });
-
-    test('updateRun upserts: the row is replaced wholesale (a cleared PR '
-        'number stays cleared)', () async {
-      final store = AfkStore(file: file);
-      await store.addRun(7, 'Add a README');
-      await store.updateRun(
-        const AfkRun(
-          issueNumber: 7,
-          title: 'Add a README',
-          state: 'pr-open',
-          prNumber: 41,
-        ),
-      );
-      await store.updateRun(
-        const AfkRun(
-          issueNumber: 7,
-          title: 'Add a README',
-          state: 'done',
-          closedUnmerged: true,
-        ),
-      );
-      final run = store.runFor(7)!;
-      expect(run.state, 'done');
-      expect(run.prNumber, isNull);
-      expect(run.closedUnmerged, isTrue);
-    });
-
-    test('a T2-era row (no new fields) reads back with the defaults '
-        '(the store grows without migrating the rows)', () async {
-      await file.writeAsString(
-        jsonEncode({
-          'afk.run.7': '{"state":"idle","issueNumber":7,"title":"A"}',
-        }),
-      );
-      final run = AfkStore(file: file).runFor(7)!;
-      expect(run.state, 'idle');
-      expect(run.retryCount, 0);
-      expect(run.prNumber, isNull);
-      expect(run.prUrl, isNull);
-      expect(run.closedUnmerged, isFalse);
-      expect(run.retryAt, isNull);
-      expect(run.narrationId, isNull);
-    });
-
-    test('a row with a corrupt new field degrades to the default for that '
-        'field (never a throw)', () async {
-      await file.writeAsString(
-        jsonEncode({
-          'afk.run.7': '{"state":"failed","issueNumber":7,"title":"A","retryCount":"lots"}',
-        }),
-      );
-      final run = AfkStore(file: file).runFor(7)!;
+      final run = AfkStore(file: file).runFor('o/r', 7)!;
       expect(run.state, 'failed');
-      expect(run.retryCount, 0);
+      expect(run.retryCount, 3);
+      expect(run.lastFailureReason, 'model under load');
     });
-  });
 
-  group('the run row grows with the failure reason (spec #376, T6: the '
-      'fresh-agent handoff\'s bootstrap lists why a run is retrying)', () {
-    test(
-      'updateRun persists lastFailureReason; runFor reads it back; a row '
-      'without it (a T2/T3-era row) reads back null (tolerant decode)',
-      () async {
-        final store = AfkStore(file: file);
-        await store.addRun(7, 'Add a README');
-        await store.updateRun(
-          const AfkRun(
-            issueNumber: 7,
-            title: 'Add a README',
-            state: 'dispatched',
-            retryCount: 1,
-            lastFailureReason: 'model under load',
-          ),
-        );
-        expect(
-          AfkStore(file: file).runFor(7)!.lastFailureReason,
-          'model under load',
-        );
-
-        // A row written before the field existed (no lastFailureReason key)
-        // reads back null, never a throw.
-        await file.writeAsString(
-          jsonEncode({
-            'afk.run.8': '{"state":"dispatched","issueNumber":8,"title":"B"}',
-          }),
-        );
-        expect(AfkStore(file: file).runFor(8)!.lastFailureReason, isNull);
-      },
-    );
-
-    test(
-      'a wrong-typed lastFailureReason degrades to null (never a throw)',
-      () async {
-        await file.writeAsString(
-          jsonEncode({
-            'afk.run.7': '{"state":"dispatched","issueNumber":7,"title":"A","lastFailureReason":42}',
-          }),
-        );
-        expect(AfkStore(file: file).runFor(7)!.lastFailureReason, isNull);
-      },
-    );
-
-    test('copyWith clears lastFailureReason by an explicit null (the '
-        'unset/cleared distinction)', () {
+    test('copyWith replaces state fields but not the identity', () {
       const run = AfkRun(
+        ownerRepo: 'o/r',
         issueNumber: 7,
-        title: 'Add a README',
-        state: 'dispatched',
-        lastFailureReason: 'model under load',
+        title: 'T',
+        state: 'idle',
       );
-      expect(run.copyWith().lastFailureReason, 'model under load');
-      expect(run.copyWith(lastFailureReason: null).lastFailureReason, isNull);
+      final next = run.copyWith(state: 'dispatched');
+      expect(next.ownerRepo, 'o/r');
+      expect(next.issueNumber, 7);
+      expect(next.title, 'T');
+      expect(next.state, 'dispatched');
     });
   });
 
-  group('the run row grows with the hand-back durability (spec #376, review '
-      'fixup: the terminal failure hand-back is retried until it fully '
-      'lands)', () {
+  group('no migration (the legacy flat keys are ignored, never written back)', () {
     test(
-      'updateRun persists handbackLanded; runFor reads it back; a row '
-      'without it (a pre-fixup row) reads back false (tolerant decode)',
+      'a legacy flat file (afk.sessionId + afk.run.<n>) reads as empty',
       () async {
-        final store = AfkStore(file: file);
-        await store.addRun(7, 'Add a README');
-        await store.updateRun(
-          const AfkRun(
-            issueNumber: 7,
-            title: 'Add a README',
-            state: 'failed',
-            retryCount: 3,
-            handbackLanded: true,
-          ),
-        );
-        expect(AfkStore(file: file).runFor(7)!.handbackLanded, isTrue);
-
-        // A row written before the field existed (no handbackLanded key)
-        // reads back false, never a throw.
         await file.writeAsString(
           jsonEncode({
-            'afk.run.8':
-                '{"state":"failed","issueNumber":8,"title":"B","retryCount":3}',
+            'afk.sessionId': 'ses_legacy',
+            'afk.run.7': '{"state":"idle","issueNumber":7,"title":"Legacy"}',
           }),
         );
-        expect(AfkStore(file: file).runFor(8)!.handbackLanded, isFalse);
+        final store = AfkStore(file: file);
+        // The per-repo accessors never see the legacy flat keys.
+        expect(store.sessionIdFor('o/r'), isNull);
+        expect(store.sessionIdFor('NetAuraTech/OpenCodeBridge'), isNull);
+        expect(store.runFor('o/r', 7), isNull);
+        expect(store.allRuns(), isEmpty);
       },
     );
 
     test(
-      'a wrong-typed handbackLanded degrades to false (never a throw)',
+      'a write drops the legacy flat keys (they are not written back)',
       () async {
+        // A pre-scoping file with the legacy keys.
         await file.writeAsString(
           jsonEncode({
-            'afk.run.7': '{"state":"failed","issueNumber":7,"title":"A","handbackLanded":"yes"}',
+            'afk.sessionId': 'ses_legacy',
+            'afk.run.7': '{"state":"idle","issueNumber":7,"title":"Legacy"}',
           }),
         );
-        expect(AfkStore(file: file).runFor(7)!.handbackLanded, isFalse);
+        // Any per-repo write loads the legacy map and must drop the flat keys.
+        await AfkStore(file: file).addRun('o/r', 9, 'Nine');
+        final reloaded = AfkStore(file: file);
+        final map = reloaded.load();
+        expect(map.containsKey('afk.sessionId'), isFalse);
+        expect(map.containsKey('afk.run.7'), isFalse);
+        // The new per-repo row is present.
+        expect(map.containsKey('afk.run.o/r.9'), isTrue);
+        expect(reloaded.runFor('o/r', 9)!.title, 'Nine');
+        expect(reloaded.allRuns(), hasLength(1));
+      },
+    );
+
+    test(
+      'the legacy flat keys never appear on any read after a fresh write',
+      () async {
+        final store = AfkStore(file: file);
+        await store.setSessionId('o/r', 'ses_1');
+        await store.addRun('o/r', 7, 'A README');
+        final reloaded = AfkStore(file: file);
+        final map = reloaded.load();
+        expect(map.containsKey('afk.sessionId'), isFalse);
+        expect(map.containsKey('afk.run.7'), isFalse);
+        expect(map.containsKey('afk.session.o/r'), isTrue);
+        expect(map.containsKey('afk.run.o/r.7'), isTrue);
       },
     );
   });

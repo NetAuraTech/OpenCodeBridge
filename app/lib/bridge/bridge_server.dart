@@ -15,6 +15,7 @@ import 'afk/afk_ready_gate_poller.dart';
 import 'afk/afk_run_service.dart';
 import 'afk/afk_settings.dart';
 import 'afk/github_reader.dart';
+import 'afk/repo_identity.dart';
 import 'docker/docker_backend.dart';
 import 'events/bridge_event.dart';
 import 'events/composite_event_service.dart';
@@ -603,11 +604,13 @@ class BridgeServer {
         eventHub,
         path: notifyCredential,
         senderFactory: notifySenderFactory,
-        // The AFK session's id, read live (spec #376, T5): the terminal-
-        // failure push's deep-link — resolved at push time, so a (re-)arming
-        // is picked up without a rebuild. `null` (no AFK session stored) ⇒
-        // the failure push is not sent (there is nowhere to go).
-        afkSession: () async => afkComponent.sessionId,
+        // The AFK session's id, read live (spec #376, T5; per repo by
+        // spec #407, T3): the terminal-failure push's deep-link — the event
+        // carries the repo identity, and the resolver reads **that repo's**
+        // stored session at push time, so a (re-)arming is picked up without
+        // a rebuild. `null` (no AFK session stored for the repo) ⇒ the
+        // failure push is not sent (there is nowhere to go).
+        afkSession: BridgeServer._afkSessionResolver(afkComponent),
       );
     }
     final tunnelSupervisor = tunnel;
@@ -625,42 +628,80 @@ class BridgeServer {
     // the orbs + backend exist (issue #260). A test injecting [tasks] keeps
     // its own; the default is built conditionally, then assigned.
     OrbTaskService? taskService = tasks;
-    // The AFK Ready gate's admission poller (spec #376, "The Ready gate and
-    // the feed", T2): the real `gh` reader, the component's run store, and
-    // the unified event hub's emit — the admission events ride the same
-    // fan-out the app's SSE sees. Armed ⇒ the schedule starts via
-    // [updateAfKSettings]; the system is inert when disarmed or when there
-    // is no event hub (no SSE surface for the events).
+    // The AFK Ready gate's admission poller (spec #407, T2, per-project): it
+    // iterates the armed repo identities each pass, admitting each newly ready
+    // issue through that repo's own `gh` reader (built from that repo's
+    // checkout directory). The per-repo checkout directory is resolved from the
+    // project list + [repoIdentityOf] (the first list-order project carrying
+    // that repo identity — the same fact the session's home reads), and is
+    // re-read on each pass (a closed checkout simply drops out until it
+    // reappears; a repo with no resolvable directory is inert for the tick).
+    // The admission events ride the same fan-out the app's SSE sees; the
+    // schedule is driven by [updateAfKSettings] (start when any repo is armed,
+    // stop when none is), and the pass is inert without an event hub (no SSE
+    // surface for the events).
+    //
+    // The per-repo `gh` reader builder the AFK consumers read each repo's
+    // tracker through (spec #407) — [BridgeServer._afkReaderFor], one
+    // [GhGitHubReader] per checkout directory — is shared by the Ready-gate
+    // poller and the run service. The two name only their own repo-set
+    // argument for [BridgeServer._afkRepoDirectories] (the poller: the armed
+    // repos — admission is new work; the run service: the armed repos plus
+    // the repos that still hold rows, so a disarm never strands an in-flight
+    // run).
     final afkPoller = eventHub == null
         ? null
         : AfkReadyGatePoller(
-            reader: GhGitHubReader(),
             store: afkComponent.store,
-            isArmed: () => afkComponent.enabled,
+            armedRepos: () => afkComponent.settings.armedRepos,
+            repoDirectories: () => BridgeServer._afkRepoDirectories(
+              afkComponent.settings.armedRepos,
+              backend,
+            ),
+            readerFor: BridgeServer._afkReaderFor,
             emitEvent: eventHub.emit,
           );
-    // The AFK run service (spec #376, T3): the real `gh` reader, the
-    // component's run store, and the session operations over the composite
-    // backend + component — the run's `afk.pr_open` / `afk.failed` events
-    // ride the same fan-out the app's SSE sees. Its pass runs for the life
-    // of the bridge (in-flight runs must finish through a disarm, user
-    // story #24); the arming gates only its new-work steps. Its startup
-    // reconciliation (T6) reads liveness — the AFK-attributed orbs in flight
-    // (the task service's persisted fact) + the AFK session's active state
-    // (the sessions backend) — through this closure; not the service inbox.
-    // Built only when there is an event hub (no SSE surface otherwise).
+    // The AFK run service (spec #376, T3; **per repo** by spec #407, T4):
+    // the per-repo reader wiring (the same provider/builder pair the
+    // Ready-gate poller rides — each row is read through *its own* repo's
+    // reader, built from that repo's checkout directory: no more bridge-cwd
+    // reads, the #405 incident's class of bug), the component's run store,
+    // and the session operations over the composite backend + component —
+    // the run's `afk.pr_open` / `afk.failed` events (both carrying the row's
+    // repo identity) ride the same fan-out the app's SSE sees. Its pass
+    // runs for the life of the bridge (in-flight runs must finish through a
+    // disarm, user story #24); the arming gates only its new-work steps,
+    // **per the row's repo**. Its startup reconciliation (T6) reads
+    // liveness — the AFK-attributed orbs in flight (the task service's
+    // persisted fact — the host total, any repo's AFK orb keeps a row live)
+    // + the row's repo's AFK session's active state (the sessions backend,
+    // per repo) — through this closure; not the service inbox. Built only
+    // when there is an event hub (no SSE surface otherwise).
     final afkRuns = eventHub == null
         ? null
         : AfkRunService(
-            reader: GhGitHubReader(),
+            // In-flight work of a disarmed repo must keep resolving (spec
+            // #407: a disarm holds everything — the session and the rows
+            // outlive it, the run keeps going): the armed repos **plus** the
+            // repos that still hold rows in the store (the poller's wiring
+            // stays armed-only — admission is new work).
+            repoDirectories: () => BridgeServer._afkRepoDirectories({
+              ...afkComponent.settings.armedRepos,
+              for (final run in afkComponent.store.allRuns()) run.ownerRepo,
+            }, backend),
+            readerFor: BridgeServer._afkReaderFor,
             store: afkComponent.store,
             sessions: CompositeAfkSessions(
               component: afkComponent,
               backend: backend,
             ),
             emitEvent: eventHub.emit,
-            isArmed: () => afkComponent.enabled,
-            liveness: () => _afkLiveness(afkComponent, taskService, backend),
+            // The run service's **per-repo** new-work gate (spec #407, T4):
+            // the row's repo in the live armed set — arming B never feeds
+            // A's idle runs, a disarm of A never strands A's in-flight runs.
+            isArmed: (repo) => afkComponent.isArmed(repo),
+            liveness: (repo) =>
+                _afkLiveness(afkComponent, taskService, backend, repo),
           );
     final bridge = BridgeServer._(
       server,
@@ -716,11 +757,12 @@ class BridgeServer {
         file: File('${homeDirectory()}/.config/opencodebridge/tasks.json'),
         notifyProvider: () => bridge._notify,
         upstreams: orbUpstreams,
-        // The AFK parallel-orbs cap (issue #379, spec #376 T4): the spawn
-        // boundary reads the AFK attribution live — the AFK session id (the
-        // bridge's own persisted fact) and the current cap — so a Settings
-        // change is effective from the next spawn, and a spawn is AFK-attributed
-        // when its caller session is the AFK session.
+        // The AFK parallel-orbs cap (issue #379, reshaped by spec #407 T5):
+        // the spawn boundary reads the AFK attribution live — the set of
+        // AFK session ids (every armed repo's stored session — the bridge's
+        // own persisted facts) and the current cap — so a Settings change is
+        // effective from the next spawn, and a spawn is AFK-attributed when
+        // its caller session is any armed repo's AFK session.
         afkGate: () => afkComponent.spawnGate(),
       );
     }
@@ -805,37 +847,114 @@ class BridgeServer {
     }
   }
 
-  /// The AFK liveness facts (spec #376, T6), read live at reconciliation
-  /// time: the **AFK-attributed orbs in flight** (the task service's
-  /// persisted fact — the creating task's caller session held against the
-  /// AFK store's session id) plus the **AFK session's active state** (the
+  /// The per-repo `gh` reader builder the AFK consumers share (spec #407):
+  /// one [GhGitHubReader] per checkout [directory] — the reader runs every
+  /// `gh` call from the repo's own checkout directory (no more bridge-cwd
+  /// reads, the #405 incident's class of bug). The [repo] is the row's / the
+  /// pass's repo identity (named for the seam's shape); the real reader reads
+  /// the repo's tracker from its [directory]. Shared by the Ready-gate
+  /// poller and the run service (the two AFK consumers of the per-repo
+  /// reader wiring).
+  static GitHubReader _afkReaderFor(String repo, String directory) =>
+      GhGitHubReader(workingDirectory: Directory(directory));
+
+  /// The per-repo checkout directories the AFK consumers read from (spec
+  /// #407, T2): the shared checkout resolution ([resolveRepoDirectories]) over
+  /// the given [repos] identities — for each, the **first list-order project**
+  /// whose checkout resolves to that identity (via [repoIdentityOf], the one
+  /// fact that also pins the session's home), mapped to its canonical
+  /// directory. A repo identity with no matching project (a closed checkout)
+  /// is simply absent from the map — the consumer then leaves that repo's work
+  /// inert for the tick, and the next pass picks it up again once the project
+  /// reappears. `backend == null` (no shared opencode service) means no
+  /// project list, hence no resolvable directories (all repos inert); a failed
+  /// project-list read degrades to the same empty map (no resolvable
+  /// directories this tick, never a throw). The resolution is re-run on each
+  /// pass (the project list is cheap and a checkout can be closed/reopened at
+  /// runtime), so a closed checkout drops out until it returns.
+  ///
+  /// The call sites name their own repo set: the Ready-gate poller resolves
+  /// the armed repos (admission is new work), the run service resolves the
+  /// armed repos **plus** the repos that still hold rows in the store (a
+  /// disarm must not strand the in-flight runs' directories, spec #407).
+  static Future<Map<String, String>> _afkRepoDirectories(
+    Set<String> repos,
+    SessionsBackend? backend,
+  ) async {
+    if (backend == null || repos.isEmpty) return const {};
+    final List<OpencodeProject> projects;
+    try {
+      projects = await backend.service.projects();
+    } catch (_) {
+      return const {}; // No project list: no resolvable directories this tick.
+    }
+    return resolveRepoDirectories(repos, projects);
+  }
+
+  /// The failure push's deep-link resolver (spec #376, T5; per repo by
+  /// spec #407, T3): the closure hands [AfkComponent.sessionIdFor] the repo
+  /// identity carried by the `afk.failed` event's data, so the push
+  /// deep-links the **failed run's repo's** AFK session, read live (a
+  /// (re-)arming is picked up without a rebuild). `null` for the repo ⇒ no
+  /// stored session ⇒ the failure push is not sent (there is nowhere to go).
+  static Future<String?> Function(String repo) _afkSessionResolver(
+    AfkComponent afk,
+  ) =>
+      (repo) => Future<String?>.value(afk.sessionIdFor(repo));
+
+  /// The AFK liveness facts **for [repo]** (spec #376, T6; reshaped by #407
+  /// T5, and **per repo** by #407 T4), read live at reconciliation time:
+  /// the **AFK-attributed orbs in flight** (the task service's persisted
+  /// fact — the creating task's caller session held against the store's
+  /// disarming-stable AFK session ids, the attribution set) plus **the
+  /// repo's AFK session's active state** (the repo's stored id in the
   /// sessions backend's active set). The run service's startup
   /// reconciliation ORs the two ([AfkLiveness.any]); a `dispatched` run is
   /// live while either holds, non-live + no narration + no PR is lost.
   ///
+  /// The two facts have different scopes (spec #407, T4): the orbs-in-flight
+  /// counter is the **host total** across all repos (an AFK-attributed orb
+  /// from **any** repo keeps every row live — the attribution set is global,
+  /// T5), while the session-active fact is **per repo** (the row's repo's
+  /// session active, not any session): a row of repo A is live while A's
+  /// session is active even if B's is inactive, and vice-versa.
+  ///
   /// Not the service inbox (spec #376, T6): the two bridge-side facts only.
-  /// Inert on a failed read (no task service, no backend, no AFK session id):
-  /// the answer degrades to no-liveness (the reconciliation then reads the
-  /// run's narration/PR to decide lost vs. on-its-way), never a throw.
+  /// Inert on a failed read (no task service, no backend, no stored session
+  /// id): the answer degrades to no-liveness (the reconciliation then reads
+  /// the run's narration/PR to decide lost vs. on-its-way), never a throw.
   static Future<AfkLiveness> _afkLiveness(
     AfkComponent afk,
     OrbTaskService? tasks,
     SessionsBackend? backend,
+    String repo,
   ) async {
-    final id = afk.store.sessionId();
-    if (id == null || id.isEmpty) return const AfkLiveness.none();
+    // The AFK session ids (the store's disarming-stable set, spec #407 T5:
+    // a disarm never deletes a stored session id, so a disarmed repo's
+    // in-flight orb still counts until it settles). The orbs-in-flight
+    // counter is held against this global set (the host total — the
+    // attribution set, T5), not against the single repo's id.
+    final ids = afk.store.allSessionIds();
+    if (ids.isEmpty) return const AfkLiveness.none();
     var orbsInFlight = 0;
     if (tasks != null) {
       try {
-        orbsInFlight = tasks.afkOrbsInFlight(id);
+        orbsInFlight = tasks.afkOrbsInFlight(ids);
       } catch (_) {
         orbsInFlight = 0; // A failed read degrades to no orbs in flight.
       }
     }
+    // The session-active fact is per repo: [repo]'s stored id in the
+    // backend's active set (a failed read, or no stored id for the repo,
+    // degrades to inactive — the other repo's active session does not count
+    // for this repo's rows, spec #407 T4).
+    final repoId = afk.store.sessionIdFor(repo);
     var sessionActive = false;
-    if (backend != null) {
+    if (repoId != null && backend != null) {
       try {
-        sessionActive = (await backend.service.activeSessionIds()).contains(id);
+        sessionActive = (await backend.service.activeSessionIds()).contains(
+          repoId,
+        );
       } catch (_) {
         sessionActive = false; // A failed read degrades to inactive.
       }
@@ -863,10 +982,12 @@ class BridgeServer {
     EventHub? hub, {
     String? path,
     Future<FcmSender> Function(FirebaseServiceAccount)? senderFactory,
-    // The AFK session's id, read live (spec #376, T5): the terminal-failure
-    // push's deep-link — the dispatcher resolves it at push time so a
-    // (re-)arming is picked up without a rebuild. `null` ⇒ no AFK session.
-    Future<String?> Function()? afkSession,
+    // A repo's AFK session id, read live (spec #376, T5; per repo by
+    // spec #407, T3): the terminal-failure push's deep-link — the dispatcher
+    // resolves it at push time from the event's repo identity, so a
+    // (re-)arming is picked up without a rebuild. `null` for the repo ⇒ no
+    // AFK session to point at.
+    Future<String?> Function(String repo)? afkSession,
   }) async {
     final account = FirebaseServiceAccount.tryLoad(path: path);
     if (account == null) return (null, null);
@@ -895,8 +1016,8 @@ class BridgeServer {
     // The hub fans the push events out like any other downstream; with no
     // hub there is no event stream and no push to send. The dispatcher maps
     // the AFK run's two "look now" events (spec #376, T5) to the `afkRun`
-    // push kind; the failure push deep-links to the AFK session, resolved
-    // live through [afkSession].
+    // push kind; the failure push deep-links to **the failed repo's** AFK
+    // session (spec #407, T3), resolved live through [afkSession].
     final dispatcher = PushDispatcher(
       service,
       sessionLabel: label,
@@ -942,8 +1063,9 @@ class BridgeServer {
       _events,
       path: path,
       senderFactory: senderFactory,
-      // The failure push's deep-link (spec #376, T5): read live, as at start.
-      afkSession: afk == null ? null : () async => afk.sessionId,
+      // The failure push's deep-link (spec #376, T5; per repo by
+      // spec #407, T3): read live, as at start.
+      afkSession: afk == null ? null : _afkSessionResolver(afk),
     );
     _notify = service;
     _pushDispatcher = newDispatcher;
@@ -954,7 +1076,8 @@ class BridgeServer {
   }
 
   // --------------------------------------------------------------------------
-  // The AFK subsystem's in-process surface (spec #376, T1).
+  // The AFK subsystem's in-process surface (spec #376, T1; per repo by
+  // spec #407, T3).
   //
   // The bridge runs in the app's process in server mode, so the app talks to
   // this surface directly — there is no HTTP endpoint for AFK. The app hands
@@ -962,62 +1085,72 @@ class BridgeServer {
   // change ([updateAfKSettings]); a changed cap is effective from the next
   // orb spawn and a changed model from the next AFK session creation.
   //
-  // [updateAfKSettings] is the whole surface: it holds the values live and,
-  // when the arming toggle is on, ensures the AFK session exists (create or
-  // reuse, idempotent) and stores its id. Arming is therefore idempotent —
-  // startup with the persisted arm reuses the session the service still has,
-  // a re-arm after a disarm reuses it (no duplicate), and a toggle-on creates
-  // it. Disarming (the toggle off) holds the values but leaves the session
-  // alone — it outlives a disarm.
+  // [updateAfKSettings] is the whole surface: it holds the values live and
+  // arms the **newly armed** repos — the diff of the old and new `armedRepos`
+  // sets, so each repo that entered the set gets its session ensured
+  // (create or reuse, idempotent) and its id stored, while the repos that
+  // leave it are left alone (their session and stored id outlive a disarm —
+  // a re-arm reuses them, no duplicate). The in-process handoff shape is
+  // unchanged (one call on startup and on change).
 
   /// The AFK subsystem's live settings (the values the app last handed the
-  /// bridge). The arming toggle, the parallel-orbs cap, and the model.
+  /// bridge). The per-repo arming (the set of armed repo identities), the
+  /// parallel-orbs cap, and the model.
   AfkSettings get afkSettings => _afk?.settings ?? const AfkSettings();
 
   /// The in-process notification the app calls at startup and on every AFK
   /// setting change in Settings: the new values are held live, so the next
   /// orb spawn reads the new cap and the next AFK session creation reads the
-  /// new model (no restart). When the arming toggle is on, the AFK session is
-  /// ensured (create or reuse, idempotent) and its id stored; when it is off
-  /// the values are held and the session is left alone. Returns the session id
-  /// when armed, else `null`. A no-op session-wise when this bridge has no AFK
-  /// component (no shared opencode service).
-  Future<String?> updateAfKSettings(AfkSettings settings) async {
-    _afk?.updateSettings(settings);
-    // The Ready gate's admission poller follows the arming toggle live
-    // (spec #376, T2): start on arm, stop on disarm.
-    _afkPoller?.syncArmed(settings.enabled);
-    // The run service does not follow the toggle live (spec #376, user
+  /// new model (no restart). The **newly armed** repos (those the new
+  /// `armedRepos` set adds over the old one) have their sessions ensured
+  /// (create or reuse, idempotent — the fresh-agent handoff) and their ids
+  /// stored; the repos that leave the set are left alone (the session and
+  /// the stored id outlive a disarm, so a re-arm reuses them — no duplicate).
+  /// A no-op session-wise when this bridge has no AFK component (no shared
+  /// opencode service). Returns the ensured session ids, one per newly armed
+  /// repo in the new set's order (empty when nothing was newly armed, and
+  /// `null` ids where a repo's checkout could not be resolved yet).
+  Future<List<String?>> updateAfKSettings(AfkSettings settings) async {
+    final component = _afk;
+    if (component == null) return const [];
+    // The arming diff: the repos the new set adds over the old one, in the
+    // new set's (persisted) order. Repos that leave the set are left alone —
+    // their session and stored id outlive a disarm.
+    final oldRepos = component.settings.armedRepos;
+    final newlyArmed = settings.armedRepos
+        .where((repo) => !oldRepos.contains(repo))
+        .toList(growable: false);
+    component.updateSettings(settings);
+    // The Ready gate's admission poller follows the arming live (spec #376,
+    // T2; per-repo arming by #407, T1): start when a repo is armed, stop
+    // when none is.
+    _afkPoller?.syncArmed(settings.armedRepos.isNotEmpty);
+    // The run service does not follow the arming live (spec #376, user
     // story #24): its pass runs for the life of the bridge and its
     // new-work steps read the arming live through [isArmed] — a disarm
     // gates new feeds and re-dispatches while the in-flight runs finish to
     // their PR or failure. No destructive stop here.
-    if (!settings.enabled) return null;
-    // The fresh-agent handoff (spec #376, T6): the arming ensures the session
-    // (create or reuse, idempotent). When it was **just created** — a wiped
-    // store's first arm, or a session the service lost (a normal host-service
-    // restart reuses it: ids and full state persist, so `id == before`) — the
-    // run service sends the **bootstrap** feed (the in-flight runs from the
-    // store) so the recreated agent reconciles with the tracker itself. A
-    // reused session sends no bootstrap (no recreation, no re-bootstrap).
-    final before = _afk?.store.sessionId();
-    final id = await ensureAfKSession();
     final runs = _afkRuns;
-    if (id != null && id != before && runs != null) {
-      await runs.bootstrap();
+    final ids = <String?>[];
+    for (final repo in newlyArmed) {
+      // The fresh-agent handoff, per repo (spec #376, T6; scoped by
+      // spec #407, T3): the arming ensures the repo's session (create or
+      // reuse, idempotent). When it was **just created** — a wiped store's
+      // first arm of the repo, or a session the service lost (a normal
+      // host-service restart reuses the stored id: `id == before`) — the
+      // run service sends **the repo's** bootstrap feed (that repo's
+      // in-flight runs from the store) so the recreated agent reconciles
+      // with its own tracker. A reused session sends no bootstrap (no
+      // recreation, no re-bootstrap).
+      final before = component.store.sessionIdFor(repo);
+      final id = await component.ensureSession(repo);
+      if (id != null && id != before && runs != null) {
+        await runs.bootstrap(repo);
+      }
+      ids.add(id);
     }
-    return id;
+    return ids;
   }
-
-  /// Ensure the AFK session exists and return its id (the arming action):
-  /// create it in the main checkout (model pinned from the `afkModel` setting,
-  /// empty = the service's default, agent `afk`, visible — never archived) or
-  /// reuse the stored one when the service still has it, and store its id.
-  /// Idempotent. Returns `null` when this bridge has no AFK component (no
-  /// shared opencode service) or the main checkout cannot be resolved yet
-  /// (safe to retry once it is).
-  Future<String?> ensureAfKSession() =>
-      _afk?.ensureSession() ?? Future<String?>.value(null);
 
   /// Where the bridge listens, e.g. `http://127.0.0.1:48201/`.
   Uri get baseUri =>

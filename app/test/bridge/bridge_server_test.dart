@@ -3725,6 +3725,9 @@ void main() {
         bridgeEvent(
           type: BridgeEventType.afkFailed,
           data: {
+            // The repo identity (spec #407, T3): the failure push's deep-link
+            // resolves the failed repo's stored AFK session from this.
+            'repo': 'o/r',
             'issueNumber': 7,
             'title': 'Add a README',
             'reason': 'model under load',
@@ -3760,9 +3763,12 @@ void main() {
         afk: afk,
       );
       base = server.baseUri;
-      // The AFK session is armed (a stored id): the failure push has a
-      // session to point at.
-      await afkStore.setSessionId('ses_afk');
+      // The AFK session is armed (a repo armed, its id stored): the failure
+      // push has a session to point at.
+      afk.updateSettings(
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 5, model: ''),
+      );
+      await afkStore.setSessionId('o/r', 'ses_afk');
     });
 
     tearDown(() async {
@@ -3861,9 +3867,9 @@ void main() {
       expect(sender.sent, hasLength(1));
       expect(sender.links.single, 'https://github.com/o/r/pull/41');
 
-      // Clear the stored AFK session (the system is not armed / has no
+      // Clear the stored AFK session (the repo is still armed but has no
       // session): the failure push has nowhere to point, so it is not sent.
-      await afkStore.setSessionId(null);
+      await afkStore.setSessionId('o/r', null);
       sender.sent.clear();
       hub.emit(
         bridgeEvent(
@@ -4013,7 +4019,15 @@ void main() {
         service: service,
         orderStore: _InMemoryOrderStore(),
       );
-      final component = AfkComponent(backend: backend, store: store);
+      // The repo's checkout is injected (the identity-based default
+      // resolution — the first list-order project whose repo identity
+      // equals the repo — is covered by the component tests against real
+      // git checkouts; this bridge test focuses on the handoff wiring).
+      final component = AfkComponent(
+        backend: backend,
+        store: store,
+        directoryOf: (_, _) async => dir.path,
+      );
       final hub = EventHub(service: _FakeEventUpstream());
       server = await BridgeServer.start(
         port: 0,
@@ -4030,6 +4044,7 @@ void main() {
       // reconciliation ran on the empty store, so no GitHub read here).
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
@@ -4037,9 +4052,11 @@ void main() {
           lastFailureReason: 'model under load',
         ),
       );
-      final id = await server.updateAfKSettings(
-        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+      final ids = await server.updateAfKSettings(
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 5, model: ''),
       );
+      expect(ids, hasLength(1), reason: 'the newly armed repo is ensured');
+      final id = ids.single;
       expect(id, 'ses_afk_1', reason: 'a fresh session is created');
       expect(service.createdCount, 1, reason: 'the agent is recreated');
       // The first feed is the bootstrap (the in-flight runs from the store),
@@ -4066,12 +4083,16 @@ void main() {
       store = AfkStore(file: File('${dir.path}/afk.json'));
       service = _AfkHandoffService(dir.path);
       service.present.add('ses_persisted');
-      await store.setSessionId('ses_persisted');
+      await store.setSessionId('o/r', 'ses_persisted');
       final backend = SessionsBackend(
         service: service,
         orderStore: _InMemoryOrderStore(),
       );
-      final component = AfkComponent(backend: backend, store: store);
+      final component = AfkComponent(
+        backend: backend,
+        store: store,
+        directoryOf: (_, _) async => dir.path,
+      );
       final hub = EventHub(service: _FakeEventUpstream());
       server = await BridgeServer.start(
         port: 0,
@@ -4083,17 +4104,82 @@ void main() {
       // store with no run rows).
       await store.updateRun(
         const AfkRun(
+          ownerRepo: 'o/r',
           issueNumber: 7,
           title: 'Add a README',
           state: 'dispatched',
         ),
       );
-      final id = await server.updateAfKSettings(
-        const AfkSettings(enabled: true, parallelOrbs: 5, model: ''),
+      final ids = await server.updateAfKSettings(
+        const AfkSettings(armedRepos: {'o/r'}, parallelOrbs: 5, model: ''),
       );
-      expect(id, 'ses_persisted', reason: 'the stored session is reused');
+      expect(
+        ids.single,
+        'ses_persisted',
+        reason: 'the stored session is reused',
+      );
       expect(service.createdCount, 0, reason: 'no new session is created');
       expect(service.prompts, isEmpty, reason: 'no re-bootstrap on reuse');
+    });
+
+    test('arming repo A bootstraps only A in-flight runs (a run of B never '
+        'appears in A bootstrap, spec #407, AC3)', () async {
+      await build();
+      // In-flight runs in two repos (seeded after start: the startup
+      // reconciliation ran on the empty store).
+      await store.updateRun(
+        const AfkRun(
+          ownerRepo: 'o/a',
+          issueNumber: 7,
+          title: 'A run',
+          state: 'dispatched',
+        ),
+      );
+      await store.updateRun(
+        const AfkRun(
+          ownerRepo: 'o/b',
+          issueNumber: 55,
+          title: 'B run',
+          state: 'dispatched',
+        ),
+      );
+      // Arm only o/a: its session is created and bootstrapped with o/a runs.
+      final ids = await server.updateAfKSettings(
+        const AfkSettings(armedRepos: {'o/a'}, parallelOrbs: 5, model: ''),
+      );
+      expect(ids, hasLength(1), reason: 'only o/a is newly armed');
+      expect(service.createdCount, 1, reason: 'only o/a session is created');
+      // The bootstrap goes to o/a session and lists only o/a runs (never
+      // o/b).
+      expect(service.prompts, hasLength(1));
+      expect(service.prompts.single.$1, ids.single);
+      expect(
+        service.prompts.single.$2,
+        contains('#7'),
+        reason: 'o/a run is in the bootstrap',
+      );
+      expect(
+        service.prompts.single.$2,
+        isNot(contains('#55')),
+        reason: 'a run of another repo never appears',
+      );
+      // Arming o/b later creates o/b session and bootstraps o/b runs only.
+      final more = await server.updateAfKSettings(
+        const AfkSettings(
+          armedRepos: {'o/a', 'o/b'},
+          parallelOrbs: 5,
+          model: '',
+        ),
+      );
+      expect(more, hasLength(1), reason: 'only o/b is newly armed (o/a was)');
+      expect(service.createdCount, 2);
+      expect(service.prompts, hasLength(2));
+      expect(
+        service.prompts[1].$2,
+        contains('#55'),
+        reason: 'o/b run is in o/b bootstrap',
+      );
+      expect(service.prompts[1].$2, isNot(contains('#7')));
     });
   });
 }

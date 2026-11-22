@@ -144,9 +144,29 @@ abstract class GitHubReader {
 }
 
 /// The real [GitHubReader]: `gh` shells out — `gh issue list` / `gh issue
-/// view`, the bridge's existing `gh` pattern ([Process.run], utf8), in the
-/// bridge process's cwd, like the bridge's other `gh` calls.
+/// view`, the bridge's existing `gh` pattern ([Process.run], utf8).
+///
+/// It runs every `gh` call **from its working directory** ([workingDirectory],
+/// required): the reader reads one specific checkout's tracker, and the
+/// directory is what pins it there — no reliance on the app process's implicit
+/// cwd (the #405 incident's root cause: the reader read the app's cwd while the
+/// session lived in another project, so the two "which repo" resolutions
+/// diverged). The directory is an implementation detail of this class — the
+/// [GitHubReader] interface is unchanged. The bridge builds one reader per
+/// armed project, from that project's checkout directory.
 class GhGitHubReader implements GitHubReader {
+  GhGitHubReader({required this.workingDirectory, this.ghBinary = 'gh'});
+
+  /// The checkout directory every `gh` call runs from (the reader's repo's
+  /// project directory) — required: a reader without a directory has no repo
+  /// to read.
+  final Directory workingDirectory;
+
+  /// The `gh` executable (default: `gh` on `PATH`). Injected in tests, which
+  /// point it at a fake recording the invocation's working directory — the
+  /// seam that proves the reader's directory reaches the `gh` subprocess.
+  final String ghBinary;
+
   /// The gate's entry label, passed as `gh issue list --label`.
   static const String readyLabel = 'ready-for-agent';
 
@@ -158,7 +178,7 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<List<ReadyIssue>> listReadyIssues() async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       [
         'issue',
         'list',
@@ -171,6 +191,7 @@ class GhGitHubReader implements GitHubReader {
         '--limit',
         '$listLimit',
       ],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
@@ -203,8 +224,9 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<String> readIssueState(int issueNumber) async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       ['issue', 'view', '$issueNumber', '--json', 'state'],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
@@ -223,8 +245,9 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<IssueComment?> readLastComment(int issueNumber) async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       ['issue', 'view', '$issueNumber', '--json', 'comments'],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
@@ -274,8 +297,9 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<bool> hasLabel(int issueNumber, String label) async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       ['issue', 'view', '$issueNumber', '--json', 'labels'],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
@@ -298,8 +322,9 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<PrInfo?> readPr(int prNumber) async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       ['pr', 'view', '$prNumber', '--json', 'number,url,state'],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
@@ -321,8 +346,9 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<void> addLabel(int issueNumber, String label) async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       ['issue', 'edit', '$issueNumber', '--add-label', label],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
@@ -334,8 +360,9 @@ class GhGitHubReader implements GitHubReader {
   @override
   Future<void> addComment(int issueNumber, String body) async {
     final result = await Process.run(
-      'gh',
+      ghBinary,
       ['issue', 'comment', '$issueNumber', '--body', body],
+      workingDirectory: workingDirectory.path,
       stdoutEncoding: utf8,
       stderrEncoding: utf8,
     );
