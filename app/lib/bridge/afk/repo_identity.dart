@@ -19,6 +19,8 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
+import '../sessions/opencode_service.dart';
+
 /// The remote the identity is read from: a project tracks its repo on
 /// `origin`, and only `origin` counts (another remote is not the project's
 /// tracker).
@@ -79,4 +81,38 @@ Future<String?> repoIdentityOf(Directory dir) async {
   );
   if (result.exitCode != 0) return null;
   return parseRepoIdentity((result.stdout as String).trim());
+}
+
+/// The shared checkout resolution (spec #407, the review fixups): the one
+/// fact that maps a repo identity to its checkout directory — the **first
+/// list-order** [projects] project whose canonical directory resolves to
+/// that identity through [repoIdentityOf] (a project with an empty canonical
+/// directory, or a checkout whose identity does not resolve — no `origin`
+/// remote — is skipped; two checkouts of the same repo share one identity
+/// and one home, and the first of them in list order wins). Returns the
+/// resolved identities → their canonical directory; a requested identity
+/// with no matching project is simply absent from the map.
+///
+/// The two bridge-side consumers of this fact ride it (the Ready-gate
+/// poller's per-repo admission, and the AFK component's session-home
+/// resolution) — the same loop, one home. A failed git read of a project's
+/// identity degrades to "no identity" (skipped), never a throw; it is the
+/// caller that decides what a failed *project list* read means (the poller
+/// degrades to no directories, the component lets it propagate).
+Future<Map<String, String>> resolveRepoDirectories(
+  Set<String> repos,
+  List<OpencodeProject> projects,
+) async {
+  final out = <String, String>{};
+  for (final repo in repos) {
+    for (final project in projects) {
+      if (project.canonical.isEmpty) continue;
+      final identity = await repoIdentityOf(Directory(project.canonical));
+      if (identity != null && identity == repo) {
+        out[repo] = project.canonical;
+        break; // The first list-order project carrying this identity.
+      }
+    }
+  }
+  return out;
 }

@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'afk_session_manager.dart';
 import 'afk_settings.dart';
 import 'afk_spawn_gate.dart';
@@ -170,26 +168,27 @@ class AfkComponent {
   }
 
   /// The default session-directory resolution (spec #407, T1's directory
-  /// resolution scoped to the repo): the **first list-order project** whose
-  /// resolved repo identity equals [repo] — two checkouts of the same repo
-  /// share one identity and one session, and the session lands in the first
-  /// of them (deterministic). A project whose identity does not resolve (no
-  /// `origin` remote) is skipped.
+  /// resolution scoped to the repo): the shared checkout resolution
+  /// ([resolveRepoDirectories]) over the single [repo] identity — the
+  /// **first list-order project** whose resolved repo identity equals [repo]
+  /// (two checkouts of the same repo share one identity and one session, and
+  /// the session lands in the first of them, deterministic; a project whose
+  /// identity does not resolve — no `origin` remote — is skipped).
   ///
   /// Throws [_NoCheckout] when no list-order project carries the identity:
   /// the repo has nowhere to put its session yet — the caller treats it as
-  /// "not ready" (safe to retry).
+  /// "not ready" (safe to retry). A failed project-list read propagates
+  /// (the bridge's poller degrades its own to an empty map; this site does
+  /// not — the caller handles a failed create-or-reuse as "not ready").
   static Future<String> _defaultDirectoryOf(
     SessionsBackend backend,
     String repo,
   ) async {
     final projects = await backend.service.projects();
-    for (final project in projects) {
-      if (project.canonical.isEmpty) continue;
-      final identity = await repoIdentityOf(Directory(project.canonical));
-      if (identity == repo) return project.canonical;
-    }
-    throw const _NoCheckout();
+    final resolved = await resolveRepoDirectories({repo}, projects);
+    final directory = resolved[repo];
+    if (directory == null) throw const _NoCheckout();
+    return directory;
   }
 }
 
