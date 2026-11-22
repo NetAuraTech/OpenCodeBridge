@@ -653,39 +653,43 @@ class BridgeServer {
                 GhGitHubReader(workingDirectory: Directory(directory)),
             emitEvent: eventHub.emit,
           );
-    // The AFK run service (spec #376, T3): the real `gh` reader, the
-    // component's run store, and the session operations over the composite
-    // backend + component — the run's `afk.pr_open` / `afk.failed` events
-    // ride the same fan-out the app's SSE sees. Its pass runs for the life
-    // of the bridge (in-flight runs must finish through a disarm, user
-    // story #24); the arming gates only its new-work steps. Its startup
-    // reconciliation (T6) reads liveness — the AFK-attributed orbs in flight
-    // (the task service's persisted fact) + the AFK session's active state
-    // (the sessions backend) — through this closure; not the service inbox.
-    // Built only when there is an event hub (no SSE surface otherwise).
-    //
-    // The reader's working directory: the reader now requires one (spec #407,
-    // T2 — no more implicit app-cwd), but per-repo routing (each row read
-    // through *its own* repo's reader) is T4's work. Until then the run
-    // service keeps its single reader on the bridge process's cwd — exactly
-    // the pre-T2 behavior, so nothing about the run service's reads changes
-    // here (T4 will replace this with the per-repo reader from the row's own
-    // repo directory).
+    // The AFK run service (spec #376, T3; **per repo** by spec #407, T4):
+    // the per-repo reader wiring (the same provider/builder pair the
+    // Ready-gate poller rides — each row is read through *its own* repo's
+    // reader, built from that repo's checkout directory: no more bridge-cwd
+    // reads, the #405 incident's class of bug), the component's run store,
+    // and the session operations over the composite backend + component —
+    // the run's `afk.pr_open` / `afk.failed` events (both carrying the row's
+    // repo identity) ride the same fan-out the app's SSE sees. Its pass
+    // runs for the life of the bridge (in-flight runs must finish through a
+    // disarm, user story #24); the arming gates only its new-work steps,
+    // **per the row's repo**. Its startup reconciliation (T6) reads
+    // liveness — the AFK-attributed orbs in flight (the task service's
+    // persisted fact — the host total, any repo's AFK orb keeps a row live)
+    // + the row's repo's AFK session's active state (the sessions backend,
+    // per repo) — through this closure; not the service inbox. Built only
+    // when there is an event hub (no SSE surface otherwise).
     final afkRuns = eventHub == null
         ? null
         : AfkRunService(
-            reader: GhGitHubReader(workingDirectory: Directory.current),
+            repoDirectories: () => BridgeServer._afkRepoDirectories(
+              afkComponent.settings.armedRepos,
+              backend,
+            ),
+            readerFor: (repo, directory) =>
+                GhGitHubReader(workingDirectory: Directory(directory)),
             store: afkComponent.store,
             sessions: CompositeAfkSessions(
               component: afkComponent,
               backend: backend,
             ),
             emitEvent: eventHub.emit,
-            // The run service's global new-work gate (the per-repo isArmed
-            // lands in T4, which owns the run service's per-repo routing):
-            // true while any repo is armed.
-            isArmed: () => afkComponent.settings.armedRepos.isNotEmpty,
-            liveness: () => _afkLiveness(afkComponent, taskService, backend),
+            // The run service's **per-repo** new-work gate (spec #407, T4):
+            // the row's repo in the live armed set — arming B never feeds
+            // A's idle runs, a disarm of A never strands A's in-flight runs.
+            isArmed: (repo) => afkComponent.isArmed(repo),
+            liveness: (repo) =>
+                _afkLiveness(afkComponent, taskService, backend, repo),
           );
     final bridge = BridgeServer._(
       server,
@@ -879,29 +883,38 @@ class BridgeServer {
   ) =>
       (repo) => Future<String?>.value(afk.sessionIdFor(repo));
 
-  /// The AFK liveness facts (spec #376, T6; reshaped by #407 T5), read live
-  /// at reconciliation time: the **AFK-attributed orbs in flight** (the task
-  /// service's persisted fact — the creating task's caller session held
-  /// against the armed repos' AFK session ids, the attribution set) plus
-  /// the **AFK session's active state** (the sessions backend's active set).
-  /// The run service's startup reconciliation ORs the two
-  /// ([AfkLiveness.any]); a `dispatched` run is live while either holds,
-  /// non-live + no narration + no PR is lost.
+  /// The AFK liveness facts **for [repo]** (spec #376, T6; reshaped by #407
+  /// T5, and **per repo** by #407 T4), read live at reconciliation time:
+  /// the **AFK-attributed orbs in flight** (the task service's persisted
+  /// fact — the creating task's caller session held against the store's
+  /// disarming-stable AFK session ids, the attribution set) plus **the
+  /// repo's AFK session's active state** (the repo's stored id in the
+  /// sessions backend's active set). The run service's startup
+  /// reconciliation ORs the two ([AfkLiveness.any]); a `dispatched` run is
+  /// live while either holds, non-live + no narration + no PR is lost.
+  ///
+  /// The two facts have different scopes (spec #407, T4): the orbs-in-flight
+  /// counter is the **host total** across all repos (an AFK-attributed orb
+  /// from **any** repo keeps every row live — the attribution set is global,
+  /// T5), while the session-active fact is **per repo** (the row's repo's
+  /// session active, not any session): a row of repo A is live while A's
+  /// session is active even if B's is inactive, and vice-versa.
   ///
   /// Not the service inbox (spec #376, T6): the two bridge-side facts only.
-  /// Inert on a failed read (no task service, no backend, no armed repo's
-  /// stored session id): the answer degrades to no-liveness (the
-  /// reconciliation then reads the run's narration/PR to decide lost vs.
-  /// on-its-way), never a throw.
+  /// Inert on a failed read (no task service, no backend, no stored session
+  /// id): the answer degrades to no-liveness (the reconciliation then reads
+  /// the run's narration/PR to decide lost vs. on-its-way), never a throw.
   static Future<AfkLiveness> _afkLiveness(
     AfkComponent afk,
     OrbTaskService? tasks,
     SessionsBackend? backend,
+    String repo,
   ) async {
     // The AFK session ids (the store's disarming-stable set, spec #407 T5:
     // a disarm never deletes a stored session id, so a disarmed repo's
-    // in-flight orb still counts until it settles). The per-repo liveness
-    // lands with the per-repo run service in T4.
+    // in-flight orb still counts until it settles). The orbs-in-flight
+    // counter is held against this global set (the host total — the
+    // attribution set, T5), not against the single repo's id.
     final ids = afk.store.allSessionIds();
     if (ids.isEmpty) return const AfkLiveness.none();
     var orbsInFlight = 0;
@@ -912,11 +925,16 @@ class BridgeServer {
         orbsInFlight = 0; // A failed read degrades to no orbs in flight.
       }
     }
+    // The session-active fact is per repo: [repo]'s stored id in the
+    // backend's active set (a failed read, or no stored id for the repo,
+    // degrades to inactive — the other repo's active session does not count
+    // for this repo's rows, spec #407 T4).
+    final repoId = afk.store.sessionIdFor(repo);
     var sessionActive = false;
-    if (backend != null) {
+    if (repoId != null && backend != null) {
       try {
-        sessionActive = (await backend.service.activeSessionIds()).any(
-          ids.contains,
+        sessionActive = (await backend.service.activeSessionIds()).contains(
+          repoId,
         );
       } catch (_) {
         sessionActive = false; // A failed read degrades to inactive.
