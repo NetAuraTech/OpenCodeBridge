@@ -18,8 +18,8 @@ import '../../model/command.dart';
 /// checkouts of the same repo share one identity and thus one armed state.
 /// [armedRepos] is an [LinkedHashSet] (const-constructible) that preserves
 /// the persisted order, so the consumers that iterate it (the spawn gate's
-/// session-id set, the arming diff, [firstArmedRepo]) see a deterministic
-/// order (the persisted order, first list-order first).
+/// session-id set, the arming diff) see a deterministic order (the persisted
+/// order, first list-order first).
 class AfkSettings {
   const AfkSettings({
     this.armedRepos = const {},
@@ -42,14 +42,6 @@ class AfkSettings {
   /// The armed repo identities (`owner/repo`), in persisted order. Empty is
   /// the inert state — no armed repo means no AFK work at all.
   final Set<String> armedRepos;
-
-  /// The first armed repo in list order, or `null` when none is armed (spec
-  /// #407). The **transitional single anchor**: the per-project poller
-  /// (T2) and the run service's liveness (T4) still read the arming through
-  /// this one repo until they are reshaped per repo — the session layer
-  /// (T3: the session port, the spawn gate, the failure-push deep-link) is
-  /// already per repo. Deterministic (first list-order armed repo).
-  String? get firstArmedRepo => armedRepos.isEmpty ? null : armedRepos.first;
 
   /// How many AFK orbs may run in parallel (1–10). Effective from the next
   /// orb spawn (enforced at the spawn boundary by a later ticket).

@@ -183,19 +183,20 @@ class PushDispatcher implements EventConnection {
   /// decision is wanted. The deep-link is the **failed run's repo's AFK
   /// session** (in-app), so the human reads that agent's `FAILED` narration
   /// in place. The repo identity comes from the event's data (spec #407: the
-  /// `afk.failed` event gains the repo — emitted by the run service, T4);
-  /// while the events are not yet repo-scoped the bridge's resolver falls
-  /// back to a stored session so the push stands. No push without an AFK
-  /// session to point at (not armed / no shared service): there is nowhere
-  /// for the human to go.
+  /// `afk.failed` event is repo-scoped — emitted by the run service with the
+  /// row's repo, T4); the resolver is handed that repo and answers the
+  /// repo's stored AFK session id, read live at push time. No push without an
+  /// AFK session to point at — the repo-less event (a repo the bridge has no
+  /// stored session for) resolves to `null` ⇒ no push (there is nowhere for
+  /// the human to go, spec #407: "no session for that repo ⇒ no push").
   Future<void> _afkFailed(BridgeEvent event) async {
     final issue = _afkIssue(event);
     if (issue == null) return;
     final resolver = afkSession;
     if (resolver == null) return;
-    // The event's repo identity (spec #407, T4's events); a repo-less event
-    // (not yet repo-scoped) names no repo, and the resolver answers for its
-    // own fallback repo.
+    // The event's repo identity (spec #407, T4's repo-scoped events); a
+    // repo-less event (an empty repo) names no repo, and the resolver
+    // answers no session for it — `null` ⇒ no push.
     final repo = event.data['repo'];
     String? sessionId;
     try {

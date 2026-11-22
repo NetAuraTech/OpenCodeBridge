@@ -610,7 +610,7 @@ class BridgeServer {
         // stored session at push time, so a (re-)arming is picked up without
         // a rebuild. `null` (no AFK session stored for the repo) ⇒ the
         // failure push is not sent (there is nowhere to go).
-        afkSession: (repo) async => afkComponent.sessionIdFor(repo),
+        afkSession: BridgeServer._afkSessionResolver(afkComponent),
       );
     }
     final tunnelSupervisor = tunnel;
@@ -640,6 +640,15 @@ class BridgeServer {
     // schedule is driven by [updateAfKSettings] (start when any repo is armed,
     // stop when none is), and the pass is inert without an event hub (no SSE
     // surface for the events).
+    //
+    // The per-repo `gh` reader builder the AFK consumers read each repo's
+    // tracker through (spec #407) — [BridgeServer._afkReaderFor], one
+    // [GhGitHubReader] per checkout directory — is shared by the Ready-gate
+    // poller and the run service. The two name only their own repo-set
+    // argument for [BridgeServer._afkRepoDirectories] (the poller: the armed
+    // repos — admission is new work; the run service: the armed repos plus
+    // the repos that still hold rows, so a disarm never strands an in-flight
+    // run).
     final afkPoller = eventHub == null
         ? null
         : AfkReadyGatePoller(
@@ -649,8 +658,7 @@ class BridgeServer {
               afkComponent.settings.armedRepos,
               backend,
             ),
-            readerFor: (repo, directory) =>
-                GhGitHubReader(workingDirectory: Directory(directory)),
+            readerFor: BridgeServer._afkReaderFor,
             emitEvent: eventHub.emit,
           );
     // The AFK run service (spec #376, T3; **per repo** by spec #407, T4):
@@ -672,12 +680,16 @@ class BridgeServer {
     final afkRuns = eventHub == null
         ? null
         : AfkRunService(
-            repoDirectories: () => BridgeServer._afkRepoDirectories(
-              afkComponent.settings.armedRepos,
-              backend,
-            ),
-            readerFor: (repo, directory) =>
-                GhGitHubReader(workingDirectory: Directory(directory)),
+            // In-flight work of a disarmed repo must keep resolving (spec
+            // #407: a disarm holds everything — the session and the rows
+            // outlive it, the run keeps going): the armed repos **plus** the
+            // repos that still hold rows in the store (the poller's wiring
+            // stays armed-only — admission is new work).
+            repoDirectories: () => BridgeServer._afkRepoDirectories({
+              ...afkComponent.settings.armedRepos,
+              for (final run in afkComponent.store.allRuns()) run.ownerRepo,
+            }, backend),
+            readerFor: BridgeServer._afkReaderFor,
             store: afkComponent.store,
             sessions: CompositeAfkSessions(
               component: afkComponent,
@@ -835,41 +847,48 @@ class BridgeServer {
     }
   }
 
-  /// The per-repo checkout directories the Ready-gate poller reads from (spec
-  /// #407, T2): for each [armedRepos] identity, the **first list-order
-  /// project** whose checkout resolves to that identity (via [repoIdentityOf],
-  /// the one fact that also pins the session's home), mapped to its canonical
+  /// The per-repo `gh` reader builder the AFK consumers share (spec #407):
+  /// one [GhGitHubReader] per checkout [directory] — the reader runs every
+  /// `gh` call from the repo's own checkout directory (no more bridge-cwd
+  /// reads, the #405 incident's class of bug). The [repo] is the row's / the
+  /// pass's repo identity (named for the seam's shape); the real reader reads
+  /// the repo's tracker from its [directory]. Shared by the Ready-gate
+  /// poller and the run service (the two AFK consumers of the per-repo
+  /// reader wiring).
+  static GitHubReader _afkReaderFor(String repo, String directory) =>
+      GhGitHubReader(workingDirectory: Directory(directory));
+
+  /// The per-repo checkout directories the AFK consumers read from (spec
+  /// #407, T2): the shared checkout resolution ([resolveRepoDirectories]) over
+  /// the given [repos] identities — for each, the **first list-order project**
+  /// whose checkout resolves to that identity (via [repoIdentityOf], the one
+  /// fact that also pins the session's home), mapped to its canonical
   /// directory. A repo identity with no matching project (a closed checkout)
-  /// is simply absent from the map — the poller then leaves that repo's poll
+  /// is simply absent from the map — the consumer then leaves that repo's work
   /// inert for the tick, and the next pass picks it up again once the project
   /// reappears. `backend == null` (no shared opencode service) means no
-  /// project list, hence no resolvable directories (all repos inert). The
-  /// resolution is re-run on each armed pass (the project list is cheap and a
-  /// checkout can be closed/reopened at runtime), so a closed checkout drops
-  /// out until it returns.
+  /// project list, hence no resolvable directories (all repos inert); a failed
+  /// project-list read degrades to the same empty map (no resolvable
+  /// directories this tick, never a throw). The resolution is re-run on each
+  /// pass (the project list is cheap and a checkout can be closed/reopened at
+  /// runtime), so a closed checkout drops out until it returns.
+  ///
+  /// The call sites name their own repo set: the Ready-gate poller resolves
+  /// the armed repos (admission is new work), the run service resolves the
+  /// armed repos **plus** the repos that still hold rows in the store (a
+  /// disarm must not strand the in-flight runs' directories, spec #407).
   static Future<Map<String, String>> _afkRepoDirectories(
-    Set<String> armedRepos,
+    Set<String> repos,
     SessionsBackend? backend,
   ) async {
-    if (backend == null || armedRepos.isEmpty) return const {};
+    if (backend == null || repos.isEmpty) return const {};
     final List<OpencodeProject> projects;
     try {
       projects = await backend.service.projects();
     } catch (_) {
       return const {}; // No project list: no resolvable directories this tick.
     }
-    final out = <String, String>{};
-    for (final repo in armedRepos) {
-      for (final project in projects) {
-        if (project.canonical.isEmpty) continue;
-        final identity = await repoIdentityOf(Directory(project.canonical));
-        if (identity != null && identity == repo) {
-          out[repo] = project.canonical;
-          break; // The first list-order project carrying this identity.
-        }
-      }
-    }
-    return out;
+    return resolveRepoDirectories(repos, projects);
   }
 
   /// The failure push's deep-link resolver (spec #376, T5; per repo by
