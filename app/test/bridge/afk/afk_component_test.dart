@@ -122,7 +122,7 @@ void main() {
     final component = AfkComponent(
       backend: backend,
       store: AfkStore(file: storeFile),
-      directoryOf: (_, __) async => directory,
+      directoryOf: (_, _) async => directory,
     );
     component.updateSettings(
       AfkSettings(armedRepos: repos ?? const {}, parallelOrbs: 5, model: model),
@@ -411,7 +411,7 @@ void main() {
         final component = AfkComponent(
           backend: null,
           store: AfkStore(file: storeFile),
-          directoryOf: (_, __) async => '/main-checkout',
+          directoryOf: (_, _) async => '/main-checkout',
         );
         // Armed, but with no backend there is no host to create the session on.
         component.updateSettings(const AfkSettings(armedRepos: {'o/r'}));

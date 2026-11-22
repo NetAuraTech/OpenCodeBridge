@@ -4026,7 +4026,7 @@ void main() {
       final component = AfkComponent(
         backend: backend,
         store: store,
-        directoryOf: (_, __) async => dir.path,
+        directoryOf: (_, _) async => dir.path,
       );
       final hub = EventHub(service: _FakeEventUpstream());
       server = await BridgeServer.start(
@@ -4091,7 +4091,7 @@ void main() {
       final component = AfkComponent(
         backend: backend,
         store: store,
-        directoryOf: (_, __) async => dir.path,
+        directoryOf: (_, _) async => dir.path,
       );
       final hub = EventHub(service: _FakeEventUpstream());
       server = await BridgeServer.start(
