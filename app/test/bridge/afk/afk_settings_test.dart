@@ -8,7 +8,6 @@ void main() {
         'inert)', () {
       const settings = AfkSettings();
       expect(settings.armedRepos, isEmpty);
-      expect(settings.firstArmedRepo, isNull);
       expect(settings.parallelOrbs, 5);
       expect(settings.model, '');
     });
@@ -18,10 +17,12 @@ void main() {
       expect(AfkSettings.maxParallelOrbs, 10);
     });
 
-    test('the arming set is order-preserving (firstArmedRepo is the first '
-        'listed)', () {
+    test('the arming set is order-preserving (the persisted order, first '
+        'list-order first)', () {
       const settings = AfkSettings(armedRepos: {'b/repo', 'a/repo'});
-      expect(settings.firstArmedRepo, 'b/repo');
+      // The set's iteration order is the persisted order: the first armed
+      // repo is the list's first element.
+      expect(settings.armedRepos.first, 'b/repo');
       expect(settings.armedRepos, {'b/repo', 'a/repo'});
     });
 
