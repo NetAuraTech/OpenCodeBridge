@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/access/access_session.dart';
 import 'package:opencodebridge/access/token_store.dart';
+import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/bridge/events/bridge_event.dart';
 import 'package:opencodebridge/bridge/sessions/backend.dart';
 import 'package:opencodebridge/client/events_client.dart';
@@ -13,6 +15,7 @@ import 'package:opencodebridge/client/sessions_client.dart';
 import 'package:opencodebridge/model/message.dart';
 import 'package:opencodebridge/model/orb.dart';
 import 'package:opencodebridge/model/permission.dart';
+import 'package:opencodebridge/model/project.dart';
 import 'package:opencodebridge/model/question.dart';
 import 'package:opencodebridge/model/session.dart';
 import 'package:opencodebridge/model/session_detail.dart';
@@ -105,13 +108,19 @@ Session _orbSession() => Session(
 
 /// A scripted [SessionsClient] for the tab tests.
 class _FakeSessionsClient extends SessionsClient {
-  _FakeSessionsClient({this.rows = const []})
+  _FakeSessionsClient({this.rows = const [], this.projectRows = const []})
     : store = <String, num>{},
       super(Uri.parse('http://bridge.test/'));
 
   /// The rows the client returns; delete mutates it, like a re-fetch would
   /// see.
   final List<Session> rows;
+
+  /// The project list the `projects()` call returns (spec #407, T6): the
+  /// per-project arm toggle resolves each group's repo identity from these
+  /// rows' canonical directories. Defaults to empty (no resolvable checkouts,
+  /// no arm toggle).
+  final List<Project> projectRows;
 
   /// The bridge's order store, emulated (issue #238): the pinned positions,
   /// keyed by session id. A test seeds it with the bridge's persisted store
@@ -192,6 +201,9 @@ class _FakeSessionsClient extends SessionsClient {
     );
     return decodeSessionList([for (final row in pinned) row.toJson()]);
   }
+
+  @override
+  Future<List<Project>> projects() async => projectRows;
 
   @override
   Future<void> cancel(String id) async {
@@ -453,6 +465,7 @@ class _FakeEventsSource implements EventSource {
 Future<_FakeSessionsClient> _pumpTab(
   WidgetTester tester, {
   List<Session> rows = const [],
+  List<Project> projects = const [],
   _FakeEventsSource? events,
   AccessSession? access,
   _FakeFsClient? fs,
@@ -461,8 +474,14 @@ Future<_FakeSessionsClient> _pumpTab(
   DeepLinkTarget? deepLinks,
   FutureOr<void> Function()? onOpenSettings,
   AppSettings? settings,
+  AppMode? mode,
+  VoidCallback? onAfkChanged,
+  Future<String?> Function(Directory)? repoIdentity,
 }) async {
-  final client = _FakeSessionsClient(rows: List<Session>.of(rows));
+  final client = _FakeSessionsClient(
+    rows: List<Session>.of(rows),
+    projectRows: List<Project>.of(projects),
+  );
   await tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
@@ -477,6 +496,9 @@ Future<_FakeSessionsClient> _pumpTab(
           deepLinks: deepLinks,
           onOpenSettings: onOpenSettings,
           settings: settings,
+          mode: mode,
+          onAfkChanged: onAfkChanged,
+          repoIdentity: repoIdentity,
         ),
       ),
     ),
@@ -3324,6 +3346,173 @@ void main() {
           // The row now wears its orb (the move landed): the host label is
           // gone for it and the orb chip is present.
           expect(find.byKey(const ValueKey('orb-chip-dev')), findsOneWidget);
+        },
+      );
+    });
+
+    // The per-project AFK arm toggle (spec #407, T6). The toggle lives in the
+    // project group's rows (next to the group's New session button), server
+    // mode only, and is visible only when the group's checkout resolves a repo
+    // identity (T1's `repoIdentityOf`). Its state is the repo identity's
+    // membership in the persisted `afk.armedRepos`; toggling persists the set
+    // and hands the fresh settings to the in-process bridge (onAfkChanged).
+    group('the per-project AFK arm toggle (spec #407, T6)', () {
+      // The arm toggle lives in the project group's rows (next to the group's
+      // New session button), server mode only, and is visible only when the
+      // group's checkout resolves a repo identity. The identity is resolved
+      // through the tab's injected [repoIdentity] collaborator (a test stands
+      // in for the real `repoIdentityOf` git read; the production default is
+      // the real `repoIdentityOf`). Its state is the repo identity's
+      // membership in the persisted `afk.armedRepos`; toggling persists the
+      // set and hands the fresh settings to the in-process bridge
+      // (onAfkChanged).
+
+      const projectA = Project(id: 'p1', name: 'app', canonical: '/code/app');
+      const projectA2 = Project(
+        id: 'p2',
+        name: 'app-alt',
+        canonical: '/code/app',
+      );
+      const projectB = Project(
+        id: 'p3',
+        name: 'infra',
+        canonical: '/code/infra',
+      );
+
+      Finder armToggle(String projectId) =>
+          find.byKey(ValueKey('afk-arm-$projectId'));
+
+      Future<AppSettings> freshSettings() async {
+        SharedPreferences.setMockInitialValues({});
+        return AppSettings.load();
+      }
+
+      // The fake identity read: `o/a` for the `app`/`app-alt` checkouts
+      // (the same repo, two checkouts) and `o/b` for the `infra` checkout.
+      // Anything else resolves no identity (not armable).
+      Future<String?> Function(Directory) identity(
+        Map<String, String> byDirectory,
+      ) =>
+          (dir) async => byDirectory[dir.path];
+
+      testWidgets(
+        'server mode shows the arm toggle for a project whose checkout '
+        'resolves a repo identity',
+        (tester) async {
+          final settings = await freshSettings();
+          await _pumpTab(
+            tester,
+            rows: [_one],
+            projects: [projectA],
+            settings: settings,
+            mode: AppMode.server,
+            repoIdentity: identity({'/code/app': 'o/a'}),
+          );
+          await tester.pumpAndSettle();
+          expect(armToggle('p1'), findsOneWidget);
+        },
+      );
+
+      testWidgets(
+        'a project whose checkout has no resolvable origin shows no arm '
+        'toggle (not armable)',
+        (tester) async {
+          final settings = await freshSettings();
+          await _pumpTab(
+            tester,
+            rows: [_one],
+            projects: [projectA],
+            settings: settings,
+            mode: AppMode.server,
+            // The checkout resolves no identity (no `origin`).
+            repoIdentity: (dir) async => null,
+          );
+          await tester.pumpAndSettle();
+          expect(armToggle('p1'), findsNothing);
+        },
+      );
+
+      testWidgets(
+        'client mode shows no arm toggle (the bridge runs on the host)',
+        (tester) async {
+          final settings = await freshSettings();
+          await _pumpTab(
+            tester,
+            rows: [_one],
+            projects: [projectA],
+            settings: settings,
+            mode: AppMode.client,
+            repoIdentity: identity({'/code/app': 'o/a'}),
+          );
+          await tester.pumpAndSettle();
+          expect(armToggle('p1'), findsNothing);
+        },
+      );
+
+      testWidgets(
+        'toggling persists the armed set (round-trip) and hands the fresh '
+        'settings to the in-process bridge',
+        (tester) async {
+          final settings = await freshSettings();
+          var afkChanged = 0;
+          await _pumpTab(
+            tester,
+            rows: [_one],
+            projects: [projectA],
+            settings: settings,
+            mode: AppMode.server,
+            onAfkChanged: () => afkChanged++,
+            repoIdentity: identity({'/code/app': 'o/a'}),
+          );
+          await tester.pumpAndSettle();
+          final toggle = armToggle('p1');
+          expect(toggle, findsOneWidget);
+
+          // Arm the project: the set gains the repo identity and the bridge
+          // is notified with the fresh settings.
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(settings.afkArmedRepos, contains('o/a'));
+          expect(afkChanged, 1);
+
+          // Disarm it again: the set is back to empty, the bridge re-notified.
+          await tester.tap(toggle);
+          await tester.pumpAndSettle();
+          expect(settings.afkArmedRepos, isEmpty);
+          expect(afkChanged, 2);
+        },
+      );
+
+      testWidgets(
+        'two project rows of the same repo identity show the same armed '
+        'state (arming is per repo identity, not per project row)',
+        (tester) async {
+          final settings = await freshSettings();
+          // Both `app` and `app-alt` checkouts resolve to `o/a`; `infra` to
+          // `o/b`.
+          await _pumpTab(
+            tester,
+            rows: [_one, _three],
+            projects: [projectA, projectA2, projectB],
+            settings: settings,
+            mode: AppMode.server,
+            repoIdentity: identity({'/code/app': 'o/a', '/code/infra': 'o/b'}),
+          );
+          await tester.pumpAndSettle();
+          // Two toggles for the same identity (one per project row).
+          expect(armToggle('p1'), findsOneWidget);
+          expect(armToggle('p2'), findsOneWidget);
+
+          // Arm through one row; both rows reflect the armed state.
+          await tester.tap(armToggle('p1'));
+          await tester.pumpAndSettle();
+          final switchA = tester.widget<Switch>(armToggle('p1'));
+          final switchA2 = tester.widget<Switch>(armToggle('p2'));
+          expect(switchA.value, isTrue);
+          expect(switchA2.value, isTrue);
+          expect(settings.afkArmedRepos, contains('o/a'));
+          // The distinct repo (p3 / infra) is unaffected.
+          expect(settings.afkArmedRepos, isNot(contains('o/b')));
         },
       );
     });

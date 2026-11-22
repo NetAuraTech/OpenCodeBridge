@@ -233,6 +233,11 @@ class _HomeShellState extends State<HomeShell> {
             // The desktop session sounds (issue #246): the app-level listener
             // rides the tab's event stream (no second SSE connection).
             onEventSource: widget.onEventSource,
+            // The per-project AFK arm toggle (spec #407, T6): server mode
+            // only, and it hands the fresh settings to the in-process bridge
+            // through the same onAfkChanged path the Settings section uses.
+            mode: widget.mode,
+            onAfkChanged: widget.onAfkChanged,
           ),
           OrbsTab(
             apiBase: _apiBase,
