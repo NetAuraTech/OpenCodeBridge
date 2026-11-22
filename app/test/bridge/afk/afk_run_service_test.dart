@@ -89,7 +89,20 @@ class _FakeReader implements GitHubReader {
 /// The per-repo reader registry the service's tests fake: the row's repo's
 /// reader, resolved through the same provider/builder pair the Ready-gate
 /// poller rides (the bridge's `_afkRepoDirectories` + `readerFor` shape).
-/// The default harness resolves every known repo to its own checkout
+///
+/// The **production arming-scoping** the fake mirrors (spec #407, the review
+/// fixups): the run service's directory provider resolves checkouts only for
+/// the repos it is told about — its armed set **plus** the repos that still
+/// hold rows in the store (so a disarm never strands an in-flight run's
+/// directory). [reposToldAbout] is that live set; [directoriesFuture]
+/// resolves each of its members to the registered checkout directory (a
+/// repo that is told about but has no registered checkout stays absent —
+/// inert). A fake that resolved every registered repo regardless of what the
+/// provider is told about would pass tests the production wiring fails, so
+/// this scoping is part of the harness contract, not an implementation
+/// detail.
+///
+/// The default harness resolves every told-about repo to its own checkout
 /// directory and returns that repo's [_FakeReader] — so a cross-repo read
 /// (repo A's row read through B's reader/directory) is observable: each
 /// reader is a distinct instance and the builder fails for an unknown repo.
@@ -97,13 +110,26 @@ class _ReaderTable {
   final Map<String, _FakeReader> readers = {};
   final Map<String, String> directories = {};
 
+  /// The repos the production directory provider is told about, read live:
+  /// the run service's armed set ∪ the repos that still hold rows in the
+  /// store. Set by the harness [setUp] to the production expression.
+  late Set<String> Function() reposToldAbout;
+
   /// The repo's reader (created on demand).
   _FakeReader readerFor(String repo) =>
       readers.putIfAbsent(repo, _FakeReader.new);
 
-  /// The service's [AfkRunService.repoDirectories] seam.
-  Future<Map<String, String>> directoriesFuture() async =>
-      Map<String, String>.of(directories);
+  /// The service's [AfkRunService.repoDirectories] seam: resolves the
+  /// directory only for the repos the provider is told about ([reposToldAbout]
+  /// ∩ the registered checkouts) — the production arming-scoping the fake
+  /// mirrors, never for a repo the provider is not told about.
+  Future<Map<String, String>> directoriesFuture() async {
+    final toldAbout = reposToldAbout();
+    return {
+      for (final entry in directories.entries)
+        if (toldAbout.contains(entry.key)) entry.key: entry.value,
+    };
+  }
 
   /// The service's [AfkRunService.readerFor] seam (throws for an unknown
   /// repo — the builder's failure degrades to the row being inert).
@@ -202,6 +228,15 @@ void main() {
     file = File('${dir.path}/afk.json');
     store = AfkStore(file: file);
     table = _ReaderTable();
+    // The production directory-provider scoping (spec #407, the review
+    // fixups): the run service resolves checkouts for the armed repos **plus**
+    // the repos that still hold rows in the store (a disarm never strands an
+    // in-flight run's directory). Read live so a test's disarm / arming is
+    // picked up on the next pass.
+    table.reposToldAbout = () => {
+      ...armed,
+      for (final run in store.allRuns()) run.ownerRepo,
+    };
     addRepo(repoA);
     sessions = _FakeSessions()..idsByRepo[repoA] = 'ses_afk';
     payloads = [];
@@ -1246,6 +1281,59 @@ void main() {
       expect(_eventsOfType(payloads, 'afk.pr_open'), hasLength(1));
       // And the idle run stayed idle all along (the disarm gated it).
       expect(store.runFor(repoA, 7)!.state, 'idle');
+    });
+
+    test('a disarmed repo holding in-flight rows keeps them driven (the '
+        'production provider resolves its checkout while the repo still holds '
+        'rows — armed ∪ repos with rows) while its idle rows are not fed (the '
+        'new-work gate still holds)', () async {
+      // A holds an idle ready row and a dispatched in-flight row; the repo
+      // is disarmed mid-run. The production run-service provider resolves
+      // A's checkout because A still holds rows in the store (the run
+      // service's armedRepos ∪ repos-with-rows shape) — the fake mirrors
+      // that scoping, so this is exactly what the bridge wiring would do.
+      await store.addRun(repoA, 7, 'Add a README'); // idle, ready.
+      reader(repoA).labels[7] = {'ready-for-agent'};
+      await store.updateRun(
+        const AfkRun(
+          ownerRepo: repoA,
+          issueNumber: 9,
+          title: 'Ship the widget',
+          state: 'dispatched',
+        ),
+      );
+      reader(repoA).lastComments[9] = IssueComment(
+        id: 'IC1',
+        body: 'PR opened: https://github.com/o/r/pull/42',
+      );
+      reader(repoA).prs[42] = PrInfo(
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+        state: 'OPEN',
+      );
+      sessions.idle = true;
+      armed = {}; // Disarmed; A still holds rows ⇒ its checkout resolves.
+      await service.pollOnce();
+      // The in-flight row is still driven through A's own reader: the
+      // narration is read and the PR-open transition lands — a disarm
+      // never strands an in-flight run (spec #407: "disarming R holds
+      // everything").
+      expect(store.runFor(repoA, 9)!.state, 'pr-open');
+      expect(_eventsOfType(payloads, 'afk.pr_open'), hasLength(1));
+      expect(
+        reader(repoA).lastCommentCalls,
+        1,
+        reason: 'the narration was read through the row repo own reader',
+      );
+      // The idle row is NOT fed: the new-work gate is armed-only and still
+      // holds — no label read, no prompt, no state change.
+      expect(store.runFor(repoA, 7)!.state, 'idle');
+      expect(
+        reader(repoA).hasLabelCalls,
+        0,
+        reason: 'the idle row feed is gated on the repo being armed',
+      );
+      expect(sessions.prompts, isEmpty);
     });
   });
 
