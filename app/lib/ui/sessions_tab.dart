@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 
 import '../access/access_session.dart';
+import '../app_mode.dart';
+import '../bridge/afk/repo_identity.dart';
 import '../bridge/orb/orb_state_machine.dart';
 import '../client/authenticated_http.dart';
 import '../client/events_client.dart';
@@ -11,6 +14,7 @@ import '../client/fs_client.dart';
 import '../client/orbs_client.dart';
 import '../client/sessions_client.dart';
 import '../model/orb.dart';
+import '../model/project.dart';
 import '../model/session.dart';
 import '../settings/app_settings.dart';
 import 'deep_link_target.dart';
@@ -76,6 +80,9 @@ class SessionsTab extends StatefulWidget {
     this.onThemeModeChanged,
     this.onOrbChipTapped,
     this.onEventSource,
+    this.mode,
+    this.onAfkChanged,
+    this.repoIdentity,
   });
 
   /// The tunnel's Access login (issue #23, client mode); `null` in server
@@ -148,6 +155,27 @@ class SessionsTab extends StatefulWidget {
   /// tracked). `null` leaves the source to the tab alone.
   final void Function(EventSource? source)? onEventSource;
 
+  /// The app's mode (spec #407, T6): the per-project AFK arm toggle is
+  /// **server mode only** — the bridge (and the AFK system it runs) is local
+  /// to this machine; in client mode the bridge runs on the host, so there is
+  /// nothing to arm here. `null` leaves the toggle absent (the safe default).
+  final AppMode? mode;
+
+  /// Hands the AFK settings to the in-process bridge on every arming change
+  /// (spec #407, T6; the existing `onAfkChanged` path, server mode): the arm
+  /// toggle persists the armed set and calls this so the app re-hands the
+  /// fresh settings to the bridge (which creates/reuses the repo's session,
+  /// T3). `null` (client mode, or an injection that cannot notify) makes the
+  /// toggle's handoff a no-op; the toggle's visibility is gated on the mode
+  /// and the repo identity, not on this callback.
+  final VoidCallback? onAfkChanged;
+
+  /// Resolves a checkout directory's repo identity (spec #407, T1:
+  /// [repoIdentityOf], `owner/repo` from the checkout's `origin` remote,
+  /// `null` on any failure = not armable). Injectable so a test stands in for
+  /// the git read; the production default is the real [repoIdentityOf].
+  final Future<String?> Function(Directory directory)? repoIdentity;
+
   @override
   State<SessionsTab> createState() => SessionsTabState();
 }
@@ -167,6 +195,21 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
   /// from; `null` until it has loaded. A row whose orb is absent (deleted in
   /// the meantime) falls back to the raw orb id.
   List<OrbRecord>? _orbRecords;
+
+  /// The project list (id + display name + canonical directory) the per-project
+  /// AFK arm toggle resolves identities against (spec #407, T6); empty until
+  /// it has loaded. The home-list groups' `project.id` is this same id space
+  /// (the service's project id), so a group's checkout directory is its
+  /// matching row's [Project.canonical].
+  List<Project> _afkProjects = const [];
+
+  /// The resolved repo identity per canonical directory (spec #407, T1's
+  /// [repoIdentityOf]): `null` marks a checkout that resolves no `origin`
+  /// identity (not armable — no toggle). Keyed by canonical so two checkouts
+  /// of the same repo (the same directory) share one resolution, and a given
+  /// directory is git-read once (the read shells out, so it is cached for the
+  /// tab's lifetime rather than re-run on every list refresh).
+  final Map<String, String?> _afkIdentitiesByDir = {};
 
   /// The event stream source (spec §8) the tab's views listen to, `null`
   /// when there is no bridge to listen on.
@@ -488,7 +531,7 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       // A deep-link target set while the list was still loading (issue
       // #24): the model kept it; open it now, from the fresh rows.
       _openDeepLink();
-      unawaited(_loadOrbs());
+      unawaited(_loadRowSideFacts());
     } on SessionsClientError catch (e) {
       if (!mounted) return;
       if (quiet) return; // Keep the rows on screen: the next event retries.
@@ -508,6 +551,13 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
+  /// The reads that follow a successful list load (spec §9.2's orb chips and
+  /// spec #407, T6's AFK project list): both are decorative side-facts the
+  /// rows read against, fetched in parallel after the rows are on screen.
+  Future<void> _loadRowSideFacts() async {
+    await Future.wait([_loadOrbs(), _loadAfkProjects()]);
+  }
+
   /// The orb list for the rows' chips (spec §9.2): the orb names and state
   /// dots, fetched without the PR enrichment (that is the Orbs tab's badge).
   /// Decorative — a failure leaves the chips on the raw orb id.
@@ -523,6 +573,22 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
     }
   }
 
+  /// The project list (spec #407, T6): the rows' canonical directories the
+  /// per-project AFK arm toggle resolves repo identities against. Decorative —
+  /// a failure (or no sessions client) leaves the list empty, so no toggle
+  /// shows (the safe default). Fetched once per list load.
+  Future<void> _loadAfkProjects() async {
+    final client = _client;
+    if (client == null) return;
+    try {
+      final projects = await client.projects();
+      if (!mounted) return;
+      setState(() => _afkProjects = projects);
+    } catch (_) {
+      // No project list: the arm toggle stays absent (not armable).
+    }
+  }
+
   /// The record of the orb a row belongs to, or `null` when the orb is
   /// absent from the list (deleted in the meantime).
   OrbRecord? _orbOf(String? orbId) {
@@ -533,6 +599,88 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
       if (record.id == orbId) return record;
     }
     return null;
+  }
+
+  /// The checkout directory a project group's rows live in (spec #407, T6):
+  /// the group's [SessionProject.id] is the service's project id (the same
+  /// id space [Project.id] carries), so the group's canonical directory is its
+  /// matching project-list row's [Project.canonical]. `null` when the group
+  /// has no matching row (the project list has not loaded, or the project is
+  /// not one the service lists) — then the group is not armable (no toggle).
+  String? _canonicalOfProject(String projectId) {
+    for (final project in _afkProjects) {
+      if (project.id == projectId) return project.canonical;
+    }
+    return null;
+  }
+
+  /// The repo identity a project group's checkout resolves to (spec #407,
+  /// T1): `repoIdentityOf(canonical)`, `null` when the checkout has no
+  /// resolvable `origin` (not armable) or has not been resolved yet. Cached
+  /// per canonical directory, and resolved **lazily** — the git read is
+  /// spawned on demand (when a group needs its toggle state) rather than up
+  /// front, so the tab never blocks a list load on a `git` call. The resolver
+  /// is the injectable [repoIdentity] (production: [repoIdentityOf]).
+  Future<String?> _afkIdentityOfProject(String projectId) async {
+    final canonical = _canonicalOfProject(projectId);
+    if (canonical == null || canonical.isEmpty) return null;
+    final cached = _afkIdentitiesByDir[canonical];
+    if (cached != null || _afkIdentitiesByDir.containsKey(canonical)) {
+      return cached; // Resolved before (possibly to `null`: not armable).
+    }
+    final resolver = widget.repoIdentity ?? repoIdentityOf;
+    String? identity;
+    try {
+      identity = await resolver(Directory(canonical));
+    } catch (_) {
+      identity = null; // A failed read degrades to not armable.
+    }
+    _afkIdentitiesByDir[canonical] = identity;
+    return identity;
+  }
+
+  /// A project group's arm state (spec #407, T6): its resolved repo identity
+  /// plus whether that identity is in the persisted `afk.armedRepos`. `null`
+  /// when the group is not armable (no resolvable `origin`, or not in server
+  /// mode) — the row then shows no toggle at all. Two groups of the same repo
+  /// identity resolve the same identity and thus share one answer.
+  Future<_AfkArmState?> _afkArmState(String projectId) async {
+    // Server mode only: the bridge (and the AFK system it runs) is local to
+    // this machine; in client mode there is nothing here to arm.
+    if (widget.mode != AppMode.server) return null;
+    final settings = widget.settings;
+    if (settings == null) return null;
+    final identity = await _afkIdentityOfProject(projectId);
+    if (identity == null) return null; // Not armable.
+    return _AfkArmState(
+      identity: identity,
+      armed: settings.afkArmedRepos.contains(identity),
+    );
+  }
+
+  /// Flips a project group's arming (spec #407, T6): adds or removes the
+  /// group's resolved repo identity from the persisted `afk.armedRepos`, then
+  /// hands the fresh settings to the in-process bridge (the existing
+  /// [onAfkChanged] path). The bridge creates/reuses the repo's session on arm
+  /// and holds everything on disarm (T3) — the UI only persists the set and
+  /// re-hands the settings. No-op when the group is not armable.
+  Future<void> _toggleAfkArmed(String projectId, bool armed) async {
+    final settings = widget.settings;
+    if (settings == null) return;
+    final identity = await _afkIdentityOfProject(projectId);
+    if (identity == null) return; // Not armable.
+    final current = settings.afkArmedRepos;
+    final next = <String>{...current};
+    if (armed) {
+      next.add(identity);
+    } else {
+      next.remove(identity);
+    }
+    // Persist (a fresh install / disarm lands on the empty set, which the
+    // store stores as the absent key).
+    settings.afkArmedRepos = next;
+    if (mounted) setState(() {});
+    widget.onAfkChanged?.call();
   }
 
   /// The global new-project flow (issue #54): browse the host's filesystem
@@ -889,6 +1037,20 @@ class SessionsTabState extends State<SessionsTab> with WidgetsBindingObserver {
                     projectId: group.project.id,
                     busy: _newSessionBusy,
                     onPressed: () => _createInProject(group.project.id),
+                  ),
+                // The per-project AFK arm toggle (spec #407, T6): server mode
+                // only, visible only when the group's checkout resolves a repo
+                // identity (the widget resolves its armability asynchronously
+                // and hides itself — rendering nothing — when it is not
+                // armable). It sits with the group's New session button — the
+                // natural home for a per-project action (and, like it, hidden
+                // on the Archived surface).
+                if (!showingArchived)
+                  _AfkArmToggle(
+                    key: ValueKey('afk-arm-toggle-${group.project.id}'),
+                    projectId: group.project.id,
+                    armState: _afkArmState,
+                    onArmed: _toggleAfkArmed,
                   ),
                 for (final s in group.sessions)
                   _SessionRow(
@@ -1362,6 +1524,128 @@ class _GroupNewSessionButton extends StatelessWidget {
       label: busy ? const Text('Creating…') : const Text('New session'),
     ),
   );
+}
+
+/// A project group's resolved arm state (spec #407, T6): the repo identity the
+/// group's checkout resolves to, and whether that identity is armed. [identity]
+/// doubles as the armability fact (non-null = armable) and the toggle's label.
+class _AfkArmState {
+  const _AfkArmState({required this.identity, required this.armed});
+
+  final String identity;
+  final bool armed;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _AfkArmState &&
+      other.identity == identity &&
+      other.armed == armed;
+
+  @override
+  int get hashCode => Object.hash(identity, armed);
+}
+
+/// The per-project AFK arm toggle (spec #407, T6): the row-level control that
+/// arms (or disarms) the AFK agent for the project's **repo identity**. Server
+/// mode only, and visible **only** when the project's checkout resolves a repo
+/// identity (T1's [repoIdentityOf] non-null) — a project without a resolvable
+/// `origin` renders nothing (not armable).
+///
+/// The armability check is asynchronous (the identity is resolved from the
+/// checkout's `origin` remote), so the widget resolves it and hides itself when
+/// the answer is `null`. Its checked state is the repo identity's membership in
+/// the persisted `afk.armedRepos`; two project rows of the same repo identity
+/// resolve the same identity and thus show the same state (arming is per repo
+/// identity, not per project row). Toggling persists the set and hands the
+/// fresh settings to the in-process bridge ([onArmed] — the existing
+/// `onAfkChanged` path), which creates/reuses the repo's session on arm and
+/// holds everything on disarm (T3).
+class _AfkArmToggle extends StatefulWidget {
+  const _AfkArmToggle({
+    super.key,
+    required this.projectId,
+    required this.armState,
+    required this.onArmed,
+  });
+
+  /// The project group's id (the service's project id).
+  final String projectId;
+
+  /// Resolves the group's arm state: `null` when the group is not armable (no
+  /// resolvable `origin`, or not in server mode), else the identity + armed
+  /// flag.
+  final Future<_AfkArmState?> Function(String projectId) armState;
+
+  /// Flips the group's arming to [armed]: persists the set and notifies the
+  /// in-process bridge.
+  final Future<void> Function(String projectId, bool armed) onArmed;
+
+  @override
+  State<_AfkArmToggle> createState() => _AfkArmToggleState();
+}
+
+class _AfkArmToggleState extends State<_AfkArmToggle> {
+  /// The resolved arm state: `null` while resolving or when not armable (the
+  /// toggle is hidden); an [_AfkArmState] once the group's identity is known
+  /// and armable.
+  _AfkArmState? _state;
+
+  /// The resolution generation, so a superseded resolve (a re-resolve started
+  /// before a newer one completed) never clobbers the newer result.
+  int _resolve = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _reResolve();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AfkArmToggle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A fresh parent build re-asks for the state: the arming set may have
+    // changed (a toggle on this or a sibling row), or the project list / the
+    // identity may have resolved since the last build. The identity read is
+    // cached per checkout, so the re-check is a set-membership read, not a new
+    // git call.
+    _reResolve();
+  }
+
+  Future<void> _reResolve() async {
+    final generation = ++_resolve;
+    final state = await widget.armState(widget.projectId);
+    if (!mounted || generation != _resolve) return; // A newer resolve won.
+    // Set only when the answer changed: didUpdateWidget re-asks on every
+    // parent rebuild, and a no-op setState would rebuild the parent, which
+    // would re-ask again — a loop. Comparing keeps the fixpoint.
+    if (state == _state) return;
+    setState(() => _state = state);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = _state;
+    // Not armable (or still resolving): no toggle at all. The `Switch` is the
+    // keyed, findable element — a project whose checkout resolves no identity
+    // renders none (the "no toggle" tests find nothing).
+    if (state == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      child: Row(
+        children: [
+          const Icon(Icons.auto_mode, size: 18),
+          const SizedBox(width: 12),
+          Expanded(child: Text('AFK agent · ${state.identity}')),
+          Switch(
+            key: ValueKey('afk-arm-${widget.projectId}'),
+            value: state.armed,
+            onChanged: (value) =>
+                unawaited(widget.onArmed(widget.projectId, value)),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _CenteredMessage extends StatelessWidget {
