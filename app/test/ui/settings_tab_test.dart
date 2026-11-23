@@ -91,6 +91,19 @@ const TunnelReport _kDownReport = TunnelReport(
   ],
 );
 
+/// The [FocusNode] of the field carrying [key]: the node a focus loss must
+/// release before the field can commit on blur.
+///
+/// [key] is a [Key], not a [ValueKey]: `ValueKey.==` compares
+/// `runtimeType`, so a raw `ValueKey` (i.e. `ValueKey<dynamic>`) never
+/// matches the field's const `ValueKey<String>`, and `find.byKey` would
+/// come up empty.
+FocusNode focusNodeOf(WidgetTester tester, Key key) => tester
+    .widget<EditableText>(
+      find.descendant(of: find.byKey(key), matching: find.byType(EditableText)),
+    )
+    .focusNode;
+
 void main() {
   Future<AppSettings> pumpSettings(
     WidgetTester tester, {
@@ -1207,5 +1220,100 @@ void main() {
       expect(settings.afkModel, '');
       expect(changes, 0);
     });
+
+    testWidgets(
+      'the model commits on focus loss (no keypress) and notifies the bridge',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        var changes = 0;
+        final settings = await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          onAfkChanged: () => changes++,
+        );
+
+        await scrollSettings(tester, find.byKey(const ValueKey('afk-model')));
+        await tester.enterText(
+          find.byKey(const ValueKey('afk-model')),
+          'zhipu/glm-4.7',
+        );
+        final modelFocus = focusNodeOf(tester, const ValueKey('afk-model'));
+        expect(modelFocus.hasPrimaryFocus, isTrue);
+
+        // No Enter, no done action: the user moves on to the cap field, and
+        // the focus loss is what must commit the typed model (issue #419).
+        await tester.tap(find.byKey(const ValueKey('afk-parallel-orbs')));
+        await tester.pump();
+        expect(modelFocus.hasPrimaryFocus, isFalse);
+
+        expect(settings.afkModel, 'zhipu/glm-4.7');
+        expect(changes, 1);
+        expect((await AppSettings.load()).afkModel, 'zhipu/glm-4.7');
+      },
+    );
+
+    testWidgets('clearing the model and losing focus removes the pinned key', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(const {
+        'afk.model': 'zhipu/glm-4.7',
+      });
+      var changes = 0;
+      final settings = await pumpSettings(
+        tester,
+        mode: AppMode.server,
+        localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+        onAfkChanged: () => changes++,
+      );
+      expect(settings.afkModel, 'zhipu/glm-4.7');
+
+      await scrollSettings(tester, find.byKey(const ValueKey('afk-model')));
+      await tester.enterText(find.byKey(const ValueKey('afk-model')), '');
+      await tester.tap(find.byKey(const ValueKey('afk-parallel-orbs')));
+      await tester.pump();
+
+      expect(settings.afkModel, '');
+      expect(changes, 1);
+      expect((await AppSettings.load()).afkModel, '');
+    });
+
+    testWidgets(
+      'the cap commits on focus loss (no keypress) and notifies the bridge',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+        var changes = 0;
+        final settings = await pumpSettings(
+          tester,
+          mode: AppMode.server,
+          localBridgeUri: Uri.parse('http://127.0.0.1:48201/'),
+          onAfkChanged: () => changes++,
+        );
+
+        await scrollSettings(
+          tester,
+          find.byKey(const ValueKey('afk-parallel-orbs')),
+        );
+        await tester.enterText(
+          find.byKey(const ValueKey('afk-parallel-orbs')),
+          '7',
+        );
+        final capFocus = focusNodeOf(
+          tester,
+          const ValueKey('afk-parallel-orbs'),
+        );
+        expect(capFocus.hasPrimaryFocus, isTrue);
+
+        // The user moves on to the model field: the focus loss must commit
+        // the typed cap, with no keypress in between (issue #419).
+        await tester.tap(find.byKey(const ValueKey('afk-model')));
+        await tester.pump();
+        expect(capFocus.hasPrimaryFocus, isFalse);
+
+        expect(settings.afkParallelOrbs, 7);
+        expect(changes, 1);
+        expect((await AppSettings.load()).afkParallelOrbs, 7);
+      },
+    );
   });
 }
