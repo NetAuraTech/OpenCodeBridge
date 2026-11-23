@@ -305,6 +305,7 @@ void main() {
     },
   ];
 
+  final createBodies = <Map<String, Object?>>[];
   final promptBodies = <Map<String, Object?>>[];
   final replyBodies = <Map<String, Object?>>[];
   final repliedRequestIDs = <String>[];
@@ -383,6 +384,7 @@ void main() {
       if (path == '/api/session' && req.method == 'POST') {
         final body = await utf8.decodeStream(req);
         final decoded = jsonDecode(body) as Map<String, Object?>;
+        createBodies.add(decoded);
         final location = decoded['location'] as Map<String, Object?>?;
         final directory = location?['directory'] as String?;
         // Echo the created session, bound to the project of the directory.
@@ -840,6 +842,43 @@ void main() {
         expect(session.projectId, 'p2');
         expect(session.created, 400);
         expect(session.location, '/proj/two');
+      },
+    );
+
+    test(
+      'createSessionInDirectory posts the pinned model ref as model',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        // The records list is shared with the create tests above.
+        createBodies.clear();
+        await service.createSessionInDirectory(
+          '/proj/two',
+          model: const ModelRef(id: 'glm-4.7', providerId: 'zhipu'),
+        );
+        // `ModelRef.toJson()` with no variant: the pinned ref travels in the
+        // create body, not a follow-up `POST …/model`.
+        expect(createBodies, [
+          {
+            'location': {'directory': '/proj/two'},
+            'model': {'id': 'glm-4.7', 'providerID': 'zhipu'},
+          },
+        ]);
+      },
+    );
+
+    test(
+      'createSessionInDirectory posts no model key without a model',
+      () async {
+        final service = OpencodeHttpService(baseUrl: base, password: password);
+        createBodies.clear();
+        await service.createSessionInDirectory('/proj/two');
+        // No `model` key at all: an inherited default is the absence, not an
+        // empty ref.
+        expect(createBodies, [
+          {
+            'location': {'directory': '/proj/two'},
+          },
+        ]);
       },
     );
 

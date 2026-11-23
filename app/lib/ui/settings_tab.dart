@@ -1033,17 +1033,47 @@ class _AfkSectionState extends State<_AfkSection> {
     text: widget.settings.afkModel,
   );
 
+  // One focus node per field: a focus loss commits the typed value, so a
+  // value entered and blurred without Enter still persists (issue #419).
+  late final FocusNode _capFocusNode = FocusNode();
+  late final FocusNode _modelFocusNode = FocusNode();
+
   /// The cap's last commit problem (an out-of-bounds / non-numeric value).
   String? _capProblem;
 
   /// The model's last commit problem (a malformed `provider/model`).
   String? _modelProblem;
 
+  // Guards a commit fired by a focus change reported while a node tears
+  // down: a dead state must not persist a value after dispose.
+  bool _disposed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // A [FocusNode] reports focus changes to its listeners; commit on blur.
+    _capFocusNode.addListener(_onCapFocusChanged);
+    _modelFocusNode.addListener(_onModelFocusChanged);
+  }
+
   @override
   void dispose() {
+    _disposed = true;
+    _capFocusNode.removeListener(_onCapFocusChanged);
+    _modelFocusNode.removeListener(_onModelFocusChanged);
+    _capFocusNode.dispose();
+    _modelFocusNode.dispose();
     _capController.dispose();
     _modelController.dispose();
     super.dispose();
+  }
+
+  void _onCapFocusChanged() {
+    if (!_capFocusNode.hasFocus && !_disposed) _commitCap();
+  }
+
+  void _onModelFocusChanged() {
+    if (!_modelFocusNode.hasFocus && !_disposed) _commitModel();
   }
 
   void _commitCap() {
@@ -1102,6 +1132,7 @@ class _AfkSectionState extends State<_AfkSection> {
               child: TextField(
                 key: const ValueKey('afk-parallel-orbs'),
                 controller: _capController,
+                focusNode: _capFocusNode,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
                   isDense: true,
@@ -1130,6 +1161,7 @@ class _AfkSectionState extends State<_AfkSection> {
         child: TextField(
           key: const ValueKey('afk-model'),
           controller: _modelController,
+          focusNode: _modelFocusNode,
           decoration: const InputDecoration(
             labelText: 'Model',
             hintText: 'provider/model[#variant] (empty = inherit)',
