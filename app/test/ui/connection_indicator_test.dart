@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:opencodebridge/client/connection_monitor.dart';
 import 'package:opencodebridge/ui/connection_indicator.dart';
 

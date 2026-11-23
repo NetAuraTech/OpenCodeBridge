@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/settings/app_settings.dart';
 import 'package:opencodebridge/ui/mode_choice_screen.dart';
