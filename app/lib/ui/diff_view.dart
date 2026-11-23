@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:material_ui/material_ui.dart';
 
 /// The kind of a unified diff line.
 enum DiffKind { context, added, removed }

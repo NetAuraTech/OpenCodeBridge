@@ -14,17 +14,6 @@ analyzer:
     - build/**
     - android/**
     - linux/**
-  errors:
-    # `flutter analyze` treats info-level issues as fatal by default
-    # (--fatal-infos), so the 3.50.1 SDK's new deprecation of
-    # `package:flutter/material.dart` (→ `package:material_ui/material_ui.dart`,
-    # deprecated after v3.47.0-0.0.pre) makes the analyze stage of the
-    # verification command fail the moment the Flutter pin moves (issue #390).
-    # Suppress the deprecation diagnostic here — the migration of every
-    # import to `material_ui` is a separate, larger refactor tracked as its
-    # own ticket; the pin bump must not drag it in. Revert this override when
-    # the migration lands.
-    deprecated_member_use: ignore
 
 linter:
   # The lint rules applied to this project can be customized in the

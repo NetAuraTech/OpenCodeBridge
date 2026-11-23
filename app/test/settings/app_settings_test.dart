@@ -1,7 +1,7 @@
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart';
 import 'package:opencodebridge/app_mode.dart';
 import 'package:opencodebridge/bridge/afk/afk_settings.dart' as afk;
 import 'package:opencodebridge/settings/app_settings.dart';
