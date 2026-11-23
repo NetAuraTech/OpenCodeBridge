@@ -543,6 +543,12 @@ class StructuredSessionScreen extends StatelessWidget {
   }
 }
 
+/// The bridge's PartRef of a tool part: the (message id, tool call id) pair
+/// that addresses a tool call within its assistant message. The message id
+/// rides in the key, so a map keyed by it resolves the owning message without
+/// a second map (issue #426).
+typedef _ToolRef = ({String messageId, String toolId});
+
 class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   SessionDetail? _detail;
 
@@ -657,12 +663,13 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// `null` while there is none.
   int? _compactionIndex;
 
-  /// In-flight tool call id -> its index in its message's tool list (the
-  /// list is append-only, so the index is stable).
-  final Map<String, int> _liveTools = {};
-
-  /// In-flight tool call id -> the id of the message its card lives in.
-  final Map<String, String> _liveToolsOf = {};
+  /// In-flight tool part -> its index in its message's tool list (the list
+  /// is append-only, so the index is stable). Keyed by the [_ToolRef] pair —
+  /// the (message id, tool call id), the bridge's PartRef — never by the raw
+  /// id alone: some providers name tool calls per assistant message, not
+  /// globally (hipfire: the first call of every message is `call_0`), and a
+  /// raw-id key would collapse one call per message (issue #426).
+  final Map<_ToolRef, int> _liveTools = {};
 
   /// In-flight message id -> whether the next streamed text part must be
   /// joined with the newline that separates the parts of the history (the
@@ -872,7 +879,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     _pendingReasoning.clear();
     _liveMessages.clear();
     _liveTools.clear();
-    _liveToolsOf.clear();
     _needsSep.clear();
     _needsSepReasoning.clear();
     _compactionIndex = null;
@@ -1184,7 +1190,6 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   void _seedLiveMessages() {
     _liveMessages.clear();
     _liveTools.clear();
-    _liveToolsOf.clear();
     _needsSep.clear();
     _needsSepReasoning.clear();
     for (var i = 0; i < _messages.length; i++) {
@@ -1195,8 +1200,7 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
       for (var t = 0; t < message.tools.length; t++) {
         final toolId = message.tools[t].id;
         if (toolId != null) {
-          _liveTools[toolId] = t;
-          _liveToolsOf[toolId] = id;
+          _liveTools[(messageId: id, toolId: toolId)] = t;
         }
       }
     }
@@ -1555,17 +1559,16 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// created at `session.tool.input.started`, which carries the tool name
   /// and precedes every other tool event.
   void _applyToolInputStarted(Map<String, Object?> data) {
-    final id = _messageId(data);
-    final toolId = data['id'] is String ? data['id'] as String : null;
+    final ref = _toolRef(data);
     final name = data['name'] is String ? data['name'] as String : '';
-    if (id == null || toolId == null || !mounted) return;
-    setState(() => _ensureToolCard(id, toolId, name));
+    if (ref == null || !mounted) return;
+    setState(() => _ensureToolCard(ref, name));
   }
 
   /// The tool's final input (the service's JSON string of the input object).
   void _applyToolInputEnded(Map<String, Object?> data) {
-    final toolId = data['id'] is String ? data['id'] as String : null;
-    if (toolId == null) return;
+    final ref = _toolRef(data);
+    if (ref == null) return;
     final text = data['text'];
     if (text is! String) return;
     Object? input;
@@ -1576,20 +1579,19 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     }
     if (!mounted) return;
     setState(
-      () => _updateToolCard(toolId, (tool) => _rebuildTool(tool, input: input)),
+      () => _updateToolCard(ref, (tool) => _rebuildTool(tool, input: input)),
     );
   }
 
   /// The tool call's input object (from `session.tool.called`).
   void _applyToolCalled(Map<String, Object?> data) {
-    final id = _messageId(data);
-    final toolId = data['id'] is String ? data['id'] as String : null;
-    if (id == null || toolId == null || !mounted) return;
+    final ref = _toolRef(data);
+    if (ref == null || !mounted) return;
     final input = data['input'];
     setState(() {
-      _ensureToolCard(id, toolId, '');
+      _ensureToolCard(ref, '');
       if (input != null) {
-        _updateToolCard(toolId, (tool) => _rebuildTool(tool, input: input));
+        _updateToolCard(ref, (tool) => _rebuildTool(tool, input: input));
       }
     });
   }
@@ -1600,15 +1602,15 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
   /// service patch, so its diff is synthesized from the content the
   /// `session.tool.called` event stored on the card.
   void _applyToolSuccess(Map<String, Object?> data) {
-    final toolId = data['id'] is String ? data['id'] as String : null;
-    if (toolId == null || !mounted) return;
+    final ref = _toolRef(data);
+    if (ref == null || !mounted) return;
     // The tool-state decode (the success event's `data`) lives in the client
     // (which routes through the model's one tool-state decoder), so the view
     // adapts the decoded patch/answers to the card instead of decoding them.
     final state = toolStateFacts(data);
     setState(
       () => _updateToolCard(
-        toolId,
+        ref,
         (tool) => _rebuildTool(
           tool,
           status: 'completed',
@@ -1623,12 +1625,12 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
 
   /// The tool failed.
   void _applyToolFailed(Map<String, Object?> data) {
-    final toolId = data['id'] is String ? data['id'] as String : null;
-    if (toolId == null || !mounted) return;
+    final ref = _toolRef(data);
+    if (ref == null || !mounted) return;
     final error = data['error'] is String ? data['error'] as String : null;
     setState(
       () => _updateToolCard(
-        toolId,
+        ref,
         (tool) => _rebuildTool(tool, status: 'error', error: error),
       ),
     );
@@ -1713,25 +1715,34 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     }
   }
 
-  /// Appends a new in-flight tool card (created at `tool.input.started`):
-  /// the card is running until its success / failed event.
-  void _ensureToolCard(String messageId, String toolId, String name) {
-    if (_liveTools.containsKey(toolId)) return;
-    final index = _ensureLiveMessage(messageId);
-    final message = _messages[index];
-    final tools = List<ToolCall>.of(message.tools)
-      ..add(ToolCall(id: toolId, name: name, status: 'running'));
-    _setMessageAt(index, message.replaceLiveFields(tools: tools));
-    _liveTools[toolId] = tools.length - 1;
-    _liveToolsOf[toolId] = messageId;
+  /// The in-flight tool part of a `session.tool.*` payload: its (message
+  /// id, tool call id) pair, `null` when the event carries no tool part. The
+  /// pair is the live card's key — issue #426: a raw tool id alone is
+  /// per-message on some providers (hipfire re-issues `call_0` in every
+  /// assistant message), so it cannot address the card across messages.
+  _ToolRef? _toolRef(Map<String, Object?> data) {
+    final messageId = _messageId(data);
+    final toolId = data['id'] is String ? data['id'] as String : null;
+    if (messageId == null || toolId == null) return null;
+    return (messageId: messageId, toolId: toolId);
   }
 
-  /// Applies [update] to the in-flight tool card [toolId].
-  void _updateToolCard(String toolId, ToolCall Function(ToolCall tool) update) {
-    final messageId = _liveToolsOf[toolId];
-    if (messageId == null) return;
-    final index = _liveMessages[messageId];
-    final toolIndex = _liveTools[toolId];
+  /// Appends a new in-flight tool card (created at `tool.input.started`):
+  /// the card is running until its success / failed event.
+  void _ensureToolCard(_ToolRef ref, String name) {
+    if (_liveTools.containsKey(ref)) return;
+    final index = _ensureLiveMessage(ref.messageId);
+    final message = _messages[index];
+    final tools = List<ToolCall>.of(message.tools)
+      ..add(ToolCall(id: ref.toolId, name: name, status: 'running'));
+    _setMessageAt(index, message.replaceLiveFields(tools: tools));
+    _liveTools[ref] = tools.length - 1;
+  }
+
+  /// Applies [update] to the in-flight tool card [ref].
+  void _updateToolCard(_ToolRef ref, ToolCall Function(ToolCall tool) update) {
+    final index = _liveMessages[ref.messageId];
+    final toolIndex = _liveTools[ref];
     if (index == null || toolIndex == null) return;
     final message = _messages[index];
     if (toolIndex >= message.tools.length) return;
