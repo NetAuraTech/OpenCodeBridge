@@ -194,15 +194,55 @@ class AfkRun {
 /// pre-pilot rows were killed by the developer, nothing to preserve). A
 /// missing file reads empty; a corrupt or non-object file degrades to empty,
 /// never a throw.
+///
+/// **Serialized, atomic writes** (issue #418): every mutator runs its whole
+/// read-modify-write under a single write lock — the map is loaded, mutated,
+/// and written only after the previous write has landed — so concurrent
+/// writers never interleave and never write a stale map over a newer one. The
+/// write itself is an atomic replace (stage a sibling temp file, rename over
+/// the target), so a synchronous reader mid-write always sees a complete file.
 class AfkStore {
-  AfkStore({File? file}) : file = file ?? AfkStore.host();
+  AfkStore({File? file, File Function(String path)? tempFile})
+    : file = file ?? AfkStore.host(),
+      _tempFile = tempFile ?? _defaultTempFile;
 
   /// The app-owned AFK state file.
   final File file;
 
+  /// The factory for the staging files [_write] creates for its atomic
+  /// replace (issue #418): a sibling temp per write, renamed over [file].
+  /// Injectable so a test can observe the staging step in flight.
+  final File Function(String path) _tempFile;
+
+  /// The future chain serializing every write (issue #418): each
+  /// read-modify-write — the map load, the mutation, the file write — runs
+  /// only after the previous write has fully landed, so two overlapping
+  /// writers never interleave and no stale map is ever written over a newer
+  /// one. Readers stay unserialized: they read the file directly, and the
+  /// atomic replace in [_write] guarantees they always see a complete file.
+  Future<void> _writeChain = Future<void>.value();
+
+  /// The per-instance sequence for the staging file names of [_write] (a
+  /// crash mid-write must never collide with a concurrent instance's
+  /// staging file).
+  int _tempSequence = 0;
+
+  /// Run [action] (a mutator's load + mutation + write) only after every
+  /// write queued before it has landed. The chain keeps going even when an
+  /// action fails — one failure never wedges the store.
+  Future<void> _withWriteLock(Future<void> Function() action) {
+    final next = _writeChain.then<void>((_) => action());
+    _writeChain = next.catchError((Object _) {});
+    return next;
+  }
+
   /// The host path: `~/.config/opencodebridge/afk.json`.
   static File host() =>
       File('${homeDirectory()}/.config/opencodebridge/afk.json');
+
+  /// The default staging file factory: a plain [File] at the given path
+  /// (issue #418). A test injects its own to observe the staging step.
+  static File _defaultTempFile(String path) => File(path);
 
   /// The key under which a repo's AFK session id is stored:
   /// `afk.session.<owner/repo>`.
@@ -257,14 +297,16 @@ class AfkStore {
   /// Store the AFK session id for [repo] (the session the bridge created
   /// under that repo's checkout). `null` clears it. Other stored values are
   /// kept.
-  Future<void> setSessionId(String repo, String? id) async {
-    final map = load();
-    if (id == null) {
-      map.remove(keySession(repo));
-    } else {
-      map[keySession(repo)] = id;
-    }
-    await _write(map);
+  Future<void> setSessionId(String repo, String? id) {
+    return _withWriteLock(() async {
+      final map = load();
+      if (id == null) {
+        map.remove(keySession(repo));
+      } else {
+        map[keySession(repo)] = id;
+      }
+      await _write(map);
+    });
   }
 
   /// The stored run row for issue [issueNumber] in [repo], or `null` when
@@ -301,15 +343,17 @@ class AfkStore {
     int issueNumber,
     String title, {
     String state = 'idle',
-  }) async {
-    final map = load();
-    map[keyRun(repo, issueNumber)] = jsonEncode({
-      'ownerRepo': repo,
-      'state': state,
-      'issueNumber': issueNumber,
-      'title': title,
+  }) {
+    return _withWriteLock(() async {
+      final map = load();
+      map[keyRun(repo, issueNumber)] = jsonEncode({
+        'ownerRepo': repo,
+        'state': state,
+        'issueNumber': issueNumber,
+        'title': title,
+      });
+      await _write(map);
     });
-    await _write(map);
   }
 
   /// Replace the whole run row [run] (spec #376, T3; keyed per repo by
@@ -318,23 +362,25 @@ class AfkStore {
   /// deadline, the recorded PR number/URL, the processed narration's id).
   /// The row is keyed by its own [AfkRun.ownerRepo]. Other stored values
   /// (the session records, the other rows) are kept.
-  Future<void> updateRun(AfkRun run) async {
-    final map = load();
-    map[keyRun(run.ownerRepo, run.issueNumber)] = jsonEncode({
-      'ownerRepo': run.ownerRepo,
-      'state': run.state,
-      'issueNumber': run.issueNumber,
-      'title': run.title,
-      'retryCount': run.retryCount,
-      'prNumber': run.prNumber,
-      'prUrl': run.prUrl,
-      'closedUnmerged': run.closedUnmerged,
-      'retryAt': run.retryAt,
-      'narrationId': run.narrationId,
-      'lastFailureReason': run.lastFailureReason,
-      'handbackLanded': run.handbackLanded,
+  Future<void> updateRun(AfkRun run) {
+    return _withWriteLock(() async {
+      final map = load();
+      map[keyRun(run.ownerRepo, run.issueNumber)] = jsonEncode({
+        'ownerRepo': run.ownerRepo,
+        'state': run.state,
+        'issueNumber': run.issueNumber,
+        'title': run.title,
+        'retryCount': run.retryCount,
+        'prNumber': run.prNumber,
+        'prUrl': run.prUrl,
+        'closedUnmerged': run.closedUnmerged,
+        'retryAt': run.retryAt,
+        'narrationId': run.narrationId,
+        'lastFailureReason': run.lastFailureReason,
+        'handbackLanded': run.handbackLanded,
+      });
+      await _write(map);
     });
-    await _write(map);
   }
 
   /// The run row decoded from a stored value ([runFor], [allRuns]), or
@@ -419,12 +465,19 @@ class AfkStore {
   /// dropped — they are neither migrated nor written back (spec #407). An
   /// empty map removes the file: there is nothing to keep (no AFK fact yet)
   /// and the app-owned dir is left without cruft.
+  ///
+  /// The write is an atomic replace (issue #418): the content is staged in a
+  /// sibling temp file and moved over the target with a single rename, so a
+  /// synchronous reader mid-write always sees either the previous complete
+  /// file or the new one — never a truncated or partial file.
   Future<void> _write(Map<String, String> map) async {
     final clean = {
       for (final entry in map.entries)
         if (!_isLegacyKey(entry.key)) entry.key: entry.value,
     };
     if (clean.isEmpty) {
+      // A plain delete is deliberate here: a missing file reads as empty,
+      // so a reader mid-delete sees "no state", never a torn file.
       if (file.existsSync()) {
         await file.delete();
       }
@@ -434,6 +487,25 @@ class AfkStore {
     if (!parent.existsSync()) {
       await parent.create(recursive: true);
     }
-    await file.writeAsString(jsonEncode(clean));
+    final temp = _tempFile('${file.path}.afk-tmp.$pid.${_tempSequence++}');
+    try {
+      await temp.writeAsString(jsonEncode(clean));
+      await temp.rename(file.path);
+    } on Object {
+      await _deleteQuietly(temp);
+      rethrow;
+    }
+  }
+
+  /// Best-effort removal of a staging file after a failed write (issue #418):
+  /// the delete is swallowed so it can never mask the original error.
+  static Future<void> _deleteQuietly(File temp) async {
+    try {
+      if (temp.existsSync()) {
+        await temp.delete();
+      }
+    } catch (_) {
+      // A leftover staging file is harmless: the original error is rethrown.
+    }
   }
 }
