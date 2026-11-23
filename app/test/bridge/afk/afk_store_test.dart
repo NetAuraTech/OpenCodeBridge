@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -302,4 +303,169 @@ void main() {
       },
     );
   });
+
+  group('concurrent writers and readers (issue #418)', () {
+    test(
+      'overlapping writers cannot lose an earlier write (the map is captured '
+      'inside the serialized write)',
+      () async {
+        final fake = _FakeFile('${dir.path}/afk.json');
+        final store = AfkStore(file: fake);
+        // Hold the first write in flight: it has not landed on disk yet.
+        fake.holdNextWrite();
+        final first = store.addRun('a/r', 1, 'A');
+        // The second writer starts while the first is in flight. An
+        // unserialized read-modify-write loads a map that does not carry the
+        // first writer's row, and its write lands over it.
+        final second = store.addRun('b/r', 2, 'B');
+        fake.releaseHeldWrites();
+        await Future.wait([first, second]);
+        expect(
+          store.runFor('a/r', 1),
+          isNotNull,
+          reason: 'the in-flight write must not be lost to the overlap',
+        );
+        expect(store.runFor('b/r', 2), isNotNull);
+      },
+    );
+
+    test('a reader mid-write never sees a partial or missing file (the replace '
+        'is atomic)', () async {
+      final fake = _FakeFile('${dir.path}/afk.json');
+      // The store's staging file, injected: the test holds the rename from it,
+      // so the write is truly mid-flight — staged content written, target
+      // still untouched.
+      final staged = _FakeFile('${dir.path}/afk.json.afk-tmp.test');
+      final store = AfkStore(file: fake, tempFile: (_) => staged);
+      await store.updateRun(
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'dispatched',
+        ),
+      );
+      staged.holdNextRename();
+      final pending = store.updateRun(
+        const AfkRun(
+          ownerRepo: 'o/r',
+          issueNumber: 7,
+          title: 'Add a README',
+          state: 'pr-open',
+        ),
+      );
+      // Suspend until the rename itself is in flight. A truncate-then-write
+      // store would have emptied or truncated the target by now; the atomic
+      // replace leaves it holding the previous complete state.
+      await staged.holdFired;
+      final mid = AfkStore(file: fake).runFor('o/r', 7);
+      expect(mid, isNotNull, reason: 'a mid-write read is never torn');
+      expect(mid!.state, 'dispatched', reason: 'the replace is atomic');
+      staged.releaseHeldWrites();
+      await pending;
+      expect(store.runFor('o/r', 7)!.state, 'pr-open');
+    });
+  });
+}
+
+/// The [File] seam for the store's concurrency tests (issue #418): delegates
+/// to a real file on disk, but lets a test hold an operation in flight. Two
+/// holds, each pinning one side of the atomic-write contract:
+///
+/// - [holdNextWrite] holds a direct `writeAsString` on the target (the
+///   non-atomic truncate+write path), leaving the on-disk file truncated —
+///   exactly what that path exposes mid-flight to a synchronous reader. Under
+///   the atomic implementation the store never writes the target directly, so
+///   the hold never fires.
+/// - [holdNextRename] holds the staged replace: the sibling file already
+///   carries the new content while the target still holds the old one.
+/// [holdFired] completes when the next held operation has gone in flight, so
+/// a test can read at a deterministic mid-write instant.
+class _FakeFile implements File {
+  _FakeFile(String path) : _real = File(path), path = path;
+
+  final File _real;
+  @override
+  final String path;
+
+  bool _holdNextWrite = false;
+  bool _holdNextRename = false;
+  final List<Completer<void>> _held = [];
+  final Completer<void> _holdFired = Completer<void>();
+
+  /// Hold the next [writeAsString] in flight (leaving the file truncated)
+  /// until [releaseHeldWrites].
+  void holdNextWrite() => _holdNextWrite = true;
+
+  /// Hold the next [rename] in flight until [releaseHeldWrites].
+  void holdNextRename() => _holdNextRename = true;
+
+  /// Completes when the next held operation has gone in flight and is
+  /// waiting for [releaseHeldWrites].
+  Future<void> get holdFired => _holdFired.future;
+
+  /// Land every held operation, in the order held.
+  void releaseHeldWrites() {
+    for (final held in _held) {
+      held.complete();
+    }
+    _held.clear();
+  }
+
+  void _fireHold() {
+    if (!_holdFired.isCompleted) _holdFired.complete();
+  }
+
+  @override
+  bool existsSync() => _real.existsSync();
+
+  @override
+  String readAsStringSync({Encoding encoding = utf8}) =>
+      _real.readAsStringSync(encoding: encoding);
+
+  @override
+  Future<File> writeAsString(
+    String contents, {
+    FileMode mode = FileMode.write,
+    Encoding encoding = utf8,
+    bool flush = false,
+  }) async {
+    if (_holdNextWrite) {
+      _holdNextWrite = false;
+      // The truncated view: a real writeAsString empties the file before the
+      // content lands, so a write held in flight is observed truncated.
+      _real.writeAsStringSync('');
+      final held = Completer<void>();
+      _held.add(held);
+      _fireHold();
+      await held.future;
+    }
+    await _real.writeAsString(contents, encoding: encoding, flush: flush);
+    return _real;
+  }
+
+  @override
+  Future<File> rename(String newPath) async {
+    if (_holdNextRename) {
+      _holdNextRename = false;
+      // The staged file already carries the new content; the target still
+      // holds the old one until this rename lands.
+      final held = Completer<void>();
+      _held.add(held);
+      _fireHold();
+      await held.future;
+    }
+    return _real.rename(newPath);
+  }
+
+  @override
+  Future<FileSystemEntity> delete({bool recursive = false}) =>
+      _real.delete(recursive: recursive);
+
+  @override
+  Directory get parent => _real.parent;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('not faked: ${invocation.memberName}');
 }
