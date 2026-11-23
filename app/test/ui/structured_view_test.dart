@@ -2749,6 +2749,147 @@ void main() {
     });
 
     testWidgets(
+      'tool ids reused across messages each open their own card (issue #426)',
+      (tester) async {
+        // Some providers name their tool calls per assistant message, not
+        // globally (hipfire: the first call of every message is `call_0`):
+        // the structured view must key its live cards by the (message, tool)
+        // pair — the bridge's PartRef — or the second message's card is
+        // dropped and its follow-up events land on the first message's card.
+        final client = _FakeClient(details: const [_detail0]);
+        final events = await _pump(tester, client: client);
+
+        // The first message's call_0: a shell run.
+        events.add(
+          _event(
+            'session.tool.input.started',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'call_0',
+              'name': 'shell',
+            },
+          ),
+        );
+        events.add(
+          _event(
+            'session.tool.input.ended',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_1',
+              'id': 'call_0',
+              'text': '{"command":"ls"}',
+            },
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        // The next message's call_0: a read — a distinct card, not an
+        // update of the shell's.
+        events.add(
+          _event(
+            'session.tool.input.started',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_2',
+              'id': 'call_0',
+              'name': 'read',
+            },
+          ),
+        );
+        events.add(
+          _event(
+            'session.tool.input.ended',
+            aggregateID: 'ses_1',
+            data: const {
+              'assistantMessageID': 'msg_2',
+              'id': 'call_0',
+              'text': '{"path":"/b.txt"}',
+            },
+          ),
+        );
+        events.add(
+          _event(
+            'session.tool.success',
+            aggregateID: 'ses_1',
+            data: const {'assistantMessageID': 'msg_2', 'id': 'call_0'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        // Two distinct cards, one per message: each call's input and status
+        // resolve to its own call.
+        expect(find.text('shell · running'), findsOneWidget);
+        expect(find.text('ls'), findsOneWidget);
+        expect(find.text('read · completed'), findsOneWidget);
+        expect(find.text('/b.txt'), findsOneWidget);
+        // The shell's card was not clobbered by the read's events.
+        expect(find.textContaining('"path"'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a reopened mid-turn history resolves a late tool event to the right '
+      'reused-id card (issue #426)',
+      (tester) async {
+        // The same per-message ids seen from the history: a session opened
+        // mid-turn whose loaded history already carries two assistant
+        // messages whose tool calls are both `call_0`. The seed keys the
+        // cards by the (message, tool) pair, so a late success for the first
+        // message's call must settle its own card — not the second's.
+        final client = _FakeClient(
+          details: const [_detail0],
+          messages: const [
+            SessionMessage(role: 'user', text: 'go'),
+            SessionMessage(
+              id: 'msg_1',
+              role: 'assistant',
+              tools: [ToolCall(id: 'call_0', name: 'shell', status: 'running')],
+            ),
+            SessionMessage(
+              id: 'msg_2',
+              role: 'assistant',
+              tools: [
+                ToolCall(
+                  id: 'call_0',
+                  name: 'read',
+                  status: 'running',
+                  input: {'path': '/b.txt'},
+                ),
+              ],
+            ),
+          ],
+        );
+        final events = await _pump(tester, client: client);
+
+        // Both cards render from the history, one per message.
+        expect(find.text('shell · running'), findsOneWidget);
+        expect(find.text('read · running'), findsOneWidget);
+        expect(find.text('/b.txt'), findsOneWidget);
+
+        // The first message's call_0 settles late (its success crossed the
+        // wire after the view opened).
+        events.add(
+          _event(
+            'session.tool.success',
+            aggregateID: 'ses_1',
+            data: const {'assistantMessageID': 'msg_1', 'id': 'call_0'},
+          ),
+        );
+        await tester.pump();
+        await tester.pump();
+
+        // Only the first message's card settled; the second's running card
+        // is untouched.
+        expect(find.text('shell · completed'), findsOneWidget);
+        expect(find.text('read · running'), findsOneWidget);
+        expect(find.text('read · completed'), findsNothing);
+      },
+    );
+
+    testWidgets(
       'a question tool settles on the answers from its success event',
       (tester) async {
         final client = _FakeClient(details: const [_detail0]);

@@ -17,8 +17,10 @@ class ToolCall {
   });
 
   /// The tool call id (the service's tool part `id`). The structured view
-  /// tracks the in-flight tool cards off the `session.tool.*` events by this
-  /// id. `null` when the call was composed without one.
+  /// tracks the in-flight tool cards off the `session.tool.*` events by the
+  /// (message id, tool call id) pair — the tool id alone is per-message on
+  /// some providers (issue #426). `null` when the call was composed without
+  /// one.
   final String? id;
 
   /// The tool name (the service's tool `name`).
