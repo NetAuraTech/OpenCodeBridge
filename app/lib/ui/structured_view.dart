@@ -4252,17 +4252,19 @@ class _MarkdownState extends State<_Markdown> {
   bool? _sheetDim;
   double? _sheetSize;
   Color? _sheetSurface;
+  Color? _sheetBodyColor;
 
-  /// The style sheet for [palette]/[b]/[dim]/[size]/[surface], cached: returns
-  /// the previous instance unchanged when its inputs did not (so
-  /// `MarkdownBody` sees the same identity and does not reparse), building a
-  /// fresh one only when any input moved.
+  /// The style sheet for [palette]/[b]/[dim]/[size]/[surface]/[bodyColor],
+  /// cached: returns the previous instance unchanged when its inputs did not
+  /// (so `MarkdownBody` sees the same identity and does not reparse), building
+  /// a fresh one only when any input moved.
   MarkdownStyleSheet _styleSheetFor(
     _TuiMarkdownColors palette,
     TextStyle b,
     bool dim,
     double size,
     Color? surface,
+    Color? bodyColor,
   ) {
     final current = _sheet;
     if (current != null &&
@@ -4270,28 +4272,31 @@ class _MarkdownState extends State<_Markdown> {
         b == _sheetBase &&
         dim == _sheetDim &&
         size == _sheetSize &&
-        surface == _sheetSurface) {
+        surface == _sheetSurface &&
+        bodyColor == _sheetBodyColor) {
       return current;
     }
-    final sheet = _buildSheet(palette, b, dim, size, surface);
+    final sheet = _buildSheet(palette, b, dim, size, surface, bodyColor);
     _sheet = sheet;
     _sheetPalette = palette;
     _sheetBase = b;
     _sheetDim = dim;
     _sheetSize = size;
     _sheetSurface = surface;
+    _sheetBodyColor = bodyColor;
     return sheet;
   }
 
   /// Builds the TUI-theme markdown style sheet: the one place its content is
   /// derived from the palette, the base style, the dim flag, the body size,
-  /// and the surface the quote/code boxes paint on.
+  /// the surface the quote/code boxes paint on, and the body text color.
   MarkdownStyleSheet _buildSheet(
     _TuiMarkdownColors palette,
     TextStyle b,
     bool dim,
     double size,
     Color? surface,
+    Color? bodyColor,
   ) {
     TextStyle style({
       Color? color,
@@ -4316,7 +4321,15 @@ class _MarkdownState extends State<_Markdown> {
     // `null` when dimmed (the dimmed pane paints no box).
     final boxColor = dim ? null : surface;
     return MarkdownStyleSheet(
-      p: b,
+      // The body paragraph (and, via flutter_markdown's aliases, the list
+      // items and code-block prelude) carries its color explicitly, and so do
+      // the table cells ([tableBody]): material_ui's `Theme` widget installs
+      // no `flutter/material` `Theme` in the tree, so `flutter_markdown`'s
+      // fallback stylesheet — built from material's `Theme.of` at parse time
+      // — resolves to the light `ThemeData.fallback()` in either mode, and a
+      // style left colorless would inherit its light `bodyMedium` color
+      // (issue #423). The dimmed pane keeps its base color instead.
+      p: dim ? b : b.copyWith(color: bodyColor),
       h1: style(
         fontSize: size * 1.3,
         fontWeight: FontWeight.w700,
@@ -4338,6 +4351,9 @@ class _MarkdownState extends State<_Markdown> {
           .copyWith(decoration: dim ? b.decoration : TextDecoration.underline),
       listBullet: style(color: palette.listBullet),
       blockquote: style(color: palette.blockQuote),
+      // The table cells' text: the theme's body color (the fallback's
+      // `tableBody` carries its light `bodyMedium` color — see [p] above).
+      tableBody: style(color: bodyColor),
       // The quote's box: the theme's surface, like the code blocks — the
       // markdown default is a fixed light box the light quote color is
       // unreadable on in dark mode.
@@ -4354,21 +4370,35 @@ class _MarkdownState extends State<_Markdown> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = _TuiMarkdownColors.resolve(Theme.of(context).brightness);
+    final theme = Theme.of(context);
+    final palette = _TuiMarkdownColors.resolve(theme.brightness);
     final b = widget.base ?? const TextStyle();
     // The body size the paragraph text actually renders in: the base when the
     // pane sets one, else the theme's body size (the markdown fallback
     // stylesheet merges under ours, so the code size must be set explicitly
     // to win over its shrunken default).
-    final size =
-        b.fontSize ?? Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14;
+    final size = b.fontSize ?? theme.textTheme.bodyMedium?.fontSize ?? 14;
     // The surface the quote/code boxes paint on, part of the cache key so a
     // theme swap (a new surface) rebuilds the sheet rather than reusing a
     // sheet that painted the previous surface.
-    final surface = Theme.of(context).colorScheme.surfaceContainerHighest;
+    final surface = theme.colorScheme.surfaceContainerHighest;
+    // The body text color, from the app's actual theme: material_ui's
+    // `Theme.of` resolves the real theme, while `flutter_markdown`'s
+    // fallback stylesheet reads material's `Theme.of` — which material_ui's
+    // `Theme` widget never installs — and so always falls back to the light
+    // default (issue #423). Part of the cache key: a theme swap changes it,
+    // which rebuilds the sheet and re-parses with the new color.
+    final bodyColor = theme.textTheme.bodyMedium?.color;
     return MarkdownBody(
       data: widget.data,
-      styleSheet: _styleSheetFor(palette, b, widget.dim, size, surface),
+      styleSheet: _styleSheetFor(
+        palette,
+        b,
+        widget.dim,
+        size,
+        surface,
+        bodyColor,
+      ),
     );
   }
 }
