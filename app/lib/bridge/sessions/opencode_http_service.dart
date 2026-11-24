@@ -96,6 +96,7 @@ class OpencodeHttpService implements OpencodeService {
     String projectId, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     OpencodeProject? project;
     for (final p in await projects()) {
@@ -109,7 +110,14 @@ class OpencodeHttpService implements OpencodeService {
     }
     final body = await _post(
       _base.replace(path: '/api/session'),
-      jsonEncode(_createBody(project.canonical, model: model, agent: agent)),
+      jsonEncode(
+        _createBody(
+          project.canonical,
+          model: model,
+          agent: agent,
+          permissions: permissions,
+        ),
+      ),
     );
     final decoded = jsonDecode(body);
     final outer = decoded is Map<String, Object?>
@@ -128,10 +136,18 @@ class OpencodeHttpService implements OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     final body = await _post(
       _base.replace(path: '/api/session'),
-      jsonEncode(_createBody(directory, model: model, agent: agent)),
+      jsonEncode(
+        _createBody(
+          directory,
+          model: model,
+          agent: agent,
+          permissions: permissions,
+        ),
+      ),
     );
     final decoded = jsonDecode(body);
     final outer = decoded is Map<String, Object?>
@@ -149,14 +165,20 @@ class OpencodeHttpService implements OpencodeService {
   /// and [agent], when provided, are applied on creation so the session
   /// carries its model and thinking level (variant) — matching a session
   /// created directly in opencode — instead of starting with no model.
+  /// [permissions], when non-empty, are the session's per-session permission
+  /// rules applied at creation (the service's `permissions` field, spec
+  /// #420): absent/empty sends no key (an ordinary session).
   static Map<String, Object?> _createBody(
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) => {
     'location': {'directory': directory},
     if (model != null) 'model': model.toJson(),
     if (agent != null && agent.isNotEmpty) 'agent': agent,
+    if (permissions != null && permissions.isNotEmpty)
+      'permissions': permissions,
   };
 
   @override
@@ -241,6 +263,23 @@ class OpencodeHttpService implements OpencodeService {
       location: _nestedString(map, 'location', 'directory'),
       archived: _archivedFrom(map),
     );
+  }
+
+  /// The session's **per-session permission rules** as the service reports
+  /// them (the `Session.Info.permissions` of the same `GET /api/session/{id}`
+  /// the [probe] answers from — one request, the session's `data` map): an
+  /// absent or `null` field answers an empty list (an ordinary session). A
+  /// non-2xx (the service's 404 for an unknown session) propagates as the
+  /// typed [OpencodeServiceError], like the other reads.
+  @override
+  Future<List<Map<String, Object?>>> sessionPermissions(String id) async {
+    final map = await _sessionData(id);
+    final raw = map['permissions'];
+    final list = raw is List ? raw : const <Object?>[];
+    return [
+      for (final item in list)
+        if (item is Map<String, Object?>) item,
+    ];
   }
 
   /// The model registry's context limits, keyed by model id (and by

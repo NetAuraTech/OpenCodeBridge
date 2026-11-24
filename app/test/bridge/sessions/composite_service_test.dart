@@ -53,6 +53,13 @@ class FakeService implements OpencodeService {
   var projectsCalls = 0;
   var createCalls = 0;
   var createInCalls = 0;
+
+  /// The `permissions` the last create call was asked to carry (spec #420:
+  /// the create forwards them to the host).
+  List<Map<String, Object?>>? createPermissions;
+
+  /// The ids [sessionPermissions] was asked for (the routing observation).
+  final List<String> sessionPermissionsCalls = [];
   var modelsCalls = 0;
   var agentsCalls = 0;
   var skillsCalls = 0;
@@ -92,8 +99,10 @@ class FakeService implements OpencodeService {
     String projectId, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     createCalls++;
+    createPermissions = permissions;
     throw const OpencodeServiceError(500, 'not scripted');
   }
 
@@ -102,8 +111,10 @@ class FakeService implements OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     createInCalls++;
+    createPermissions = permissions;
     throw const OpencodeServiceError(500, 'not scripted');
   }
 
@@ -136,6 +147,15 @@ class FakeService implements OpencodeService {
       if (session.id == id) return session;
     }
     throw const OpencodeServiceError(404, 'no such session');
+  }
+
+  /// The per-session permission rules read (spec #420): records the id it was
+  /// asked for (the composite's routing observation) and answers an empty
+  /// list — the composite test only observes which service was routed to.
+  @override
+  Future<List<Map<String, Object?>>> sessionPermissions(String id) async {
+    sessionPermissionsCalls.add(id);
+    return const [];
   }
 
   @override
@@ -622,6 +642,27 @@ void main() {
       expect(orb1.detailCalls, isEmpty);
     });
 
+    test('sessionPermissions routes by owner (spec #420): a known orb session '
+        'goes to the orb, a host session to the host', () async {
+      final host = FakeService(sessions: [hostSession]);
+      final orb1 = FakeService(sessions: [orbSession]);
+      final composite = makeComposite(
+        host: host,
+        orbs: () async => [runningOrb('orb1')],
+        passwords: (_) async => 'pw1',
+        upstreams: {'http://127.0.0.1:41234|pw1': orb1},
+      );
+      await composite.listSessions(); // learn the table
+
+      expect(await composite.sessionPermissions('ses_orb'), isEmpty);
+      expect(orb1.sessionPermissionsCalls, ['ses_orb']);
+      expect(host.sessionPermissionsCalls, isEmpty);
+
+      expect(await composite.sessionPermissions('ses_host'), isEmpty);
+      expect(host.sessionPermissionsCalls, ['ses_host']);
+      expect(orb1.sessionPermissionsCalls, ['ses_orb']);
+    });
+
     test(
       'a retry-bearing orb session routes its message read to the same service '
       'that served the session (no host/orb split for a retried orb turn)',
@@ -994,8 +1035,22 @@ void main() {
         await composite.listSessions();
 
         await composite.projects();
-        await swallow(() => composite.createSession('p1'));
-        await swallow(() => composite.createSessionInDirectory('/dir'));
+        // The create forwards the `permissions` to the host (spec #420): the
+        // composite passes them through, the host is the create target.
+        const denials = [
+          {
+            'action': 'shell',
+            'resource': 'git push --force *',
+            'effect': 'deny',
+          },
+        ];
+        await swallow(
+          () => composite.createSession('p1', permissions: denials),
+        );
+        await swallow(
+          () =>
+              composite.createSessionInDirectory('/dir', permissions: denials),
+        );
         await composite.listModels();
         await composite.listAgents();
         await composite.listSkills();
@@ -1005,6 +1060,9 @@ void main() {
         expect(host.projectsCalls, 1);
         expect(host.createCalls, 1);
         expect(host.createInCalls, 1);
+        // Both creates forwarded the per-session permissions to the host.
+        expect(host.createPermissions, denials);
+        expect(orb1.createPermissions, isNull);
         expect(host.modelsCalls, 1);
         expect(host.agentsCalls, 1);
         expect(host.skillsCalls, 1);

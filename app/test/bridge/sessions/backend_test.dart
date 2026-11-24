@@ -106,6 +106,7 @@ class FakeOpencodeService implements OpencodeService {
     String projectId, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     created.add(projectId);
     createdWith.add((model, agent));
@@ -121,6 +122,7 @@ class FakeOpencodeService implements OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     createdIn.add(directory);
     createdInWith.add((model, agent));

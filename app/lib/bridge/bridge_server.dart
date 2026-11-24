@@ -9,7 +9,6 @@ import '../model/permission.dart';
 import '../model/question.dart';
 import '../model/tunnel_report.dart';
 import '../model/tunnel_setup.dart';
-import 'afk/afk_charter.dart';
 import 'afk/afk_component.dart';
 import 'afk/afk_ready_gate_poller.dart';
 import 'afk/afk_run_service.dart';
@@ -479,19 +478,6 @@ class BridgeServer {
     try {
       await OrbAgentTools.materialize();
     } catch (_) {}
-    // The AFK agent's charter (spec #376, T1): the canonical markdown agent
-    // file for the `afk` agent, installed into the global opencode config's
-    // agents dir **only if absent** — an existing (hand-edited) file is never
-    // rewritten, the developer's edit wins. Server mode only: [bootstrapOpencode]
-    // is the on-switch the app passes only there (client mode and the default
-    // start pass nothing), which is exactly "the bridge's startup, server
-    // mode". A failure degrades: the AFK session simply cannot be created on
-    // a host that has no writable config dir.
-    if (bootstrapOpencode != null) {
-      try {
-        await AfkCharter.install();
-      } catch (_) {}
-    }
     final orbBuilder =
         orb ?? await BridgeServer._defaultOrb((line) => orbEmit?.call(line));
     // The backend the orb service's PR repo resolver (issue #96) reaches:

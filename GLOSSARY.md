@@ -91,7 +91,7 @@ _Avoid_: message view, chat view
 ### The AFK agent
 
 **AFK agent**:
-One resident opencode session per armed project (per repo identity), on the host's shared service and visible in the app's session list; each lives in its own checkout of its project and reads its own tracker (its own `gh` reader from that checkout, its run rows scoped by repo). The bridge feeds it the project's ready issues; per issue it runs the `implement-spec` skill and dispatches implementation into orbs. It never merges, force-pushes, or deletes: its runs end at a PR.
+One resident opencode session per armed project (per repo identity), on the host's shared service and visible in the app's session list; each lives in its own checkout of its project and reads its own tracker (its own `gh` reader from that checkout, its run rows scoped by repo). The bridge feeds it the project's ready issues; per issue it runs the `implement-spec` skill and dispatches implementation into orbs. It runs the **default agent** (no custom agent — its standing rules ride the feed, versioned in the app source, and its human-boundary denials are applied to the session at creation). It never merges, force-pushes, or deletes: its runs end at a PR.
 _Avoid_: pilot, bot, worker, daemon
 
 **AFK run**:
