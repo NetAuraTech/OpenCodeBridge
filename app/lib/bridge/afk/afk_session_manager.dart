@@ -1,17 +1,23 @@
 import 'dart:io';
 
+import 'afk_rules.dart' as afk_rules;
 import 'afk_settings.dart';
 import '../sessions/opencode_service.dart';
 
-/// The bridge's owner of the AFK session (spec #376, "The AFK agent").
+/// The bridge's owner of the AFK session (spec #376, "The AFK agent"; spec
+/// #420: the resident session runs the **default agent**).
 ///
 /// **Arming** creates the AFK session: in the main checkout's directory, with
 /// the model pinned from the `afkModel` setting (omitted when empty — the
-/// service's default), the agent `afk`, and visible in the session list
-/// (never archived). Its session id is stored by the bridge. **Disarming**
-/// never destroys the session — it only stops the system from admitting work
-/// (the session outlives a disarm), and re-arming **reuses** the existing
-/// session rather than creating a duplicate.
+/// service's default), **no agent override** (the session runs the default
+/// agent, like any interactive session), and the **human-boundary denials**
+/// ([afk_rules.humanBoundaryDenials]) applied to the session at creation as
+/// per-session permissions (the enforcement; the rules' words ride the feed —
+/// [afk_rules.standingRules] prefixes every feed). The session is visible in
+/// the session list (never archived). Its session id is stored by the bridge.
+/// **Disarming** never destroys the session — it only stops the system from
+/// admitting work (the session outlives a disarm), and re-arming **reuses**
+/// the existing session rather than creating a duplicate.
 ///
 /// The module rides the composite session service seam ([OpencodeService]):
 /// create and probe are the only operations it needs, and that seam is the
@@ -35,10 +41,6 @@ class AfkSessionManager {
   /// directory — at creation time.
   final Future<String> Function() directory;
 
-  /// The agent id the AFK session is created with (the `afk` custom agent
-  /// defined by the charter).
-  static const String agentId = 'afk';
-
   /// The stored AFK session id (the id the bridge created for the armed
   /// agent), or `null` when none is armed yet. Seeded with [initialSessionId]
   /// (the id persisted in the bridge's store) so a re-arm reuses it; updated
@@ -53,7 +55,11 @@ class AfkSessionManager {
   /// Reuses the stored id when the service still has it (a disarm that the
   /// session outlived, or a re-arm); otherwise creates it in the resolved
   /// main checkout with the model pinned from [model] (`null`/empty =
-  /// inherit) and the agent `afk`, and returns the new id.
+  /// inherit) and **no agent override** (the session runs the default agent —
+  /// spec #420; its standing rules ride the feed, [afk_rules.standingRules]),
+  /// and the **human-boundary denials** applied to the session at creation as
+  /// per-session permissions ([afk_rules.humanBoundaryDenials] — the
+  /// enforcement; the rules' words ride the feed). Returns the new id.
   ///
   /// The model is read at creation time, so a changed `afkModel` setting is
   /// effective from the next session creation without a restart.
@@ -66,7 +72,7 @@ class AfkSessionManager {
     final session = await sessions.createSessionInDirectory(
       directory,
       model: parseAfkModel(model ?? ''),
-      agent: agentId,
+      permissions: afk_rules.humanBoundaryDenials,
     );
     _id = session.id;
     return session.id;

@@ -99,6 +99,12 @@ class FakeComposerService implements OpencodeService {
     return canCancel;
   }
 
+  /// The session's per-session permission rules (spec #420): the composer's
+  /// fakes carry none — an empty list (an ordinary session).
+  @override
+  Future<List<Map<String, Object?>>> sessionPermissions(String id) async =>
+      const [];
+
   @override
   Future<SessionDetail> getDetail(String id) async {
     final d = detail;
@@ -120,12 +126,14 @@ class FakeComposerService implements OpencodeService {
     String projectId, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async => throw StateError('not scripted');
   @override
   Future<OpencodeSession> createSessionInDirectory(
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async => throw StateError('not scripted');
   @override
   Future<void> deleteSession(String id) async {}

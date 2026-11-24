@@ -422,6 +422,7 @@ class _FakeOpencode implements OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     createdDirectories.add(directory);
     createdInWith.add((model, agent));

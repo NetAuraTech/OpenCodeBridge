@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opencodebridge/bridge/afk/afk_component.dart';
+import 'package:opencodebridge/bridge/afk/afk_rules.dart';
 import 'package:opencodebridge/bridge/afk/afk_session_manager.dart';
 import 'package:opencodebridge/bridge/afk/afk_settings.dart';
 import 'package:opencodebridge/bridge/afk/afk_store.dart';
@@ -19,6 +20,7 @@ class _FakeService extends OpencodeService {
   String? createDirectory;
   ModelRef? createModel;
   String? createAgent;
+  List<Map<String, Object?>>? createPermissions;
 
   /// The project list (the main-checkout resolution reads it).
   List<OpencodeProject> projectList = const [];
@@ -34,11 +36,13 @@ class _FakeService extends OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     createdCount++;
     createDirectory = directory;
     createModel = model;
     createAgent = agent;
+    createPermissions = permissions;
     final id = 'ses_afk_$createdCount';
     present.add(id);
     return OpencodeSession(
@@ -131,18 +135,28 @@ void main() {
   }
 
   group('AfkSessionManager', () {
-    test('creates the session in the directory with agent afk', () async {
-      final manager = AfkSessionManager(
-        sessions: service,
-        directory: () async => '/main-checkout',
-      );
-      final id = await manager.ensureSession();
-      expect(service.createdCount, 1);
-      expect(service.createDirectory, '/main-checkout');
-      expect(service.createAgent, 'afk');
-      expect(id, 'ses_afk_1');
-      expect(manager.sessionId, 'ses_afk_1');
-    });
+    test(
+      'creates the session with the default agent and the human-boundary '
+      'permissions (no agent override, the denials ride the create call)',
+      () async {
+        final manager = AfkSessionManager(
+          sessions: service,
+          directory: () async => '/main-checkout',
+        );
+        final id = await manager.ensureSession();
+        expect(service.createdCount, 1);
+        expect(service.createDirectory, '/main-checkout');
+        // No agent override: the resident session runs the default agent
+        // (spec #420) — no custom `afk` agent.
+        expect(service.createAgent, isNull);
+        // The human-boundary denials ride the create call as per-session
+        // permissions (the enforcement; the rules' words ride the feed).
+        expect(service.createPermissions, isNotNull);
+        expect(service.createPermissions, humanBoundaryDenials);
+        expect(id, 'ses_afk_1');
+        expect(manager.sessionId, 'ses_afk_1');
+      },
+    );
 
     test('an empty model is created with no model pin (inherit)', () async {
       final manager = AfkSessionManager(

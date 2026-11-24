@@ -69,6 +69,13 @@ void main() {
     'time': {'created': 100, 'updated': 200},
     'model': {'id': 'mod1', 'providerID': 'prov1', 'variant': 'v1'},
     'agent': 'plan',
+    // The session's per-session permission rules as the service reports them
+    // (the `Session.Info.permissions` the create call's `permissions` field
+    // is reported back on, spec #420).
+    'permissions': [
+      {'action': 'shell', 'resource': 'git push --force *', 'effect': 'deny'},
+      {'action': 'shell', 'resource': 'gh pr merge *', 'effect': 'deny'},
+    ],
   };
 
   // The detail of `ses_2`: the model is unknown to the registry, so the
@@ -881,6 +888,69 @@ void main() {
         ]);
       },
     );
+
+    test('createSessionInDirectory posts the permissions array in the create '
+        'body', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      createBodies.clear();
+      const denials = [
+        {'action': 'shell', 'resource': 'git push --force *', 'effect': 'deny'},
+        {'action': 'shell', 'resource': 'gh pr merge *', 'effect': 'deny'},
+      ];
+      await service.createSessionInDirectory(
+        '/proj/two',
+        model: const ModelRef(id: 'glm-4.7', providerId: 'zhipu'),
+        permissions: denials,
+      );
+      // The per-session permission rules (spec #420) ride the create body
+      // alongside the model — the enforcement point.
+      expect(createBodies, [
+        {
+          'location': {'directory': '/proj/two'},
+          'model': {'id': 'glm-4.7', 'providerID': 'zhipu'},
+          'permissions': [
+            {
+              'action': 'shell',
+              'resource': 'git push --force *',
+              'effect': 'deny',
+            },
+            {'action': 'shell', 'resource': 'gh pr merge *', 'effect': 'deny'},
+          ],
+        },
+      ]);
+    });
+
+    test('createSessionInDirectory posts no permissions key without '
+        'permissions', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      createBodies.clear();
+      await service.createSessionInDirectory(
+        '/proj/two',
+        permissions: const [],
+      );
+      // An empty list is the absence: an ordinary session carries no
+      // `permissions` key (and no `model` key either).
+      expect(createBodies, [
+        {
+          'location': {'directory': '/proj/two'},
+        },
+      ]);
+    });
+
+    test('sessionPermissions reads the session\'s permission rules back from '
+        'the detail read (the reported enforcement fact)', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      expect(await service.sessionPermissions('ses_1'), [
+        {'action': 'shell', 'resource': 'git push --force *', 'effect': 'deny'},
+        {'action': 'shell', 'resource': 'gh pr merge *', 'effect': 'deny'},
+      ]);
+    });
+
+    test('sessionPermissions of a session with no permission field answers an '
+        'empty list', () async {
+      final service = OpencodeHttpService(baseUrl: base, password: password);
+      expect(await service.sessionPermissions('ses_2'), isEmpty);
+    });
 
     test('activeSessionIds returns the active set', () async {
       final service = OpencodeHttpService(baseUrl: base, password: password);

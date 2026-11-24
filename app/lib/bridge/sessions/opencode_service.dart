@@ -125,10 +125,15 @@ abstract class OpencodeService {
   /// applied to the new session (opencode's create accepts them); the bridge
   /// passes the current/default model so the session shows its model and
   /// thinking level (variant) like a session created directly in opencode.
+  /// [permissions], when provided, are the session's **per-session
+  /// permission rules** (`Permission.Rule`-shaped maps: `{action, resource,
+  /// effect}`) applied at creation — the service's create body carries them,
+  /// and [sessionPermissions] reads them back.
   Future<OpencodeSession> createSession(
     String projectId, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   });
 
   /// Create a new session whose working directory is [directory] as-is
@@ -136,12 +141,34 @@ abstract class OpencodeService {
   /// service auto-creates a project for a directory it has never seen and
   /// reuses the existing project for one it has. The session has no TUI
   /// attached yet. [model] and [agent], when provided, are applied to the new
-  /// session.
+  /// session. [permissions], when provided, are the session's **per-session
+  /// permission rules** applied at creation — the enforcement rides the
+  /// create call (the AFK resident session's human-boundary denials, spec
+  /// #420), and [sessionPermissions] reads them back.
   Future<OpencodeSession> createSessionInDirectory(
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   });
+
+  /// The session's **per-session permission rules** as the service reports
+  /// them (the `Session.Info.permissions` of the service's
+  /// `GET /api/session/{id}` — the same `Permission.Ruleset` the create call
+  /// accepts: an array of `{action, resource, effect}` rules), so the
+  /// enforcement fact is observable without a live service (the AFK resident
+  /// session's human-boundary denials, spec #420). An absent or `null`
+  /// field answers an empty list.
+  ///
+  /// The default throws [UnimplementedError] (mirroring how the seam gives
+  /// its light reads defaults — an implementation without the read, such as
+  /// the tests' `noSuchMethod`-based fakes, keeps compiling and overrides
+  /// only when a test needs the fact; the HTTP layer overrides it).
+  Future<List<Map<String, Object?>>> sessionPermissions(String id) async {
+    throw UnimplementedError(
+      'this service has no per-session permissions read',
+    );
+  }
 
   /// Delete a session (and its child sessions) on the service.
   Future<void> deleteSession(String id);
