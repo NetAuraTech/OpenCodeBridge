@@ -4379,6 +4379,7 @@ class _AfkHandoffService implements OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     createdCount++;
     final id = 'ses_afk_$createdCount';
@@ -4564,6 +4565,7 @@ class _FakeService implements OpencodeService {
     String projectId, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     if (failCreate) throw const OpencodeServiceError(0, 'service down');
     final session = created[projectId];
@@ -4580,6 +4582,7 @@ class _FakeService implements OpencodeService {
     String directory, {
     ModelRef? model,
     String? agent,
+    List<Map<String, Object?>>? permissions,
   }) async {
     if (failCreateInDirectory) {
       throw const OpencodeServiceError(0, 'service down');
@@ -4690,6 +4693,12 @@ class _FakeService implements OpencodeService {
     if (!_known(id)) throw const OpencodeServiceError(404, 'not found');
     return permissions;
   }
+
+  /// The session's per-session permission rules (spec #420): this fake carries
+  /// none — an empty list (an ordinary session).
+  @override
+  Future<List<Map<String, Object?>>> sessionPermissions(String id) async =>
+      const [];
 
   @override
   Future<void> replyPermission(

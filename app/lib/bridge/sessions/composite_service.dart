@@ -143,6 +143,13 @@ class CompositeOpencodeService implements OpencodeService {
   Future<OpencodeSession> probe(String id) async =>
       (await _route(id)).probe(id);
 
+  /// The session's per-session permission rules (spec #420): routed through
+  /// the `sessionID -> orb` table exactly as the other per-session ops — the
+  /// AFK session is host-only, so it resolves to the host.
+  @override
+  Future<List<Map<String, Object?>>> sessionPermissions(String id) async =>
+      (await _route(id)).sessionPermissions(id);
+
   @override
   Future<List<SessionMessage>> getMessages(String id) async =>
       (await _route(id)).getMessages(id);
@@ -305,14 +312,26 @@ class CompositeOpencodeService implements OpencodeService {
     String projectId, {
     ModelRef? model,
     String? agent,
-  }) => host.createSession(projectId, model: model, agent: agent);
+    List<Map<String, Object?>>? permissions,
+  }) => host.createSession(
+    projectId,
+    model: model,
+    agent: agent,
+    permissions: permissions,
+  );
 
   @override
   Future<OpencodeSession> createSessionInDirectory(
     String directory, {
     ModelRef? model,
     String? agent,
-  }) => host.createSessionInDirectory(directory, model: model, agent: agent);
+    List<Map<String, Object?>>? permissions,
+  }) => host.createSessionInDirectory(
+    directory,
+    model: model,
+    agent: agent,
+    permissions: permissions,
+  );
 
   @override
   Future<List<OpencodeCommand>> listCommands() => host.listCommands();

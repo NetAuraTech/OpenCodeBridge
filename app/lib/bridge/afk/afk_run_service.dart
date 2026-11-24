@@ -3,6 +3,7 @@ import 'dart:async';
 import '../events/bridge_event.dart';
 import '../sessions/backend.dart';
 import 'afk_component.dart';
+import 'afk_rules.dart' as afk_rules;
 import 'afk_run_state.dart';
 import 'afk_store.dart';
 import 'github_reader.dart';
@@ -190,10 +191,13 @@ class CompositeAfkSessions implements AfkSessionPort {
 /// The per-state work, one pass ([pollOnce], the timer's body and the test
 /// seam):
 /// - **`idle`** (can dispatch): **armed** and the issue still carries the
-///   `ready-for-agent` label → the feed goes out — a **pure availability
-///   notice** (issue number + title, nothing more, the charter's) through
-///   the existing prompt path — and the row is `dispatched`. Disarmed, an
-///   admitted issue simply waits (no feed, no state change).
+///   `ready-for-agent` label → the feed goes out — **the standing rules
+///   followed by the availability notice** (the rule's text, versioned in
+///   the app source, then the issue's number + title, nothing more of the
+///   issue's content — the rules ride in-band, spec #420: there is no
+///   on-disk charter) through the existing prompt path — and the row is
+///   `dispatched`. Disarmed, an admitted issue simply waits (no feed, no
+///   state change).
 /// - **`dispatched`**: a pending retry re-feeds once its backoff deadline
 ///   ([AfkRun.retryAt]) has passed (an **ordinary FIFO feed** — the same
 ///   prompt as any feed, no priority over newer feeds). Otherwise the
@@ -534,10 +538,13 @@ class AfkRunService {
   // The fresh-agent handoff (spec #376, T6; scoped per repo by spec #407):
   // when a repo's stored AFK session does not exist (first arm on a wiped
   // store, or a lost session), the bridge creates it (the repo's checkout
-  // directory, pinned model, agent `afk` — the arming action, the
-  // [AfkComponent]'s) and the **first feed is a bootstrap**: *that repo's*
-  // in-flight runs (number, state, retry count, last failure reason) from
-  // the store, so the recreated agent reconciles with its own tracker. A run
+  // directory, pinned model, **no agent override** — the default agent,
+  // spec #420 — with the human-boundary denials as the session's
+  // per-session permissions — the arming action, the [AfkComponent]'s) and
+  // the **first feed is a bootstrap**: it begins with the standing rules
+  // (the rule's text, spec #420) and then carries *that repo's* in-flight
+  // runs (number, state, retry count, last failure reason) from the store,
+  // so the recreated agent reconciles with its own tracker. A run
   // of another repo never appears in this repo's bootstrap (the store is
   // keyed per repo). A plain host-service restart does not lose the session
   // (ids and full state persist), so a normal restart reuses it — no
@@ -546,13 +553,15 @@ class AfkRunService {
   // just created.
 
   /// Send the bootstrap feed for [repo] (the fresh-agent handoff's first
-  /// feed, spec #407): *that repo's* in-flight runs from the store — the
-  /// runs in `dispatched` or `pr-open` (the ones with work in motion; `idle`
-  /// runs get their ordinary feed from the ready gate, `failed` and `done`
-  /// runs are terminal) — as one prompt to **the repo's** AFK session (a run
-  /// of another repo never appears: the store is keyed per repo). Inert when
-  /// the repo has no session to feed, or no in-flight run to reconcile (a
-  /// wiped store: nothing to hand over).
+  /// feed, spec #407): it **begins with the standing rules** (the rule's
+  /// text, versioned in the app source — the rules ride in-band, spec #420)
+  /// and then carries *that repo's* in-flight runs from the store — the runs
+  /// in `dispatched` or `pr-open` (the ones with work in motion; `idle` runs
+  /// get their ordinary feed from the ready gate, `failed` and `done` runs
+  /// are terminal) — as one prompt to **the repo's** AFK session (a run of
+  /// another repo never appears: the store is keyed per repo). Inert when the
+  /// repo has no session to feed, or no in-flight run to reconcile (a wiped
+  /// store: nothing to hand over).
   Future<void> bootstrap(String repo) async {
     final sessionId = await sessions.sessionId(repo);
     if (sessionId == null) return; // No session to feed: nothing to boot.
@@ -565,7 +574,7 @@ class AfkRunService {
         })
         .toList(growable: false);
     if (inFlight.isEmpty) return; // Nothing in flight to reconcile.
-    await sessions.prompt(repo, bootstrapFeed(inFlight));
+    await sessions.prompt(repo, afk_rules.bootstrapFeed(inFlight));
   }
 
   // ------------------------------------------------------------------------
@@ -853,14 +862,20 @@ class AfkRunService {
   }
 
   // ------------------------------------------------------------------------
-  // The feed (the pure availability notice) and the PR confirmation.
+  // The feed (the standing rules + the availability notice) and the PR
+  // confirmation.
 
   /// The feed: the AFK session's id must be available (the port creates or
-  /// reuses it), and the prompt is the **pure availability notice** — the
-  /// issue's number and title, nothing more (the charter's "What a feed
-  /// is"). Completes `true` when the prompt went out, `false` when the
-  /// session is not (yet) available — the caller then leaves the row as it
-  /// stands and asks again on the next pass.
+  /// reuses it), and the prompt is **the standing rules followed by the
+  /// availability notice** — [afk_rules.standingRules] (the rule's text,
+  /// versioned in the app source) then the issue's number and title, nothing
+  /// more of the issue's content (the bridge hands over no details; the agent
+  /// opens the issue and reads it itself — the feed's "What a feed is"). The
+  /// rules ride in-band in every feed (spec #420): there is no on-disk
+  /// charter, so the rules are always the shipped version. Completes `true`
+  /// when the prompt went out, `false` when the session is not (yet)
+  /// available — the caller then leaves the row as it stands and asks again
+  /// on the next pass.
   Future<bool> _feed(AfkRun run) async {
     final sessionId = await sessions.sessionId(run.ownerRepo);
     if (sessionId == null) return false; // Not ready: the next pass asks.
@@ -868,7 +883,7 @@ class AfkRunService {
     // repo A is never fed through B's session.
     await sessions.prompt(
       run.ownerRepo,
-      availabilityNotice(run.issueNumber, run.title),
+      afk_rules.availabilityNotice(run.issueNumber, run.title),
     );
     return true;
   }
@@ -889,41 +904,10 @@ class AfkRunService {
 }
 
 // --------------------------------------------------------------------------
-// The feed's text and the terminal narration (pure, no I/O).
-
-/// The feed's text (spec #376, "The Ready gate and the feed"): the **pure
-/// availability notice** — the issue's number and title, nothing more. The
-/// agent opens the issue and reads it itself (the charter's "What a feed
-/// is"); the bridge hands over no details.
-String availabilityNotice(int issueNumber, String title) =>
-    'Issue #$issueNumber: $title';
-
-/// The fresh-agent handoff's **bootstrap feed** (spec #376, T6): the first
-/// feed a recreated AFK session receives — the in-flight runs (number, state,
-/// retry count, last failure reason) from the store, so the agent reconciles
-/// with the tracker itself (a restart of the agent loses no work and no
-/// state). One line per run; the retry count and last failure reason are
-/// listed only when the run carries them (a fresh dispatch has neither, a
-/// run at its PR has no failure). Pure, no I/O.
-String bootstrapFeed(List<AfkRun> inFlight) {
-  final lines = <String>[
-    'Bootstrap — the AFK agent session was just recreated. These runs are '
-        'in flight (from the bridge\'s store); reconcile with the tracker before '
-        'continuing, so the restart loses no work:',
-  ];
-  for (final run in inFlight) {
-    final detail = <String>[
-      if (run.retryCount > 0) 'retry ${run.retryCount}',
-      if (run.lastFailureReason != null)
-        'last failure: ${run.lastFailureReason}',
-    ];
-    lines.add(
-      '- #${run.issueNumber} ${run.title}: ${run.state}'
-      '${detail.isEmpty ? '' : ' (${detail.join(', ')})'}',
-    );
-  }
-  return lines.join('\n');
-}
+// The terminal narration (pure, no I/O). The feed's text (the standing rules
+// + the availability notice, and the bootstrap) lives in [afk_rules] — the
+// one home for the AFK standing rules (spec #420), versioned in the app
+// source and riding the feed.
 
 /// The shape of the agent's terminal narration on the issue (spec #376:
 /// "`PR opened: <url>` or `FAILED: <reason>`"): the run's signal.
@@ -953,7 +937,7 @@ enum TerminalNarrationKind {
 ///
 /// The narration is the line that carries it (the agent's last comment,
 /// usually a single line): the first line starting with `PR opened:` or
-/// `FAILED:` decides — the prefixes are the contract (the charter's
+/// `FAILED:` decides — the prefixes are the contract (the standing rules'
 /// terminal narrations), case-sensitive, with the payload the line's rest
 /// (trimmed).
 TerminalNarration? parseTerminalNarration(String body) {

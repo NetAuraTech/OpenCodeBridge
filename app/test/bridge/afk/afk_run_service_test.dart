@@ -1,7 +1,7 @@
 // The AFK run service (spec #376, "The per-issue state machine
-// (bridge-owned)", T3; per repo by spec #407, T4): the feed (a pure
-// availability notice through the existing prompt path, gated on the ROW'S
-// REPO being armed), the wait (the idle-wait long-poll as the trigger), the
+// (bridge-owned)", T3; per repo by spec #407, T4): the feed (the standing
+// rules + the availability notice through the existing prompt path — the
+// rules ride in-band, spec #420 — gated on the ROW'S REPO being armed), the wait (the idle-wait long-poll as the trigger), the
 // terminal narration (the run's signal, read through the row's repo's own
 // reader), the transitions (pr-open, done — the PR and issue state read from
 // the row's repo), the bounded retry with backoff (ordinary FIFO re-feeds),
@@ -17,6 +17,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:opencodebridge/bridge/afk/afk_rules.dart';
 import 'package:opencodebridge/bridge/afk/afk_run_service.dart';
 import 'package:opencodebridge/bridge/afk/afk_store.dart';
 import 'package:opencodebridge/bridge/afk/github_reader.dart';
@@ -303,8 +304,8 @@ void main() {
       expect(store.runFor(repoA, 7)!.state, 'dispatched');
       expect(store.runFor(repoB, 8)!.state, 'dispatched');
       expect(sessions.prompts, [
-        ('o/r', 'Issue #7: A run'),
-        ('o/b', 'Issue #8: B run'),
+        ('o/r', availabilityNotice(7, 'A run')),
+        ('o/b', availabilityNotice(8, 'B run')),
       ]);
       // ... and each label read went through the row's repo's reader (no
       // cross-repo read: A's reader only saw A's issue, B's only B's).
@@ -367,7 +368,7 @@ void main() {
         await service.pollOnce();
         expect(store.runFor(repoB, 8)!.state, 'dispatched');
         expect(store.runFor(repoA, 7)!.state, 'idle');
-        expect(sessions.prompts, [('o/b', 'Issue #8: B run')]);
+        expect(sessions.prompts, [('o/b', availabilityNotice(8, 'B run'))]);
         expect(reader(repoA).hasLabelCalls, 0, reason: 'A was gated out');
 
         // A is armed: the next pass feeds A too (each on its own session).
@@ -375,8 +376,8 @@ void main() {
         await service.pollOnce();
         expect(store.runFor(repoA, 7)!.state, 'dispatched');
         expect(sessions.prompts, [
-          ('o/b', 'Issue #8: B run'),
-          ('o/r', 'Issue #7: A run'),
+          ('o/b', availabilityNotice(8, 'B run')),
+          ('o/r', availabilityNotice(7, 'A run')),
         ]);
       },
     );
@@ -399,7 +400,7 @@ void main() {
       addRepo(repoB);
       await service.pollOnce();
       expect(store.runFor(repoB, 8)!.state, 'dispatched');
-      expect(sessions.prompts, [('o/b', 'Issue #8: B run')]);
+      expect(sessions.prompts, [('o/b', availabilityNotice(8, 'B run'))]);
     });
   });
 
@@ -655,7 +656,7 @@ void main() {
       // A does NOT re-dispatch (its repo not armed), counter intact.
       expect(store.runFor(repoA, 7)!.state, 'failed');
       expect(store.runFor(repoA, 7)!.retryCount, 3, reason: 'A counter intact');
-      expect(sessions.prompts, [('o/b', 'Issue #8: B run')]);
+      expect(sessions.prompts, [('o/b', availabilityNotice(8, 'B run'))]);
 
       // A is armed: the next pass re-dispatches A (its counter resets).
       armed = {repoA, repoB};
@@ -663,8 +664,8 @@ void main() {
       expect(store.runFor(repoA, 7)!.state, 'dispatched');
       expect(store.runFor(repoA, 7)!.retryCount, 0, reason: 'A counter reset');
       expect(sessions.prompts, [
-        ('o/b', 'Issue #8: B run'),
-        ('o/r', 'Issue #7: A run'),
+        ('o/b', availabilityNotice(8, 'B run')),
+        ('o/r', availabilityNotice(7, 'A run')),
       ]);
     });
   });
@@ -704,15 +705,18 @@ void main() {
   });
 
   group('the feed (idle → dispatched)', () {
-    test('a ready issue is fed with the availability notice only and becomes '
-        'dispatched', () async {
+    test('a ready issue is fed with the standing rules + the availability '
+        'notice and becomes dispatched', () async {
       await store.addRun(repoA, 7, 'Add a README');
       reader(repoA).labels[7] = {'ready-for-agent'};
       await service.pollOnce();
       expect(store.runFor(repoA, 7)!.state, 'dispatched');
-      // The feed is the pure availability notice (number + title, nothing
-      // more) — and it is the only thing sent (to o/r's session).
-      expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
+      // The feed is the standing rules (the rule's text, riding in-band,
+      // spec #420) + the availability notice (number + title, nothing more
+      // of the issue) — and it is the only thing sent (to o/r's session).
+      expect(sessions.prompts, [
+        ('o/r', availabilityNotice(7, 'Add a README')),
+      ]);
     });
 
     test('an idle issue without the ready label is not fed (the gate is the '
@@ -735,7 +739,9 @@ void main() {
       sessions.idsByRepo[repoA] = 'ses_afk';
       await service.pollOnce();
       expect(store.runFor(repoA, 7)!.state, 'dispatched');
-      expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
+      expect(sessions.prompts, [
+        ('o/r', availabilityNotice(7, 'Add a README')),
+      ]);
     });
   });
 
@@ -916,7 +922,7 @@ void main() {
       clock = base.add(const Duration(minutes: 5));
       await service.pollOnce();
       expect(sessions.prompts, [
-        ('o/r', 'Issue #7: Add a README'),
+        ('o/r', availabilityNotice(7, 'Add a README')),
       ], reason: 're-feed #1');
       expect(store.runFor(repoA, 7)!.retryAt, isNull);
 
@@ -1002,7 +1008,9 @@ void main() {
         // The backoff elapses: the re-feed goes out (retryAt cleared).
         clock = clock.add(const Duration(minutes: 5));
         await service.pollOnce();
-        expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
+        expect(sessions.prompts, [
+          ('o/r', availabilityNotice(7, 'Add a README')),
+        ]);
         expect(store.runFor(repoA, 7)!.retryAt, isNull);
 
         // The agent goes idle again but posts no new narration (the last
@@ -1134,7 +1142,9 @@ void main() {
       final run = store.runFor(repoA, 7)!;
       expect(run.state, 'dispatched');
       expect(run.retryCount, 0, reason: 'the counter is reset');
-      expect(sessions.prompts, [('o/r', 'Issue #7: Add a README')]);
+      expect(sessions.prompts, [
+        ('o/r', availabilityNotice(7, 'Add a README')),
+      ]);
     });
   });
 
@@ -1403,10 +1413,6 @@ void main() {
   });
 
   group('the pure helpers', () {
-    test('availabilityNotice is the issue number + title, nothing more', () {
-      expect(availabilityNotice(7, 'Add a README'), 'Issue #7: Add a README');
-    });
-
     test('parseTerminalNarration: the two terminal narrations', () {
       final pr = parseTerminalNarration(
         'PR opened: https://github.com/o/r/pull/41',
@@ -1442,38 +1448,6 @@ void main() {
       expect(parsePrNumber('https://github.com/o/r/issues/41'), isNull);
       expect(parsePrNumber('https://github.com/o/r/pull/'), isNull);
       expect(parsePrNumber(null), isNull);
-    });
-
-    test('bootstrapFeed lists the in-flight runs (number, state, retry count, '
-        'last failure reason); a fresh run lists only its state', () {
-      final feed = bootstrapFeed(const [
-        AfkRun(
-          ownerRepo: repoA,
-          issueNumber: 7,
-          title: 'Add a README',
-          state: 'dispatched',
-          retryCount: 1,
-          lastFailureReason: 'model under load',
-        ),
-        AfkRun(
-          ownerRepo: repoA,
-          issueNumber: 9,
-          title: 'Ship the widget',
-          state: 'pr-open',
-        ),
-      ]);
-      expect(feed, contains('#7'));
-      expect(feed, contains('Add a README'));
-      expect(feed, contains('dispatched'));
-      expect(feed, contains('retry 1'));
-      expect(feed, contains('last failure: model under load'));
-      expect(feed, contains('#9'));
-      expect(feed, contains('Ship the widget'));
-      expect(feed, contains('pr-open'));
-      // A fresh run (no retry, no failure) carries no detail parentheses —
-      // its line is the bare "- #N title: state" (it is the feed's last line).
-      expect(feed, endsWith('- #9 Ship the widget: pr-open'));
-      expect(feed, isNot(contains('pr-open (')));
     });
   });
 

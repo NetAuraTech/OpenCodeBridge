@@ -127,14 +127,17 @@ class AfkComponent {
   }
 
   /// Ensure [repo]'s AFK session exists and return its id (the **arming**
-  /// action, spec #407, T3): reuses the session the repo's manager holds —
-  /// the id persisted in the store (a restart, or a re-arm after a disarm,
-  /// which the session outlived) — when the service still has it; otherwise
-  /// creates it in the repo's own checkout (the first list-order project
-  /// carrying this repo identity) with the model pinned from the current
-  /// global `afkModel` setting (empty = the service's default) and the agent
-  /// `afk`, and stores its id under `afk.session.<owner/repo>`. Idempotent:
-  /// an already-armed repo returns the same id without a second create (a
+  /// action, spec #407, T3; spec #420: the resident session runs the default
+  /// agent): reuses the session the repo's manager holds — the id persisted
+  /// in the store (a restart, or a re-arm after a disarm, which the session
+  /// outlived) — when the service still has it; otherwise creates it in the
+  /// repo's own checkout (the first list-order project carrying this repo
+  /// identity) with the model pinned from the current global `afkModel`
+  /// setting (empty = the service's default) and **no agent override** (the
+  /// session runs the default agent — its standing rules ride the feed, and
+  /// the human-boundary denials are applied to the session at creation), and
+  /// stores its id under `afk.session.<owner/repo>`. Idempotent: an
+  /// already-armed repo returns the same id without a second create (a
   /// re-arm after a disarm reuses it — no duplicate).
   ///
   /// Returns `null` when the backend is not ready (no shared opencode
