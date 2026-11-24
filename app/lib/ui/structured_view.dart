@@ -3598,11 +3598,18 @@ class _CostBar extends StatelessWidget {
   }
 
   /// The header's speed chip text, or `null` while idle: the live prefill or
-  /// decode throughput (at most one is set at a time).
+  /// decode throughput (at most one is set at a time). A zero prefill is the
+  /// in-flight marker (the hipfire proxy opens the prefill phase at the
+  /// request start before any speed is measurable): it renders as an
+  /// ellipsis, not `0 tok/s`.
   static String? _speedText(double? prefill, double? decode) {
     final parts = <String>[];
     if (prefill != null) {
-      parts.add('prefill ${prefill.toStringAsFixed(0)} tok/s');
+      parts.add(
+        prefill > 0
+            ? 'prefill ${prefill.toStringAsFixed(0)} tok/s'
+            : 'prefill…',
+      );
     }
     if (decode != null) {
       parts.add('decode ${decode.toStringAsFixed(1)} tok/s');

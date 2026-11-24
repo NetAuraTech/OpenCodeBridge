@@ -165,6 +165,75 @@ void main() {
         throwsArgumentError,
       );
     });
+
+    test('a speed-0 prefill frame (the hipfire in-flight marker) is '
+        're-emitted, not dropped', () async {
+      // The hipfire proxy opens the prefill phase at the request start with
+      // no measurable speed yet; that frame must still reach the chip so the
+      // prefill pill stays up for the whole TTFT (a 0 is a value, not a
+      // missing field).
+      final streamServer = await HttpServer.bind('127.0.0.1', 0);
+      final streamBase = Uri.parse('http://127.0.0.1:${streamServer.port}');
+      streamServer.listen((req) async {
+        final resp = req.response;
+        resp.headers.contentType = ContentType.parse('text/event-stream');
+        resp.bufferOutput = false;
+        resp.write(
+          'event: prefill\n'
+          'data: {"tokens":4200,"progress":0,"elapsed":0,"speed":0}\n\n',
+        );
+        await resp.flush();
+        await resp.done;
+      });
+      final catalogServer = await HttpServer.bind('127.0.0.1', 0);
+      catalogServer.listen((req) async {
+        final resp = req.response;
+        resp.headers.contentType = ContentType.json;
+        if (req.uri.path == '/api/provider') {
+          resp.write(
+            jsonEncode({
+              'data': [
+                {
+                  'settings': {'baseURL': '$streamBase/v1'},
+                },
+              ],
+            }),
+          );
+        } else {
+          resp.statusCode = HttpStatus.notFound;
+        }
+        await resp.close();
+      });
+      try {
+        final emitted = <Map<String, Object?>>[];
+        final feed = LlamaSpeedFeed(
+          serviceBase: Uri.parse('http://127.0.0.1:${catalogServer.port}'),
+          password: password,
+          emit: (raw) {
+            final decoded = jsonDecode(raw);
+            if (decoded is Map<String, Object?> &&
+                decoded['type'] == 'llama.speed') {
+              emitted.add(
+                (decoded['data'] as Map<String, Object?>?) ??
+                    const <String, Object?>{},
+              );
+            }
+          },
+          reconnectDelay: const Duration(milliseconds: 5),
+        );
+        feed.start();
+        await _until(
+          () => emitted.any(
+            (data) => data['prefill'] == 0.0 && data['decode'] == null,
+          ),
+          message: 'expected the speed-0 prefill llama.speed event',
+        );
+        await feed.close();
+      } finally {
+        await catalogServer.close(force: true);
+        await streamServer.close(force: true);
+      }
+    });
   });
 }
 
