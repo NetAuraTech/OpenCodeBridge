@@ -1792,6 +1792,22 @@ void main() {
         reason: 'prefill is drawn in the TUI theme info color (light)',
       );
 
+      // A zero prefill is the in-flight marker (hipfire: the prefill phase is
+      // opened at the request start, before any speed is measurable): the chip
+      // shows an ellipsis instead of `prefill 0 tok/s`.
+      events.add(
+        _event('llama.speed', data: const {'prefill': 0.0, 'decode': null}),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('prefill…'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.text('prefill…')).style?.color,
+        const Color(0xFF318795),
+        reason: 'the in-flight prefill marker keeps the TUI info color',
+      );
+
       events.add(
         _event('llama.speed', data: const {'prefill': null, 'decode': 45.5}),
       );
