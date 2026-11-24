@@ -939,6 +939,24 @@ class _StructuredSessionPanelState extends State<StructuredSessionPanel> {
     super.dispose();
   }
 
+  @override
+  void deactivate() {
+    super.deactivate();
+    // The panel is leaving the tree (the session's detail pane is dropped,
+    // the whole tab is torn down). Release the message list's selection
+    // focus now, while the element is still active, instead of letting
+    // `FocusNode.dispose` fire the unfocus from `detach` later, deep in the
+    // unmount sweep: the change is marked only and lands in a microtask
+    // after the frame, when the focus scope's dependent bookkeeping is
+    // already consistent (issue #429 — the
+    // `InheritedElement.notifyClients` "descendant" assert, the
+    // focus/notification overlap). A no-op when the region holds no focus
+    // and no request is pending.
+    _selectionFocus.unfocus(
+      disposition: UnfocusDisposition.previouslyFocusedChild,
+    );
+  }
+
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final position = _scroll.position;
@@ -5000,6 +5018,21 @@ class _PromptBarState extends State<_PromptBar> {
   }
 
   @override
+  void deactivate() {
+    super.deactivate();
+    // The prompt bar is leaving the tree. Release the field's focus now,
+    // while the element is still active, instead of letting
+    // `FocusNode.dispose` fire the unfocus from `detach` later, deep in the
+    // unmount sweep: the change is marked only (`unfocus` never applies it
+    // during the build) and lands in a microtask after the frame, when the
+    // focus scope's dependent bookkeeping is already consistent (issue
+    // #429 — the `InheritedElement.notifyClients` "descendant" assert, the
+    // focus/notification overlap). A no-op when the field holds no focus
+    // and no request is pending.
+    _fieldFocus.unfocus(disposition: UnfocusDisposition.previouslyFocusedChild);
+  }
+
+  @override
   void dispose() {
     widget.controller.removeListener(_syncMenu);
     _menuScroll.dispose();
@@ -5174,7 +5207,15 @@ class _PromptBarState extends State<_PromptBar> {
   /// drop it, so the soft keyboard stays up and the keyboard's menu
   /// controls keep working after a tap.
   void _activate(PromptMenuRow row) {
-    _fieldFocus.requestFocus();
+    // Only request the focus when the field's node is still attached to its
+    // element: a row tap landing in the same event that drops the prompt bar
+    // would otherwise request focus on a node whose element is torn down
+    // before the deferred focus change is applied (issue #429 — the
+    // `InheritedElement.notifyClients` "descendant" assert, the
+    // focus/notification overlap).
+    if (mounted) {
+      _fieldFocus.requestFocus();
+    }
     final insertion = row.insertion;
     final active = _active;
     if (insertion != null && active != null) {

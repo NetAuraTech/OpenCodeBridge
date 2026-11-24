@@ -1068,6 +1068,26 @@ class _AfkSectionState extends State<_AfkSection> {
     super.dispose();
   }
 
+  @override
+  void deactivate() {
+    super.deactivate();
+    // The settings tab's section is leaving the tree. Release the fields'
+    // focus now, while the element is still active, instead of letting
+    // `FocusNode.dispose` fire the unfocus from `detach` later, deep in the
+    // unmount sweep: the change is marked only and lands in a microtask
+    // after the frame, when the focus scope's dependent bookkeeping is
+    // already consistent (issue #429 — the
+    // `InheritedElement.notifyClients` "descendant" assert, the
+    // focus/notification overlap). A no-op when a field holds no focus and
+    // no request is pending.
+    _capFocusNode.unfocus(
+      disposition: UnfocusDisposition.previouslyFocusedChild,
+    );
+    _modelFocusNode.unfocus(
+      disposition: UnfocusDisposition.previouslyFocusedChild,
+    );
+  }
+
   void _onCapFocusChanged() {
     if (!_capFocusNode.hasFocus && !_disposed) _commitCap();
   }
