@@ -233,7 +233,7 @@ jobs:
       # release-* only: the play-aab artifact (Google Play upload format) is
       # deliberately excluded from the published release assets.
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: 'release-*'
