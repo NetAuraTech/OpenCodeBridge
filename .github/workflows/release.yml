@@ -129,7 +129,7 @@ jobs:
           tar -czf "artifacts/opencodebridge_${VERSION}_linux_x64.tar.gz" -C app/build/linux/x64/release/bundle .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-linux
           path: artifacts/
@@ -210,7 +210,7 @@ jobs:
           cp app/build/app/outputs/bundle/release/app-release.aab "artifacts-play/opencodebridge_${VERSION}_android.aab"
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-android
           path: artifacts/
@@ -218,7 +218,7 @@ jobs:
       # The AAB is the Google Play upload format: kept as a run artifact for
       # the Play upload, never attached to the public release (see header).
       - name: Upload AAB artifact (Play upload only, not released)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: play-aab
           path: artifacts-play/
